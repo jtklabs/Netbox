@@ -1,0 +1,35 @@
+{% load helpers %}
+{# Support-renewal quote lines covering this device (direct or via components) #}
+
+<div class="card">
+  <h5 class="card-header">
+    Support Renewals
+    {% if line_count %}
+      <div class="card-actions">
+        <a href="{{ all_lines_url }}" class="btn btn-sm btn-ghost-primary">
+          <i class="mdi mdi-chevron-right-box-outline" aria-hidden="true"></i> View all ({{ line_count }})
+        </a>
+      </div>
+    {% endif %}
+  </h5>
+  {% if lines %}
+    <table class="table table-hover attr-table">
+      {% for line in lines %}
+        <tr>
+          <td><a href="{{ line.get_absolute_url }}">{{ line.description|default:line.service_sku|default:line.serial }}</a></td>
+          <td>{{ line.quote.number }}</td>
+          <td>{{ line.effective_total|placeholder }}</td>
+          <td>{{ line.coverage_end|placeholder }}</td>
+        </tr>
+      {% endfor %}
+      {% for currency, total in totals.items %}
+        <tr>
+          <th colspan="2">Total ({{ currency }})</th>
+          <th colspan="2">{{ total }}</th>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <div class="card-body"><span class="text-muted">No quote lines cover this device</span></div>
+  {% endif %}
+</div>

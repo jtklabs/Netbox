@@ -1,0 +1,93 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load perms %}
+{% load plugins %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Quote</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr>
+              <th>Vendor</th>
+              <td>{{ object.vendor|linkify }}</td>
+            </tr>
+            <tr>
+              <th>Number</th>
+              <td>{{ object.number }}</td>
+            </tr>
+            <tr>
+              <th>Status</th>
+              <td>{% badge object.get_status_display bg_color=object.get_status_color %}</td>
+            </tr>
+            <tr>
+              <th>Quote date</th>
+              <td>{{ object.quote_date|placeholder }}</td>
+            </tr>
+            <tr>
+              <th>Valid until</th>
+              <td>{{ object.valid_until|placeholder }}</td>
+            </tr>
+            <tr>
+              <th>Currency</th>
+              <td>{{ object.currency }}</td>
+            </tr>
+            <tr>
+              <th>Total</th>
+              <td>{{ object.total|placeholder }}</td>
+            </tr>
+            <tr>
+              <th>Document</th>
+              <td>
+                {% if object.document %}
+                  <a href="{{ object.document.url }}">
+                    <i class="mdi mdi-file-download"></i> {{ object.document.name }}
+                  </a>
+                {% else %}
+                  {{ ''|placeholder }}
+                {% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Description</th>
+              <td>{{ object.description|placeholder }}</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+      {% plugin_left_page object %}
+      {% include 'inc/panels/tags.html' %}
+    </div>
+    <div class="col col-md-6">
+      {% include 'inc/panels/custom_fields.html' %}
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+  <div class="row">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">
+          Lines
+          {% if request.user|can_change:object %}
+            <div class="card-actions">
+              <form method="post" action="{% url 'plugins:netbox_quotes:quote_rematch' pk=object.pk %}">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-sm btn-ghost-primary">
+                  <i class="mdi mdi-refresh" aria-hidden="true"></i> Re-run serial matching
+                </button>
+              </form>
+            </div>
+          {% endif %}
+        </h5>
+        <div class="card-body table-responsive">
+          {% render_table lines_table %}
+        </div>
+      </div>
+      {% plugin_full_width_page object %}
+    </div>
+  </div>
+{% endblock %}

@@ -3,6 +3,10 @@ FROM docker.io/netboxcommunity/netbox:v4.6.5-5.0.2
 COPY plugin_requirements.txt /opt/netbox/
 RUN /usr/local/bin/uv pip install -r /opt/netbox/plugin_requirements.txt
 
+# Our own plugins, vendored in this repo
+COPY plugins/netbox-quotes /opt/netbox-plugins/netbox-quotes
+RUN /usr/local/bin/uv pip install /opt/netbox-plugins/netbox-quotes
+
 # Bake plugin config into the image so collectstatic picks up plugin static files.
 # At runtime the ./configuration bind mount shadows this copy.
 COPY configuration/plugins.py /etc/netbox/config/plugins.py

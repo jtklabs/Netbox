@@ -1,6 +1,6 @@
 # NetBox @ nova.jtklabs.dev/netbox — Project Plan
 
-Status: **Gate 0 — awaiting approval** · 4.6 spike (from Gate 2) pulled forward and **PASSED** — 4.6.x adopted · Last updated: 2026-07-28
+Status: **Gate 0 — awaiting approval** · 4.6 spike **PASSED**, 4.6.x adopted · **Gate 2.5 (quotes plugin) in progress**, netbox-contract dropped per D9 · Last updated: 2026-07-29
 
 A single-repo, env-driven NetBox deployment: dev first (local containers, local accounts), then prod (Ubuntu 24 EC2, RDS Postgres, S3, Apache + mod_auth_mellon SAML, 30-day AMI redeploy cycle). All version claims below were verified against live sources on 2026-07-28.
 
@@ -41,6 +41,9 @@ It's cache + job queue only (transient data). netbox-docker ships two Valkey 9.1
 ### D7 — App version cadence is decoupled from the AMI cadence
 The 30-day AMI redeploy does **not** force a NetBox upgrade. Images are pinned by tag; a fresh AMI comes up on the same pinned versions. Upgrades are a deliberate, runbooked act (bump pins → dev → prod), naturally scheduled into an AMI window when convenient. This protects us from the classic failure mode: plugin lags NetBox release, forced upgrade breaks prod.
 
+### D9 — Custom `netbox_quotes` plugin; netbox-contract dropped (2026-07-29)
+Requirement: vendor support-renewal quotes with an attached document and per-line pricing, where each line carries a serial that auto-attaches to the Device/Module/InventoryItem holding that serial (manual assignment fallback; component lines roll up to their device). Verified nothing existing covers this (netbox-contract's InvoiceLine has no device link/serial; netbox-lifecycle has assignments but zero money fields; netbox-inventory/CESNET/NetBox Labs Asset Lifecycle all miss the shape — see research 2026-07-28). So we own a small plugin: `plugins/netbox-quotes` in this repo, models QuoteVendor ("Vendor" in UI; class renamed to avoid a reverse-accessor clash with netbox_lifecycle.Vendor) / Quote (with FileField document → S3 in prod) / QuoteLine (serial, pricing, coverage dates, GFK assignment, match_state auto/manual/unmatched/ambiguous). Serial matching is case-insensitive and treats duplicate-serial hits as `ambiguous` (NetBox doesn't enforce serial uniqueness). One serial per line; the same serial may appear on multiple lines. **netbox-contract is dropped** — the quotes plugin covers the real need, and it removes our only NetBox-version-lagging dependency.
+
 ### D8 — Single repo, env-file driven
 One repo holds: a pinned import of netbox-docker's support files, our plugin Dockerfile, `configuration/` overrides, per-env env files, compose overlays, Apache snippets, discovery config, and deploy/bootstrap scripts. Selecting dev vs prod = choosing the env file + compose overlay (`COMPOSE_FILE`/profiles). Secrets never committed; prod secrets live on the data disk (SSM Parameter Store as a later hardening option).
 
@@ -50,8 +53,9 @@ One repo holds: a pinned import of netbox-docker's support files, our plugin Doc
 |---|---|---|
 | NetBox | **v4.6.5** (→ 4.6.6 when its image publishes) | Spike-verified with both plugins 2026-07-28. |
 | netbox-docker | image `v4.6.5-5.0.2`, support files tag `5.0.2` | Imported into repo; see VERSIONS.md. |
-| netbox-contract | **2.4.6** (PyPI `netbox-contract`, plugin `netbox_contract`) | Declared matrix tops at 4.5, but verified working on 4.6.5 by our spike. MIT. Active. |
+| netbox-quotes | **0.1.0** (ours, `plugins/netbox-quotes`, plugin `netbox_quotes`) | Custom quotes/serial-matching plugin (D9). Installed into the image from the repo. |
 | netbox-lifecycle | **1.1.9** (PyPI `netbox-lifecycle`, plugin `netbox_lifecycle`) | Spike-verified on 4.6.5. Maintainer is a NetBox core dev. |
+| ~~netbox-contract~~ | dropped 2026-07-29 | Superseded by netbox-quotes (D9); was our only version-lagging dependency. |
 | Diode services | 2.1.x (ingester/reconciler/auth) | Gate 3. |
 | diode-netbox-plugin | latest 1.12.x | Requires NetBox ≥ 4.6 — satisfied by our pin. Final pin at Gate 3. |
 | orb-agent | 2.11.x | Apache-2.0, Docker Hub `netboxlabs/orb-agent`. |
@@ -146,6 +150,18 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Convention note committed (which plugin owns what)
 - [x] 4.6 spike verdict recorded → final prod pin decided: **4.6.x** *(passed 2026-07-28)*
 
+### Gate 2.5 — Quotes plugin v1 (effort: 2 sessions, then polish)
+**Scope:** build `netbox_quotes` per D9 — models + migrations, UI (list/detail/edit/import views, quote-page lines table with re-match action, device-page renewals card), REST API (incl. `?device_id=` rollup filter for Nova), serial auto-match engine, quote document upload.
+**Exit criteria (all verified 2026-07-29 in dev):**
+- [x] Auto-match: line with a known device serial attaches itself on create/import (incl. case-insensitive)
+- [x] Component rollup: line matched to an inventory item appears on the parent device's renewals card and in `?device_id=` API results
+- [x] Ambiguous + unmatched serials flagged, manually assignable (UI selector + API); manual assignments survive re-matching
+- [x] Quote document uploads and downloads
+- [x] CSV bulk import of lines works, with auto-match on import
+- [x] Device deletion clears its line assignments back to unmatched
+- [x] Module rollup verified with a real module (bay + type + install); renewals card added to module pages too (2026-07-29)
+- [x] Jason's hands-on look: switches + device view confirmed good
+
 ### Gate 3 — Discovery working in dev (effort: 1–2 sessions)
 **Scope:** add diode services + diode-netbox-plugin (version matching our NetBox pin) + orb-agent via `compose/discovery.yml`; write an agent policy scanning a real test subnet/device from your network; ingest → review → apply changesets in NetBox.
 **Exit criteria:**
@@ -229,7 +245,8 @@ These were verified 2026-07-28 against current repos/docs; they're the sharp edg
 - **Superuser bootstrap (dev)**: `SKIP_SUPERUSER=false` + `SUPERUSER_NAME/EMAIL/PASSWORD` (+ `SUPERUSER_API_TOKEN`); no default credentials in current images.
 - **NetBox 4.6+ note for the future bump**: v2 API tokens require `API_TOKEN_PEPPER_1` env/secret — without it token creation fails; netbox-docker 5.0.0+ images are the 4.6-era line (Granian server since 4.0.0; container user is `netbox`).
 - **Postgres floor**: NetBox 4.6 requires PG 14+ (14 deprecated); 4.7 will require 15+. Valkey 9.1 ships as two services (queue DB 0 w/ AOF, cache DB 1).
-- **netbox-contract API quirk** (found in spike, version-independent): invoice `POST /api/plugins/contracts/invoices/` must include `"template": false` — the serializer's `validate()` does `data['template']` and KeyErrors if omitted. UI unaffected. Endpoint names are irregular: plural `contracts`/`invoices`/`serviceproviders` but singular `contracttype`/`invoiceline`/`contractassignment`/`accountingdimension`; contracts use `external_party_*` field names.
+- **netbox-contract**: dropped 2026-07-29 (D9). Historical spike note: it worked on 4.6.5 but its invoice API required an explicit `"template": false` in POST bodies.
+- **Plugin dev gotchas learned**: NetBox blocks `makemigrations` unless `DEVELOPER=true` is set; two plugins must not define identically-named model classes (users.Owner reverse accessors clash — hence QuoteVendor); generate plugin migrations by bind-mounting the repo package over the installed site-packages copy in a `docker compose run`.
 - **Discovery stack**: orb-agent = Apache-2.0, container `netboxlabs/orb-agent`, YAML policies, backends: `network_discovery` (Nmap), `device_discovery` (NAPALM), `snmp_discovery`, `gnmi_discovery` (beta). Diode = ingester/reconciler/auth containers + `netboxlabs-diode-netbox-plugin` (NLUL 1.0 source-available license — free for internal self-hosted use; flag only if procurement demands strict OSI). Compose quickstart exists. Diode requires NetBox ≥ 4.2.3; latest plugin targets ≥ 4.6.
 
 ## 10. Source links

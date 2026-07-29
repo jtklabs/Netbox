@@ -1,9 +1,11 @@
-# Plugins are installed into the image via Dockerfile-Plugins / plugin_requirements.txt.
-# Keep this list in sync with plugin_requirements.txt.
+# Plugins are installed into the image via Dockerfile-Plugins:
+# - PyPI plugins from plugin_requirements.txt
+# - our own plugins from plugins/
+# Keep this list in sync with both.
 
 PLUGINS = [
-    "netbox_contract",
     "netbox_lifecycle",
+    "netbox_quotes",
 ]
 
 PLUGINS_CONFIG = {}
