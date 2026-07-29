@@ -1,0 +1,45 @@
+# orb-agent configuration. No secrets in this file — all ${VARS} are resolved
+# from the container environment (set in compose/discovery.yml from .env).
+# Policies have no schedule -> each runs ONCE per agent start; restart the
+# orb-agent container to re-scan.
+version: 1.0
+orb:
+  config_manager:
+    active: local
+  backends:
+    device_discovery:
+    snmp_discovery:
+    common:
+      diode:
+        target: grpc://diode-nginx:80/diode
+        client_id: ${DIODE_CLIENT_ID}
+        client_secret: ${DIODE_CLIENT_SECRET}
+        agent_name: dev-agent-01
+  policies:
+    snmp_discovery:
+      lab_snmpv3:
+        config:
+          defaults:
+            site: Lab
+        scope:
+          targets:
+            - host: "10.0.21.101"
+          authentication:
+            protocol_version: "SNMPv3"
+            security_level: "authPriv"
+            username: ${SNMP_USER}
+            auth_protocol: "SHA"
+            auth_passphrase: ${SNMP_AUTH_PASS}
+            priv_protocol: "AES"
+            priv_passphrase: ${SNMP_PRIV_PASS}
+    device_discovery:
+      lab_napalm:
+        config:
+          defaults:
+            site: Lab
+            role: switch
+        scope:
+          - hostname: 10.0.21.101
+            username: ${DEVICE_USER}
+            password: ${DEVICE_PASS}
+            driver: ios

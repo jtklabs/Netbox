@@ -1,1 +1,2 @@
 netbox-lifecycle==1.1.9
+netboxlabs-diode-netbox-plugin==1.14.1
