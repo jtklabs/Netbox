@@ -1,0 +1,10 @@
+FROM docker.io/netboxcommunity/netbox:v4.6.5-5.0.2
+
+COPY plugin_requirements.txt /opt/netbox/
+RUN /usr/local/bin/uv pip install -r /opt/netbox/plugin_requirements.txt
+
+# Bake plugin config into the image so collectstatic picks up plugin static files.
+# At runtime the ./configuration bind mount shadows this copy.
+COPY configuration/plugins.py /etc/netbox/config/plugins.py
+RUN DEBUG="true" SECRET_KEY="dummyKeyWithMinimumLength-------------------------" \
+    /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input

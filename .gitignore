@@ -1,0 +1,7 @@
+# Real env files carry secrets and are generated locally (scripts/init-dev-env.sh);
+# only the .example templates are committed.
+.env
+env/*.env
+*.pyc
+__pycache__/
+.DS_Store

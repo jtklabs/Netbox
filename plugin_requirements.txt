@@ -1,0 +1,2 @@
+netbox-contract==2.4.6
+netbox-lifecycle==1.1.9

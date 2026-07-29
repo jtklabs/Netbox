@@ -1,0 +1,22 @@
+# Dev overlay: local build with plugins, loopback port, local superuser.
+# Selected via COMPOSE_FILE in .env — paths here are relative to the repo root
+# (the directory of the base docker-compose.yml).
+services:
+  netbox:
+    image: netbox-jtk:v4.6.5-5.0.2
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+    pull_policy: never
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Dev-only local superuser (loopback access only; prod uses SSO).
+      # Password comes from .env, which scripts/init-dev-env.sh generates.
+      SKIP_SUPERUSER: "false"
+      SUPERUSER_NAME: admin
+      SUPERUSER_EMAIL: admin@jtklabs.dev
+      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:?run scripts/init-dev-env.sh first}
+  netbox-worker:
+    image: netbox-jtk:v4.6.5-5.0.2
+    pull_policy: never
