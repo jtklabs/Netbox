@@ -1,5 +1,6 @@
 # Mirrors the prod Apache config shape (apache/netbox.conf): static mapping
-# first, app routes proxied WITHOUT stripping /netbox, spoof-proof SSO header.
+# first, app routes proxied WITHOUT stripping /netbox, spoof-proof injection of
+# the full Mellon header set.
 server {
     listen 80;
 
@@ -14,9 +15,13 @@ server {
     }
 
     location /netbox/ {
-        # Simulates mod_auth_mellon: client-supplied header is discarded and
-        # replaced with the "authenticated" user.
+        # Simulates mod_auth_mellon: client-supplied headers are discarded and
+        # replaced with the "authenticated" identity, matching prod's header set.
         proxy_set_header X-Remote-User "${REHEARSAL_SSO_USER}";
+        proxy_set_header X-User-Email "${REHEARSAL_SSO_USER}@jtklabs.dev";
+        proxy_set_header X-UserFirstName "Rehearsal";
+        proxy_set_header X-User-LastName "User";
+        proxy_set_header X-User-Groups "netbox-admins|netops";
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://netbox:8080;

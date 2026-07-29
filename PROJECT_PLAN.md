@@ -215,9 +215,9 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 
 ## 8. Open questions (answer at Gate 0)
 
-1. **RDS**: engine version? (Need ≥14 today; 15+ before NetBox 4.7. Dev container will match your major.)
-2. **Media**: S3 (recommended, D4) or data disk?
-3. **SAML**: where do I get IdP metadata; which mellon attribute carries the username (uid? email?); is there a groups attribute worth mapping to NetBox groups/superuser?
+1. ~~RDS~~ **Answered 2026-07-29: PostgreSQL 16.13** — above the 4.6 floor and already satisfies NetBox 4.7's PG 15+ requirement. Dev postgres pinned to 16-alpine for parity.
+2. ~~Media~~ **Answered 2026-07-29: S3.** (Bucket name goes in Jason's own prod.env.)
+3. ~~SAML~~ **Answered 2026-07-29:** existing Mellon already injects X-Remote-User, X-User-AD-Username, X-User-Email, X-UserFirstName, X-User-LastName, X-User-FullName, X-User-Groups. Full mapping incl. group sync wired into prod.env.example; group separator to be verified at first prod login (default `|`).
 4. **Discovery**: first target subnet(s) and device credential types (SSH? SNMP v2c/v3?); vendor mix (drives NAPALM driver choice)?
 5. ~~Image distribution~~ **Answered 2026-07-29: no ECR.** Image is built during the monthly AMI bake (docs/FIRST-BOOT.md), bootstrap local-build as fallback; `PROD_IMAGE` stays unset.
 6. **Apache ownership**: do I own the vhost include in this repo and you drop it into the existing Apache config, or is Apache managed elsewhere (Ansible/etc.)?

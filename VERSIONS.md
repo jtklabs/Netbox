@@ -7,7 +7,7 @@
 | netbox-docker support files | tag `5.0.2` (commit `5adc62fe3fa65163c4ef63733bdcbd3e59b5c544`) | 2026-07-28 | Imported verbatim: `docker-compose.yml`, `configuration/` (plugins.py edited), `env/` (secrets regenerated). To upgrade: diff against the new upstream tag. |
 | netbox-quotes (ours) | 0.1.0 | 2026-07-29 | Local plugin in `plugins/netbox-quotes`, installed by Dockerfile-Plugins. Replaces netbox-contract (dropped 2026-07-29 — see PROJECT_PLAN.md D9). |
 | netbox-lifecycle | 1.1.9 | 2026-07-28 | 4.6 blocker fixed upstream in 1.1.9. |
-| Postgres (dev) | 18-alpine (upstream default) | 2026-07-28 | Will be aligned to the RDS engine major version once confirmed (Gate 0 Q1). |
+| Postgres (dev) | **16-alpine** | 2026-07-29 | Aligned to prod RDS (PostgreSQL 16.13). |
 | Valkey | 9.1-alpine | 2026-07-28 | Queue (DB 0, AOF) + cache (DB 1). |
 | Diode services | 2.1.0 (`DIODE_TAG`) | 2026-07-29 | ingester/reconciler/auth. Compose adapted from netboxlabs/diode `release` branch (`diode-server/docker/`); `nginx.conf` + `bootstrap-clients.sh` vendored verbatim into `discovery/`. |
 | netboxlabs-diode-netbox-plugin | 1.14.1 | 2026-07-29 | Plugin `netbox_diode_plugin`; supports NetBox 4.4.10–4.6.99. |
