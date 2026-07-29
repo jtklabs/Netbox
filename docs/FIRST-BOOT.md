@@ -110,15 +110,15 @@ grant it from the break-glass admin at
 Login page over https, SSO round-trip, device pages, quote document download
 (S3), `docker compose ps` all healthy.
 
-## ECR (optional, from your workstation/dev box)
+## Image distribution (decision 2026-07-29: no ECR)
+
+Leave `PROD_IMAGE` unset. Recommended: add one step to the monthly AMI bake,
+after the repo checkout —
 
 ```bash
-aws ecr create-repository --repository-name netbox-jtk
-aws ecr get-login-password | docker login --username AWS --password-stdin <acct>.dkr.ecr.<region>.amazonaws.com
-docker compose build
-docker tag netbox-jtk:v4.6.5-5.0.2 <acct>.dkr.ecr.<region>.amazonaws.com/netbox-jtk:v4.6.5-5.0.2
-docker push <acct>.dkr.ecr.<region>.amazonaws.com/netbox-jtk:v4.6.5-5.0.2
+cd /opt/netbox && docker compose --env-file /dev/null -f docker-compose.yml -f compose/prod.yml build
 ```
 
-Then set `PROD_IMAGE` in the data-disk `.env` and give the instance role
-`AmazonEC2ContainerRegistryReadOnly`.
+— so instances boot with the image already present (fast boot, no Docker Hub
+dependency at boot time). If the bake skips this, bootstrap builds at first
+boot instead (~5 extra minutes).

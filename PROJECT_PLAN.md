@@ -219,7 +219,7 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 2. **Media**: S3 (recommended, D4) or data disk?
 3. **SAML**: where do I get IdP metadata; which mellon attribute carries the username (uid? email?); is there a groups attribute worth mapping to NetBox groups/superuser?
 4. **Discovery**: first target subnet(s) and device credential types (SSH? SNMP v2c/v3?); vendor mix (drives NAPALM driver choice)?
-5. **Image distribution**: do you have ECR (or another private registry) available, or should bootstrap build the image on-instance?
+5. ~~Image distribution~~ **Answered 2026-07-29: no ECR.** Image is built during the monthly AMI bake (docs/FIRST-BOOT.md), bootstrap local-build as fallback; `PROD_IMAGE` stays unset.
 6. **Apache ownership**: do I own the vhost include in this repo and you drop it into the existing Apache config, or is Apache managed elsewhere (Ansible/etc.)?
 7. **Maintenance window**: is there an accepted window for the 30-day redeploy (affects how much we care about queue draining)?
 
