@@ -1,8 +1,10 @@
+# NOTE: deviates from upstream netbox-docker — the postgres service lives in
+# compose/dev.yml (prod uses RDS and must not run a local DB; overlays cannot
+# remove services, so the base defines none). See VERSIONS.md.
 services:
   netbox: &netbox
     image: docker.io/netboxcommunity/netbox:${VERSION-v4.6-5.0.2}
     depends_on:
-      - postgres
       - redis
       - redis-cache
     env_file: env/netbox.env
@@ -31,19 +33,6 @@ services:
       start_period: 20s
       timeout: 3s
       interval: 15s
-
-  # postgres
-  postgres:
-    image: docker.io/postgres:18-alpine
-    healthcheck:
-      test: pg_isready -q -t 2 -d $$POSTGRES_DB -U $$POSTGRES_USER
-      start_period: 20s
-      timeout: 30s
-      interval: 10s
-      retries: 5
-    env_file: env/postgres.env
-    volumes:
-      - netbox-postgres:/var/lib/postgresql
 
   # redis
   redis:
@@ -74,8 +63,6 @@ services:
 
 volumes:
   netbox-media-files:
-    driver: local
-  netbox-postgres:
     driver: local
   netbox-redis-cache-data:
     driver: local

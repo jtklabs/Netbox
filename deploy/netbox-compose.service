@@ -1,0 +1,19 @@
+# systemd unit: keeps the stack managed across reboots (install into the AMI:
+#   cp deploy/netbox-compose.service /etc/systemd/system/ && systemctl enable netbox-compose
+# ). Bootstrap handles disk mount + secrets before compose starts.
+[Unit]
+Description=NetBox docker compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/opt/netbox
+ExecStart=/opt/netbox/deploy/bootstrap.sh
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

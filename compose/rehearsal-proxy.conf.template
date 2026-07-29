@@ -1,0 +1,24 @@
+# Mirrors the prod Apache config shape (apache/netbox.conf): static mapping
+# first, app routes proxied WITHOUT stripping /netbox, spoof-proof SSO header.
+server {
+    listen 80;
+
+    location = / {
+        return 302 /netbox/;
+    }
+
+    # Granian inside the container serves /static, but BASE_PATH pages
+    # reference /netbox/static/ — map it back (must precede the app route).
+    location /netbox/static/ {
+        proxy_pass http://netbox:8080/static/;
+    }
+
+    location /netbox/ {
+        # Simulates mod_auth_mellon: client-supplied header is discarded and
+        # replaced with the "authenticated" user.
+        proxy_set_header X-Remote-User "${REHEARSAL_SSO_USER}";
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://netbox:8080;
+    }
+}

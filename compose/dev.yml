@@ -8,6 +8,8 @@ services:
       context: .
       dockerfile: Dockerfile-Plugins
     pull_policy: never
+    depends_on:
+      - postgres
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -20,3 +22,20 @@ services:
   netbox-worker:
     image: netbox-jtk:v4.6.5-5.0.2
     pull_policy: never
+
+  # Local database is dev-only; prod points DB_* at RDS (compose/prod.yml).
+  postgres:
+    image: docker.io/postgres:18-alpine
+    healthcheck:
+      test: pg_isready -q -t 2 -d $$POSTGRES_DB -U $$POSTGRES_USER
+      start_period: 20s
+      timeout: 30s
+      interval: 10s
+      retries: 5
+    env_file: env/postgres.env
+    volumes:
+      - netbox-postgres:/var/lib/postgresql
+
+volumes:
+  netbox-postgres:
+    driver: local

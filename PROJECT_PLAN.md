@@ -1,6 +1,6 @@
 # NetBox @ nova.jtklabs.dev/netbox — Project Plan
 
-Status: **Gate 0 — awaiting approval** · 4.6 spike **PASSED**, 4.6.x adopted · **Gate 2.5 (quotes plugin) in progress**, netbox-contract dropped per D9 · Last updated: 2026-07-29
+Status: Gates **1, 2, 2.5, 3 complete** (dev stack, plugins, quotes plugin, discovery — all verified against real hardware) · Gates **4 & 5 built and rehearsed in dev**; live prod deploy blocked only on §8 inputs (RDS version, S3 bucket, SAML metadata/attribute, ECR, EC2 access) · Last updated: 2026-07-29
 
 A single-repo, env-driven NetBox deployment: dev first (local containers, local accounts), then prod (Ubuntu 24 EC2, RDS Postgres, S3, Apache + mod_auth_mellon SAML, 30-day AMI redeploy cycle). All version claims below were verified against live sources on 2026-07-28.
 
@@ -173,22 +173,24 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] network_discovery (nmap subnet sweep) — deferred until a subnet target is nominated; policy pattern documented in the runbook
 - [ ] Your sign-off
 
-### Gate 4 — Prod profile: RDS, S3, subpath, SSO (effort: 1–2 sessions)
-**Scope:** `compose/prod.yml` + `env/prod.env.example` (RDS w/ `DB_SSLMODE=require`, S3 `STORAGES`, `BASE_PATH=netbox/`, `CSRF_TRUSTED_ORIGINS=https://nova.jtklabs.dev`, `REMOTE_AUTH_*`); Apache vhost include with mellon config, spoof-proof header injection, the **static-path mapping** (see §9 — this is the known sharp edge of subpath hosting), healthcheck override; dev subpath rehearsal via `compose/proxy.yml`; deploy to a prod-like EC2 instance.
+### Gate 4 — Prod profile: RDS, S3, subpath, SSO (artifacts built + rehearsed 2026-07-29; live deploy awaiting inputs)
+**Built:** `compose/prod.yml`, `env/prod.env.example`, env-gated `configuration/extra.py` (BASE_PATH, S3 STORAGES via instance role), `apache/netbox.conf` (mellon + spoof-proof header + static mapping + logout note), dev rehearsal via `compose/proxy.yml` + `env/rehearsal.env`. Base compose restructured: postgres is now dev-only (`compose/dev.yml`) since overlays can't remove services — prod simply never defines it.
 **Exit criteria:**
-- [ ] Dev rehearsal: NetBox fully functional under `/netbox` behind the rehearsal proxy (styles load, plugins' pages work under the subpath)
-- [ ] Prod-like instance: SAML login round-trip → NetBox session as the SSO user (auto-created)
-- [ ] Local-account break-glass login path verified
-- [ ] Media upload lands in S3; RDS connection over SSL confirmed
-- [ ] Nova can call the API at `https://nova.jtklabs.dev/netbox/api/` with a token
+- [x] Dev rehearsal PASSED: NetBox fully functional under `/netbox` behind the rehearsal proxy — styles load via the static mapping, quotes-plugin pages and API work under the subpath, header SSO auto-creates the user, client-supplied identity headers are overwritten (spoof-proof)
+- [x] **Finding:** auto-created SSO users have zero permissions by default — first admin must be granted (one-time `is_superuser` grant, or `REMOTE_AUTH_SUPERUSER_GROUPS` once the IdP sends a groups header; noted in prod.env.example)
+- [ ] Prod-like instance: real SAML round-trip *(needs: IdP metadata + username attribute, EC2 target)*
+- [ ] Local-account break-glass login verified in prod
+- [ ] Media upload lands in S3; RDS over SSL confirmed *(needs: bucket + RDS answers)*
+- [ ] Nova calls `https://nova.jtklabs.dev/netbox/api/` with a token
 
-### Gate 5 — 30-day redeploy automation (effort: 1–2 sessions)
-**Scope:** `deploy/bootstrap.sh` + cloud-init user-data + systemd unit; data-disk mount-by-label and env/SECRET_KEY sourcing; image distribution strategy (recommended: build plugin image in CI → push to **ECR**, instance pulls pinned tag; alternative: build on-instance at bootstrap); backup jobs (RDS snapshots are primary; `pg_dump` + media manifest to S3/data disk as belt-and-braces); runbooks.
+### Gate 5 — 30-day redeploy automation (artifacts built 2026-07-29; drill awaiting EC2)
+**Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/data/netbox-secrets`, ECR-pull or local-build, health gate), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
 **Exit criteria:**
-- [ ] **The drill:** terminate instance → launch fresh AMI with user-data → NetBox healthy at `https://…/netbox` with all data intact, **zero manual steps**, time recorded
-- [ ] SECRET_KEY and sessions survive redeploy (users not mass-logged-out beyond the window)
-- [ ] Restore runbook exercised once (point-in-time RDS restore or dump into dev)
-- [ ] Upgrade runbook written: monthly pin-bump procedure incl. plugin-compat check (and the NetBox 4.6+ `API_TOKEN_PEPPER_1` requirement noted for that move)
+- [x] Bootstrap + user-data + systemd unit written and syntax-checked; secrets persistence design (SECRET_KEY/pepper/SAML on data disk) documented
+- [x] Runbooks: redeploy drill, monthly pin-bump (incl. plugin-compat gate + NetBox 4.7 PG15 warning), restore
+- [ ] **The drill on real EC2:** fresh AMI → healthy at `https://…/netbox`, zero manual steps, time recorded *(needs: EC2/AMI pipeline access)*
+- [ ] Sessions survive a real redeploy
+- [ ] Restore fire-drill exercised once
 
 ### Gate 6 — Production cutover (effort: 1 session)
 **Scope:** real prod deploy, Apache config live on nova.jtklabs.dev, first discovery run against the production network, monitoring hook (healthcheck endpoint → whatever you use), docs pass.
