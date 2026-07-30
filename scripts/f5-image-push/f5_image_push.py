@@ -59,6 +59,37 @@ class Device:
     password: str
 
 
+class Report:
+    """Append-only run history CSV, written per device as results come in.
+
+    The report is a log, not a source of truth: re-runs never consult it to
+    decide what to skip — that decision is made by checking the unit itself
+    (find_listed_image). Existing rows are never rewritten or overwritten.
+    """
+
+    COLUMNS = ["timestamp", "image", "device", "host", "status", "detail"]
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def record(self, image, device, status, detail=""):
+        with self.lock:
+            is_new = not os.path.isfile(self.path) or os.path.getsize(self.path) == 0
+            with open(self.path, "a", newline="") as fh:
+                writer = csv.writer(fh)
+                if is_new:
+                    writer.writerow(self.COLUMNS)
+                writer.writerow([
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    image,
+                    device.name,
+                    device.host,
+                    status,
+                    detail,
+                ])
+
+
 class F5Client:
     """Minimal token-authenticated iControl REST client for one unit."""
 
@@ -120,6 +151,13 @@ class F5Client:
         resp.raise_for_status()
         return resp.json()
 
+    def post_json(self, path, payload):
+        resp = self.session.post(
+            f"{self.base}{path}", json=payload, verify=self.verify, timeout=self.timeout
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def upload_chunk(self, filename, chunk, start, total):
         end = start + len(chunk) - 1
         resp = self.session.post(
@@ -133,6 +171,24 @@ class F5Client:
             timeout=max(self.timeout, 120),
         )
         resp.raise_for_status()
+
+
+# Require this much room beyond the image itself so the upload can't run the
+# partition to zero (the unit needs working space to checksum/unpack).
+SPACE_HEADROOM_KB = 100 * 1024
+
+
+def free_space_kb(client):
+    """Available KB on the filesystem holding /shared/images, or None if the
+    unit won't run the check (util/bash disabled on some hardened boxes)."""
+    try:
+        result = client.post_json("/mgmt/tm/util/bash", {
+            "command": "run",
+            "utilCmdArgs": '-c "df -Pk /shared/images | tail -1"',
+        })
+        return int(result.get("commandResult", "").split()[3])
+    except (requests.RequestException, ValueError, IndexError):
+        return None
 
 
 def find_listed_image(client, filename):
@@ -193,7 +249,7 @@ def wait_until_listed(client, filename, local_md5, verify_timeout):
     )
 
 
-def push_to_device(device, image_path, local_md5, settings, force):
+def push_to_device(device, image_path, local_md5, settings, force, report):
     filename = os.path.basename(image_path)
     client = F5Client(device, settings["login_provider"], settings["verify_ssl"], settings["timeout"])
     try:
@@ -202,17 +258,32 @@ def push_to_device(device, image_path, local_md5, settings, force):
         if existing and not force:
             if existing.get("checksum") == local_md5:
                 log(device.name, "image already present with matching checksum — skipping")
+                report.record(filename, device, "already-present",
+                              "verified on device, checksum matches")
                 return {"device": device, "status": "already-present"}
             log(device.name, "image name already listed but checksum differs — re-uploading")
+        needed_kb = os.path.getsize(image_path) // 1024 + SPACE_HEADROOM_KB
+        avail_kb = free_space_kb(client)
+        if avail_kb is None:
+            log(device.name, "could not check free space (util/bash unavailable) — proceeding anyway")
+        elif avail_kb < needed_kb:
+            raise RuntimeError(
+                f"not enough space in /shared/images: {avail_kb // 1024} MB free, "
+                f"need ~{needed_kb // 1024} MB — delete old images in the GUI Image List"
+            )
+        else:
+            log(device.name, f"{avail_kb // 1024} MB free in /shared/images — enough, starting upload")
         log(device.name, f"uploading {filename} to /shared/images")
         upload_image(client, image_path, settings["chunk_size"])
         log(device.name, "upload complete, waiting for the unit to verify the checksum")
         entry = wait_until_listed(client, filename, local_md5, settings["verify_timeout"])
         version = entry.get("version", "?")
         log(device.name, f"done — version {version} verified, visible in the GUI Image List")
+        report.record(filename, device, "uploaded", f"version {version}, checksum verified")
         return {"device": device, "status": "uploaded"}
     except (requests.RequestException, RuntimeError, OSError) as exc:
         log(device.name, f"FAILED: {exc}")
+        report.record(filename, device, "failed", str(exc))
         return {"device": device, "status": "failed", "error": str(exc)}
     finally:
         client.logout()
@@ -250,6 +321,8 @@ def load_settings(config_path):
 
 
 def load_devices(csv_path, settings):
+    """CSV carries only inventory (host + optional name); credentials and port
+    always come from config.ini so no secrets ever live in the device list."""
     if not os.path.isfile(csv_path):
         sys.exit(f"device CSV not found: {csv_path} (copy devices.csv.example and fill it in)")
     devices = []
@@ -262,9 +335,9 @@ def load_devices(csv_path, settings):
             devices.append(Device(
                 host=host,
                 name=(row.get("name") or "").strip() or host,
-                port=int((row.get("port") or "").strip() or settings["port"]),
-                username=(row.get("username") or "").strip() or settings["username"],
-                password=(row.get("password") or "").strip() or settings["password"],
+                port=settings["port"],
+                username=settings["username"],
+                password=settings["password"],
             ))
     if not devices:
         sys.exit(f"no devices found in {csv_path} (needs a 'host' column)")
@@ -279,6 +352,8 @@ def main():
     argp.add_argument("--workers", type=int, help="parallel uploads (default from config)")
     argp.add_argument("--force", action="store_true", help="re-upload even if the unit already lists the image")
     argp.add_argument("--dry-run", action="store_true", help="show what would be done without connecting")
+    argp.add_argument("--report", default="push-report.csv",
+                      help="append-only run history CSV (default: push-report.csv)")
     args = argp.parse_args()
 
     settings = load_settings(args.config)
@@ -302,10 +377,12 @@ def main():
     print("computing local MD5 (the unit re-checks this after upload)...")
     local_md5 = md5_of(args.image)
     print(f"md5:     {local_md5}")
+    report = Report(args.report)
+    print(f"report:  appending results to {args.report}")
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(
-            lambda dev: push_to_device(dev, args.image, local_md5, settings, args.force),
+            lambda dev: push_to_device(dev, args.image, local_md5, settings, args.force, report),
             devices,
         ))
 

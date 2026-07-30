@@ -1,7 +1,7 @@
 # Copy to devices.csv and list your units. devices.csv is gitignored.
-# host is required (management IP or DNS name). Everything else is optional:
-# name is a display label, port/username/password override config.ini per unit.
-host,name,port,username,password
-10.0.10.11,bigip-dc1-a,,,
-10.0.10.12,bigip-dc1-b,,,
-lb-edge.example.net,bigip-edge,8443,,
+# Inventory only — credentials and port live in config.ini, never here.
+# host = management IP or DNS name (required); name = display label (optional).
+host,name
+10.0.10.11,bigip-dc1-a
+10.0.10.12,bigip-dc1-b
+lb-edge.example.net,bigip-edge

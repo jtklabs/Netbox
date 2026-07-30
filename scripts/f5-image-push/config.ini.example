@@ -10,7 +10,7 @@ password = changeme
 login_provider = tmos
 
 [defaults]
-# Management HTTPS port; per-unit override available in the CSV.
+# Management HTTPS port, applied to every unit in the CSV.
 port = 443
 # Set true once the management interfaces have certs your machine trusts.
 verify_ssl = false
