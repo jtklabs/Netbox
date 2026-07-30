@@ -28,8 +28,9 @@ cp devices.csv.example devices.csv    # fill in your units (gitignored)
 ```
 
 The account in `config.ini` needs the **Administrator** role on the units —
-the image-upload endpoint refuses lesser roles. Per-unit credential/port
-overrides go in the CSV columns.
+the image-upload endpoint refuses lesser roles. The CSV is inventory only
+(`host` plus an optional display `name`); credentials and the management port
+come exclusively from `config.ini`, so no secrets ever live in the device list.
 
 ## Usage
 
@@ -42,6 +43,10 @@ overrides go in the CSV columns.
 Behavior:
 
 - Uploads to all units in parallel (`workers` in config, `--workers` to override).
+- Checks free space on the unit first (`df` of `/shared/images` via the
+  util/bash endpoint): if there isn't room for the image plus ~100 MB headroom,
+  that unit fails up-front with a clear message instead of dying mid-upload.
+  Units that refuse the check (util/bash disabled) get a warning and proceed.
 - Computes the ISO's MD5 locally, then after each upload waits for the unit to
   list the image as verified and compares checksums — a mismatch is a failure.
 - Skips units that already list the image with a matching checksum (use
@@ -50,6 +55,22 @@ Behavior:
   and are deleted on completion. An expired token mid-upload triggers an
   automatic re-login and chunk retry.
 - Exit code is non-zero if any unit failed; the summary names the failures.
+
+## Run report and re-runs
+
+Every device outcome is appended to `push-report.csv` (override with
+`--report`) the moment it happens — timestamp, image, device, host, status
+(`uploaded` / `already-present` / `failed`), and detail (version, or the error
+for failures). The file is append-only: re-runs add rows, they never rewrite
+history, so it accumulates a full audit trail across runs. It's gitignored.
+
+To retry after failures, just run the same command again against the full CSV.
+The report is history, **not** the skip decision: on every run each unit is
+queried directly and skipped only if it actually lists the image with a
+matching verified checksum on the box. Previous successes are therefore left
+alone (logged as `already-present`), previous failures are re-attempted — and
+this stays correct even if the report file is deleted or someone removed the
+image from a unit by hand.
 
 ## After the push
 
@@ -70,8 +91,10 @@ fleet-wide; rebooting load balancers is not.)
   different provider; `login_provider = tmos` is right for local and
   BIG-IP-configured remote auth users.
 - **403 during upload** — the account isn't Administrator on that unit.
-- **400 near the end of an upload / image never verifies** — usually
-  `/shared/images` is out of space; delete old images in the GUI Image List
-  and re-run (the tool re-uploads only what's missing).
+- **"not enough space in /shared/images"** — the pre-check caught a full
+  partition; delete old images in the GUI Image List and re-run (the tool
+  re-uploads only what's missing).
+- **400 near the end of an upload / image never verifies** — space ran out on
+  a unit where the pre-check couldn't run; same fix as above.
 - **TLS errors** — self-signed management certs are the norm; leave
   `verify_ssl = false` until you've deployed real ones.

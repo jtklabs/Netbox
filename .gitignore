@@ -7,6 +7,7 @@ discovery/oauth2/client/client-credentials.json
 # F5 image push tool — real creds/inventory stay local, only .example is committed
 scripts/f5-image-push/config.ini
 scripts/f5-image-push/devices.csv
+scripts/f5-image-push/push-report.csv
 scripts/f5-image-push/*.iso
 *.pyc
 __pycache__/
