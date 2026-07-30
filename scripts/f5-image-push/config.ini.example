@@ -1,0 +1,24 @@
+# Copy to config.ini and fill in. config.ini is gitignored — never commit it.
+
+[credentials]
+# Account needs the Administrator role on the units (the image-upload REST
+# endpoint requires it).
+username = admin
+password = changeme
+# Auth source for the login token. "tmos" covers local accounts and BIG-IP
+# remote auth (TACACS+/RADIUS/LDAP) — leave it unless you know otherwise.
+login_provider = tmos
+
+[defaults]
+# Management HTTPS port; per-unit override available in the CSV.
+port = 443
+# Set true once the management interfaces have certs your machine trusts.
+verify_ssl = false
+# How many units to upload to at the same time.
+workers = 3
+# Upload chunk size in KB. 1024 is the iControl REST maximum.
+chunk_size_kb = 1024
+# Seconds to wait after upload for the unit to list + checksum-verify the image.
+verify_timeout = 300
+# Per-request HTTP timeout in seconds.
+request_timeout = 60
