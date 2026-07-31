@@ -20,22 +20,28 @@ Two modes:
                                  firewall, AP...), strip only components
     --mode switches              keep switches only
 
-Keep/drop rule (deliberately conservative — we only drop on confident evidence):
+Keep/drop rule:
 
     name without parentheses   -> keep   (not sent to Cisco at all)
     component / spare part     -> DROP   (module, PSU, line card, optic, fan...)
     switch                     -> keep
     other device               -> keep in `devices` mode, DROP in `switches` mode
-    non-Cisco serial           -> keep   (Cisco has no record of it)
-    unknown serial             -> keep   (ditto — may still be a real device)
-    API/auth/network error     -> keep   (we could not ask)
+    no record, name has parens -> DROP   (Cisco has never heard of a serial on a
+                                          row that was already suspect)
+    no record, plain name      -> keep   (only reachable via --check-all)
+    API/auth/network error     -> keep   (we could not ask — never a removal)
     unclassifiable record      -> keep   (record exists but says nothing useful)
 
-Nothing is dropped just because Cisco does not recognise it. That is deliberate
-on two counts: the sheet legitimately contains non-Cisco hardware, and the
-Product Information API is documented to return nothing for some valid Catalyst
-9200/9500 serials that resolve fine on cway.cisco.com. "Not found" therefore
-never means "not a device".
+The "no record" removal is limited to parenthesised rows on purpose. Those rows
+are already suspect by the sheet's own convention, so an unrecognised serial
+there is far more likely to be junk than a real device. Use --keep-unknown to
+turn it off.
+
+A failed lookup is NOT the same as "no record" and never causes a removal: a
+rate limit, timeout or auth failure means Cisco did not answer, so the row is
+kept. Note also that the Product Information API is documented to return nothing
+for some valid Catalyst 9200/9500 serials that resolve fine on cway.cisco.com,
+so check the report before trusting a large batch of no-record removals.
 
 Every decision, with the raw Cisco fields behind it, is written to a report CSV
 so drops can be audited and the classifier tuned to your fleet.
@@ -85,6 +91,7 @@ KEEP_UNCLASSIFIED = "unclassified"
 KEEP_NOT_CHECKED = "not-checked"
 DROP_OTHER = "not-a-switch"
 DROP_COMPONENT = "component"
+DROP_NO_RECORD = "no-record"
 
 # Rows whose name contains parentheses are the ones worth checking. Any
 # parenthesis counts, not just "(1)" — matching the wider pattern costs an extra
@@ -425,6 +432,9 @@ def main(argv=None):
                              r"(default: %(default)s — i.e. any parentheses)")
     parser.add_argument("--check-all", action="store_true",
                         help="look up every serial, ignoring the name pattern")
+    parser.add_argument("--keep-unknown", action="store_true",
+                        help="keep parenthesised rows whose serial Cisco has no record of "
+                             "(default: remove them)")
     parser.add_argument("--mode", choices=("devices", "switches"), default="devices",
                         help="devices: keep any standalone device, strip only components. "
                              "switches: keep switches only (default: %(default)s)")
@@ -459,22 +469,31 @@ def main(argv=None):
     except re.error as exc:
         raise SystemExit("error: bad --name-pattern (%s)" % exc)
 
+    # Which rows carry the sheet's own "suspect" marker? Tracked separately from
+    # which rows we look up, because --check-all widens the lookups but must not
+    # widen the no-record removal to rows with ordinary names.
+    if name_column is None:
+        name_matches = [False] * len(rows)
+    else:
+        name_matches = [bool(name_re.search(row.get(name_column) or "")) for row in rows]
+
     # Decide which rows are worth asking Cisco about.
     if args.check_all:
         print("checking every row (--check-all)")
-        flagged = [True] * len(rows)
+        checked = [True] * len(rows)
     elif name_column is None:
-        print("warning: no name column found — checking every row "
-              "(use --name-column to enable name filtering)", file=sys.stderr)
-        flagged = [True] * len(rows)
+        print("warning: no name column found — checking every row and keeping "
+              "unknown serials (use --name-column to enable name filtering)",
+              file=sys.stderr)
+        checked = [True] * len(rows)
     else:
-        flagged = [bool(name_re.search(row.get(name_column) or "")) for row in rows]
+        checked = list(name_matches)
         print("name column %r: %d of %d rows match %s and will be checked"
-              % (name_column, sum(flagged), len(rows), args.name_pattern))
+              % (name_column, sum(checked), len(rows), args.name_pattern))
 
     serials = []
     seen = set()
-    for row, check in zip(rows, flagged):
+    for row, check in zip(rows, checked):
         if not check:
             continue
         serial = (row.get(serial_column) or "").strip()
@@ -527,12 +546,12 @@ def main(argv=None):
             decision, reason = classify(entry, mode=args.mode)
             decisions[serial.upper()] = (decision, reason, entry)
 
-    dropped = (DROP_OTHER, DROP_COMPONENT)
+    dropped = (DROP_OTHER, DROP_COMPONENT, DROP_NO_RECORD)
 
     kept_rows = []
     report_rows = []
     counts = {}
-    for row, check in zip(rows, flagged):
+    for row, check, suspect in zip(rows, checked, name_matches):
         serial = (row.get(serial_column) or "").strip()
         if not check:
             # Name carries no parenthetical marker, so this is a real device by
@@ -544,6 +563,13 @@ def main(argv=None):
             decision, reason, record = decisions[serial.upper()]
         else:
             decision, reason, record = KEEP_UNKNOWN, "not looked up (--limit)", None
+
+        # Cisco definitively has no record AND the name was already suspect.
+        # A failed lookup (KEEP_ERROR) never lands here — no answer is not an
+        # answer, so those rows survive.
+        if decision == KEEP_UNKNOWN and suspect and not args.keep_unknown:
+            decision = DROP_NO_RECORD
+            reason = "no record at Cisco and name has parentheses"
 
         counts[decision] = counts.get(decision, 0) + 1
         if decision not in dropped:
@@ -582,7 +608,8 @@ def main(argv=None):
     print("kept %d of %d rows -> %s  (mode: %s)" % (len(kept_rows), len(rows), output_path, args.mode))
     print("decisions -> %s" % report_path)
     for decision in (KEEP_NOT_CHECKED, KEEP_SWITCH, KEEP_DEVICE, KEEP_UNKNOWN,
-                     KEEP_UNCLASSIFIED, KEEP_ERROR, DROP_COMPONENT, DROP_OTHER):
+                     KEEP_UNCLASSIFIED, KEEP_ERROR, DROP_COMPONENT, DROP_NO_RECORD,
+                     DROP_OTHER):
         if counts.get(decision):
             verb = "removed" if decision in dropped else "kept"
             print("  %-16s %5d  (%s)" % (decision, counts[decision], verb))
