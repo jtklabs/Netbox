@@ -7,15 +7,15 @@ transceivers and other components that are not standalone devices.
 
 Two modes:
 
-    --mode switches   (default)  keep switches only
-    --mode devices               keep any standalone device (switch, router,
+    --mode devices    (default)  keep any standalone device (switch, router,
                                  firewall, AP...), strip only components
+    --mode switches              keep switches only
 
 Keep/drop rule (deliberately conservative — we only drop on confident evidence):
 
     component / spare part     -> DROP   (module, PSU, line card, optic, fan...)
-    non-switch device          -> DROP in `switches` mode, KEEP in `devices` mode
     switch                     -> keep
+    other device               -> keep in `devices` mode, DROP in `switches` mode
     non-Cisco serial           -> keep   (Cisco has no record of it)
     unknown serial             -> keep   (ditto — may still be a real device)
     API/auth/network error     -> keep   (we could not ask)
@@ -35,7 +35,7 @@ Usage:
     export CISCO_CLIENT_SECRET=...
     python3 scripts/clean_inventory.py inventory.csv
 
-    python3 scripts/clean_inventory.py inventory.csv --mode devices \
+    python3 scripts/clean_inventory.py inventory.csv --mode switches \
         --output cleaned.csv --report decisions.csv --cache .cisco-cache.json
 
 Requires Cisco Support API entitlement (SNTC customer or PSS partner).
@@ -269,7 +269,7 @@ class CiscoClient:
 # --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
-def classify(record, mode="switches"):
+def classify(record, mode="devices"):
     """Return (decision, reason) for one Cisco product record.
 
     Order matters. Components are tested first because a switch's own module
@@ -386,9 +386,9 @@ def main(argv=None):
     parser.add_argument("-o", "--output", help="cleaned CSV (default: <input>-cleaned.csv)")
     parser.add_argument("-r", "--report", help="per-serial decision report CSV (default: <input>-report.csv)")
     parser.add_argument("--serial-column", help="serial column name (default: auto-detect 'serial')")
-    parser.add_argument("--mode", choices=("switches", "devices"), default="switches",
-                        help="switches: keep switches only. devices: keep any standalone "
-                             "device, strip only components (default: %(default)s)")
+    parser.add_argument("--mode", choices=("devices", "switches"), default="devices",
+                        help="devices: keep any standalone device, strip only components. "
+                             "switches: keep switches only (default: %(default)s)")
     parser.add_argument("--cache", default=".cisco-product-cache.json",
                         help="lookup cache file; speeds up re-runs (default: %(default)s)")
     parser.add_argument("--no-cache", action="store_true", help="disable the lookup cache")
