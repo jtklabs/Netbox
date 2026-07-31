@@ -22,6 +22,7 @@ NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discove
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin; `Dockerfile-Plugins` builds the image with it + PyPI plugins
 - `apache/netbox.conf` — prod vhost include (mellon SSO, header injection, static mapping)
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures
+- `scripts/clean_inventory.py` — standalone utility (unrelated to the deployment): filters an inventory CSV down to switches using the Cisco Product Information API
 
 ## Prod (summary)
 
