@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""Filter an inventory CSV down to switches, using the Cisco Product Information API.
+"""Clean an inventory CSV that should list devices but is polluted with parts.
 
 Reads a CSV with a `serial` column, asks Cisco what each serial is, and writes a
-cleaned CSV containing every row EXCEPT the ones Cisco positively identifies as
-something other than a switch.
+cleaned CSV with the junk rows removed — modules, power supplies, line cards,
+transceivers and other components that are not standalone devices.
+
+Two modes:
+
+    --mode switches   (default)  keep switches only
+    --mode devices               keep any standalone device (switch, router,
+                                 firewall, AP...), strip only components
 
 Keep/drop rule (deliberately conservative — we only drop on confident evidence):
 
-    switch                  -> keep
-    unknown serial          -> keep   (Cisco has no record of it)
-    API/auth/network error  -> keep   (we could not ask)
-    unclassifiable record   -> keep   (record exists but says nothing useful)
-    positively another type -> DROP   (router, AP, phone, firewall, module, ...)
+    component / spare part     -> DROP   (module, PSU, line card, optic, fan...)
+    non-switch device          -> DROP in `switches` mode, KEEP in `devices` mode
+    switch                     -> keep
+    non-Cisco serial           -> keep   (Cisco has no record of it)
+    unknown serial             -> keep   (ditto — may still be a real device)
+    API/auth/network error     -> keep   (we could not ask)
+    unclassifiable record      -> keep   (record exists but says nothing useful)
 
-This matters in practice: the Product Information API is documented to have gaps
-for some Catalyst 9200/9500 serials that resolve fine on cway.cisco.com, so a
-"not found" must never be read as "not a switch".
+Nothing is dropped just because Cisco does not recognise it. That is deliberate
+on two counts: the sheet legitimately contains non-Cisco hardware, and the
+Product Information API is documented to return nothing for some valid Catalyst
+9200/9500 serials that resolve fine on cway.cisco.com. "Not found" therefore
+never means "not a device".
 
 Every decision, with the raw Cisco fields behind it, is written to a report CSV
 so drops can be audited and the classifier tuned to your fleet.
@@ -25,7 +35,7 @@ Usage:
     export CISCO_CLIENT_SECRET=...
     python3 scripts/clean_inventory.py inventory.csv
 
-    python3 scripts/clean_inventory.py inventory.csv \
+    python3 scripts/clean_inventory.py inventory.csv --mode devices \
         --output cleaned.csv --report decisions.csv --cache .cisco-cache.json
 
 Requires Cisco Support API entitlement (SNTC customer or PSS partner).
@@ -58,10 +68,12 @@ MAX_ATTEMPTS = 4
 
 # Decisions
 KEEP_SWITCH = "switch"
+KEEP_DEVICE = "other-device"
 KEEP_UNKNOWN = "unknown"
 KEEP_ERROR = "lookup-failed"
 KEEP_UNCLASSIFIED = "unclassified"
 DROP_OTHER = "not-a-switch"
+DROP_COMPONENT = "component"
 
 # Base PID prefixes that identify a switch regardless of what the API's
 # taxonomy fields say. Deterministic and offline, so this is checked first.
@@ -80,13 +92,42 @@ SWITCH_PID_PREFIXES = (
     "MS",                                               # Meraki switches
 )
 
-# Words that mark a product as definitively NOT a switch when they appear in the
-# product_type / product_series / product_category text.
+# Components / spare parts: never standalone devices, dropped in every mode.
+# These are checked FIRST, because a switch's own module carries the switch's PID
+# family (C9300-NM-8X, C9400-LC-48U) and its product_series is literally
+# "... Series Switches" — so a switch test would otherwise keep it.
+COMPONENT_PID_RE = re.compile(
+    r"""(
+          ^PWR- | -PWR- | ^PSU- | -PS$ | -PS=            # power supplies
+        | ^FAN- | -FAN- | -FAN=?$ | ^ACS-FAN             # fans / fan trays
+        | -NM- | ^NM- | -NIM- | ^NIM- | -EM-             # network / interface modules
+        | -LC- | ^LC- | -SUP-? \d | ^VS-S                # line cards / supervisors
+        | ^SFP | -SFP | ^GLC- | ^QSFP | ^X2- | ^CVR- | ^CAB-   # optics / cables
+        | ^STACK- | -STACK | ^C\d+-STACK                 # stacking modules
+        | ^MEM- | ^FLASH- | ^SSD- | ^HDD-                # memory / storage
+        | ^RCKMNT- | ^BRKT- | ^ACC-                      # brackets / accessories
+        | ^PID-UPG | ^LIC- | ^L-                         # licenses / upgrades
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# product_type values that mean "part", not "device". Cisco's own sample uses
+# BOARD for a line card, with product_subcategory "SPARE".
+COMPONENT_TYPES = ("BOARD", "MODULE", "POWER SUPPLY", "ACCESSORY", "SPARE", "OPTIC", "MEMORY")
+
+# "module" and "adapter" live here, not in NON_SWITCH_WORDS: a module is a part
+# in BOTH modes, so it must never be rescued by `--mode devices`.
+COMPONENT_WORDS = (
+    "power supply", "line card", "linecard", "supervisor", "fan tray",
+    "transceiver", "optic", "memory", "rack mount", "bracket", "spare",
+    "accessory", "module", "adapter", "daughter card",
+)
+
+# Words that mark a product as a device but NOT a switch.
 NON_SWITCH_WORDS = (
     "router", "firewall", "access point", "wireless", "phone", "telepresence",
-    "camera", "server", "adapter", "gateway", "controller", "transceiver",
-    "antenna", "license", "power supply", "module", "line card", "linecard",
-    "chassis fan", "storage", "load balancer",
+    "camera", "server", "gateway", "controller", "antenna", "storage",
+    "load balancer",
 )
 
 SWITCH_RE = re.compile(r"\bswitch(es)?\b", re.IGNORECASE)
@@ -228,16 +269,21 @@ class CiscoClient:
 # --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
-def classify(record):
+def classify(record, mode="switches"):
     """Return (decision, reason) for one Cisco product record.
 
-    Layered on purpose: product_category is demonstrably unreliable as a device
-    -type signal (Cisco's own sample response files a uBR10012 router under
-    category "Video"), so PID prefixes and the product_series naming convention
-    are trusted ahead of it.
+    Order matters. Components are tested first because a switch's own module
+    carries the switch's PID family and a product_series of "... Series
+    Switches" — testing for a switch first would keep every line card and power
+    supply in the sheet.
+
+    After that, product_category is deliberately the LAST signal consulted: it
+    is demonstrably unreliable for device type (Cisco's own sample response
+    files a uBR10012 router under category "Video"), so PID families and the
+    product_series naming convention are trusted ahead of it.
     """
     if record is None:
-        return KEEP_UNKNOWN, "no record returned by Cisco"
+        return KEEP_UNKNOWN, "no record returned by Cisco (non-Cisco or unlisted serial)"
 
     base_pid = (record.get("base_pid") or "").strip()
     product_type = (record.get("product_type") or "").strip()
@@ -246,10 +292,24 @@ def classify(record):
     subcategory = (record.get("product_subcategory") or "").strip()
 
     pid_upper = base_pid.upper()
+    haystack = " ".join([product_type, series, category, subcategory]).lower()
+
+    # 1. Component / spare part -> never a device, dropped in every mode.
+    if base_pid and COMPONENT_PID_RE.search(pid_upper):
+        return DROP_COMPONENT, "base_pid %s is a component/spare part" % base_pid
+    if product_type.upper() in COMPONENT_TYPES:
+        return DROP_COMPONENT, "product_type %s is a part, not a device" % product_type
+    if subcategory.upper() == "SPARE":
+        return DROP_COMPONENT, "product_subcategory SPARE"
+    for word in COMPONENT_WORDS:
+        if word in haystack:
+            label = product_type or series or category or base_pid
+            return DROP_COMPONENT, "component: %s (%s)" % (label, word)
+
+    # 2. Switch?
     for prefix in SWITCH_PID_PREFIXES:
         if pid_upper.startswith(prefix):
             return KEEP_SWITCH, "base_pid %s matches switch family %s" % (base_pid, prefix)
-
     if SWITCH_RE.search(series):
         return KEEP_SWITCH, "product_series: %s" % series
     if product_type.upper() == "SWITCH" or SWITCH_RE.search(product_type):
@@ -257,17 +317,20 @@ def classify(record):
     if SWITCH_RE.search(category) or SWITCH_RE.search(subcategory):
         return KEEP_SWITCH, "product_category/subcategory: %s / %s" % (category, subcategory)
 
-    haystack = " ".join([product_type, series, category, subcategory]).lower()
-    for word in NON_SWITCH_WORDS:
-        if word in haystack:
-            label = product_type or series or category or base_pid
-            return DROP_OTHER, "identified as %s (%s)" % (label, word)
-
+    # 3. Some other device.
     if not haystack.strip():
         # A record exists but carries no taxonomy at all — cannot judge it.
         return KEEP_UNCLASSIFIED, "record has no product type/series/category"
 
     label = product_type or series or category
+    for word in NON_SWITCH_WORDS:
+        if word in haystack:
+            if mode == "devices":
+                return KEEP_DEVICE, "device (not a switch): %s" % label
+            return DROP_OTHER, "identified as %s (%s)" % (label, word)
+
+    if mode == "devices":
+        return KEEP_DEVICE, "device (not a switch): %s" % label
     return DROP_OTHER, "no switch indicators; identified as %s" % label
 
 
@@ -323,6 +386,9 @@ def main(argv=None):
     parser.add_argument("-o", "--output", help="cleaned CSV (default: <input>-cleaned.csv)")
     parser.add_argument("-r", "--report", help="per-serial decision report CSV (default: <input>-report.csv)")
     parser.add_argument("--serial-column", help="serial column name (default: auto-detect 'serial')")
+    parser.add_argument("--mode", choices=("switches", "devices"), default="switches",
+                        help="switches: keep switches only. devices: keep any standalone "
+                             "device, strip only components (default: %(default)s)")
     parser.add_argument("--cache", default=".cisco-product-cache.json",
                         help="lookup cache file; speeds up re-runs (default: %(default)s)")
     parser.add_argument("--no-cache", action="store_true", help="disable the lookup cache")
@@ -398,8 +464,10 @@ def main(argv=None):
         if isinstance(entry, dict) and "__error__" in entry:
             decisions[serial.upper()] = (KEEP_ERROR, entry["__error__"], None)
         else:
-            decision, reason = classify(entry)
+            decision, reason = classify(entry, mode=args.mode)
             decisions[serial.upper()] = (decision, reason, entry)
+
+    dropped = (DROP_OTHER, DROP_COMPONENT)
 
     kept_rows = []
     report_rows = []
@@ -414,14 +482,14 @@ def main(argv=None):
             decision, reason, record = KEEP_UNKNOWN, "not looked up (--limit)", None
 
         counts[decision] = counts.get(decision, 0) + 1
-        if decision != DROP_OTHER:
+        if decision not in dropped:
             kept_rows.append(row)
 
         record = record or {}
         report_rows.append(
             {
                 "serial": serial,
-                "decision": "keep" if decision != DROP_OTHER else "remove",
+                "decision": "remove" if decision in dropped else "keep",
                 "classification": decision,
                 "reason": reason,
                 "base_pid": record.get("base_pid", ""),
@@ -446,11 +514,12 @@ def main(argv=None):
         raise SystemExit("error: cannot write output (%s)" % exc)
 
     print("")
-    print("kept %d of %d rows -> %s" % (len(kept_rows), len(rows), output_path))
+    print("kept %d of %d rows -> %s  (mode: %s)" % (len(kept_rows), len(rows), output_path, args.mode))
     print("decisions -> %s" % report_path)
-    for decision in (KEEP_SWITCH, KEEP_UNKNOWN, KEEP_UNCLASSIFIED, KEEP_ERROR, DROP_OTHER):
+    for decision in (KEEP_SWITCH, KEEP_DEVICE, KEEP_UNKNOWN, KEEP_UNCLASSIFIED,
+                     KEEP_ERROR, DROP_COMPONENT, DROP_OTHER):
         if counts.get(decision):
-            verb = "removed" if decision == DROP_OTHER else "kept"
+            verb = "removed" if decision in dropped else "kept"
             print("  %-16s %5d  (%s)" % (decision, counts[decision], verb))
     return 0
 
