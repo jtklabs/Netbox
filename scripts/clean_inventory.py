@@ -5,6 +5,15 @@ Reads a CSV with a `serial` column, asks Cisco what each serial is, and writes a
 cleaned CSV with the junk rows removed — modules, power supplies, line cards,
 transceivers and other components that are not standalone devices.
 
+Only rows whose NAME contains parentheses are sent to Cisco. Those are the
+suspect rows: when the sheet was built, duplicate names were disambiguated with
+an incrementing suffix — "core-sw-01", "core-sw-01 (1)", "core-sw-01 (2)" — and
+the extra entries are the modules and power supplies hanging off the real
+device. Rows without parentheses are treated as known-good devices and kept
+without a lookup, which also keeps the API call count down.
+
+Use --check-all to look up every serial regardless of name.
+
 Two modes:
 
     --mode devices    (default)  keep any standalone device (switch, router,
@@ -13,6 +22,7 @@ Two modes:
 
 Keep/drop rule (deliberately conservative — we only drop on confident evidence):
 
+    name without parentheses   -> keep   (not sent to Cisco at all)
     component / spare part     -> DROP   (module, PSU, line card, optic, fan...)
     switch                     -> keep
     other device               -> keep in `devices` mode, DROP in `switches` mode
@@ -72,8 +82,14 @@ KEEP_DEVICE = "other-device"
 KEEP_UNKNOWN = "unknown"
 KEEP_ERROR = "lookup-failed"
 KEEP_UNCLASSIFIED = "unclassified"
+KEEP_NOT_CHECKED = "not-checked"
 DROP_OTHER = "not-a-switch"
 DROP_COMPONENT = "component"
+
+# Rows whose name contains parentheses are the ones worth checking. Any
+# parenthesis counts, not just "(1)" — matching the wider pattern costs an extra
+# lookup at worst, while matching too narrowly would leave junk in the sheet.
+DEFAULT_NAME_PATTERN = r"\(.*?\)"
 
 # Base PID prefixes that identify a switch regardless of what the API's
 # taxonomy fields say. Deterministic and offline, so this is checked first.
@@ -337,23 +353,40 @@ def classify(record, mode="devices"):
 # --------------------------------------------------------------------------- #
 # CSV plumbing
 # --------------------------------------------------------------------------- #
-def find_serial_column(fieldnames, override=None):
+def _find_column(fieldnames, override, exact, variants, label, required=True):
     if override:
         for name in fieldnames:
             if name.strip().lower() == override.strip().lower():
                 return name
         raise SystemExit("error: column %r not found; columns are: %s" % (override, ", ".join(fieldnames)))
     for name in fieldnames:
-        if name.strip().lower() == "serial":
+        if name.strip().lower() == exact:
             return name
     # Tolerate the common variants rather than failing on a near miss.
     for name in fieldnames:
         collapsed = re.sub(r"[^a-z]", "", name.lower())
-        if collapsed in ("serialnumber", "serialno", "sn", "serials"):
+        if collapsed in variants:
             return name
+    if not required:
+        return None
     raise SystemExit(
-        "error: no 'serial' column found; columns are: %s\n"
-        "       pass --serial-column to choose one explicitly" % ", ".join(fieldnames)
+        "error: no '%s' column found; columns are: %s\n"
+        "       pass --%s-column to choose one explicitly" % (exact, ", ".join(fieldnames), label)
+    )
+
+
+def find_serial_column(fieldnames, override=None):
+    return _find_column(
+        fieldnames, override, "serial",
+        ("serialnumber", "serialno", "sn", "serials"), "serial",
+    )
+
+
+def find_name_column(fieldnames, override=None):
+    return _find_column(
+        fieldnames, override, "name",
+        ("devicename", "hostname", "host", "devicehostname", "description"),
+        "name", required=False,
     )
 
 
@@ -386,6 +419,12 @@ def main(argv=None):
     parser.add_argument("-o", "--output", help="cleaned CSV (default: <input>-cleaned.csv)")
     parser.add_argument("-r", "--report", help="per-serial decision report CSV (default: <input>-report.csv)")
     parser.add_argument("--serial-column", help="serial column name (default: auto-detect 'serial')")
+    parser.add_argument("--name-column", help="name column name (default: auto-detect 'name')")
+    parser.add_argument("--name-pattern", default=DEFAULT_NAME_PATTERN,
+                        help="only look up rows whose name matches this regex "
+                             r"(default: %(default)s — i.e. any parentheses)")
+    parser.add_argument("--check-all", action="store_true",
+                        help="look up every serial, ignoring the name pattern")
     parser.add_argument("--mode", choices=("devices", "switches"), default="devices",
                         help="devices: keep any standalone device, strip only components. "
                              "switches: keep switches only (default: %(default)s)")
@@ -407,6 +446,7 @@ def main(argv=None):
             if not reader.fieldnames:
                 raise SystemExit("error: %s is empty or has no header row" % args.input)
             serial_column = find_serial_column(reader.fieldnames, args.serial_column)
+            name_column = find_name_column(reader.fieldnames, args.name_column)
             fieldnames = list(reader.fieldnames)
             rows = list(reader)
     except OSError as exc:
@@ -414,9 +454,29 @@ def main(argv=None):
 
     print("read %d rows from %s (serial column: %r)" % (len(rows), args.input, serial_column))
 
+    try:
+        name_re = re.compile(args.name_pattern)
+    except re.error as exc:
+        raise SystemExit("error: bad --name-pattern (%s)" % exc)
+
+    # Decide which rows are worth asking Cisco about.
+    if args.check_all:
+        print("checking every row (--check-all)")
+        flagged = [True] * len(rows)
+    elif name_column is None:
+        print("warning: no name column found — checking every row "
+              "(use --name-column to enable name filtering)", file=sys.stderr)
+        flagged = [True] * len(rows)
+    else:
+        flagged = [bool(name_re.search(row.get(name_column) or "")) for row in rows]
+        print("name column %r: %d of %d rows match %s and will be checked"
+              % (name_column, sum(flagged), len(rows), args.name_pattern))
+
     serials = []
     seen = set()
-    for row in rows:
+    for row, check in zip(rows, flagged):
+        if not check:
+            continue
         serial = (row.get(serial_column) or "").strip()
         if serial and serial.upper() not in seen:
             seen.add(serial.upper())
@@ -472,9 +532,13 @@ def main(argv=None):
     kept_rows = []
     report_rows = []
     counts = {}
-    for row in rows:
+    for row, check in zip(rows, flagged):
         serial = (row.get(serial_column) or "").strip()
-        if not serial:
+        if not check:
+            # Name carries no parenthetical marker, so this is a real device by
+            # the sheet's own convention — kept without consulting Cisco.
+            decision, reason, record = KEEP_NOT_CHECKED, "name has no parentheses", None
+        elif not serial:
             decision, reason, record = KEEP_UNCLASSIFIED, "row has no serial", None
         elif serial.upper() in decisions:
             decision, reason, record = decisions[serial.upper()]
@@ -488,6 +552,7 @@ def main(argv=None):
         record = record or {}
         report_rows.append(
             {
+                "name": (row.get(name_column) or "") if name_column else "",
                 "serial": serial,
                 "decision": "remove" if decision in dropped else "keep",
                 "classification": decision,
@@ -516,8 +581,8 @@ def main(argv=None):
     print("")
     print("kept %d of %d rows -> %s  (mode: %s)" % (len(kept_rows), len(rows), output_path, args.mode))
     print("decisions -> %s" % report_path)
-    for decision in (KEEP_SWITCH, KEEP_DEVICE, KEEP_UNKNOWN, KEEP_UNCLASSIFIED,
-                     KEEP_ERROR, DROP_COMPONENT, DROP_OTHER):
+    for decision in (KEEP_NOT_CHECKED, KEEP_SWITCH, KEEP_DEVICE, KEEP_UNKNOWN,
+                     KEEP_UNCLASSIFIED, KEEP_ERROR, DROP_COMPONENT, DROP_OTHER):
         if counts.get(decision):
             verb = "removed" if decision in dropped else "kept"
             print("  %-16s %5d  (%s)" % (decision, counts[decision], verb))
