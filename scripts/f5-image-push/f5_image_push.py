@@ -200,6 +200,25 @@ def find_listed_image(client, filename):
     return None
 
 
+def remote_md5(client, filename):
+    """md5sum of the file as it sits in /shared/images on the unit, or None if
+    the check can't run (util/bash disabled). This is the only trustworthy
+    checksum comparison: the 'checksum' metadata field on sys/software/image
+    is NOT the plain md5 of the ISO file, so it must never be compared against
+    a locally computed md5."""
+    try:
+        result = client.post_json("/mgmt/tm/util/bash", {
+            "command": "run",
+            "utilCmdArgs": f"-c \"md5sum '/shared/images/{filename}'\"",
+        })
+        out = result.get("commandResult", "").split()
+        if out and len(out[0]) == 32:
+            return out[0]
+    except requests.RequestException:
+        pass
+    return None
+
+
 def upload_image(client, image_path, chunk_size):
     filename = os.path.basename(image_path)
     total = os.path.getsize(image_path)
@@ -231,15 +250,20 @@ def upload_image(client, image_path, chunk_size):
 
 
 def wait_until_listed(client, filename, local_md5, verify_timeout):
-    """Poll until the unit lists the image with a verified checksum."""
+    """Poll until the unit lists the image as verified, then md5sum the file
+    on the unit and compare to the local md5."""
     deadline = time.time() + verify_timeout
     while time.time() < deadline:
         entry = find_listed_image(client, filename)
         if entry and entry.get("verified", "").lower() == "yes":
-            checksum = entry.get("checksum", "")
-            if local_md5 and checksum and checksum != local_md5:
+            device_md5 = remote_md5(client, filename)
+            if device_md5 is None:
+                log(client.device.name,
+                    "cannot md5sum on the unit (util/bash unavailable) — "
+                    "relying on the unit's own image verification")
+            elif device_md5 != local_md5:
                 raise RuntimeError(
-                    f"checksum mismatch after upload (local {local_md5}, unit {checksum})"
+                    f"md5 mismatch after upload (local {local_md5}, on-device {device_md5})"
                 )
             return entry
         time.sleep(5)
@@ -256,12 +280,19 @@ def push_to_device(device, image_path, local_md5, settings, force, report):
         client.login()
         existing = find_listed_image(client, filename)
         if existing and not force:
-            if existing.get("checksum") == local_md5:
-                log(device.name, "image already present with matching checksum — skipping")
+            device_md5 = remote_md5(client, filename)
+            if device_md5 == local_md5:
+                log(device.name, "image already present, md5sum on device matches — skipping")
                 report.record(filename, device, "already-present",
-                              "verified on device, checksum matches")
+                              "md5sum on device matches local image")
                 return {"device": device, "status": "already-present"}
-            log(device.name, "image name already listed but checksum differs — re-uploading")
+            if device_md5 is None and existing.get("verified", "").lower() == "yes":
+                log(device.name, "image already listed as verified (cannot md5sum, "
+                                 "util/bash unavailable) — skipping")
+                report.record(filename, device, "already-present",
+                              "listed as verified on device; md5sum check unavailable")
+                return {"device": device, "status": "already-present"}
+            log(device.name, "image name already listed but md5 differs — re-uploading")
         needed_kb = os.path.getsize(image_path) // 1024 + SPACE_HEADROOM_KB
         avail_kb = free_space_kb(client)
         if avail_kb is None:

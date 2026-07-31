@@ -47,10 +47,15 @@ Behavior:
   util/bash endpoint): if there isn't room for the image plus ~100 MB headroom,
   that unit fails up-front with a clear message instead of dying mid-upload.
   Units that refuse the check (util/bash disabled) get a warning and proceed.
-- Computes the ISO's MD5 locally, then after each upload waits for the unit to
-  list the image as verified and compares checksums — a mismatch is a failure.
-- Skips units that already list the image with a matching checksum (use
-  `--force` to re-upload).
+- Computes the ISO's MD5 locally; after each upload it waits for the unit to
+  list the image as verified, then runs `md5sum` on the file on the unit
+  (via util/bash) and compares — a mismatch is a failure. Note the `checksum`
+  metadata field on `sys software image` is *not* the plain md5 of the ISO
+  file, so the tool never compares against it.
+- Skips units where the file in `/shared/images` already md5sums to the same
+  value as the local image (use `--force` to re-upload). If the unit won't
+  run md5sum (util/bash disabled), a listed-and-verified image of the same
+  name is trusted and skipped.
 - Auth tokens are extended to the 10-hour maximum so slow WAN uploads survive,
   and are deleted on completion. An expired token mid-upload triggers an
   automatic re-login and chunk retry.
@@ -66,8 +71,8 @@ history, so it accumulates a full audit trail across runs. It's gitignored.
 
 To retry after failures, just run the same command again against the full CSV.
 The report is history, **not** the skip decision: on every run each unit is
-queried directly and skipped only if it actually lists the image with a
-matching verified checksum on the box. Previous successes are therefore left
+queried directly and skipped only if the file on the box actually md5sums to
+the same value as the local image. Previous successes are therefore left
 alone (logged as `already-present`), previous failures are re-attempted — and
 this stays correct even if the report file is deleted or someone removed the
 image from a unit by hand.
