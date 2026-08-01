@@ -6,7 +6,8 @@
 | netbox-docker image | `netboxcommunity/netbox:v4.6.5-5.0.2` | 2026-07-28 | Base of `Dockerfile-Plugins`; local image tag `netbox-jtk:v4.6.5-5.0.2`. |
 | netbox-docker support files | tag `5.0.2` (commit `5adc62fe3fa65163c4ef63733bdcbd3e59b5c544`) | 2026-07-28 | Imported verbatim: `docker-compose.yml`, `configuration/` (plugins.py edited), `env/` (secrets regenerated). To upgrade: diff against the new upstream tag. |
 | netbox-quotes (ours) | 0.1.0 | 2026-07-29 | Local plugin in `plugins/netbox-quotes`, installed by Dockerfile-Plugins. Replaces netbox-contract (dropped 2026-07-29 — see PROJECT_PLAN.md D9). |
-| netbox-lifecycle | 1.1.9 | 2026-07-28 | 4.6 blocker fixed upstream in 1.1.9. |
+| netbox-refresh (ours) | 0.1.0 | 2026-07-31 | Local plugin in `plugins/netbox-refresh`: EoL dates, replacement models, cost, Cisco EoX sync, refresh report. Replaces netbox-lifecycle (D10). |
+| ~~netbox-lifecycle~~ | removed 2026-07-31 | — | Third-party EoL plugin, superseded by netbox-refresh. Tables dropped with `migrate netbox_lifecycle zero` before removal. |
 | Postgres (dev) | **16-alpine** | 2026-07-29 | Aligned to prod RDS (PostgreSQL 16.13). |
 | Valkey | 9.1-alpine | 2026-07-28 | Queue (DB 0, AOF) + cache (DB 1). |
 | Diode services | 2.1.0 (`DIODE_TAG`) | 2026-07-29 | ingester/reconciler/auth. Compose adapted from netboxlabs/diode `release` branch (`diode-server/docker/`); `nginx.conf` + `bootstrap-clients.sh` vendored verbatim into `discovery/`. |

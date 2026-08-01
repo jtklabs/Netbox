@@ -5,7 +5,10 @@ RUN /usr/local/bin/uv pip install -r /opt/netbox/plugin_requirements.txt
 
 # Our own plugins, vendored in this repo
 COPY plugins/netbox-quotes /opt/netbox-plugins/netbox-quotes
-RUN /usr/local/bin/uv pip install /opt/netbox-plugins/netbox-quotes
+COPY plugins/netbox-refresh /opt/netbox-plugins/netbox-refresh
+RUN /usr/local/bin/uv pip install \
+    /opt/netbox-plugins/netbox-quotes \
+    /opt/netbox-plugins/netbox-refresh
 
 # Bake plugin config into the image so collectstatic picks up plugin static files.
 # At runtime the ./configuration bind mount shadows this copy.

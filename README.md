@@ -20,6 +20,7 @@ NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discove
 - `docker-compose.yml`, `configuration/`, `env/*.example` — imported from netbox-docker at the tag in [VERSIONS.md](VERSIONS.md) (deviation: the postgres service lives in `compose/dev.yml`; prod uses RDS)
 - `compose/` — env overlays: `dev.yml`, `prod.yml`, `discovery.yml`, `proxy.yml` (dev rehearsal of the prod subpath+SSO topology)
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin; `Dockerfile-Plugins` builds the image with it + PyPI plugins
+- `plugins/netbox-refresh/` — our hardware-lifecycle plugin: EoL dates on device/module types, replacement model links, replacement cost, Cisco EoX sync (`manage.py sync_cisco_eol`) and the refresh cost report at **Hardware Refresh › Refresh Report**
 - `apache/netbox.conf` — prod vhost include (mellon SSO, header injection, static mapping)
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures
 - `scripts/clean_inventory.py` — standalone utility (unrelated to the deployment): cleans an inventory CSV by stripping component serials (modules, PSUs, line cards, optics) via the Cisco Product Information API, keeping real devices. Only rows whose name contains parentheses — the `(1)`/`(2)` duplicates — are sent to Cisco; `--check-all` overrides. On those rows a "no record at Cisco" also removes the row (`--keep-unknown` disables). Rows with plain names are never looked up or removed, and a failed lookup never removes anything. `--mode switches` narrows the result to switches only.

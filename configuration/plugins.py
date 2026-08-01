@@ -6,12 +6,18 @@
 from os import environ
 
 PLUGINS = [
-    "netbox_lifecycle",
     "netbox_quotes",
+    "netbox_refresh",
     "netbox_diode_plugin",
 ]
 
 PLUGINS_CONFIG = {
+    "netbox_refresh": {
+        # Cisco Support API credentials for the EoX sync. Kept in the
+        # environment rather than in this file so nothing secret is committed.
+        "cisco_client_id": environ.get("CISCO_CLIENT_ID", ""),
+        "cisco_client_secret": environ.get("CISCO_CLIENT_SECRET", ""),
+    },
     "netbox_diode_plugin": {
         # gRPC target the plugin (and its derived auth URL) uses to reach Diode.
         "diode_target_override": environ.get(
