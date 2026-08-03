@@ -10,7 +10,7 @@
 #   `docker compose build` in that case).
 services:
   netbox:
-    image: ${PROD_IMAGE:-netbox-jtk:v4.6.5-5.0.2}
+    image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}
     build:
       context: .
       dockerfile: Dockerfile-Plugins
@@ -28,7 +28,7 @@ services:
       interval: 15s
 
   netbox-worker:
-    image: ${PROD_IMAGE:-netbox-jtk:v4.6.5-5.0.2}
+    image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}
     pull_policy: ${PROD_PULL_POLICY:-never}
     restart: unless-stopped
     env_file:

@@ -15,6 +15,8 @@ docker compose build
 echo '==> starting the stack'
 docker compose up -d
 
+# Health is always checked over loopback; BIND_ADDRESS only affects who else
+# can reach it.
 url=http://127.0.0.1:8080
 echo "==> waiting for NetBox at $url"
 echo '    first boot runs all database migrations and can take ~10 minutes'
@@ -24,6 +26,15 @@ for _ in $(seq 1 120); do
     echo "NetBox is up: $url"
     echo "  username: admin"
     echo "  password: $(grep '^SUPERUSER_PASSWORD=' .env | cut -d= -f2-)"
+    bind=$(grep '^BIND_ADDRESS=' .env | tail -1 | cut -d= -f2-)
+    if [ -z "$bind" ] || [ "$bind" = "127.0.0.1" ]; then
+      echo ''
+      echo 'Bound to loopback only — not reachable from other machines.'
+      echo 'To open it up, set BIND_ADDRESS (and CSRF_TRUSTED_ORIGINS) in .env;'
+      echo 'for HTTPS see ./scripts/dev-tls-cert.sh and compose/dev-proxy.yml.'
+    else
+      echo "  reachable on: $bind"
+    fi
     exit 0
   fi
   sleep 10

@@ -1,0 +1,47 @@
+# Dev HTTPS proxy. Mirrors the prod Apache config (apache/netbox.conf) so the
+# subpath and static mapping are exercised in daily use, not only in a drill:
+# NetBox is served at /netbox, static files are mapped back, and app routes keep
+# the prefix.
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DEV_HOSTNAME};
+
+    ssl_certificate     /etc/nginx/tls/dev.crt;
+    ssl_certificate_key /etc/nginx/tls/dev.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # NetBox serves media and large imports; do not cap uploads at nginx's 1m.
+    client_max_body_size 50m;
+
+    location = / {
+        return 302 /netbox/;
+    }
+
+    # Granian inside the container serves /static, but BASE_PATH pages
+    # reference /netbox/static/ — map it back. MUST precede the app route.
+    location /netbox/static/ {
+        proxy_pass http://netbox:8080/static/;
+    }
+
+    location /netbox/ {
+        # Identity headers: unset first so a client cannot spoof them, exactly
+        # as prod Apache does. They are only populated when DEV_PROXY_SSO_USER
+        # is set, which simulates mod_auth_mellon; leave it empty to use local
+        # NetBox logins instead.
+        proxy_set_header X-Remote-User "${DEV_PROXY_SSO_USER}";
+        proxy_set_header X-User-Email "${DEV_PROXY_SSO_EMAIL}";
+        proxy_set_header X-UserFirstName "${DEV_PROXY_SSO_FIRST}";
+        proxy_set_header X-User-LastName "${DEV_PROXY_SSO_LAST}";
+        proxy_set_header X-User-Groups "${DEV_PROXY_SSO_GROUPS}";
+
+        proxy_pass http://netbox:8080;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Django builds absolute URLs and validates CSRF from this — without it
+        # every form post fails behind TLS termination.
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;
+    }
+}

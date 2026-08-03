@@ -16,7 +16,7 @@ services:
     environment:
       REHEARSAL_SSO_USER: ${REHEARSAL_SSO_USER:-jason}
     ports:
-      - "127.0.0.1:8081:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:8081:80"
     volumes:
       - ./compose/rehearsal-proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:

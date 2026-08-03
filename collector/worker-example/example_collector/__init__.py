@@ -17,7 +17,7 @@ Install by listing this package in the file INSTALL_WORKERS_PATH points at
     worker:
       my_collector:
         config:
-          package: jtk_collector
+          package: example_collector
           schedule: "0 * * * *"     # omit to run once per agent start
           site: Branch A
         scope:
@@ -32,7 +32,7 @@ from worker.backend import Backend
 from worker.models import Metadata, Policy
 
 
-class JtkCollector(Backend):
+class ExampleCollector(Backend):
     """Collects whatever you need and returns NetBox entities."""
 
     @classmethod
@@ -40,8 +40,8 @@ class JtkCollector(Backend):
         # Must be a classmethod. The older instance-level setup() still works
         # but is deprecated and goes away in worker 2.0.
         return Metadata(
-            name="jtk_collector",
-            app_name="jtk-collector",
+            name="example_collector",
+            app_name="example-collector",
             app_version="0.1.0",
         )
 

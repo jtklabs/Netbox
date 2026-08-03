@@ -1,9 +1,9 @@
-# Dev overlay: local build with plugins, loopback port, local superuser.
+# Dev overlay: local build with plugins, local superuser.
 # Selected via COMPOSE_FILE in .env — paths here are relative to the repo root
 # (the directory of the base docker-compose.yml).
 services:
   netbox:
-    image: netbox-jtk:v4.6.5-5.0.2
+    image: netbox-custom:v4.6.5-5.0.2
     build:
       context: .
       dockerfile: Dockerfile-Plugins
@@ -11,16 +11,21 @@ services:
     depends_on:
       - postgres
     ports:
-      - "127.0.0.1:8080:8080"
+      # BIND_ADDRESS defaults to loopback. Set it in .env to a LAN address (or
+      # 0.0.0.0) when the dev host is a server you reach from elsewhere.
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:8080"
     environment:
-      # Dev-only local superuser (loopback access only; prod uses SSO).
-      # Password comes from .env, which scripts/init-dev-env.sh generates.
+      # Dev-only local superuser. Password comes from .env, which
+      # scripts/init-dev-env.sh generates.
       SKIP_SUPERUSER: "false"
       SUPERUSER_NAME: admin
       SUPERUSER_EMAIL: admin@jtklabs.dev
       SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:?run scripts/init-dev-env.sh first}
+      # Required once NetBox is reached by any name other than localhost —
+      # without it Django rejects the login POST as a CSRF failure.
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
   netbox-worker:
-    image: netbox-jtk:v4.6.5-5.0.2
+    image: netbox-custom:v4.6.5-5.0.2
     pull_policy: never
 
   # Local database is dev-only; prod points DB_* at RDS (compose/prod.yml).

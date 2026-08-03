@@ -29,7 +29,7 @@ done
 # Derive the tag from the Dockerfile's base image so the two cannot drift.
 base_image=$(grep -m1 '^FROM ' Dockerfile-Plugins | awk '{print $2}')
 base_tag=${base_image##*:}
-image=${tag:-netbox-jtk:$base_tag}
+image=${tag:-netbox-custom:$base_tag}
 
 echo "==> base image:  $base_image"
 echo "==> building:    $image"

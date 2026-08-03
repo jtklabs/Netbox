@@ -1,0 +1,57 @@
+# Dev reverse proxy: HTTPS, serving NetBox at /netbox — the same path prod uses.
+#
+# Running dev behind this means the subpath, the static-file mapping and (if you
+# want it) the SSO header handoff are exercised every day, so prod holds no
+# surprises. Enable by appending to COMPOSE_FILE in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:compose/dev.yml:compose/discovery.yml:compose/dev-proxy.yml
+#
+# Then:  ./scripts/dev-tls-cert.sh <hostname>   (once, generates the cert)
+#        docker compose up -d
+#        browse to https://<hostname>:8443/netbox/
+#
+# Set DEV_PROXY_SSO_USER in .env to also simulate mod_auth_mellon; leave it
+# empty to log in with the local admin account.
+services:
+  netbox:
+    environment:
+      # Serve under the prod path. configuration/extra.py picks this up.
+      BASE_PATH: netbox/
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?set to https://<hostname>:<port> in .env}
+      # Header auth is only active when a simulated user is configured.
+      REMOTE_AUTH_ENABLED: ${DEV_PROXY_SSO_ENABLED:-false}
+      REMOTE_AUTH_HEADER: HTTP_X_REMOTE_USER
+      REMOTE_AUTH_AUTO_CREATE_USER: "true"
+      REMOTE_AUTH_USER_EMAIL: HTTP_X_USER_EMAIL
+      REMOTE_AUTH_USER_FIRST_NAME: HTTP_X_USERFIRSTNAME
+      REMOTE_AUTH_USER_LAST_NAME: HTTP_X_USER_LASTNAME
+      REMOTE_AUTH_GROUP_SYNC_ENABLED: ${DEV_PROXY_SSO_ENABLED:-false}
+      REMOTE_AUTH_GROUP_HEADER: HTTP_X_USER_GROUPS
+      REMOTE_AUTH_GROUP_SEPARATOR: "|"
+      REMOTE_AUTH_AUTO_CREATE_GROUPS: "true"
+      REMOTE_AUTH_SUPERUSER_GROUPS: netbox-admins
+    healthcheck:
+      # BASE_PATH moves the login URL; the stock healthcheck would 404.
+      test: curl -f http://localhost:8080/netbox/login/ || exit 1
+
+  netbox-worker:
+    environment:
+      BASE_PATH: netbox/
+
+  dev-proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${DEV_PROXY_PORT:-8443}:443"
+    environment:
+      DEV_HOSTNAME: ${DEV_HOSTNAME:-localhost}
+      DEV_PROXY_SSO_USER: ${DEV_PROXY_SSO_USER:-}
+      DEV_PROXY_SSO_EMAIL: ${DEV_PROXY_SSO_EMAIL:-}
+      DEV_PROXY_SSO_FIRST: ${DEV_PROXY_SSO_FIRST:-}
+      DEV_PROXY_SSO_LAST: ${DEV_PROXY_SSO_LAST:-}
+      DEV_PROXY_SSO_GROUPS: ${DEV_PROXY_SSO_GROUPS:-}
+    volumes:
+      - ./compose/dev-proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./compose/dev-tls:/etc/nginx/tls:ro
+    depends_on:
+      - netbox

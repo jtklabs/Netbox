@@ -30,6 +30,37 @@ script is safe: it creates only what is missing and keeps the shared passwords i
 
 NetBox: http://127.0.0.1:8080 — local superuser `admin`, password in your generated `.env` (`SUPERUSER_PASSWORD`). No secrets are committed to this repo.
 
+### Reaching dev from another machine
+
+By default everything binds to loopback, so a dev host is not exposed. On a
+shared dev server, put NetBox behind the bundled HTTPS proxy — it serves at
+**`/netbox`, the same path prod uses**, so the subpath and static-file mapping
+are exercised every day rather than only in a drill:
+
+```bash
+./scripts/dev-tls-cert.sh netbox-dev.example.com    # or an IP
+```
+
+That prints the `.env` lines to set (`BIND_ADDRESS`, `DEV_HOSTNAME`,
+`CSRF_TRUSTED_ORIGINS`, and the `compose/dev-proxy.yml` overlay). Then
+`docker compose up -d` and browse to `https://netbox-dev.example.com:8443/netbox/`.
+The certificate is self-signed, so browsers warn — the point is keeping
+credentials off plaintext HTTP, not proving identity.
+
+Two things to know:
+
+- **`CSRF_TRUSTED_ORIGINS` is required** as soon as NetBox is reached by
+  anything other than localhost. Without it the login POST fails as a CSRF
+  error even though the page loads.
+- Setting `DEV_PROXY_SSO_USER` additionally simulates the prod Mellon header
+  handoff, including group sync — useful for testing SSO behaviour. Leave it
+  empty for normal local logins.
+
+Exposing the stack also exposes the Diode ingest port, which is plaintext gRPC.
+Prefer binding to a specific LAN address over `0.0.0.0`, and see
+[collector/README.md](collector/README.md) before exposing Diode beyond a
+trusted network.
+
 ## Prod image
 
 ```bash

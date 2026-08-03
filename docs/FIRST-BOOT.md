@@ -44,7 +44,7 @@ sudo tee /data/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
 VERSION=v4.6.5-5.0.2
 # With ECR: set PROD_IMAGE to the pushed URI and PROD_PULL_POLICY=missing
-# PROD_IMAGE=123456789.dkr.ecr.us-east-1.amazonaws.com/netbox-jtk:v4.6.5-5.0.2
+# PROD_IMAGE=123456789.dkr.ecr.us-east-1.amazonaws.com/netbox-custom:v4.6.5-5.0.2
 EOF
 ```
 
