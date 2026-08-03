@@ -5,13 +5,40 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERS
 
 ## Dev quickstart
 
+From a fresh clone, one command does everything — env files, image build, stack, and waiting for NetBox:
+
+```bash
+./scripts/dev-up.sh
+```
+
+It is idempotent, so it is also how to restart. It prints the URL and the generated
+admin password when NetBox is ready (first boot runs all migrations, ~10 minutes).
+
+Doing it by hand is the same three steps:
+
 ```bash
 ./scripts/init-dev-env.sh   # generates .env + env/*.env with fresh local secrets
 docker compose build
-docker compose up -d        # first boot runs migrations (~several minutes)
+docker compose up -d
 ```
 
-NetBox: http://127.0.0.1:8080 — local superuser `admin`, password in your generated `.env` (`SUPERUSER_PASSWORD`). No secrets are committed to this repo; `env/*.env.example` are the templates.
+**`scripts/init-dev-env.sh` is not optional.** A fresh clone ships only
+`env/*.example` templates, and `.env` is what selects the compose overlay chain —
+without it compose runs the base file alone, which has no database. Re-running the
+script is safe: it creates only what is missing and keeps the shared passwords in
+`env/netbox.env`, `postgres.env`, `redis.env` and `redis-cache.env` consistent.
+
+NetBox: http://127.0.0.1:8080 — local superuser `admin`, password in your generated `.env` (`SUPERUSER_PASSWORD`). No secrets are committed to this repo.
+
+## Prod image
+
+```bash
+./scripts/prod-build.sh
+```
+
+Builds the production image and verifies every plugin loads inside it, so a broken
+plugin fails at bake time rather than during a redeploy. This is the step to add to
+the monthly AMI bake — see [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md).
 
 NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discovery/README.md](discovery/README.md)).
 

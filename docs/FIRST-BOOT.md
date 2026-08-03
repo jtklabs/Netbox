@@ -112,13 +112,17 @@ Login page over https, SSO round-trip, device pages, quote document download
 
 ## Image distribution (decision 2026-07-29: no ECR)
 
-Leave `PROD_IMAGE` unset. Recommended: add one step to the monthly AMI bake,
-after the repo checkout —
+Leave `PROD_IMAGE` unset. Add one step to the monthly AMI bake, after the repo
+checkout:
 
 ```bash
-cd /opt/netbox && docker compose --env-file /dev/null -f docker-compose.yml -f compose/prod.yml build
+cd /opt/netbox && ./scripts/prod-build.sh
 ```
 
-— so instances boot with the image already present (fast boot, no Docker Hub
-dependency at boot time). If the bake skips this, bootstrap builds at first
-boot instead (~5 extra minutes).
+That builds the image under the exact tag `compose/prod.yml` expects and then
+verifies every plugin loads inside it — a plugin that would fail on boot is
+caught during the bake instead of during a redeploy. Instances then start with
+the image already present (fast boot, no Docker Hub dependency at boot time).
+
+If the bake skips this, `deploy/bootstrap.sh` builds at first boot instead
+(~5 extra minutes).

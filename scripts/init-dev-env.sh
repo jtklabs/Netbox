@@ -1,34 +1,58 @@
 #!/usr/bin/env bash
-# Generate local dev env files from the committed .example templates, filling in
-# fresh random secrets. Idempotent: existing files/blocks are left untouched.
+# Generate the local dev env files from the committed .example templates,
+# filling in fresh random secrets.
+#
+# Safe to re-run: every file is created only if missing, and the companion
+# files are derived from env/netbox.env so their shared passwords always match
+# even when only some of them exist.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
 
+# Read a KEY=value out of an env file.
+getval() { grep "^$2=" "$1" | tail -1 | cut -d= -f2-; }
+
+created=()
+
+# --- .env: selects the compose overlay chain, so nothing works without it ----
 if [ ! -f .env ]; then
   cp .env.example .env
   printf 'SUPERUSER_PASSWORD=%s\n' "$(gen 20)" >>.env
-  echo "created .env (dev superuser password inside)"
+  created+=(".env")
 fi
 
+# --- env/netbox.env is the source of truth for the shared passwords ---------
 if [ ! -f env/netbox.env ]; then
-  DB_PASSWORD=$(gen 24)
-  REDIS_PASSWORD=$(gen 24)
-  REDIS_CACHE_PASSWORD=$(gen 24)
   sed -e "s/{{SECRET_KEY}}/$(gen 60)/" \
     -e "s/{{API_TOKEN_PEPPER}}/$(gen 50)/" \
-    -e "s/{{DB_PASSWORD}}/$DB_PASSWORD/" \
-    -e "s/{{REDIS_PASSWORD}}/$REDIS_PASSWORD/" \
-    -e "s/{{REDIS_CACHE_PASSWORD}}/$REDIS_CACHE_PASSWORD/" \
+    -e "s/{{DB_PASSWORD}}/$(gen 24)/" \
+    -e "s/{{REDIS_PASSWORD}}/$(gen 24)/" \
+    -e "s/{{REDIS_CACHE_PASSWORD}}/$(gen 24)/" \
     env/netbox.env.example >env/netbox.env
-  sed "s/{{DB_PASSWORD}}/$DB_PASSWORD/" env/postgres.env.example >env/postgres.env
-  sed "s/{{REDIS_PASSWORD}}/$REDIS_PASSWORD/" env/redis.env.example >env/redis.env
-  sed "s/{{REDIS_CACHE_PASSWORD}}/$REDIS_CACHE_PASSWORD/" env/redis-cache.env.example >env/redis-cache.env
-  echo "created env/*.env with fresh secrets"
+  created+=("env/netbox.env")
 fi
 
-# --- Discovery stack (Diode + orb-agent) secrets --------------------------
+# --- companions, derived so they cannot drift out of sync -------------------
+db_password=$(getval env/netbox.env DB_PASSWORD)
+redis_password=$(getval env/netbox.env REDIS_PASSWORD)
+redis_cache_password=$(getval env/netbox.env REDIS_CACHE_PASSWORD)
+
+if [ ! -f env/postgres.env ]; then
+  sed "s/{{DB_PASSWORD}}/$db_password/" env/postgres.env.example >env/postgres.env
+  created+=("env/postgres.env")
+fi
+if [ ! -f env/redis.env ]; then
+  sed "s/{{REDIS_PASSWORD}}/$redis_password/" env/redis.env.example >env/redis.env
+  created+=("env/redis.env")
+fi
+if [ ! -f env/redis-cache.env ]; then
+  sed "s/{{REDIS_CACHE_PASSWORD}}/$redis_cache_password/" \
+    env/redis-cache.env.example >env/redis-cache.env
+  created+=("env/redis-cache.env")
+fi
+
+# --- discovery stack (Diode + orb-agent) secrets ---------------------------
 if ! grep -q '^DIODE_TAG=' .env; then
   cat >>.env <<EOF
 
@@ -86,18 +110,36 @@ DISCOVERY_SNMP_AUTH_PASS=
 DISCOVERY_SNMP_PRIV_PASS=
 DISCOVERY_SSH_USER=
 DISCOVERY_SSH_PASS=
+# Cisco Support API credentials for netbox_refresh EoX sync (optional):
+CISCO_CLIENT_ID=
+CISCO_CLIENT_SECRET=
 EOF
-  echo "appended discovery secrets block to .env (fill DISCOVERY_* device creds)"
+  created+=(".env discovery block")
 fi
 
 if [ ! -f discovery/oauth2/client/client-credentials.json ]; then
-  envval() { grep "^$1=" .env | tail -1 | cut -d= -f2-; }
-  sed -e "s/{{DIODE_INGEST_CLIENT_SECRET}}/$(envval DIODE_INGEST_CLIENT_SECRET)/" \
-    -e "s/{{DIODE_TO_NETBOX_CLIENT_SECRET}}/$(envval DIODE_TO_NETBOX_CLIENT_SECRET)/" \
-    -e "s/{{NETBOX_TO_DIODE_CLIENT_SECRET}}/$(envval NETBOX_TO_DIODE_CLIENT_SECRET)/" \
+  mkdir -p discovery/oauth2/client
+  sed -e "s/{{DIODE_INGEST_CLIENT_SECRET}}/$(getval .env DIODE_INGEST_CLIENT_SECRET)/" \
+    -e "s/{{DIODE_TO_NETBOX_CLIENT_SECRET}}/$(getval .env DIODE_TO_NETBOX_CLIENT_SECRET)/" \
+    -e "s/{{NETBOX_TO_DIODE_CLIENT_SECRET}}/$(getval .env NETBOX_TO_DIODE_CLIENT_SECRET)/" \
     discovery/oauth2/client/client-credentials.json.example \
     >discovery/oauth2/client/client-credentials.json
-  echo "created discovery/oauth2/client/client-credentials.json"
+  created+=("discovery/oauth2/client/client-credentials.json")
 fi
 
-echo "dev env ready — next: docker compose build && docker compose up -d"
+# --- verify: every file compose needs must now exist ------------------------
+missing=()
+for f in .env env/netbox.env env/postgres.env env/redis.env env/redis-cache.env; do
+  [ -f "$f" ] || missing+=("$f")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "ERROR: still missing after setup: ${missing[*]}" >&2
+  exit 1
+fi
+
+if [ ${#created[@]} -gt 0 ]; then
+  printf 'created: %s\n' "${created[*]}"
+else
+  echo 'nothing to do — dev env files already present'
+fi
+echo 'dev env ready — next: docker compose build && docker compose up -d'
