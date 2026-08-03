@@ -4,6 +4,12 @@
 env/*.env
 !env/rehearsal.env
 discovery/oauth2/client/client-credentials.json
+# Remote collector: real config is per-box and holds device credentials
+collector/collector.env
+collector/policies.yaml
+collector/workers.txt
+collector/agent.yaml
+collector/ca.pem
 # F5 image push tool — real creds/inventory stay local, only .example is committed
 scripts/f5-image-push/config.ini
 scripts/f5-image-push/devices.csv

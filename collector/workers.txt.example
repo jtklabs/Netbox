@@ -1,0 +1,8 @@
+# Custom worker packages to install into the agent at container start.
+# Copy to workers.txt and set INSTALL_WORKERS_PATH=/opt/orb/workers.txt in
+# collector.env to activate.
+#
+# Paths are resolved relative to this file. PyPI names, local folders and
+# tarballs all work. Pin versions — these run unsandboxed inside the agent.
+./worker-example
+# my-published-collector==1.2.3

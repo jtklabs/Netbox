@@ -1,0 +1,32 @@
+# Remote collector agent configuration (template).
+#
+# install.sh renders this plus policies.yaml into agent.yaml. Edit this file
+# only to change backends or agent-level settings; edit policies.yaml to change
+# what gets scanned.
+#
+# No secrets here — every ${VAR} is resolved from the container environment,
+# which docker compose loads from collector.env (gitignored).
+version: 1.0
+orb:
+  # Labels describe this collector. They are what a central Git policy repo
+  # selects on if you outgrow per-box policy files — see README.
+  labels:
+    collector: ${COLLECTOR_NAME}
+
+  config_manager:
+    active: local
+
+  backends:
+    device_discovery:
+    network_discovery:
+    snmp_discovery:
+    # Uncomment to run custom Python collectors (see worker-example/):
+    # worker:
+    common:
+      diode:
+        target: ${DIODE_TARGET}
+        client_id: ${DIODE_CLIENT_ID}
+        client_secret: ${DIODE_CLIENT_SECRET}
+        # Stamped onto everything this collector ingests, so you can tell which
+        # site data came from.
+        agent_name: ${COLLECTOR_NAME}

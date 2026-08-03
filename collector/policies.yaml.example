@@ -1,0 +1,66 @@
+# What this collector scans. Copy to policies.yaml and edit.
+#
+# Schedules are cron expressions; omit `schedule` to run once per agent start.
+# STAGGER the minute across sites — nothing throttles simultaneous arrivals at
+# Diode, and the reconciler's NetBox rate limit is shared by the whole fleet.
+#
+# ${VAR} substitution works in snmp_discovery credential fields and anywhere in
+# device_discovery scope/defaults. It does NOT work in network_discovery scope.
+
+snmp_discovery:
+  site_snmp:
+    config:
+      schedule: "17 * * * *"
+      defaults:
+        # Must match a Site name in NetBox, or discovery lands in "undefined".
+        site: Branch A
+    scope:
+      targets:
+        # Single hosts, CIDRs and ranges are all valid:
+        - host: "10.20.0.0/24"
+        # - host: "10.20.1.5"
+        # - host: "10.20.1.10-40"
+      authentication:
+        protocol_version: "SNMPv3"
+        security_level: "authPriv"
+        username: ${SNMP_USER}
+        auth_protocol: "SHA"
+        auth_passphrase: ${SNMP_AUTH_PASS}
+        priv_protocol: "AES"
+        priv_passphrase: ${SNMP_PRIV_PASS}
+
+device_discovery:
+  site_napalm:
+    config:
+      schedule: "37 * * * *"
+      defaults:
+        site: Branch A
+        role: switch
+    scope:
+      - hostname: 10.20.0.5
+        username: ${DEVICE_USER}
+        password: ${DEVICE_PASS}
+        # driver optional — omit and NAPALM tries the standard drivers
+        driver: ios
+
+# Uncomment to sweep for live IPs (needs host networking / raw sockets):
+# network_discovery:
+#   site_sweep:
+#     config:
+#       schedule: "7 */6 * * *"
+#       defaults:
+#         site: Branch A
+#     scope:
+#       targets:
+#         - 10.20.0.0/24
+
+# Uncomment to run a custom Python collector (see worker-example/):
+# worker:
+#   my_collector:
+#     config:
+#       package: my_collector
+#       schedule: "0 * * * *"
+#       site: Branch A
+#     scope:
+#       targets:
+#         - 10.20.0.5
