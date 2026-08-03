@@ -32,33 +32,34 @@ NetBox: http://127.0.0.1:8080 — local superuser `admin`, password in your gene
 
 ### Reaching dev from another machine
 
-By default everything binds to loopback, so a dev host is not exposed. On a
-shared dev server, put NetBox behind the bundled HTTPS proxy — it serves at
-**`/netbox`, the same path prod uses**, so the subpath and static-file mapping
-are exercised every day rather than only in a drill:
+Pass the hostname or IP people will use:
 
 ```bash
-./scripts/dev-tls-cert.sh netbox-dev.example.com    # or an IP
+./scripts/dev-up.sh netbox-dev.example.com
 ```
 
-That prints the `.env` lines to set (`BIND_ADDRESS`, `DEV_HOSTNAME`,
-`CSRF_TRUSTED_ORIGINS`, and the `compose/dev-proxy.yml` overlay). Then
-`docker compose up -d` and browse to `https://netbox-dev.example.com:8443/netbox/`.
-The certificate is self-signed, so browsers warn — the point is keeping
+That is the whole procedure — no variables to edit and no certificate step. It
+generates the TLS certificate, writes every setting it needs into `.env`,
+enables the reverse proxy and starts the stack, then prints the URL. Re-run it
+any time to restart, or with a different name to move it. `./scripts/dev-up.sh
+--local` goes back to loopback-only.
+
+NetBox is served at **`/netbox`, the same path production uses**, so the subpath
+and the static-file mapping are exercised every day rather than only in a drill.
+The certificate is self-signed, so browsers warn once — the point is keeping
 credentials off plaintext HTTP, not proving identity.
 
-Two things to know:
+Two things worth knowing:
 
-- **`CSRF_TRUSTED_ORIGINS` is required** as soon as NetBox is reached by
-  anything other than localhost. Without it the login POST fails as a CSRF
-  error even though the page loads.
-- Setting `DEV_PROXY_SSO_USER` additionally simulates the prod Mellon header
-  handoff, including group sync — useful for testing SSO behaviour. Leave it
-  empty for normal local logins.
+- Setting `DEV_PROXY_SSO_USER` in `.env` additionally simulates the production
+  Mellon header handoff, including group sync, so SSO behaviour can be tested
+  on the same path. Leave it empty for normal local logins.
+- The stack binds to all interfaces so one command works on both a Linux server
+  and Docker Desktop. On Linux you can narrow `BIND_ADDRESS` in `.env` to a
+  single interface address afterwards and it is respected.
 
 Exposing the stack also exposes the Diode ingest port, which is plaintext gRPC.
-Prefer binding to a specific LAN address over `0.0.0.0`, and see
-[collector/README.md](collector/README.md) before exposing Diode beyond a
+See [collector/README.md](collector/README.md) before exposing Diode beyond a
 trusted network.
 
 ## Prod image

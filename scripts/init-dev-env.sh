@@ -20,6 +20,25 @@ if [ ! -f .env ]; then
   cp .env.example .env
   printf 'SUPERUSER_PASSWORD=%s\n' "$(gen 20)" >>.env
   created+=(".env")
+else
+  # Existing .env: add any settings introduced since it was generated. Without
+  # this, a new variable silently falls back to its compose default — which is
+  # how BIND_ADDRESS ended up pinned to loopback on existing checkouts.
+  added=()
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      *=*) key=${line%%=*} ;;
+      *) continue ;;
+    esac
+    if ! grep -q "^${key}=" .env; then
+      printf '%s\n' "$line" >>.env
+      added+=("$key")
+    fi
+  done <.env.example
+  if [ ${#added[@]} -gt 0 ]; then
+    created+=(".env: added ${added[*]}")
+  fi
 fi
 
 # --- env/netbox.env is the source of truth for the shared passwords ---------

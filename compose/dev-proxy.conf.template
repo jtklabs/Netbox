@@ -14,6 +14,13 @@ server {
     # NetBox serves media and large imports; do not cap uploads at nginx's 1m.
     client_max_body_size 50m;
 
+    # Docker's embedded DNS. Combined with the $upstream variable below this
+    # forces nginx to re-resolve per request instead of caching the address at
+    # startup — otherwise the proxy 502s for good whenever the netbox container
+    # is recreated, which in dev is constantly.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $upstream http://netbox:8080;
+
     location = / {
         return 302 /netbox/;
     }
@@ -21,7 +28,8 @@ server {
     # Granian inside the container serves /static, but BASE_PATH pages
     # reference /netbox/static/ — map it back. MUST precede the app route.
     location /netbox/static/ {
-        proxy_pass http://netbox:8080/static/;
+        rewrite ^/netbox/static/(.*)$ /static/$1 break;
+        proxy_pass $upstream;
     }
 
     location /netbox/ {
@@ -35,7 +43,7 @@ server {
         proxy_set_header X-User-LastName "${DEV_PROXY_SSO_LAST}";
         proxy_set_header X-User-Groups "${DEV_PROXY_SSO_GROUPS}";
 
-        proxy_pass http://netbox:8080;
+        proxy_pass $upstream;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
