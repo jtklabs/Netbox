@@ -5,7 +5,10 @@ automatic (RUNBOOK-redeploy.md). No secrets ever leave this box or enter git.
 
 Prereqs:
 
-- Ubuntu 24 instance with docker + compose, this repo at `/opt/netbox`
+- Ubuntu 24 instance with Docker and **Compose v2**, this repo at `/opt/netbox`.
+  A stock Ubuntu install often has only the legacy `docker-compose` v1 binary,
+  which cannot parse these files — `sudo apt-get install -y docker-compose-v2`.
+  Check with `docker compose version` (a space, not a hyphen).
 - the data disk attached
 - an instance profile granting the S3 media bucket
 - the existing Apache + mod_auth_mellon server (separate host)

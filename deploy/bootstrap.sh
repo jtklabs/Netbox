@@ -24,6 +24,21 @@ SECRETS_DIR=${SECRETS_DIR:-$DATA_MOUNT/netbox-secrets}
 
 log() { echo "[netbox-bootstrap] $(date -Is) $*"; }
 
+# --- 0. Compose v2 is required ---------------------------------------------
+# A stock Ubuntu install often provides only the standalone `docker-compose`
+# v1 binary, which is end-of-life and cannot parse these files (pull_policy,
+# service_healthy conditions, ${VAR:?} defaults). Fail here with a clear
+# instruction rather than on a confusing YAML error later.
+if ! docker compose version >/dev/null 2>&1; then
+  log "FATAL: Docker Compose v2 is not available."
+  if command -v docker-compose >/dev/null 2>&1; then
+    log "       Found the legacy v1 binary ($(docker-compose --version 2>&1 | head -1))."
+    log "       v1 is end-of-life and cannot parse this project's compose files."
+  fi
+  log "       Install it:  sudo apt-get install -y docker-compose-v2"
+  exit 1
+fi
+
 # --- 1. Make sure the data disk is mounted ---------------------------------
 # If fstab (or cloud-init) already mounted it, nothing to do. Otherwise mount by
 # label. Either way we refuse to continue unless $DATA_MOUNT is a real mount
