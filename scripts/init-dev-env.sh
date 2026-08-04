@@ -146,6 +146,18 @@ if [ ! -f discovery/oauth2/client/client-credentials.json ]; then
   created+=("discovery/oauth2/client/client-credentials.json")
 fi
 
+# --- restore executable bits ------------------------------------------------
+# A ZIP download (GitHub's "Download ZIP", or any zip round-trip) does not carry
+# the executable bit, so every script arrives mode 644 and `./script.sh` fails
+# with "permission denied". Fix them here, since this script is the documented
+# entry point and can always be run as `bash scripts/init-dev-env.sh`.
+restored=0
+for s in scripts/*.sh deploy/*.sh collector/install.sh; do
+  [ -f "$s" ] || continue
+  if [ ! -x "$s" ]; then chmod +x "$s"; restored=$((restored + 1)); fi
+done
+[ "$restored" -gt 0 ] && created+=("restored +x on $restored script(s)")
+
 # --- make bind-mounted config readable inside the containers ----------------
 # Not every container runs as root: diode-auth is uid 100 (appuser) and NetBox
 # is uid 999. On Linux a bind mount keeps the host's ownership and mode, so a

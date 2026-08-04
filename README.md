@@ -28,6 +28,27 @@ without it compose runs the base file alone, which has no database. Re-running t
 script is safe: it creates only what is missing and keeps the shared passwords in
 `env/netbox.env`, `postgres.env`, `redis.env` and `redis-cache.env` consistent.
 
+### Deployed from a ZIP rather than a clone?
+
+A ZIP download drops the executable bit on every script, so `./scripts/dev-up.sh`
+fails with "permission denied". Start with the entry point invoked through bash —
+it restores the modes for everything else:
+
+```bash
+bash scripts/init-dev-env.sh
+```
+
+**Before running it on a host that already has a stack, keep your existing
+`.env` and `env/*.env`.** They are gitignored, so a ZIP does not contain them,
+and if they are missing the script generates *new* secrets — including a new
+database password, which will not match the existing PostgreSQL volume, and a
+new `SECRET_KEY`, which invalidates every session. Copy the old files back
+before starting anything. Extracting a ZIP over the existing directory keeps
+them; extracting into a fresh directory does not.
+
+A ZIP also has no `.git`, so there is no way to pull later updates — prefer
+`git clone` where your policies allow it.
+
 NetBox: http://127.0.0.1:8080 — local superuser `admin`, password in your generated `.env` (`SUPERUSER_PASSWORD`). No secrets are committed to this repo.
 
 ### Reaching dev from another machine
