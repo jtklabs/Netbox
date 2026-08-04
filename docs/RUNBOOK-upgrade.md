@@ -48,6 +48,18 @@ adds missing keys), so a running dev host keeps a stale `VERSION`. That is inert
 5. Rebuild the prod image with `./scripts/prod-build.sh` (it verifies every
    plugin loads) and bake it into the next AMI.
 
+## A `git pull` does not update prod's settings
+
+`prod.env`, `netbox.env` and `.env` live on the **data disk**
+(`/mnt/data_disk/netbox-secrets`), outside the repo on purpose — that is why
+they survive an AMI redeploy. Pulling updates `env/prod.env.example` and never
+touches the file in use, so any setting added to the template since that disk
+was prepared is silently absent and NetBox falls back to its own default.
+
+`bootstrap.sh` now diffs the two on every boot and logs the missing keys, so
+check `/var/log/netbox-bootstrap.log` (or `journalctl -u netbox-compose`) after
+the first boot on a new version and reconcile anything it lists.
+
 ## Rollback
 
 Pins are git history: revert the commit, rebuild, `compose up -d`. NetBox

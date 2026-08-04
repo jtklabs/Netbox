@@ -146,6 +146,31 @@ if ! grep -q '^BIND_ADDRESS=' "$SECRETS_DIR/.env" 2>/dev/null; then
   log "      on 127.0.0.1 only, which a remote Apache server cannot reach."
 fi
 
+# --- 2c. Warn when the live prod.env has drifted from the template -----------
+# prod.env lives on the data disk, deliberately outside the repo, so `git pull`
+# updates env/prod.env.example and never touches the file actually in use. Any
+# setting added to the template after this disk was prepared is therefore
+# silently absent, and NetBox quietly falls back to its own default. That is
+# exactly how a missing REMOTE_AUTH_AUTO_CREATE_GROUPS left every SSO user with
+# zero permissions and no error anywhere. Report the drift rather than assuming
+# whoever pulled also re-read the template.
+# `|| true` throughout: a grep that matches nothing returns 1, which under
+# `set -e` would abort the whole boot over a diagnostic.
+if [ -f "$REPO_DIR/env/prod.env.example" ]; then
+  tmpl_keys=$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$REPO_DIR/env/prod.env.example" 2>/dev/null | tr -d '=' | sort -u || true)
+  missing=""
+  for key in $tmpl_keys; do
+    grep -qE "^[[:space:]]*${key}=" "$SECRETS_DIR/prod.env" 2>/dev/null || missing="$missing $key"
+  done
+  if [ -n "$missing" ]; then
+    log "WARN: settings present in env/prod.env.example but MISSING from"
+    log "      $SECRETS_DIR/prod.env (a git pull cannot update that file):"
+    for key in $missing; do log "        $key"; done
+    log "      NetBox falls back to its own default for each. Review them —"
+    log "      REMOTE_AUTH_* defaults in particular fail silently rather than loudly."
+  fi
+fi
+
 # --- 3. Obtain images and start ---------------------------------------------
 cd "$REPO_DIR"
 if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2)" ]; then
