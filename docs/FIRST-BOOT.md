@@ -87,12 +87,25 @@ pepper in this file must NEVER change afterward.)
 
 ## 3. Fill in prod.env and .env
 
+**Two files, and the split is not cosmetic.** `.env` holds settings Docker
+Compose itself reads while parsing (which image, which overlays, which address
+to publish on). `prod.env` holds the environment handed *to the container*
+(database, S3, SSO). Compose does **not** read `env_file:` entries for `${...}`
+substitution, so a compose-level setting placed in `prod.env` is silently
+ignored — `BIND_ADDRESS` is the one that bites, because NetBox then stays on
+loopback and the Apache server cannot reach it.
+
 ```bash
 sudo cp env/prod.env.example /mnt/data_disk/netbox-secrets/prod.env
 sudo vi /mnt/data_disk/netbox-secrets/prod.env      # RDS endpoint/creds, S3 bucket, region
+
 sudo tee /mnt/data_disk/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
 VERSION=v4.6.5-5.0.2
+# The address NetBox publishes on. Apache is on another host, so this must NOT
+# be loopback — use this instance's PRIVATE address, and restrict port 8080 to
+# the Apache server with a security group.
+BIND_ADDRESS=10.0.0.0
 # PROD_IMAGE stays unset: the image is built during the AMI bake
 # (scripts/prod-build.sh), or by bootstrap at first boot as a fallback.
 EOF
@@ -117,8 +130,8 @@ metadata in place, and that server already injects the identity headers
 
 Apache proxies across the network to this instance, so two things must line up.
 
-**On this instance**, set `BIND_ADDRESS` in `/mnt/data_disk/netbox-secrets/prod.env` to
-its **private** address (loopback will not work — Apache is remote), then allow
+**On this instance**, set `BIND_ADDRESS` in `/mnt/data_disk/netbox-secrets/.env`
+(the `.env`, not `prod.env` — see step 3) to its **private** address, then allow
 port 8080 **only** from the Apache server in the security group. That hop is
 plain HTTP and NetBox trusts the identity headers Apache sets, so anything able
 to reach 8080 directly could impersonate any user; the security group is what

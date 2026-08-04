@@ -100,6 +100,22 @@ for p in "$REPO_DIR/configuration" "$REPO_DIR/discovery/oauth2" \
   chmod -R a+rX "$p" 2>/dev/null || true
 done
 
+# --- 2b. Catch settings placed in the wrong file ----------------------------
+# Compose substitutes ${...} from the project .env only; env_file entries are
+# passed to the container and are invisible to substitution. A compose-level
+# setting put in prod.env is therefore silently ignored, and for BIND_ADDRESS
+# that means NetBox quietly stays on loopback where Apache cannot reach it.
+for v in BIND_ADDRESS PROD_IMAGE PROD_PULL_POLICY COMPOSE_FILE VERSION; do
+  if grep -q "^${v}=" "$SECRETS_DIR/prod.env" 2>/dev/null; then
+    log "WARN: ${v} is set in prod.env, where compose cannot see it."
+    log "      Move it to $SECRETS_DIR/.env or it will have no effect."
+  fi
+done
+if ! grep -q '^BIND_ADDRESS=' "$SECRETS_DIR/.env" 2>/dev/null; then
+  log "WARN: BIND_ADDRESS is not set in $SECRETS_DIR/.env — NetBox will publish"
+  log "      on 127.0.0.1 only, which a remote Apache server cannot reach."
+fi
+
 # --- 3. Obtain images and start ---------------------------------------------
 cd "$REPO_DIR"
 if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2)" ]; then
