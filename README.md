@@ -115,8 +115,8 @@ Apache + Mellon run on a **separate, already-deployed server** which proxies to
 this instance over the private network; the NetBox host runs neither.
 
 One-time setup is [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md): prepare
-`/mnt/data_disk/netbox-secrets` on the data disk, set `BIND_ADDRESS` to the instance's
-private address, restrict port 8080 to the Apache server, and add
+`/mnt/data_disk/netbox-secrets` on the data disk, set `BIND_ADDRESS=0.0.0.0`,
+restrict port 8080 to the Apache server's security group, and add
 [apache/netbox.conf](apache/netbox.conf) to that server's vhost. Every redeploy
 after that is automatic via user-data/systemd —
 [docs/RUNBOOK-redeploy.md](docs/RUNBOOK-redeploy.md).

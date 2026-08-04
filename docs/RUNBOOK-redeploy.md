@@ -27,6 +27,21 @@ boot" — zero manual steps once first-boot setup exists.
    - `tail /var/log/netbox-bootstrap.log` for warnings
 7. **Terminate the old instance** after verification.
 
+## Keep the backend address stable
+
+The Apache server points at this instance via `NETBOX_BACKEND` in
+`apache/netbox.conf`. A new instance means a new private IP, so unless that
+address is stable you have to edit the Apache config after every redeploy —
+which is the one manual step this runbook exists to remove. Give it a stable
+address once:
+
+- attach a dedicated **ENI** with a fixed private IP and move it to the new
+  instance alongside the data disk (the same pattern, same step), or
+- point an **internal DNS record** at the new instance during step 4.
+
+`BIND_ADDRESS` itself stays `0.0.0.0` — it lives on the persistent data disk and
+must not name an IP that changes.
+
 ## Rollback
 
 Old instance still exists until step 7: detach disk, re-attach to old

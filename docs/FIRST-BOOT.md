@@ -120,9 +120,11 @@ sudo vi /mnt/data_disk/netbox-secrets/prod.env
 sudo tee /mnt/data_disk/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
 # The address NetBox publishes on. Apache is on another host, so this must NOT
-# be loopback — use this instance's PRIVATE address, and restrict port 8080 to
-# the Apache server with a security group. Replace the placeholder:
-BIND_ADDRESS=CHANGE_ME_PRIVATE_IP
+# be loopback. Use 0.0.0.0, NOT the instance's private IP: this file lives on
+# the data disk and is reused by every future instance, whose IP will differ —
+# a hardcoded IP fails the next redeploy with "cannot assign requested address".
+# The security group (8080 open only to the Apache server) is the real control.
+BIND_ADDRESS=0.0.0.0
 # (VERSION is deliberately absent: compose/prod.yml pins the image tag, so
 # VERSION here would have no effect. The tag lives in Dockerfile-Plugins.)
 # PROD_IMAGE stays unset: the image is built during the AMI bake

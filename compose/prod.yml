@@ -21,10 +21,11 @@ services:
     restart: unless-stopped
     ports:
       # Apache runs on a SEPARATE server, so this cannot be loopback. Set
-      # BIND_ADDRESS in the data-disk .env to the instance's private address, and
-      # restrict port 8080 to the Apache server with a security group — this
-      # hop is plain HTTP and NetBox trusts the identity headers Apache sets,
-      # so reaching it directly means being able to impersonate any user.
+      # BIND_ADDRESS=0.0.0.0 in the data-disk .env — not a private IP, which
+      # changes with every redeploy while that file persists. Restrict port
+      # 8080 to the Apache server with a security group: this hop is plain HTTP
+      # and NetBox trusts the identity headers Apache sets, so anything able to
+      # reach it directly could impersonate any user.
       - "${BIND_ADDRESS:-127.0.0.1}:8080:8080"
     env_file:
       - env/prod.env
