@@ -83,28 +83,43 @@ at `/data/netbox-secrets/` with fresh secrets matching the .env values.
 (Bootstrap links the redis env files into place for you on every boot — no
 manual `ln` needed.)
 
-## 4. SAML service provider material
+## 4. SAML — nothing to do here
+
+Mellon already runs on the existing Apache server with its SP keys and IdP
+metadata in place, and that server already injects the identity headers
+(`X-Remote-User`, `X-User-Email`, `X-UserFirstName`, `X-User-LastName`,
+`X-User-Groups`). This instance runs no Apache and no Mellon.
+
+## 5. Apache — on the OTHER server, not this one
+
+Apache proxies across the network to this instance, so two things must line up.
+
+**On this instance**, set `BIND_ADDRESS` in `/data/netbox-secrets/prod.env` to
+its **private** address (loopback will not work — Apache is remote), then allow
+port 8080 **only** from the Apache server in the security group. That hop is
+plain HTTP and NetBox trusts the identity headers Apache sets, so anything able
+to reach 8080 directly could impersonate any user; the security group is what
+prevents that.
+
+**On the Apache server**, copy `apache/netbox.conf` from this repo, set
+`NETBOX_BACKEND` at the top to this instance's private address, and include it
+in the existing `nova.jtklabs.dev` :443 vhost:
 
 ```bash
-cd /data/netbox-secrets/saml
-sudo mellon_create_metadata.sh https://nova.jtklabs.dev/mellon "https://nova.jtklabs.dev/mellon"
-sudo mv *.key mellon.key && sudo mv *.cert mellon.cert
-# Fetch/copy your IdP metadata:
-sudo cp /path/to/idp-metadata.xml idp-metadata.xml
-```
-
-Register the generated SP metadata with your IdP, releasing a username
-attribute (apache/netbox.conf assumes `uid` — edit `MELLON_uid` there if yours
-differs).
-
-## 5. Apache
-
-```bash
-sudo a2enmod proxy proxy_http headers auth_mellon
-sudo cp /opt/netbox/apache/netbox.conf /etc/apache2/conf-available/netbox.conf
-# Include it inside the existing nova.jtklabs.dev :443 vhost, then:
+sudo a2enmod proxy proxy_http headers      # mellon is already enabled
+sudo cp netbox.conf /etc/apache2/conf-available/netbox.conf
+# add "Include conf-available/netbox.conf" inside the vhost, then:
 sudo apachectl configtest && sudo systemctl reload apache2
 ```
+
+Check it end to end from the Apache server before going further:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://<netbox-private-ip>:8080/netbox/login/
+```
+
+A 200 means the path and security group are right. Connection refused means
+`BIND_ADDRESS` is still loopback or the security group is closed.
 
 ## 6. Start and enable
 
