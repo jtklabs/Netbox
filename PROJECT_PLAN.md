@@ -193,7 +193,7 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Nova calls `https://nova.jtklabs.dev/netbox/api/` with a token
 
 ### Gate 5 — 30-day redeploy automation (artifacts built 2026-07-29; drill awaiting EC2)
-**Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/data/netbox-secrets`, image pull-or-build, health gate on the published address), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
+**Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/mnt/data_disk/netbox-secrets`, image pull-or-build, health gate on the published address), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
 **Exit criteria:**
 - [x] Bootstrap + user-data + systemd unit written and syntax-checked; secrets persistence design (SECRET_KEY/pepper/diode credentials on the data disk) documented
 - [x] Runbooks: redeploy drill, monthly pin-bump (incl. plugin-compat gate + NetBox 4.7 PG15 warning), restore

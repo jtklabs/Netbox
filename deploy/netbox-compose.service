@@ -11,6 +11,9 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=true
 WorkingDirectory=/opt/netbox
+# Optional: DATA_MOUNT / DATA_LABEL / REPO_DIR overrides. The leading dash makes
+# a missing file non-fatal. bootstrap.sh sources it too, so either works.
+EnvironmentFile=-/etc/netbox-deploy.conf
 ExecStart=/opt/netbox/deploy/bootstrap.sh
 ExecStop=/usr/bin/docker compose down
 TimeoutStartSec=900

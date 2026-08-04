@@ -15,32 +15,55 @@ are only two locations, and the split is the whole point of the design:
 | Path | What it is | Survives a redeploy? |
 |---|---|---|
 | `/opt/netbox` | This git repo: compose files, plugins, scripts. Ships with the AMI. | **No** — replaced with each new AMI, and that is fine, it is just code. |
-| `/data/netbox-secrets/` | The files you write by hand: env files and Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
+| `/mnt/data_disk/netbox-secrets/` | The files you write by hand: env files and Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
 
-`/data` is the mount point for the data disk, so `mkdir` there only works after
+The data-disk mount point is `/mnt/data_disk` throughout. If it ever moves, set
+it once rather than editing paths everywhere:
+
+```bash
+echo 'DATA_MOUNT=/mnt/data_disk' | sudo tee /etc/netbox-deploy.conf
+```
+
+`deploy/bootstrap.sh` and the systemd unit both read that file. Bake it into the
+AMI or write it from user-data — `/etc` is replaced along with the AMI, so an
+edit made by hand on a running instance will not survive a redeploy.
+
+`/mnt/data_disk` is the mount point for the data disk, so `mkdir` there only works after
 the disk is mounted (step 1). `/opt/netbox` is wherever the AMI checked the
 repo out — if yours is elsewhere, set `REPO_DIR` when running bootstrap.
 
-**The containers do not read from `/data` directly.** On every boot
+**The containers do not read from the data disk directly.** On every boot
 `deploy/bootstrap.sh` connects the two: it symlinks the env files from the data
 disk into `/opt/netbox/env/`, and copies `client-credentials.json` into
 `/opt/netbox/discovery/oauth2/client/`. Docker Compose then reads everything
 from the repo paths as normal. (That one file is copied rather than symlinked
 because its directory is bind-mounted into a container, and a symlink inside a
-bind mount resolves against the *container's* filesystem, where `/data` does
+bind mount resolves against the *container's* filesystem, where that path does
 not exist.)
 
 So the rule of thumb: **you only ever hand-edit files under
-`/data/netbox-secrets/`.** Never edit the copies under `/opt/netbox` — a
+`/mnt/data_disk/netbox-secrets/`.** Never edit the copies under `/opt/netbox` — a
 redeploy throws them away.
 
 ## 1. Prepare the data disk (label is what bootstrap mounts by)
 
+If the disk is already mounted at `/mnt/data_disk` (fstab or cloud-init), skip
+straight to creating the directory — bootstrap detects an existing mount and
+leaves it alone.
+
 ```bash
-sudo mkfs.ext4 -L NETBOXDATA /dev/nvme1n1   # adjust device; SKIP if disk already has data
-sudo mkdir -p /data && sudo mount LABEL=NETBOXDATA /data
-sudo mkdir -p /data/netbox-secrets
+# Only if the disk is brand new and not already mounted:
+sudo mkfs.ext4 -L NETBOXDATA /dev/nvme1n1   # adjust device; SKIP if it already has data
+sudo mkdir -p /mnt/data_disk && sudo mount LABEL=NETBOXDATA /mnt/data_disk
+
+# Always:
+sudo mkdir -p /mnt/data_disk/netbox-secrets
+mountpoint /mnt/data_disk    # must say "is a mountpoint" before continuing
 ```
+
+That last check matters: if the disk is not mounted, everything below would be
+written to the root filesystem and silently disappear at the next redeploy.
+Bootstrap refuses to start in that situation for the same reason.
 
 ## 2. Generate the persistent app secrets
 
@@ -53,9 +76,9 @@ sed -e "s/{{SECRET_KEY}}/$(gen 60)/" \
     -e "s/{{DB_PASSWORD}}/$DBPW/" \
     -e "s/{{REDIS_PASSWORD}}/$RPW/" \
     -e "s/{{REDIS_CACHE_PASSWORD}}/$RCPW/" \
-    env/netbox.env.example | sudo tee /data/netbox-secrets/netbox.env >/dev/null
-sed "s/{{REDIS_PASSWORD}}/$RPW/"  env/redis.env.example       | sudo tee /data/netbox-secrets/redis.env >/dev/null
-sed "s/{{REDIS_CACHE_PASSWORD}}/$RCPW/" env/redis-cache.env.example | sudo tee /data/netbox-secrets/redis-cache.env >/dev/null
+    env/netbox.env.example | sudo tee /mnt/data_disk/netbox-secrets/netbox.env >/dev/null
+sed "s/{{REDIS_PASSWORD}}/$RPW/"  env/redis.env.example       | sudo tee /mnt/data_disk/netbox-secrets/redis.env >/dev/null
+sed "s/{{REDIS_CACHE_PASSWORD}}/$RCPW/" env/redis-cache.env.example | sudo tee /mnt/data_disk/netbox-secrets/redis-cache.env >/dev/null
 ```
 
 (The generated `DB_PASSWORD` in netbox.env is a placeholder — prod.env
@@ -65,9 +88,9 @@ pepper in this file must NEVER change afterward.)
 ## 3. Fill in prod.env and .env
 
 ```bash
-sudo cp env/prod.env.example /data/netbox-secrets/prod.env
-sudo vi /data/netbox-secrets/prod.env      # RDS endpoint/creds, S3 bucket, region
-sudo tee /data/netbox-secrets/.env >/dev/null <<'EOF'
+sudo cp env/prod.env.example /mnt/data_disk/netbox-secrets/prod.env
+sudo vi /mnt/data_disk/netbox-secrets/prod.env      # RDS endpoint/creds, S3 bucket, region
+sudo tee /mnt/data_disk/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
 VERSION=v4.6.5-5.0.2
 # PROD_IMAGE stays unset: the image is built during the AMI bake
@@ -78,7 +101,7 @@ EOF
 Running discovery on this host too? Append the diode block + DISCOVERY_* creds
 to that `.env` (copy the block shape from your dev `.env`), append
 `:compose/discovery.yml` to COMPOSE_FILE, and place `client-credentials.json`
-at `/data/netbox-secrets/` with fresh secrets matching the .env values.
+at `/mnt/data_disk/netbox-secrets/` with fresh secrets matching the .env values.
 
 (Bootstrap links the redis env files into place for you on every boot — no
 manual `ln` needed.)
@@ -94,7 +117,7 @@ metadata in place, and that server already injects the identity headers
 
 Apache proxies across the network to this instance, so two things must line up.
 
-**On this instance**, set `BIND_ADDRESS` in `/data/netbox-secrets/prod.env` to
+**On this instance**, set `BIND_ADDRESS` in `/mnt/data_disk/netbox-secrets/prod.env` to
 its **private** address (loopback will not work — Apache is remote), then allow
 port 8080 **only** from the Apache server in the security group. That hop is
 plain HTTP and NetBox trusts the identity headers Apache sets, so anything able

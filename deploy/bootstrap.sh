@@ -9,16 +9,30 @@
 #   - secrets prepared ONCE on the data disk (see FIRST-BOOT below)
 set -euo pipefail
 
+# Optional overrides without editing this file. Bake it into the AMI or write it
+# from user-data — the repo and /etc are both replaced on every redeploy, so
+# anything set here must come from one of those two, not be edited in place.
+#   DATA_MOUNT=/mnt/data_disk
+#   DATA_LABEL=NETBOXDATA
+#   REPO_DIR=/opt/netbox
+[ -f /etc/netbox-deploy.conf ] && . /etc/netbox-deploy.conf
+
 REPO_DIR=${REPO_DIR:-/opt/netbox}
 DATA_LABEL=${DATA_LABEL:-NETBOXDATA}
-DATA_MOUNT=${DATA_MOUNT:-/data}
+DATA_MOUNT=${DATA_MOUNT:-/mnt/data_disk}
 SECRETS_DIR=${SECRETS_DIR:-$DATA_MOUNT/netbox-secrets}
 
 log() { echo "[netbox-bootstrap] $(date -Is) $*"; }
 
-# --- 1. Mount the data disk by filesystem label ----------------------------
-if ! mountpoint -q "$DATA_MOUNT"; then
-  log "waiting for data disk labeled $DATA_LABEL"
+# --- 1. Make sure the data disk is mounted ---------------------------------
+# If fstab (or cloud-init) already mounted it, nothing to do. Otherwise mount by
+# label. Either way we refuse to continue unless $DATA_MOUNT is a real mount
+# point — writing secrets to the root filesystem because the disk failed to
+# attach would silently lose them at the next redeploy.
+if mountpoint -q "$DATA_MOUNT"; then
+  log "data disk already mounted at $DATA_MOUNT"
+else
+  log "$DATA_MOUNT is not mounted; looking for a filesystem labeled $DATA_LABEL"
   for _ in $(seq 1 30); do
     DEV=$(blkid -L "$DATA_LABEL" 2>/dev/null || true)
     [ -n "$DEV" ] && break
@@ -26,7 +40,9 @@ if ! mountpoint -q "$DATA_MOUNT"; then
   done
   DEV=$(blkid -L "$DATA_LABEL" 2>/dev/null || true)
   if [ -z "$DEV" ]; then
-    log "FATAL: no filesystem labeled $DATA_LABEL found — is the data disk attached?"
+    log "FATAL: $DATA_MOUNT is not a mount point and no filesystem labeled"
+    log "       $DATA_LABEL was found. Is the data disk attached? If it mounts"
+    log "       somewhere else, set DATA_MOUNT in /etc/netbox-deploy.conf."
     exit 1
   fi
   mkdir -p "$DATA_MOUNT"
@@ -60,7 +76,7 @@ done
 
 # client-credentials.json is different: its DIRECTORY is bind-mounted into the
 # diode containers, and a symlink inside a bind mount is resolved against the
-# CONTAINER's filesystem, where /data does not exist — the container just sees
+# CONTAINER's filesystem, where the data disk path does not exist — it just sees
 # a dangling link and reports "no such file". So copy it, every boot, so edits
 # on the data disk still propagate.
 if [ -f "$SECRETS_DIR/client-credentials.json" ]; then
