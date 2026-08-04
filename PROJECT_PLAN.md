@@ -1,4 +1,4 @@
-# NetBox @ nova.jtklabs.dev/netbox — Project Plan
+# NetBox deployment — Project Plan
 
 Status: Gates **1, 2, 2.5, 3 complete** (dev stack, plugins, quotes plugin, discovery — all verified against real hardware) · Gates **4 & 5 built and rehearsed in dev** · All §8 inputs answered; the only thing outstanding is EC2/AMI access to run the live deploy, which is Jason-executed via docs/FIRST-BOOT.md · Last updated: 2026-08-04
 
@@ -10,8 +10,8 @@ A single-repo, env-driven NetBox deployment: dev first (local containers, local 
 
 - NetBox deployed on Ubuntu 24 EC2; **AMI is rebuilt/redeployed every 30 days** (compliance), so the app node must be disposable and rebuild itself unattended.
 - Prod database on existing **Postgres RDS**; **S3** available; a **data disk** is detached/reattached across redeploys.
-- **SSO in prod via an EXISTING Apache + mod_auth_mellon server** (a separate host that already serves nova.jtklabs.dev and injects the identity headers). The NetBox instance runs neither Apache nor Mellon. Dev uses local accounts.
-- Served at **https://nova.jtklabs.dev/netbox** (subpath) behind the existing Apache that fronts the Nova app. Nova consumes NetBox data via API; nothing needed on our side beyond a stable API endpoint.
+- **SSO in prod via an EXISTING Apache + mod_auth_mellon server** (a separate host that already serves netbox.example.com and injects the identity headers). The NetBox instance runs neither Apache nor Mellon. Dev uses local accounts.
+- Served at **https://netbox.example.com/netbox** (subpath) behind the existing Apache that fronts the Nova app. Nova consumes NetBox data via API; nothing needed on our side beyond a stable API endpoint.
 - **Device discovery** for the existing network — open-source path required.
 - Plugins: originally a **contracts manager** and **lifecycle** plugin. Both third-party choices were later replaced by plugins we own — see D9 and D10.
 - One repo; dev vs prod differ only by env/compose selection.
@@ -79,7 +79,7 @@ One repo holds: a pinned import of netbox-docker's support files, our plugin Doc
 
 ```mermaid
 flowchart LR
-    U[User] -->|HTTPS| A[EXISTING Apache server\nnova.jtklabs.dev\nTLS + mod_auth_mellon SAML]
+    U[User] -->|HTTPS| A[EXISTING Apache server\nnetbox.example.com\nTLS + mod_auth_mellon SAML]
     A -->|private network\n/netbox/* + identity headers\nBIND_ADDRESS:8080| N[netbox container\nBASE_PATH=netbox/]
     A -->|/netbox/static/* → /static/*| N
     N --> W[netbox-worker]
@@ -90,7 +90,7 @@ flowchart LR
     DD[/data disk:\nenv + SECRET_KEY,\ndiode credentials/] -.-> N
 ```
 
-Nova reads NetBox via the REST/GraphQL API at `https://nova.jtklabs.dev/netbox/api/` with a service token.
+Nova reads NetBox via the REST/GraphQL API at `https://netbox.example.com/netbox/api/` with a service token.
 
 ## 5. Repo layout (target)
 
@@ -190,7 +190,7 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Prod-like instance: real SAML round-trip *(needs: IdP metadata + username attribute, EC2 target)*
 - [ ] Local-account break-glass login verified in prod
 - [ ] Media upload lands in S3; RDS over SSL confirmed *(needs: bucket + RDS answers)*
-- [ ] Nova calls `https://nova.jtklabs.dev/netbox/api/` with a token
+- [ ] Nova calls `https://netbox.example.com/netbox/api/` with a token
 
 ### Gate 5 — 30-day redeploy automation (artifacts built 2026-07-29; drill awaiting EC2)
 **Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/mnt/data_disk/netbox-secrets`, image pull-or-build, health gate on the published address), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
@@ -202,9 +202,9 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Restore fire-drill exercised once
 
 ### Gate 6 — Production cutover (effort: 1 session)
-**Scope:** real prod deploy, Apache config live on nova.jtklabs.dev, first discovery run against the production network, monitoring hook (healthcheck endpoint → whatever you use), docs pass.
+**Scope:** real prod deploy, Apache config live on netbox.example.com, first discovery run against the production network, monitoring hook (healthcheck endpoint → whatever you use), docs pass.
 **Exit criteria:**
-- [ ] Prod live at https://nova.jtklabs.dev/netbox behind SSO
+- [ ] Prod live at https://netbox.example.com/netbox behind SSO
 - [ ] Discovery populated real devices; data reviewed/applied
 - [ ] All runbooks final; VERSIONS.md accurate; handoff walkthrough done
 
@@ -253,7 +253,7 @@ These were verified 2026-07-28 against current repos/docs; they're the sharp edg
   ```
 - **S3 media**: NetBox 4.x uses the Django `STORAGES` dict (`default` key = media) with `storages.backends.s3.S3Storage`; **django-storages[boto3] is already in the image** — no custom pip install; on EC2 omit keys and boto3 uses the instance role. Configure in `extra.py`, env-gated (e.g. only if `S3_MEDIA_BUCKET` set → dev keeps local volume).
 - **External DB env**: `DB_HOST/PORT/NAME/USER/PASSWORD`, `DB_SSLMODE` (set `require` for RDS; `verify-full` additionally needs `sslrootcert` via `extra.py`), `DB_CONN_MAX_AGE`. Drop the `postgres` service in the prod overlay.
-- **CSRF/hosts**: `CSRF_TRUSTED_ORIGINS=https://nova.jtklabs.dev` (space-separated, scheme required), `ALLOWED_HOSTS`.
+- **CSRF/hosts**: `CSRF_TRUSTED_ORIGINS=https://netbox.example.com` (space-separated, scheme required), `ALLOWED_HOSTS`.
 - **Plugins pattern**: `Dockerfile-Plugins` → `FROM netboxcommunity/netbox:<exact-tag>`; `COPY plugin_requirements.txt`; `RUN /usr/local/bin/uv pip install -r …`; then `collectstatic --no-input` with a dummy SECRET_KEY; point `netbox` **and** `netbox-worker` services at the built image.
 - **Superuser bootstrap (dev)**: `SKIP_SUPERUSER=false` + `SUPERUSER_NAME/EMAIL/PASSWORD` (+ `SUPERUSER_API_TOKEN`); no default credentials in current images.
 - **NetBox 4.6+ note for the future bump**: v2 API tokens require `API_TOKEN_PEPPER_1` env/secret — without it token creation fails; netbox-docker 5.0.0+ images are the 4.6-era line (Granian server since 4.0.0; container user is `netbox`).

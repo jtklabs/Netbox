@@ -5,7 +5,7 @@
 
 from os import environ
 
-## Subpath serving (prod: https://nova.jtklabs.dev/netbox, and the dev rehearsal
+## Subpath serving (prod: https://netbox.example.com/netbox, and the dev rehearsal
 ## proxy). netbox-docker deliberately has no env var for this — set BASE_PATH in
 ## the environment (e.g. "netbox/") to activate. The reverse proxy must map
 ## <BASE_PATH>static/ -> /static/ and proxy app routes WITHOUT stripping the

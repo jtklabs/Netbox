@@ -1,6 +1,6 @@
-# NetBox @ jtklabs
+# NetBox deployment
 
-Env-driven NetBox deployment (dev local / prod on EC2 behind nova.jtklabs.dev/netbox).
+Env-driven NetBox deployment (dev local / prod on EC2 behind netbox.example.com/netbox).
 See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERSIONS.md) for pins.
 
 ## Dev quickstart

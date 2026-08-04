@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "netbox-quotes"
 version = "0.1.0"
 description = "Vendor support-renewal quotes with serial-matched device assignment for NetBox"
-authors = [{ name = "JTK Labs", email = "jason@jtklabs.dev" }]
+authors = [{ name = "Network Engineering" }]
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]

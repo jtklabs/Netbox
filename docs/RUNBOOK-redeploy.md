@@ -18,7 +18,7 @@ boot" — zero manual steps once first-boot setup exists.
 5. Bootstrap runs automatically: mounts the disk by label `NETBOXDATA`, links
    secrets, pulls/builds images, `compose up`, gates on health.
 6. **Verify** (5 minutes):
-   - `curl -f https://nova.jtklabs.dev/netbox/login/` → 200
+   - `curl -f https://netbox.example.com/netbox/login/` → 200
    - SSO login round-trip works; your user has expected rights
    - A discovered device page renders (data intact = RDS wiring correct)
    - Open a quote document (media = S3 wiring correct)

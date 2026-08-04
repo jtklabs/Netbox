@@ -19,7 +19,7 @@ services:
       # scripts/init-dev-env.sh generates.
       SKIP_SUPERUSER: "false"
       SUPERUSER_NAME: admin
-      SUPERUSER_EMAIL: admin@jtklabs.dev
+      SUPERUSER_EMAIL: admin@example.com
       SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:?run scripts/init-dev-env.sh first}
       # Required once NetBox is reached by any name other than localhost —
       # without it Django rejects the login POST as a CSRF failure.

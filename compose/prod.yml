@@ -1,5 +1,5 @@
 # Production overlay (Ubuntu 24 EC2, behind the host Apache at
-# nova.jtklabs.dev/netbox). Chain: docker-compose.yml:compose/prod.yml
+# netbox.example.com/netbox). Chain: docker-compose.yml:compose/prod.yml
 # (+ compose/discovery.yml if the agent runs on this host).
 #
 # - DB is RDS: no postgres service here (it lives in compose/dev.yml only);

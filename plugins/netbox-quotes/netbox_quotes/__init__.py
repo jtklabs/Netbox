@@ -6,8 +6,8 @@ class QuotesConfig(PluginConfig):
     verbose_name = 'Support Quotes'
     description = 'Vendor support-renewal quotes with serial-matched device assignment'
     version = '0.1.0'
-    author = 'JTK Labs'
-    author_email = 'jason@jtklabs.dev'
+    author = 'Network Engineering'
+    author_email = 'noreply@example.com'
     base_url = 'quotes'
     min_version = '4.6.0'
 

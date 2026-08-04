@@ -139,7 +139,7 @@ prevents that.
 
 **On the Apache server**, copy `apache/netbox.conf` from this repo, set
 `NETBOX_BACKEND` at the top to this instance's private address, and include it
-in the existing `nova.jtklabs.dev` :443 vhost:
+in the existing `netbox.example.com` :443 vhost:
 
 ```bash
 sudo a2enmod proxy proxy_http headers      # mellon is already enabled
@@ -176,7 +176,7 @@ docker compose exec netbox /opt/netbox/venv/bin/python /opt/netbox/netbox/manage
 
 Then log in once via SSO (your account gets auto-created with no rights) and
 grant it from the break-glass admin at
-`https://nova.jtklabs.dev/netbox/admin/` — or set
+`https://netbox.example.com/netbox/admin/` — or set
 `REMOTE_AUTH_SUPERUSER_GROUPS` in prod.env once the IdP sends groups.
 
 ## 8. Verify (same list as RUNBOOK-redeploy.md step 6)
