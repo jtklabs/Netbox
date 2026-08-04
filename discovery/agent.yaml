@@ -1,7 +1,20 @@
-# orb-agent configuration. No secrets in this file — all ${VARS} are resolved
-# from the container environment (set in compose/discovery.yml from .env).
-# Policies have no schedule -> each runs ONCE per agent start; restart the
-# orb-agent container to re-scan.
+# orb-agent configuration for the LOCAL/central agent. Remote sites use
+# collector/policies.yaml instead — see collector/README.md.
+#
+# ==> THIS IS WHERE YOU SET WHAT GETS DISCOVERED. <==
+#
+# Two independent target lists, both of which need editing to cover a device
+# with both methods:
+#   * snmp_discovery   -> scope.targets[].host   (accepts a single IP, a CIDR
+#                         like 10.0.21.0/24, or a range like 10.0.21.1-50)
+#   * device_discovery -> scope[].hostname       (one entry per device; SSH)
+#
+# After editing:  docker compose restart orb-agent
+# Policies have no schedule, so each runs ONCE per agent start. Add a cron
+# expression under a policy's config (e.g. schedule: "17 * * * *") to repeat.
+#
+# No secrets in this file — all ${VARS} are resolved from the container
+# environment (set in compose/discovery.yml from .env).
 version: 1.0
 orb:
   config_manager:
@@ -22,8 +35,11 @@ orb:
           defaults:
             site: Lab
         scope:
+          # Add more entries, or widen to a subnet/range, as needed.
           targets:
             - host: "10.0.21.101"
+            # - host: "10.0.21.0/24"
+            # - host: "10.0.21.10-40"
           authentication:
             protocol_version: "SNMPv3"
             security_level: "authPriv"
@@ -39,7 +55,12 @@ orb:
             site: Lab
             role: switch
         scope:
+          # One entry per device. `driver` is optional — omit it and NAPALM
+          # tries the standard drivers (ios, nxos, eos, junos, ...).
           - hostname: 10.0.21.101
             username: ${DEVICE_USER}
             password: ${DEVICE_PASS}
             driver: ios
+          # - hostname: 10.0.21.102
+          #   username: ${DEVICE_USER}
+          #   password: ${DEVICE_PASS}

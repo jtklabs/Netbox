@@ -61,6 +61,16 @@ if [ -f "$SECRETS_DIR/client-credentials.json" ]; then
 fi
 log "secrets linked from $SECRETS_DIR"
 
+# Bind-mounted config must be readable by non-root container users (diode-auth
+# is uid 100, NetBox uid 999). Secrets created by the operator under a strict
+# umask would otherwise fail with "permission denied" inside the container.
+for p in "$REPO_DIR/configuration" "$REPO_DIR/discovery/oauth2" \
+         "$REPO_DIR/discovery/nginx" "$REPO_DIR/discovery/agent.yaml" \
+         "$SECRETS_DIR/client-credentials.json"; do
+  [ -e "$p" ] || continue
+  chmod -R a+rX "$p" 2>/dev/null || true
+done
+
 # --- 3. Obtain images and start ---------------------------------------------
 cd "$REPO_DIR"
 if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2)" ]; then

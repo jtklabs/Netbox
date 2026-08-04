@@ -33,7 +33,32 @@ docker compose restart orb-agent
 
 Add a cron-style `schedule:` under a policy's `config:` for recurring scans.
 
+## Where do I set the IPs to discover?
+
+`discovery/agent.yaml`, in two independent places — edit both if you want a
+device covered by both methods:
+
+- `snmp_discovery` → `scope.targets[].host` — a single IP, a CIDR
+  (`10.0.21.0/24`) or a range (`10.0.21.1-50`)
+- `device_discovery` → `scope[].hostname` — one entry per device (SSH/NAPALM)
+
+Then `docker compose restart orb-agent`. Policies without a `schedule` run once
+per agent start, so a restart *is* the rescan. Add a cron expression under a
+policy's `config` to make it recurring.
+
+Remote sites use `collector/policies.yaml` instead — see
+[collector/README.md](../collector/README.md).
+
 ## Gotchas learned
+
+- **`diode-auth` restart-looping with "permission denied", and `orb-agent`
+  restarting with it.** On Linux, bind mounts keep the host's file mode, and
+  `diode-auth` runs as uid 100 rather than root — so config written under a
+  restrictive umask (0077) is unreadable inside the container. `orb-agent` then
+  restart-loops as a *symptom*, because it cannot authenticate while auth is
+  down. `scripts/init-dev-env.sh` now fixes the modes; re-run it, then
+  `docker compose up -d --force-recreate diode-auth-bootstrap diode-auth orb-agent`.
+  macOS masks this entirely, so it only ever appears on Linux hosts.
 
 - **Boot race**: the agent scans immediately on `up`. If NetBox is still
   migrating, the reconciler's applies fail (`connection refused`) and are NOT

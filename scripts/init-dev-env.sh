@@ -146,6 +146,35 @@ if [ ! -f discovery/oauth2/client/client-credentials.json ]; then
   created+=("discovery/oauth2/client/client-credentials.json")
 fi
 
+# --- make bind-mounted config readable inside the containers ----------------
+# Not every container runs as root: diode-auth is uid 100 (appuser) and NetBox
+# is uid 999. On Linux a bind mount keeps the host's ownership and mode, so a
+# config file created under a restrictive umask (0077) is unreadable to those
+# uids and the container dies with "permission denied" — which then restart-
+# loops anything depending on it. macOS masks this, so it only bites on Linux.
+#
+# These files are configuration, not secrets, with one exception noted below.
+normalise_perms() {
+  local path=$1
+  [ -e "$path" ] || return 0
+  if [ -d "$path" ]; then
+    chmod a+rX "$path" 2>/dev/null || true
+    find "$path" -type d -exec chmod a+rX {} + 2>/dev/null || true
+    find "$path" -type f -exec chmod a+r {} + 2>/dev/null || true
+  else
+    chmod a+r "$path" 2>/dev/null || true
+  fi
+}
+
+for p in configuration discovery/oauth2 discovery/nginx discovery/agent.yaml; do
+  normalise_perms "$p"
+done
+# discovery/oauth2/client/client-credentials.json holds OAuth client secrets and
+# is made readable to all local users so uid 100 can read it. That is the same
+# posture as upstream Diode's quickstart. It is a dev-box trade-off; on a shared
+# host, restrict who can log in rather than tightening this file, or the auth
+# bootstrap will fail again.
+
 # --- verify: every file compose needs must now exist ------------------------
 missing=()
 for f in .env env/netbox.env env/postgres.env env/redis.env env/redis-cache.env; do
