@@ -3,11 +3,23 @@
 # (the directory of the base docker-compose.yml).
 services:
   netbox:
-    image: netbox-custom:v4.6.5-5.0.2
+    image: netbox-custom:v4.6.7-5.0.2
     build:
       context: .
       dockerfile: Dockerfile-Plugins
     pull_policy: never
+    healthcheck:
+      # Upstream allows 90s + 3 default retries (~135s). A cold start runs
+      # `manage.py showmigrations` and then any pending migrations, which on a
+      # laptop or a Docker Desktop VM routinely takes longer than that — and it
+      # is slow regardless of NetBox version, so a version bump is exactly when
+      # you hit it. The container then gets marked unhealthy, netbox-worker's
+      # `depends_on: service_healthy` fails, and `docker compose up -d` exits
+      # non-zero reporting "dependency failed to start" on a stack that is
+      # progressing perfectly normally. compose/prod.yml already guards this;
+      # dev needs it just as much.
+      start_period: 900s
+      retries: 40
     depends_on:
       - postgres
     ports:
@@ -25,7 +37,7 @@ services:
       # without it Django rejects the login POST as a CSRF failure.
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
   netbox-worker:
-    image: netbox-custom:v4.6.5-5.0.2
+    image: netbox-custom:v4.6.7-5.0.2
     pull_policy: never
 
   # Local database is dev-only; prod points DB_* at RDS (compose/prod.yml).

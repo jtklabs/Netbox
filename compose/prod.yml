@@ -13,7 +13,7 @@
 #   scripts/prod-build.sh; bootstrap builds locally as a fallback.
 services:
   netbox:
-    image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}
+    image: ${PROD_IMAGE:-netbox-custom:v4.6.7-5.0.2}
     build:
       context: .
       dockerfile: Dockerfile-Plugins
@@ -42,7 +42,7 @@ services:
       retries: 40
 
   netbox-worker:
-    image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}
+    image: ${PROD_IMAGE:-netbox-custom:v4.6.7-5.0.2}
     pull_policy: ${PROD_PULL_POLICY:-never}
     restart: unless-stopped
     env_file:

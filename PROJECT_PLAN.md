@@ -59,8 +59,8 @@ One repo holds: a pinned import of netbox-docker's support files, our plugin Doc
 
 | Component | Pin | Notes |
 |---|---|---|
-| NetBox | **v4.6.5** (→ 4.6.6 when its image publishes) | Spike-verified with both plugins 2026-07-28. |
-| netbox-docker | image `v4.6.5-5.0.2`, support files tag `5.0.2` | Imported into repo; see VERSIONS.md. |
+| NetBox | **v4.6.7** | Bumped from 4.6.5 on 2026-08-04; in-place upgrade verified in dev. |
+| netbox-docker | image `v4.6.7-5.0.2`, support files tag `5.0.2` | Imported into repo; see VERSIONS.md. |
 | netbox-quotes | **0.1.0** (ours, `plugins/netbox-quotes`, plugin `netbox_quotes`) | Custom quotes/serial-matching plugin (D9). Installed into the image from the repo. |
 | netbox-lifecycle | **1.1.9** (PyPI `netbox-lifecycle`, plugin `netbox_lifecycle`) | Spike-verified on 4.6.5. Maintainer is a NetBox core dev. |
 | ~~netbox-contract~~ | dropped 2026-07-29 | Superseded by netbox-quotes (D9); was our only version-lagging dependency. |
