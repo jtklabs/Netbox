@@ -4,8 +4,35 @@ Everything here happens exactly once. After this, every 30-day redeploy is
 automatic (RUNBOOK-redeploy.md). No secrets ever leave this box or enter git.
 
 Prereqs: Ubuntu 24 instance with docker + compose, this repo at `/opt/netbox`,
-the data disk attached, an instance profile granting the S3 media bucket
-(+ ECR pull if used), and the existing Apache with mod_auth_mellon.
+the data disk attached, an instance profile granting the S3 media bucket, and
+the existing Apache with mod_auth_mellon.
+
+## How the layout works (read this first)
+
+**None of these paths exist yet — you create them in the steps below.** There
+are only two locations, and the split is the whole point of the design:
+
+| Path | What it is | Survives a redeploy? |
+|---|---|---|
+| `/opt/netbox` | This git repo: compose files, plugins, scripts. Ships with the AMI. | **No** — replaced with each new AMI, and that is fine, it is just code. |
+| `/data/netbox-secrets/` | The files you write by hand: env files, SAML keys, Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
+
+`/data` is the mount point for the data disk, so `mkdir` there only works after
+the disk is mounted (step 1). `/opt/netbox` is wherever the AMI checked the
+repo out — if yours is elsewhere, set `REPO_DIR` when running bootstrap.
+
+**The containers do not read from `/data` directly.** On every boot
+`deploy/bootstrap.sh` connects the two: it symlinks the env files from the data
+disk into `/opt/netbox/env/`, and copies `client-credentials.json` into
+`/opt/netbox/discovery/oauth2/client/`. Docker Compose then reads everything
+from the repo paths as normal. (That one file is copied rather than symlinked
+because its directory is bind-mounted into a container, and a symlink inside a
+bind mount resolves against the *container's* filesystem, where `/data` does
+not exist.)
+
+So the rule of thumb: **you only ever hand-edit files under
+`/data/netbox-secrets/`.** Never edit the copies under `/opt/netbox` — a
+redeploy throws them away.
 
 ## 1. Prepare the data disk (label is what bootstrap mounts by)
 
@@ -53,12 +80,8 @@ to that `.env` (copy the block shape from your dev `.env`), append
 `:compose/discovery.yml` to COMPOSE_FILE, and place `client-credentials.json`
 at `/data/netbox-secrets/` with fresh secrets matching the .env values.
 
-Bootstrap expects redis env files at the repo paths; link them:
-
-```bash
-sudo ln -sf /data/netbox-secrets/redis.env /opt/netbox/env/redis.env
-sudo ln -sf /data/netbox-secrets/redis-cache.env /opt/netbox/env/redis-cache.env
-```
+(Bootstrap links the redis env files into place for you on every boot — no
+manual `ln` needed.)
 
 ## 4. SAML service provider material
 

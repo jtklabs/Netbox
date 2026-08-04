@@ -52,12 +52,27 @@ for f in "${required[@]}"; do
     exit 1
   fi
 done
+# Env files are parsed by the compose CLI on the HOST, so a symlink is fine.
 ln -sf "$SECRETS_DIR/.env" "$REPO_DIR/.env"
 ln -sf "$SECRETS_DIR/netbox.env" "$REPO_DIR/env/netbox.env"
 ln -sf "$SECRETS_DIR/prod.env" "$REPO_DIR/env/prod.env"
+for f in redis.env redis-cache.env; do
+  [ -f "$SECRETS_DIR/$f" ] && ln -sf "$SECRETS_DIR/$f" "$REPO_DIR/env/$f"
+done
+
+# client-credentials.json is different: its DIRECTORY is bind-mounted into the
+# diode containers, and a symlink inside a bind mount is resolved against the
+# CONTAINER's filesystem, where /data does not exist — the container just sees
+# a dangling link and reports "no such file". So copy it, every boot, so edits
+# on the data disk still propagate.
 if [ -f "$SECRETS_DIR/client-credentials.json" ]; then
-  ln -sf "$SECRETS_DIR/client-credentials.json" \
-    "$REPO_DIR/discovery/oauth2/client/client-credentials.json"
+  mkdir -p "$REPO_DIR/discovery/oauth2/client"
+  dest="$REPO_DIR/discovery/oauth2/client/client-credentials.json"
+  # Remove first: if an earlier version of this script left a symlink here,
+  # `cp` sees source and destination as the same file and silently does
+  # nothing, leaving the broken link in place.
+  rm -f "$dest"
+  cp "$SECRETS_DIR/client-credentials.json" "$dest"
 fi
 log "secrets linked from $SECRETS_DIR"
 
