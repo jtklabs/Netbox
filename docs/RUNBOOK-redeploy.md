@@ -20,6 +20,9 @@ boot" — zero manual steps once first-boot setup exists.
 6. **Verify** (5 minutes):
    - through Apache: `curl -sS -o /dev/null -w '%{http_code}\n' https://netbox.example.com/netbox/login/` → **302** to the IdP (behind Mellon an unauthenticated 200 would mean the path is unprotected)
    - on the instance: `curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: localhost' http://<private-ip>:8080/netbox/login/` → 200
+     (the very first request after a boot can take longer than a short
+     `--max-time` while a cold worker warms up — retry once before treating
+     a timeout as a failure; a *refused* connection is a real failure)
    - SSO login round-trip works; your user has expected rights
    - A discovered device page renders (data intact = RDS wiring correct)
    - Open a quote document (media = S3 wiring correct)

@@ -152,7 +152,16 @@ if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2
   log "pulling pinned images"
   docker compose pull --quiet || log "WARN: pull failed, will try cached/local images"
 else
-  img=$(docker compose config --images 2>/dev/null | head -1 || true)
+  # Ask for the netbox service's image specifically. `config --images` emits every
+  # service's image in an order compose does not guarantee — taking the first one
+  # inspects valkey about half the time, and finding valkey present would skip the
+  # build even when the NetBox image is missing. `config --images netbox` does not
+  # filter by service on compose 2.40 either, so read it out of the merged config.
+  img=$(docker compose config 2>/dev/null | awk '
+    /^  netbox:$/ {in_svc=1; next}
+    in_svc && /^  [^ ]/ {in_svc=0}
+    in_svc && $1 == "image:" {print $2; exit}
+  ' || true)
   if [ -n "$img" ] && docker image inspect "$img" >/dev/null 2>&1; then
     log "image $img already present (baked into the AMI) — not rebuilding"
   else
