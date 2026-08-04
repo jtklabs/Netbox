@@ -155,6 +155,14 @@ sudo sh -c 'grep -vn "^[[:space:]]*#" /mnt/data_disk/netbox-secrets/prod.env /mn
 them from `netbox.env` if they are missing, so their passwords always match —
 no manual `ln` and no chance of a mismatch.)
 
+### Run compose as root in prod
+
+The data-disk secrets are mode 600 and owned by root, and `/opt/netbox/env/*`
+are symlinks to them. `docker compose` as your own user therefore fails to read
+them — and depending on the subcommand it can fail quietly, leaving you looking
+at a container that did not pick up your change. Use `sudo docker compose ...`,
+or go through `sudo systemctl restart netbox-compose`.
+
 ### If you see "env file env/redis.env not found"
 
 Compose is being run before `deploy/bootstrap.sh` has linked the data-disk
