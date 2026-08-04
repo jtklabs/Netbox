@@ -146,7 +146,8 @@ Lock the secrets down — everything above was written with the default umask:
 sudo chmod 600 /mnt/data_disk/netbox-secrets/.env \
                /mnt/data_disk/netbox-secrets/netbox.env \
                /mnt/data_disk/netbox-secrets/prod.env
-sudo sh -c 'grep -n "example.com\|CHANGE_ME" /mnt/data_disk/netbox-secrets/prod.env /mnt/data_disk/netbox-secrets/.env' \
+# Settings only — comments are skipped, so this should print nothing:
+sudo sh -c 'grep -vn "^[[:space:]]*#" /mnt/data_disk/netbox-secrets/prod.env /mnt/data_disk/netbox-secrets/.env | grep "example.com\|CHANGE_ME"' \
   && echo "^^ placeholders still present — fix these before continuing"
 ```
 
