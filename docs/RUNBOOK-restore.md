@@ -15,11 +15,14 @@ recoverable from the version history. Nothing app-side to do.
 
 ## Secrets / data disk
 
-The data disk holds the only copies of `SECRET_KEY`, `API_TOKEN_PEPPER_1`,
-SAML SP key, and diode client secrets. Snapshot the EBS volume on a schedule
-(the 30-day cycle is a natural hook). Losing `SECRET_KEY` = all sessions
-invalidated; losing the pepper = existing API tokens stop validating; losing
-the SAML SP key = re-register the SP with the IdP.
+The data disk holds the only copies of `SECRET_KEY`, `API_TOKEN_PEPPER_1` and
+the diode client secrets. (The SAML SP key lives on the Apache server, not
+here.) Snapshot the EBS volume on a schedule — the 30-day cycle is a natural
+hook.
+
+Losing `SECRET_KEY` invalidates all sessions; losing the pepper stops existing
+API tokens validating; losing the diode client secrets means re-minting them
+and re-issuing every collector credential.
 
 ## Fire-drill into dev (proves backups are real)
 

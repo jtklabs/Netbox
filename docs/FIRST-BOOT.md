@@ -15,7 +15,7 @@ are only two locations, and the split is the whole point of the design:
 | Path | What it is | Survives a redeploy? |
 |---|---|---|
 | `/opt/netbox` | This git repo: compose files, plugins, scripts. Ships with the AMI. | **No** — replaced with each new AMI, and that is fine, it is just code. |
-| `/data/netbox-secrets/` | The files you write by hand: env files, SAML keys, Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
+| `/data/netbox-secrets/` | The files you write by hand: env files and Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
 
 `/data` is the mount point for the data disk, so `mkdir` there only works after
 the disk is mounted (step 1). `/opt/netbox` is wherever the AMI checked the
@@ -39,7 +39,7 @@ redeploy throws them away.
 ```bash
 sudo mkfs.ext4 -L NETBOXDATA /dev/nvme1n1   # adjust device; SKIP if disk already has data
 sudo mkdir -p /data && sudo mount LABEL=NETBOXDATA /data
-sudo mkdir -p /data/netbox-secrets/saml
+sudo mkdir -p /data/netbox-secrets
 ```
 
 ## 2. Generate the persistent app secrets
@@ -70,8 +70,8 @@ sudo vi /data/netbox-secrets/prod.env      # RDS endpoint/creds, S3 bucket, regi
 sudo tee /data/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
 VERSION=v4.6.5-5.0.2
-# With ECR: set PROD_IMAGE to the pushed URI and PROD_PULL_POLICY=missing
-# PROD_IMAGE=123456789.dkr.ecr.us-east-1.amazonaws.com/netbox-custom:v4.6.5-5.0.2
+# PROD_IMAGE stays unset: the image is built during the AMI bake
+# (scripts/prod-build.sh), or by bootstrap at first boot as a fallback.
 EOF
 ```
 

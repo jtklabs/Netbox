@@ -13,7 +13,6 @@ REPO_DIR=${REPO_DIR:-/opt/netbox}
 DATA_LABEL=${DATA_LABEL:-NETBOXDATA}
 DATA_MOUNT=${DATA_MOUNT:-/data}
 SECRETS_DIR=${SECRETS_DIR:-$DATA_MOUNT/netbox-secrets}
-HEALTH_URL=${HEALTH_URL:-http://127.0.0.1:8080/netbox/login/}
 
 log() { echo "[netbox-bootstrap] $(date -Is) $*"; }
 
@@ -38,13 +37,12 @@ fi
 # --- 2. Link secrets from the data disk into the repo ----------------------
 # FIRST-BOOT (one time, manual): create $SECRETS_DIR containing
 #   .env                 — COMPOSE_FILE=docker-compose.yml:compose/prod.yml[:compose/discovery.yml],
-#                          VERSION, PROD_IMAGE (if ECR), diode/discovery block, DISCOVERY_* creds
+#                          VERSION, diode/discovery block, DISCOVERY_* creds
 #   netbox.env           — prod copy of env/netbox.env: fresh SECRET_KEY,
 #                          API_TOKEN_PEPPER_1, REDIS_* passwords (SECRET_KEY must
 #                          never change between redeploys)
 #   prod.env             — from env/prod.env.example: RDS, S3, SSO settings
 #   client-credentials.json  — diode OAuth clients (if discovery runs here)
-#   saml/                — mellon.key, mellon.cert, idp-metadata.xml (Apache)
 required=(".env" "netbox.env" "prod.env")
 for f in "${required[@]}"; do
   if [ ! -f "$SECRETS_DIR/$f" ]; then
@@ -92,10 +90,21 @@ if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2
   log "pulling pinned images"
   docker compose pull --quiet || log "WARN: pull failed, will try cached/local images"
 else
-  log "PROD_IMAGE unset — building image locally (slower boot; consider ECR)"
+  log "PROD_IMAGE unset — building image locally (slower boot; prefer baking it into the AMI with scripts/prod-build.sh)"
   docker compose build
 fi
 docker compose up -d
+
+# Probe the address the stack is actually published on. Apache is on another
+# host, so prod binds to this instance's private address — loopback would not
+# answer and the gate below would fail a perfectly healthy boot.
+if [ -z "${HEALTH_URL:-}" ]; then
+  bind=$(grep -h '^BIND_ADDRESS=' "$SECRETS_DIR/prod.env" .env 2>/dev/null | tail -1 | cut -d= -f2-)
+  case "$bind" in
+    ''|0.0.0.0) bind=127.0.0.1 ;;
+  esac
+  HEALTH_URL="http://${bind}:8080/netbox/login/"
+fi
 log "compose up issued; waiting for NetBox health at $HEALTH_URL"
 
 # --- 4. Gate on health -------------------------------------------------------

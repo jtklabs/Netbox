@@ -1,7 +1,7 @@
 # Runbook: 30-day AMI redeploy
 
-The app node is disposable: DB lives in RDS, media in S3, secrets + SAML
-material on the data disk. A redeploy is "launch new instance, attach disk,
+The app node is disposable: DB lives in RDS, media in S3, and secrets on the
+data disk. Apache/Mellon run on a separate server and are unaffected. A redeploy is "launch new instance, attach disk,
 boot" — zero manual steps once first-boot setup exists.
 
 ## Steps
@@ -13,7 +13,7 @@ boot" — zero manual steps once first-boot setup exists.
 2. **Stop the old instance** (do not terminate yet — it's the rollback).
 3. **Detach the data disk** from the old instance; **attach to the new one**.
 4. **Launch the new instance** with:
-   - the instance profile granting S3 media bucket access (+ ECR pull if used)
+   - the instance profile granting S3 media bucket access
    - `deploy/user-data.sh` as user-data (or rely on the enabled systemd unit)
 5. Bootstrap runs automatically: mounts the disk by label `NETBOXDATA`, links
    secrets, pulls/builds images, `compose up`, gates on health.

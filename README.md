@@ -77,16 +77,22 @@ NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discove
 ## Layout
 
 - `docker-compose.yml`, `configuration/`, `env/*.example` — imported from netbox-docker at the tag in [VERSIONS.md](VERSIONS.md) (deviation: the postgres service lives in `compose/dev.yml`; prod uses RDS)
-- `compose/` — env overlays: `dev.yml`, `prod.yml`, `discovery.yml`, `proxy.yml` (dev rehearsal of the prod subpath+SSO topology)
+- `compose/` — env overlays: `dev.yml`, `prod.yml`, `discovery.yml`, `dev-proxy.yml` (HTTPS proxy serving dev at `/netbox`, the prod path)
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin; `Dockerfile-Plugins` builds the image with it + PyPI plugins
 - `plugins/netbox-refresh/` — our hardware-lifecycle plugin: EoL dates on device/module types, replacement model links, replacement cost, Cisco EoX sync (`manage.py sync_cisco_eol`) and the refresh cost report at **Hardware Refresh › Refresh Report**
-- `apache/netbox.conf` — prod vhost include (mellon SSO, header injection, static mapping)
+- `apache/netbox.conf` — include for the **existing** Apache/Mellon server (a separate host): protects `/netbox`, strips spoofed identity headers, proxies over the private network + static mapping
 - `collector/` — remote collector kit: drop it on a box at a remote site and it discovers locally, pushing outbound to the central Diode. Includes a custom-Python worker skeleton. See [collector/README.md](collector/README.md); mint credentials with `scripts/new-collector.sh`
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures
 - `scripts/clean_inventory.py` — standalone utility (unrelated to the deployment): cleans an inventory CSV by stripping component serials (modules, PSUs, line cards, optics) via the Cisco Product Information API, keeping real devices. Only rows whose name contains parentheses — the `(1)`/`(2)` duplicates — are sent to Cisco; `--check-all` overrides. On those rows a "no record at Cisco" also removes the row (`--keep-unknown` disables). Rows with plain names are never looked up or removed, and a failed lookup never removes anything. `--mode switches` narrows the result to switches only.
 
 ## Prod (summary)
 
-One-time: prepare `/data/netbox-secrets` on the data disk (see the header of
-[deploy/bootstrap.sh](deploy/bootstrap.sh)). Every redeploy after that is
-automatic via user-data/systemd. Procedures: [docs/RUNBOOK-redeploy.md](docs/RUNBOOK-redeploy.md).
+Apache + Mellon run on a **separate, already-deployed server** which proxies to
+this instance over the private network; the NetBox host runs neither.
+
+One-time setup is [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md): prepare
+`/data/netbox-secrets` on the data disk, set `BIND_ADDRESS` to the instance's
+private address, restrict port 8080 to the Apache server, and add
+[apache/netbox.conf](apache/netbox.conf) to that server's vhost. Every redeploy
+after that is automatic via user-data/systemd —
+[docs/RUNBOOK-redeploy.md](docs/RUNBOOK-redeploy.md).

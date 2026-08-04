@@ -22,8 +22,8 @@ Pins live in: `Dockerfile-Plugins` (FROM), `compose/dev.yml` + `.env`
    upgraded first if it's on 14) and drops Redis < 6 (our Valkey 9 is fine).
 4. Merge, push, and roll prod at the next convenient AMI window (or restart
    compose in place — a redeploy is not required for an app upgrade).
-5. If ECR is in use: CI (or you) builds and pushes the new image tag first;
-   update `PROD_IMAGE` in the data-disk `.env`.
+5. Rebuild the prod image with `./scripts/prod-build.sh` (it verifies every
+   plugin loads) and bake it into the next AMI.
 
 ## Rollback
 

@@ -1,6 +1,6 @@
 # NetBox @ nova.jtklabs.dev/netbox — Project Plan
 
-Status: Gates **1, 2, 2.5, 3 complete** (dev stack, plugins, quotes plugin, discovery — all verified against real hardware) · Gates **4 & 5 built and rehearsed in dev**; live prod deploy blocked only on §8 inputs (RDS version, S3 bucket, SAML metadata/attribute, ECR, EC2 access) · Last updated: 2026-07-29
+Status: Gates **1, 2, 2.5, 3 complete** (dev stack, plugins, quotes plugin, discovery — all verified against real hardware) · Gates **4 & 5 built and rehearsed in dev** · All §8 inputs answered; the only thing outstanding is EC2/AMI access to run the live deploy, which is Jason-executed via docs/FIRST-BOOT.md · Last updated: 2026-08-04
 
 A single-repo, env-driven NetBox deployment: dev first (local containers, local accounts), then prod (Ubuntu 24 EC2, RDS Postgres, S3, Apache + mod_auth_mellon SAML, 30-day AMI redeploy cycle). All version claims below were verified against live sources on 2026-07-28.
 
@@ -10,10 +10,10 @@ A single-repo, env-driven NetBox deployment: dev first (local containers, local 
 
 - NetBox deployed on Ubuntu 24 EC2; **AMI is rebuilt/redeployed every 30 days** (compliance), so the app node must be disposable and rebuild itself unattended.
 - Prod database on existing **Postgres RDS**; **S3** available; a **data disk** is detached/reattached across redeploys.
-- **SSO in prod via Apache + mod_auth_mellon (SAML)**; dev uses local accounts.
+- **SSO in prod via an EXISTING Apache + mod_auth_mellon server** (a separate host that already serves nova.jtklabs.dev and injects the identity headers). The NetBox instance runs neither Apache nor Mellon. Dev uses local accounts.
 - Served at **https://nova.jtklabs.dev/netbox** (subpath) behind the existing Apache that fronts the Nova app. Nova consumes NetBox data via API; nothing needed on our side beyond a stable API endpoint.
 - **Device discovery** for the existing network — open-source path required.
-- Plugins: **contracts manager** and **lifecycle**.
+- Plugins: originally a **contracts manager** and **lifecycle** plugin. Both third-party choices were later replaced by plugins we own — see D9 and D10.
 - One repo; dev vs prod differ only by env/compose selection.
 
 ## 2. Decisions (ADR-style)
@@ -30,10 +30,10 @@ Your instinct was right. NetBox Discovery is not one licensed product: the **orb
 Fallbacks if Diode proves heavy (~4–6 extra containers): **Slurp'it free tier** for one-time initial onboarding (unlimited discovery/onboarding, but 10-device cap on ongoing deep collection), or custom Nornir/NAPALM collectors pushed through the Apache-2.0 `diode-sdk-python`. Decision confirmed/revised at Gate 3.
 
 ### D4 — Prod media on S3; data disk for secrets/state ✅ recommended
-NetBox media (image attachments, uploads) goes to **S3** via Django `STORAGES` — django-storages + boto3 are already in the netbox-docker image, and on EC2 an instance-profile role means no S3 keys in config at all. This makes the instance fully stateless: DB in RDS, media in S3. The **data disk** then carries only: the prod env file + SECRET_KEY, TLS/SAML material Apache needs (mellon SP keys, IdP metadata), and local backup staging. Alternative (if you'd rather avoid S3): bind-mount media onto the data disk — supported, env-switchable, decide at Gate 0.
+NetBox media (image attachments, uploads) goes to **S3** via Django `STORAGES` — django-storages + boto3 are already in the netbox-docker image, and on EC2 an instance-profile role means no S3 keys in config at all. This makes the instance fully stateless: DB in RDS, media in S3. The **data disk** then carries only the prod env files (SECRET_KEY, API token pepper, RDS/S3 settings, discovery credentials) and the Diode client credentials. SAML material lives on the Apache server, not here. Alternative (if you'd rather avoid S3): bind-mount media onto the data disk — supported, env-switchable, decide at Gate 0.
 
-### D5 — SSO: existing Apache terminates SAML, NetBox trusts a header
-Prod Apache (mod_auth_mellon) authenticates, then injects `X-Remote-User` (from e.g. `MELLON_uid`) into the proxied request; NetBox's built-in remote-auth middleware (`REMOTE_AUTH_ENABLED=true`, `REMOTE_AUTH_HEADER=HTTP_X_REMOTE_USER`, auto-create users, optional group sync from a groups header) does the rest. All of these are env vars out of the box in netbox-docker. Apache must unconditionally set/unset the header so clients can't spoof it. Dev: remote auth off, local superuser bootstrap via env. Local accounts remain a break-glass fallback in prod.
+### D5 — SSO: the existing remote Apache terminates SAML, NetBox trusts a header
+Prod Apache (mod_auth_mellon) runs on a **separate, already-deployed server** and proxies to the NetBox instance over the private network. It authenticates, then injects `X-Remote-User` into the proxied request; NetBox's built-in remote-auth middleware (`REMOTE_AUTH_ENABLED=true`, `REMOTE_AUTH_HEADER=HTTP_X_REMOTE_USER`, auto-create users, optional group sync from a groups header) does the rest. All of these are env vars out of the box in netbox-docker. Apache must unconditionally set/unset the header so clients can't spoof it. Dev: remote auth off, local superuser bootstrap via env. Local accounts remain a break-glass fallback in prod.
 
 ### D6 — Valkey/Redis stays in-container, even in prod
 It's cache + job queue only (transient data). netbox-docker ships two Valkey 9.1 containers; losing them on redeploy costs at most in-flight background jobs during the maintenance window. No ElastiCache needed.
@@ -48,6 +48,9 @@ Requirement: vendor support-renewal quotes with an attached document and per-lin
 Requirement: EoL dates on hardware models *and* components, a link to the replacement model, a per-model replacement cost, and a report answering "what goes end of life between X and Y, and what will replacing it cost" — with Cisco EoX auto-population and manual entry for everything else. Researched adopt-vs-build first: three Cisco EoL plugins exist and none work (one stores nothing so you cannot filter or report, one is dead since 2021, the maintained one has no findable source), and **nothing in the ecosystem — open source or commercial — models a replacement link or per-model cost**. NetBox Labs' Asset Lifecycle is procurement, not EoL, and is not self-hostable yet.
 Decision: build `plugins/netbox-refresh` owning the whole domain, and **remove netbox-lifecycle** rather than extending it (Jason's call — avoids coupling to a plugin whose feature work has stalled, and avoids two EoL stores). Its tables were dropped with `migrate netbox_lifecycle zero` while it still had zero records.
 Note for the 4.7 upgrade: NetBox 4.7 adds a native `DeviceType.end_of_life` / `ModuleType.end_of_life` date (PR #22634, merged, unreleased). That will overlap our `end_of_support`. Plan is to keep ours authoritative (it carries the full Cisco date set, not one field) and optionally mirror into the core field.
+
+### D11 — No ECR; the image is baked into the AMI (2026-07-29)
+No container registry is available, so `PROD_IMAGE` stays unset and `compose/prod.yml` refers to a local tag. `scripts/prod-build.sh` builds that tag and then verifies every plugin imports inside the built image, so a plugin that would fail on boot is caught during the bake rather than during a redeploy. Add it as one step to the monthly AMI bake; `deploy/bootstrap.sh` builds at first boot as a fallback (~5 minutes slower). A boot therefore needs no registry at all, which also removes Docker Hub rate limits from the redeploy path.
 
 ### D8 — Single repo, env-file driven
 One repo holds: a pinned import of netbox-docker's support files, our plugin Dockerfile, `configuration/` overrides, per-env env files, compose overlays, Apache snippets, discovery config, and deploy/bootstrap scripts. Selecting dev vs prod = choosing the env file + compose overlay (`COMPOSE_FILE`/profiles). Secrets never committed; prod secrets live on the data disk (SSM Parameter Store as a later hardening option).
@@ -76,15 +79,15 @@ One repo holds: a pinned import of netbox-docker's support files, our plugin Doc
 
 ```mermaid
 flowchart LR
-    U[User] -->|HTTPS| A[Apache on host\nnova.jtklabs.dev\nTLS + mod_auth_mellon SAML]
-    A -->|/netbox/* + X-Remote-User\n127.0.0.1:8080| N[netbox container\nBASE_PATH=netbox/]
+    U[User] -->|HTTPS| A[EXISTING Apache server\nnova.jtklabs.dev\nTLS + mod_auth_mellon SAML]
+    A -->|private network\n/netbox/* + identity headers\nBIND_ADDRESS:8080| N[netbox container\nBASE_PATH=netbox/]
     A -->|/netbox/static/* → /static/*| N
     N --> W[netbox-worker]
     N & W --> V[valkey ×2\nqueue + cache]
     N & W -->|SSL| RDS[(RDS Postgres)]
     N -->|instance role| S3[(S3 media bucket)]
     O[orb-agent] -->|gRPC| D[diode services] -->|plugin| N
-    DD[/data disk:\nenv + SECRET_KEY,\nSAML SP material,\nbackup staging/] -.-> A & N
+    DD[/data disk:\nenv + SECRET_KEY,\ndiode credentials/] -.-> N
 ```
 
 Nova reads NetBox via the REST/GraphQL API at `https://nova.jtklabs.dev/netbox/api/` with a service token.
@@ -100,7 +103,7 @@ Netbox/
 ├── compose/
 │   ├── dev.yml                  # local postgres, ports, superuser bootstrap
 │   ├── prod.yml                 # no postgres svc, RDS/S3 env, restart policies
-│   ├── proxy.yml                # dev-only subpath rehearsal proxy
+│   ├── dev-proxy.yml            # dev HTTPS proxy serving /netbox, the prod path
 │   └── discovery.yml            # diode + orb-agent
 ├── Dockerfile-Plugins           # FROM netboxcommunity/netbox:<pin>; uv pip install; collectstatic
 ├── plugin_requirements.txt      # netbox-contract==2.4.6, netbox-lifecycle==1.1.9, (diode plugin)
@@ -111,7 +114,8 @@ Netbox/
 │   ├── dev.env                  # committed, no real secrets
 │   └── prod.env.example         # committed template; real prod.env lives on data disk
 ├── apache/
-│   └── netbox.conf              # vhost include: mellon, header injection, proxy + static map
+│   └── netbox.conf              # include for the EXISTING Apache server: protects /netbox,
+│                                # strips spoofed identity headers, proxies + static map
 ├── discovery/
 │   ├── agent-policy.yaml        # orb-agent scan policies (subnets, drivers)
 │   └── README.md                # adding devices/subnets, credential handling
@@ -137,7 +141,7 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] D1–D8 approved or amended
 - [ ] RDS engine version confirmed (and PG 15+ upgrade path if it's 14)
 - [ ] S3-for-media confirmed (or data-disk media chosen)
-- [ ] SAML details identified: IdP metadata source, which MELLON_* attribute is the username, whether a groups attribute exists for role mapping
+- [x] SAML details identified — the existing Apache already injects the full header set (answered 2026-07-29)
 - [ ] Discovery scope sketched: subnets to scan, device credential types (SNMP community / SSH), where creds will live
 
 ### Gate 1 — Dev stack up (effort: 1 session)
@@ -179,9 +183,9 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Your sign-off
 
 ### Gate 4 — Prod profile: RDS, S3, subpath, SSO (artifacts built + rehearsed 2026-07-29; live deploy awaiting inputs)
-**Built:** `compose/prod.yml`, `env/prod.env.example`, env-gated `configuration/extra.py` (BASE_PATH, S3 STORAGES via instance role), `apache/netbox.conf` (mellon + spoof-proof header + static mapping + logout note), dev rehearsal via `compose/proxy.yml` + `env/rehearsal.env`. Base compose restructured: postgres is now dev-only (`compose/dev.yml`) since overlays can't remove services — prod simply never defines it.
+**Built:** `compose/prod.yml`, `env/prod.env.example`, env-gated `configuration/extra.py` (BASE_PATH, S3 STORAGES via instance role), `apache/netbox.conf` (mellon + spoof-proof header + static mapping + logout note), dev rehearsal via `compose/dev-proxy.yml`, which now doubles as the everyday dev proxy (HTTPS, `/netbox`, optional SSO simulation) so the prod topology is exercised continuously rather than only in a drill. Base compose restructured: postgres is now dev-only (`compose/dev.yml`) since overlays can't remove services — prod simply never defines it.
 **Exit criteria:**
-- [x] Dev rehearsal PASSED: NetBox fully functional under `/netbox` behind the rehearsal proxy — styles load via the static mapping, quotes-plugin pages and API work under the subpath, header SSO auto-creates the user, client-supplied identity headers are overwritten (spoof-proof)
+- [x] Dev rehearsal PASSED: NetBox fully functional under `/netbox` behind the dev proxy — styles load via the static mapping, quotes-plugin pages and API work under the subpath, header SSO auto-creates the user, client-supplied identity headers are overwritten (spoof-proof)
 - [x] **Finding:** auto-created SSO users have zero permissions by default — first admin must be granted (one-time `is_superuser` grant, or `REMOTE_AUTH_SUPERUSER_GROUPS` once the IdP sends a groups header; noted in prod.env.example)
 - [ ] Prod-like instance: real SAML round-trip *(needs: IdP metadata + username attribute, EC2 target)*
 - [ ] Local-account break-glass login verified in prod
@@ -189,9 +193,9 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 - [ ] Nova calls `https://nova.jtklabs.dev/netbox/api/` with a token
 
 ### Gate 5 — 30-day redeploy automation (artifacts built 2026-07-29; drill awaiting EC2)
-**Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/data/netbox-secrets`, ECR-pull or local-build, health gate), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
+**Built:** `deploy/bootstrap.sh` (idempotent: mount-by-label `NETBOXDATA`, secrets linked from `/data/netbox-secrets`, image pull-or-build, health gate on the published address), `deploy/user-data.sh`, `deploy/netbox-compose.service`, and `docs/RUNBOOK-redeploy.md` / `RUNBOOK-upgrade.md` / `RUNBOOK-restore.md`. Bootstrap intentionally refuses to invent prod secrets — SECRET_KEY/pepper must be created once on the data disk (documented in the script header).
 **Exit criteria:**
-- [x] Bootstrap + user-data + systemd unit written and syntax-checked; secrets persistence design (SECRET_KEY/pepper/SAML on data disk) documented
+- [x] Bootstrap + user-data + systemd unit written and syntax-checked; secrets persistence design (SECRET_KEY/pepper/diode credentials on the data disk) documented
 - [x] Runbooks: redeploy drill, monthly pin-bump (incl. plugin-compat gate + NetBox 4.7 PG15 warning), restore
 - [ ] **The drill on real EC2:** fresh AMI → healthy at `https://…/netbox`, zero manual steps, time recorded *(needs: EC2/AMI pipeline access)*
 - [ ] Sessions survive a real redeploy
@@ -211,8 +215,8 @@ Each gate ends with a demo + your sign-off before we proceed. Effort is in worki
 | Risk | Mitigation |
 |---|---|
 | netbox-contract lags NetBox releases (declared matrix behind) | D7 decoupling; we run our own spike before any NetBox bump (proven cheap on 2026-07-28); only bump when both plugins verify. |
-| Subpath (`BASE_PATH`) breakage — esp. plugin pages, static files | netbox-docker removed the easy env var for a reason; §9 has the exact recipe; dev rehearsal proxy catches regressions before prod. |
-| Docker Hub rate limits / registry outage at 30-day boot time | Pull from ECR (our built image) + GHCR/Quay mirrors for stock images; or bake images into the AMI. |
+| Subpath (`BASE_PATH`) breakage — esp. plugin pages, static files | netbox-docker removed the easy env var for a reason; §9 has the exact recipe; dev now runs behind the same subpath continuously, so regressions surface immediately. |
+| Docker Hub rate limits / registry outage at 30-day boot time | Image is baked into the AMI by `scripts/prod-build.sh` (no ECR — D11), so a boot needs no registry. |
 | Header-spoofing of `X-Remote-User` | Apache `RequestHeader unset` inbound + set from MELLON var only; NetBox only reachable via loopback proxy (no public port). |
 | Queue jobs lost during redeploy window | Redeploy in a maintenance window; jobs are re-runnable (housekeeping, discovery ingests re-sync). |
 | SAML logout ≠ NetBox logout | Wire NetBox logout redirect → `/mellon/logout`; document session behavior at Gate 4. |
@@ -235,8 +239,8 @@ These were verified 2026-07-28 against current repos/docs; they're the sharp edg
 - **BASE_PATH**: netbox-docker intentionally provides **no env var** for it — set `BASE_PATH = 'netbox/'` in `configuration/extra.py` (all `.py` in the mounted `configuration/` dir auto-load; later files override `configuration.py`).
 - **Static files under subpath**: the container's Granian launcher hardcodes serving `/static` (not `/netbox/static`). Apache must map, in this order:
   ```apache
-  ProxyPass /netbox/static/ http://127.0.0.1:8080/static/
-  ProxyPass /netbox/ http://127.0.0.1:8080/netbox/
+  ProxyPass /netbox/static/ ${NETBOX_BACKEND}/static/
+  ProxyPass /netbox/ ${NETBOX_BACKEND}/netbox/
   ```
   Do **not** strip `/netbox` on app routes — Django expects the prefix when BASE_PATH is set.
 - **Healthcheck**: compose default curls `/login/` → 404 under BASE_PATH; override to `/netbox/login/`.

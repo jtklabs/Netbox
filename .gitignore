@@ -2,7 +2,6 @@
 # only the .example templates are committed.
 .env
 env/*.env
-!env/rehearsal.env
 discovery/oauth2/client/client-credentials.json
 # Remote collector: real config is per-box and holds device credentials
 collector/collector.env

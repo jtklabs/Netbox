@@ -5,9 +5,11 @@
 # - DB is RDS: no postgres service here (it lives in compose/dev.yml only);
 #   DB_* / DB_SSLMODE come from env/prod.env.
 # - Media is S3 via S3_MEDIA_BUCKET (configuration/extra.py) + instance role.
-# - App is loopback-only; Apache terminates TLS + SAML and proxies.
-# - PROD_IMAGE: ECR URI once available; unset -> local build (bootstrap runs
-#   `docker compose build` in that case).
+# - Apache + Mellon run on a SEPARATE existing server which proxies here over
+#   the private network, so the published port is not loopback — see
+#   BIND_ADDRESS in env/prod.env and apache/netbox.conf.
+# - PROD_IMAGE: normally unset. The image is baked into the AMI by
+#   scripts/prod-build.sh; bootstrap builds locally as a fallback.
 services:
   netbox:
     image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}
