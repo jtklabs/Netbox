@@ -116,8 +116,22 @@ to that `.env` (copy the block shape from your dev `.env`), append
 `:compose/discovery.yml` to COMPOSE_FILE, and place `client-credentials.json`
 at `/mnt/data_disk/netbox-secrets/` with fresh secrets matching the .env values.
 
-(Bootstrap links the redis env files into place for you on every boot — no
-manual `ln` needed.)
+(Bootstrap links the redis env files into place on every boot, and generates
+them from `netbox.env` if they are missing, so their passwords always match —
+no manual `ln` and no chance of a mismatch.)
+
+### If you see "env file env/redis.env not found"
+
+Compose is being run before `deploy/bootstrap.sh` has linked the data-disk
+files into the repo. Run bootstrap — that is what wires the two together:
+
+```bash
+sudo /opt/netbox/deploy/bootstrap.sh
+```
+
+or start it the normal way, `sudo systemctl start netbox-compose`. Running
+`docker compose` directly in `/opt/netbox` only works *after* bootstrap has run
+at least once since the repo was replaced.
 
 ## 4. SAML — nothing to do here
 

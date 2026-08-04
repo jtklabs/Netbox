@@ -5,11 +5,14 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERS
 
 ## Dev quickstart
 
-From a fresh clone, one command does everything — env files, image build, stack, and waiting for NetBox:
+One command does everything — env files, image build, stack, and waiting for NetBox:
 
 ```bash
-./scripts/dev-up.sh
+bash scripts/dev-up.sh
 ```
+
+(Invoked with `bash` so it works from a ZIP download too, where the executable
+bit is lost. From a git clone `./scripts/dev-up.sh` is equivalent.)
 
 It is idempotent, so it is also how to restart. It prints the URL and the generated
 admin password when NetBox is ready (first boot runs all migrations, ~10 minutes).

@@ -34,7 +34,7 @@ PY
 }
 
 echo '==> preparing env files'
-./scripts/init-dev-env.sh
+bash scripts/init-dev-env.sh
 
 base_chain='docker-compose.yml:compose/dev.yml:compose/discovery.yml'
 
@@ -63,7 +63,7 @@ elif [ -n "$host" ]; then
   cert=compose/dev-tls/dev.crt
   if [ ! -f "$cert" ] || ! openssl x509 -in "$cert" -noout -text 2>/dev/null | grep -q "$host"; then
     echo "==> generating a TLS certificate for $host"
-    ./scripts/dev-tls-cert.sh "$host" >/dev/null
+    bash scripts/dev-tls-cert.sh "$host" >/dev/null
   else
     echo '==> reusing the existing TLS certificate'
   fi

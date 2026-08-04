@@ -70,8 +70,23 @@ done
 ln -sf "$SECRETS_DIR/.env" "$REPO_DIR/.env"
 ln -sf "$SECRETS_DIR/netbox.env" "$REPO_DIR/env/netbox.env"
 ln -sf "$SECRETS_DIR/prod.env" "$REPO_DIR/env/prod.env"
-for f in redis.env redis-cache.env; do
-  [ -f "$SECRETS_DIR/$f" ] && ln -sf "$SECRETS_DIR/$f" "$REPO_DIR/env/$f"
+# redis.env / redis-cache.env only carry a password that must match the one
+# already in netbox.env, so derive them rather than making the operator create
+# them consistently by hand. Missing them is otherwise invisible here and
+# surfaces later as a compose "env file not found" failure.
+for pair in "redis.env:REDIS_PASSWORD" "redis-cache.env:REDIS_CACHE_PASSWORD"; do
+  f=${pair%%:*}; key=${pair##*:}
+  if [ ! -f "$SECRETS_DIR/$f" ]; then
+    pw=$(grep "^${key}=" "$SECRETS_DIR/netbox.env" | tail -1 | cut -d= -f2-)
+    if [ -z "$pw" ]; then
+      log "FATAL: $SECRETS_DIR/$f is missing and ${key} is not set in netbox.env,"
+      log "       so it cannot be derived. See docs/FIRST-BOOT.md step 2."
+      exit 1
+    fi
+    printf 'REDIS_PASSWORD=%s\n' "$pw" > "$SECRETS_DIR/$f"
+    log "generated $SECRETS_DIR/$f from netbox.env"
+  fi
+  ln -sf "$SECRETS_DIR/$f" "$REPO_DIR/env/$f"
 done
 
 # client-credentials.json is different: its DIRECTORY is bind-mounted into the
