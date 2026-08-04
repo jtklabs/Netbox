@@ -3,9 +3,16 @@
 Everything here happens exactly once. After this, every 30-day redeploy is
 automatic (RUNBOOK-redeploy.md). No secrets ever leave this box or enter git.
 
-Prereqs: Ubuntu 24 instance with docker + compose, this repo at `/opt/netbox`,
-the data disk attached, an instance profile granting the S3 media bucket, and
-the existing Apache with mod_auth_mellon.
+Prereqs:
+
+- Ubuntu 24 instance with docker + compose, this repo at `/opt/netbox`
+- the data disk attached
+- an instance profile granting the S3 media bucket
+- the existing Apache + mod_auth_mellon server (separate host)
+- **RDS reachable on 5432 from this instance's security group, with the
+  `netbox` database and `netbox` role already created.** Nothing here creates
+  them; if they are missing the container restart-loops on a database error
+  that is only visible in `docker compose logs netbox`.
 
 ## How the layout works (read this first)
 
@@ -56,19 +63,25 @@ leaves it alone.
 sudo mkfs.ext4 -L NETBOXDATA /dev/nvme1n1   # adjust device; SKIP if it already has data
 sudo mkdir -p /mnt/data_disk && sudo mount LABEL=NETBOXDATA /mnt/data_disk
 
-# Always:
-sudo mkdir -p /mnt/data_disk/netbox-secrets
+# Always — check FIRST, then create:
 mountpoint /mnt/data_disk    # must say "is a mountpoint" before continuing
+sudo mkdir -p /mnt/data_disk/netbox-secrets
 ```
 
-That last check matters: if the disk is not mounted, everything below would be
-written to the root filesystem and silently disappear at the next redeploy.
-Bootstrap refuses to start in that situation for the same reason.
+Order matters: if the disk is not mounted, `mkdir` would create the tree on the
+root filesystem, everything below would be written there and silently disappear
+at the next redeploy — and the non-empty directory would then shadow the real
+mount. Bootstrap refuses to start in that situation for the same reason.
 
 ## 2. Generate the persistent app secrets
 
+**Run this once, ever.** Re-running regenerates `SECRET_KEY` (logging everyone
+out) and `API_TOKEN_PEPPER_1` (invalidating every API token), so it refuses if
+the file already exists.
+
 ```bash
 cd /opt/netbox
+[ -e /mnt/data_disk/netbox-secrets/netbox.env ] && { echo "REFUSING: netbox.env already exists"; return 2>/dev/null || exit 1; }
 gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
 DBPW=$(gen 32); RPW=$(gen 24); RCPW=$(gen 24)
 sed -e "s/{{SECRET_KEY}}/$(gen 60)/" \
@@ -97,15 +110,21 @@ loopback and the Apache server cannot reach it.
 
 ```bash
 sudo cp env/prod.env.example /mnt/data_disk/netbox-secrets/prod.env
-sudo vi /mnt/data_disk/netbox-secrets/prod.env      # RDS endpoint/creds, S3 bucket, region
+sudo vi /mnt/data_disk/netbox-secrets/prod.env
+#   RDS endpoint + credentials       (DB_HOST, DB_USER, DB_PASSWORD)
+#   S3 bucket + region               (S3_MEDIA_BUCKET, AWS_REGION)
+#   your real hostname               (ALLOWED_HOSTS, CSRF_TRUSTED_ORIGINS)
+#   your AD group for admins         (REMOTE_AUTH_SUPERUSER_GROUPS)
+#   Cisco API creds, if using EoX    (CISCO_CLIENT_ID, CISCO_CLIENT_SECRET)
 
 sudo tee /mnt/data_disk/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
-VERSION=v4.6.5-5.0.2
 # The address NetBox publishes on. Apache is on another host, so this must NOT
 # be loopback — use this instance's PRIVATE address, and restrict port 8080 to
-# the Apache server with a security group.
-BIND_ADDRESS=10.0.0.0
+# the Apache server with a security group. Replace the placeholder:
+BIND_ADDRESS=CHANGE_ME_PRIVATE_IP
+# (VERSION is deliberately absent: compose/prod.yml pins the image tag, so
+# VERSION here would have no effect. The tag lives in Dockerfile-Plugins.)
 # PROD_IMAGE stays unset: the image is built during the AMI bake
 # (scripts/prod-build.sh), or by bootstrap at first boot as a fallback.
 EOF
@@ -115,6 +134,16 @@ Running discovery on this host too? Append the diode block + DISCOVERY_* creds
 to that `.env` (copy the block shape from your dev `.env`), append
 `:compose/discovery.yml` to COMPOSE_FILE, and place `client-credentials.json`
 at `/mnt/data_disk/netbox-secrets/` with fresh secrets matching the .env values.
+
+Lock the secrets down — everything above was written with the default umask:
+
+```bash
+sudo chmod 600 /mnt/data_disk/netbox-secrets/.env \
+               /mnt/data_disk/netbox-secrets/netbox.env \
+               /mnt/data_disk/netbox-secrets/prod.env
+sudo sh -c 'grep -n "example.com\|CHANGE_ME" /mnt/data_disk/netbox-secrets/prod.env /mnt/data_disk/netbox-secrets/.env' \
+  && echo "^^ placeholders still present — fix these before continuing"
+```
 
 (Bootstrap links the redis env files into place on every boot, and generates
 them from `netbox.env` if they are missing, so their passwords always match —
@@ -162,14 +191,8 @@ sudo cp netbox.conf /etc/apache2/conf-available/netbox.conf
 sudo apachectl configtest && sudo systemctl reload apache2
 ```
 
-Check it end to end from the Apache server before going further:
-
-```bash
-curl -sS -o /dev/null -w '%{http_code}\n' http://<netbox-private-ip>:8080/netbox/login/
-```
-
-A 200 means the path and security group are right. Connection refused means
-`BIND_ADDRESS` is still loopback or the security group is closed.
+Verification comes after step 6 starts the stack — there is nothing listening
+yet at this point.
 
 ## 6. Start and enable
 
@@ -181,22 +204,57 @@ sudo tail -f /var/log/netbox-bootstrap.log   # or journalctl -u netbox-compose
 
 First boot runs all migrations (several minutes).
 
-## 7. Break-glass local admin + first SSO admin
+## 7. Grant yourself admin
+
+Log in once through SSO. Your account is auto-created with **no rights** — that
+is expected. Then grant it from the instance:
 
 ```bash
 cd /opt/netbox
-docker compose exec netbox /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py createsuperuser
+docker compose exec netbox /opt/netbox/venv/bin/python \
+  /opt/netbox/netbox/manage.py shell -c \
+  "from users.models import User; u=User.objects.get(username='YOUR_SSO_USERNAME'); u.is_superuser=True; u.is_staff=True; u.save(); print('granted', u.username)"
 ```
 
-Then log in once via SSO (your account gets auto-created with no rights) and
-grant it from the break-glass admin at
-`https://netbox.example.com/netbox/admin/` — or set
-`REMOTE_AUTH_SUPERUSER_GROUPS` in prod.env once the IdP sends groups.
+Better still, set `REMOTE_AUTH_SUPERUSER_GROUPS` in prod.env to your admin AD
+group (step 3) and group sync grants it automatically on next login.
 
-## 8. Verify (same list as RUNBOOK-redeploy.md step 6)
+Two things that do **not** work here, so you do not lose time on them: the
+Django admin UI (`/admin/`) was removed in NetBox 4.2 and returns 404, and a
+local `createsuperuser` account cannot log in through Apache — remote auth sees
+the `X-Remote-User` header on every request and re-authenticates as the SSO
+user. A local account is only usable by reaching port 8080 directly.
 
-Login page over https, SSO round-trip, device pages, quote document download
-(S3), `docker compose ps` all healthy.
+## 8. Verify
+
+**On the NetBox instance** — backend reachable on the published address. The
+Host header matters: `ALLOWED_HOSTS` would reject a request addressed to the
+raw IP.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: localhost' \
+  http://<netbox-private-ip>:8080/netbox/login/     # expect 200
+docker compose ps                                   # all healthy
+```
+
+**On the Apache server** — the same check proves the security group:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: localhost' \
+  http://<netbox-private-ip>:8080/netbox/login/     # expect 200
+```
+
+**Through Apache** — an unauthenticated request is answered by Mellon in the
+auth phase, so expect a redirect to your IdP, *not* a 200. A 200 here would
+mean the path is not protected:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+  https://netbox.example.com/netbox/login/          # expect 302 -> IdP
+```
+
+**In a browser**: SSO round-trip completes, device pages render with styles
+(proves the static mapping), and a quote document downloads (proves S3).
 
 ## Image distribution (decision 2026-07-29: no ECR)
 

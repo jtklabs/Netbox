@@ -77,7 +77,7 @@ ln -sf "$SECRETS_DIR/prod.env" "$REPO_DIR/env/prod.env"
 for pair in "redis.env:REDIS_PASSWORD" "redis-cache.env:REDIS_CACHE_PASSWORD"; do
   f=${pair%%:*}; key=${pair##*:}
   if [ ! -f "$SECRETS_DIR/$f" ]; then
-    pw=$(grep "^${key}=" "$SECRETS_DIR/netbox.env" | tail -1 | cut -d= -f2-)
+    pw=$(grep "^${key}=" "$SECRETS_DIR/netbox.env" | tail -1 | cut -d= -f2- || true)
     if [ -z "$pw" ]; then
       log "FATAL: $SECRETS_DIR/$f is missing and ${key} is not set in netbox.env,"
       log "       so it cannot be derived. See docs/FIRST-BOOT.md step 2."
@@ -137,16 +137,24 @@ if grep -q '^PROD_IMAGE=' .env && [ -n "$(grep '^PROD_IMAGE=' .env | cut -d= -f2
   log "pulling pinned images"
   docker compose pull --quiet || log "WARN: pull failed, will try cached/local images"
 else
-  log "PROD_IMAGE unset — building image locally (slower boot; prefer baking it into the AMI with scripts/prod-build.sh)"
-  docker compose build
+  img=$(docker compose config --images 2>/dev/null | head -1 || true)
+  if [ -n "$img" ] && docker image inspect "$img" >/dev/null 2>&1; then
+    log "image $img already present (baked into the AMI) — not rebuilding"
+  else
+    log "building image locally (slower boot; prefer baking it in with scripts/prod-build.sh)"
+    docker compose build
+  fi
 fi
-docker compose up -d
+# Not fatal: netbox-worker waits on netbox's healthcheck, so compose can report
+# a dependency failure during a first boot that is progressing normally. The
+# health gate below is the real verdict and gives a far better diagnostic.
+docker compose up -d || log "compose reported a dependency not ready — continuing to the health gate"
 
 # Probe the address the stack is actually published on. Apache is on another
 # host, so prod binds to this instance's private address — loopback would not
 # answer and the gate below would fail a perfectly healthy boot.
 if [ -z "${HEALTH_URL:-}" ]; then
-  bind=$(grep -h '^BIND_ADDRESS=' "$SECRETS_DIR/prod.env" .env 2>/dev/null | tail -1 | cut -d= -f2-)
+  bind=$(grep -h '^BIND_ADDRESS=' "$SECRETS_DIR/prod.env" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | awk '{print $1}' || true)
   case "$bind" in
     ''|0.0.0.0) bind=127.0.0.1 ;;
   esac
@@ -155,8 +163,12 @@ fi
 log "compose up issued; waiting for NetBox health at $HEALTH_URL"
 
 # --- 4. Gate on health -------------------------------------------------------
+# Host header matters: prod.env restricts ALLOWED_HOSTS, so probing by IP would
+# get a Django 400 and this gate could never pass on a healthy stack. localhost
+# is in the shipped ALLOWED_HOSTS. --max-time keeps a filtered port from turning
+# the 10-minute budget into hours on libcurl's default connect timeout.
 for _ in $(seq 1 60); do
-  if curl -fsS -o /dev/null "$HEALTH_URL"; then
+  if curl -fsS --max-time 5 -H 'Host: localhost' -o /dev/null "$HEALTH_URL"; then
     log "OK: NetBox is serving"
     exit 0
   fi

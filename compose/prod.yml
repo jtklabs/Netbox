@@ -6,8 +6,9 @@
 #   DB_* / DB_SSLMODE come from env/prod.env.
 # - Media is S3 via S3_MEDIA_BUCKET (configuration/extra.py) + instance role.
 # - Apache + Mellon run on a SEPARATE existing server which proxies here over
-#   the private network, so the published port is not loopback — see
-#   BIND_ADDRESS in env/prod.env and apache/netbox.conf.
+#   the private network, so the published port is not loopback. Set BIND_ADDRESS
+#   in the data-disk .env (NOT env/prod.env — compose cannot see env_file values
+#   when substituting ${...}). See apache/netbox.conf.
 # - PROD_IMAGE: normally unset. The image is baked into the AMI by
 #   scripts/prod-build.sh; bootstrap builds locally as a fallback.
 services:
@@ -20,7 +21,7 @@ services:
     restart: unless-stopped
     ports:
       # Apache runs on a SEPARATE server, so this cannot be loopback. Set
-      # BIND_ADDRESS in env/prod.env to the instance's private address, and
+      # BIND_ADDRESS in the data-disk .env to the instance's private address, and
       # restrict port 8080 to the Apache server with a security group — this
       # hop is plain HTTP and NetBox trusts the identity headers Apache sets,
       # so reaching it directly means being able to impersonate any user.
@@ -30,9 +31,14 @@ services:
     healthcheck:
       # BASE_PATH=netbox/ moves the login URL.
       test: curl -f http://localhost:8080/netbox/login/ || exit 1
-      start_period: 300s
-      timeout: 3s
+      # First boot runs every migration against RDS. Without generous retries the
+      # container is marked unhealthy, netbox-worker's depends_on fails, and
+      # `docker compose up -d` exits non-zero — aborting bootstrap before its own
+      # health gate ever runs.
+      start_period: 600s
+      timeout: 5s
       interval: 15s
+      retries: 40
 
   netbox-worker:
     image: ${PROD_IMAGE:-netbox-custom:v4.6.5-5.0.2}

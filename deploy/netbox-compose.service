@@ -1,11 +1,18 @@
-# systemd unit: keeps the stack managed across reboots (install into the AMI:
+# systemd unit: owns the NetBox stack across boots. Install into the AMI:
 #   cp deploy/netbox-compose.service /etc/systemd/system/ && systemctl enable netbox-compose
-# ). Bootstrap handles disk mount + secrets before compose starts.
+# Bootstrap handles the disk mount + secrets before compose starts.
 [Unit]
 Description=NetBox docker compose stack
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
+# Do not start before the data disk is there. EC2 secondary volumes are usually
+# mounted `nofail` in fstab, which drops the ordering that would otherwise be
+# implied — without this the unit can race the mount.
+RequiresMountsFor=/mnt/data_disk
+# A docker restart (unattended-upgrades patching docker-ce) should restart this
+# stack, not deactivate it and leave nothing running.
+PartOf=docker.service
 
 [Service]
 Type=oneshot
@@ -14,9 +21,16 @@ WorkingDirectory=/opt/netbox
 # Optional: DATA_MOUNT / DATA_LABEL / REPO_DIR overrides. The leading dash makes
 # a missing file non-fatal. bootstrap.sh sources it too, so either works.
 EnvironmentFile=-/etc/netbox-deploy.conf
-ExecStart=/opt/netbox/deploy/bootstrap.sh
-ExecStop=/usr/bin/docker compose down
-TimeoutStartSec=900
+ExecStart=/bin/sh -c 'cd "${REPO_DIR:-/opt/netbox}" && exec ./deploy/bootstrap.sh'
+ExecStop=/bin/sh -c 'cd "${REPO_DIR:-/opt/netbox}" && exec /usr/bin/docker compose down'
+# First boot runs every migration against RDS and may also build the image.
+# 900s was not enough for that and systemd would SIGTERM a healthy boot
+# mid-migration, then run ExecStop against it.
+TimeoutStartSec=2400
+# A transient failure (RDS not yet reachable) should not leave the node down
+# permanently on a deployment whose whole point is unattended redeploys.
+Restart=on-failure
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target

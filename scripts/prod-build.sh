@@ -19,7 +19,7 @@ verify=true
 tag=''
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag) tag="$2"; shift 2 ;;
+    --tag) tag="${2:?--tag requires a value}"; shift 2 ;;
     --no-verify) verify=false; shift ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -31,6 +31,13 @@ base_image=$(grep -m1 '^FROM ' Dockerfile-Plugins | awk '{print $2}')
 base_tag=${base_image##*:}
 image=${tag:-netbox-custom:$base_tag}
 
+if [ -z "$tag" ] && ! grep -q "netbox-custom:$base_tag" compose/prod.yml; then
+  echo "ERROR: compose/prod.yml does not default to netbox-custom:$base_tag." >&2
+  echo "       Bumping Dockerfile-Plugins without updating compose/prod.yml would" >&2
+  echo "       leave prod pointing at an image that is never built." >&2
+  exit 1
+fi
+
 echo "==> base image:  $base_image"
 echo "==> building:    $image"
 docker build -f Dockerfile-Plugins -t "$image" .
@@ -39,7 +46,11 @@ if [ "$verify" = true ]; then
   echo '==> verifying the plugins load in the built image'
   # A plugin that imports cleanly at build time but explodes on boot would
   # otherwise only surface during a redeploy, so check it here.
-  docker run --rm --entrypoint /opt/netbox/venv/bin/python "$image" -c "
+  # Mount the repo's configuration/ exactly as compose does at runtime — the
+  # image's baked copy is shadowed there, so without this a broken extra.py
+  # (the S3 STORAGES block, say) passes the bake and fails every boot.
+  docker run --rm -v "$PWD/configuration:/etc/netbox/config:ro" \
+    --entrypoint /opt/netbox/venv/bin/python "$image" -c "
 import os, sys
 sys.path.insert(0, '/opt/netbox/netbox')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
