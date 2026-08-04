@@ -10,23 +10,44 @@ secret it holds is its own scoped ingest credential, revocable on its own.
 
 ## Standing one up
 
-**On the central server**, mint credentials for it:
+**From the central server**, build a ready-to-run bundle for the site. This
+mints the credential, fills it in, and seeds the policies with the site name:
 
 ```bash
-./scripts/new-collector.sh site-branch-a
+./scripts/deploy-collector.sh site-branch-a \
+    --target grpc://10.90.0.1:8090/diode --site "Branch A"
 ```
 
-That prints a `client_id`/`client_secret` pair scoped to `diode:ingest` only.
-The secret is shown once.
+Add `--host ubuntu@10.20.0.5` and it copies the bundle over SSH and starts it
+too. Without it you get `dist/collector-site-branch-a.tar.gz` to move across by
+hand — useful when the central server has no SSH route to the site.
 
-**On the remote box**, copy this `collector/` directory across, then:
+A whole fleet at once, from a file of `name  ssh-host  site` lines (`-` for no
+SSH host):
 
 ```bash
-./install.sh                 # creates collector.env, tells you to fill it in
-vi collector.env             # paste the credentials + set DIODE_TARGET
-vi policies.yaml             # describe what this site scans
+./scripts/deploy-collector.sh --fleet collectors.txt --target grpc://10.90.0.1:8090/diode
+```
+
+Re-running for an existing name refuses rather than quietly issuing a second
+credential; use `--rotate` when you actually mean to replace one.
+
+**On the remote box** (only needed if you did not use `--host`):
+
+```bash
+tar xzf collector-site-branch-a.tar.gz && cd site-branch-a
+vi policies.yaml             # set the subnets/hosts this site scans
 ./install.sh                 # validates and starts
 ```
+
+The credential and device passwords are already in `collector.env`; edit it only
+if this site uses different device credentials from the central defaults.
+
+### Doing it by hand
+
+`./scripts/new-collector.sh <name>` just mints a credential and prints it, if
+you would rather assemble the box yourself. `./install.sh` on a bare copy of
+this directory will create the config files and tell you what to fill in.
 
 `./install.sh --check` validates config and Diode connectivity without starting
 anything. Re-running is safe.

@@ -19,3 +19,5 @@ scripts/f5-image-push/*.iso
 *.pyc
 __pycache__/
 .DS_Store
+# Collector bundles contain live credentials
+dist/
