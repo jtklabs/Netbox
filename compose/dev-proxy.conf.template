@@ -14,6 +14,13 @@ server {
     # NetBox serves media and large imports; do not cap uploads at nginx's 1m.
     client_max_body_size 50m;
 
+    # nginx listens on 443 inside the container but is published on another
+    # port, so it has no idea what port clients use. Left to itself it expands
+    # a redirect into https://host/... and drops :8443, which then fails to
+    # connect. Emitting relative Location headers lets the browser keep the
+    # scheme, host and port it already has.
+    absolute_redirect off;
+
     # Docker's embedded DNS. Combined with the $upstream variable below this
     # forces nginx to re-resolve per request instead of caching the address at
     # startup — otherwise the proxy 502s for good whenever the netbox container
@@ -22,6 +29,12 @@ server {
     set $upstream http://netbox:8080;
 
     location = / {
+        return 302 /netbox/;
+    }
+
+    # /netbox without the trailing slash would otherwise miss the location
+    # below entirely.
+    location = /netbox {
         return 302 /netbox/;
     }
 
