@@ -6,7 +6,7 @@ class QuotesConfig(PluginConfig):
     verbose_name = 'Support Quotes'
     description = 'Vendor support-renewal quotes with serial-matched device assignment'
     version = '0.1.0'
-    author = 'Network Engineering'
+    author = 'Nova Team'
     author_email = 'noreply@example.com'
     base_url = 'quotes'
     min_version = '4.6.0'

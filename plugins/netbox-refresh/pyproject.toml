@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "netbox-refresh"
 version = "0.1.0"
 description = "Hardware end-of-life tracking, replacement planning and refresh cost reporting for NetBox"
-authors = [{ name = "Network Engineering" }]
+authors = [{ name = "Nova Team" }]
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]

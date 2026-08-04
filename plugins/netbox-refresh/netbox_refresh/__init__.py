@@ -6,7 +6,7 @@ class RefreshConfig(PluginConfig):
     verbose_name = 'Hardware Refresh'
     description = 'End-of-life dates, replacement models and refresh cost reporting'
     version = '0.1.0'
-    author = 'Network Engineering'
+    author = 'Nova Team'
     author_email = 'noreply@example.com'
     base_url = 'refresh'
     min_version = '4.6.0'
