@@ -195,8 +195,10 @@ to reach 8080 directly could impersonate any user; the security group is what
 prevents that.
 
 **On the Apache server**, copy `apache/netbox.conf` from this repo, set
-`NETBOX_BACKEND` at the top to this instance's private address, and include it
-in the existing `netbox.example.com` :443 vhost:
+`NETBOX_BACKEND` at the top to this instance's private address, **fill in and
+uncomment the "Mellon attributes → identity headers" block** (the attribute
+names are specific to your IdP — the comments in the file say how to find
+them), and include it in the existing `netbox.example.com` :443 vhost:
 
 ```bash
 sudo a2enmod proxy proxy_http headers      # mellon is already enabled
@@ -207,6 +209,46 @@ sudo apachectl configtest && sudo systemctl reload apache2
 
 Verification comes after step 6 starts the stack — there is nothing listening
 yet at this point.
+
+### SSO prompts, but no account is created
+
+The IdP round-trip working proves only Mellon's *authentication*. Identity
+reaches NetBox as HTTP headers, and mod_auth_mellon **does not set headers** —
+it exports SAML attributes as Apache environment variables (`MELLON_<attr>`),
+which never cross the proxy hop. Without the mapping block in
+`apache/netbox.conf`, NetBox receives an authenticated request carrying no
+identity at all and just shows its login page. Two checks tell you which side
+is broken:
+
+**1. Did the NetBox side get its settings?** (on this instance)
+
+```bash
+sudo docker exec netbox-netbox-1 sh -c 'env | grep ^REMOTE_AUTH' 
+```
+
+Expect `REMOTE_AUTH_ENABLED=true`, `REMOTE_AUTH_HEADER=HTTP_X_REMOTE_USER` and
+the rest of the block from `env/prod.env.example`. Missing entries mean your
+data-disk `prod.env` predates them (`git pull` never updates that file — recent
+bootstraps log exactly which keys drifted). Add them and
+`sudo docker compose up -d --force-recreate netbox`.
+
+**2. Do the headers actually arrive?** (on this instance, while you load the
+page in a browser)
+
+```bash
+sudo tcpdump -i any -A -s0 'tcp dst port 8080' 2>/dev/null | grep -iE 'x-remote-user|x-user-'
+```
+
+Nothing printed while pages load = Apache is not sending them: fill in and
+uncomment the mapping block in `apache/netbox.conf`. If your vhost already
+builds these headers for another application, check their scope — inside that
+app's `<Location>` they do not apply to `/netbox`.
+
+Groups specifically: multi-valued SAML attributes arrive as separate
+`MELLON_groups_0`, `MELLON_groups_1`, … variables until
+`MellonMergeEnvVars On "|"` collapses them (`|` matches
+`REMOTE_AUTH_GROUP_SEPARATOR`). If users appear but with no groups, that line
+is the usual culprit — see also `REMOTE_AUTH_AUTO_CREATE_GROUPS` in step 3.
 
 ## 6. Start and enable
 
