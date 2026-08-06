@@ -5,7 +5,8 @@
 #   TEST_HOST=<this host's LAN IP> NETBOX_BACKEND=http://172.17.0.1:8080 \
 #     docker compose up -d --build
 #
-# Then browse to http://$TEST_HOST:8082/netbox/ and log in as jdoe/jdoepass
+# Then browse to httpS://$TEST_HOST:8082/netbox/ (self-signed — accept the
+# warning once) and log in as jdoe/jdoepass
 # (superuser via netbox-admins) or msmith/msmithpass (netops only, no admin).
 # The SP tests the CURRENT ../../apache/netbox.conf straight from the repo —
 # with its commented Mellon mapping block force-enabled by the entrypoint.
@@ -17,16 +18,16 @@ services:
     ports:
       - "8083:8080"
     environment:
-      SIMPLESAMLPHP_SP_ENTITY_ID: http://${TEST_HOST:?set TEST_HOST to this host's LAN IP}:8082/mellon/metadata
-      SIMPLESAMLPHP_SP_ASSERTION_CONSUMER_SERVICE: http://${TEST_HOST}:8082/mellon/postResponse
-      SIMPLESAMLPHP_SP_SINGLE_LOGOUT_SERVICE: http://${TEST_HOST}:8082/mellon/logout
+      SIMPLESAMLPHP_SP_ENTITY_ID: https://${TEST_HOST:?set TEST_HOST to this host's LAN IP}:8082/mellon/metadata
+      SIMPLESAMLPHP_SP_ASSERTION_CONSUMER_SERVICE: https://${TEST_HOST}:8082/mellon/postResponse
+      SIMPLESAMLPHP_SP_SINGLE_LOGOUT_SERVICE: https://${TEST_HOST}:8082/mellon/logout
     volumes:
       - ./authsources.php:/var/www/simplesamlphp/config/authsources.php:ro
   sp:
     build: ./sp
     container_name: netbox-ssotest-sp
     ports:
-      - "8082:80"
+      - "8082:443"
     environment:
       TEST_HOST: ${TEST_HOST}
       # As reachable FROM THIS CONTAINER; the docker bridge gateway

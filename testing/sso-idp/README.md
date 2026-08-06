@@ -25,7 +25,8 @@ TEST_HOST=<this host LAN IP> NETBOX_BACKEND=http://172.17.0.1:8080 \
   docker compose up -d --build
 ```
 
-Browse to `http://$TEST_HOST:8082/netbox/` — you land on the IdP login form.
+Browse to **`https://$TEST_HOST:8082/netbox/`** (self-signed certificate —
+accept the warning once) — you land on the IdP login form.
 
 | user | password | groups | expectation |
 |---|---|---|---|
@@ -41,8 +42,11 @@ the `REMOTE_AUTH_*` block from `env/prod.env.example` active.
 - Attribute names mirror prod's (`MELLON_username` etc. — the entrypoint
   substitutes the repo example's `MELLON_uid`). Edit `authsources.php` to test
   other shapes; it is mounted, so `docker compose restart idp` applies it.
-- Plain HTTP end to end, `MellonSecureCookie Off` — a test rig, nothing else.
-  Prod terminates TLS and keeps mellon cookie settings at their defaults.
+- The SP is **https on purpose**: this mellon build stamps `SameSite=None` on
+  its cookies regardless of `MellonCookieSameSite`, and browsers drop
+  None-without-Secure — a plain-http rig fails the cookie test in every real
+  browser (bare 400 at `/mellon/postResponse`) while passing scripted tests.
+  The IdP stays http; an http page may POST to an https target.
 - Wire check while logging in, on the NetBox host:
   `sudo tcpdump -i any -A -s0 'tcp dst port 8080' | grep -iE 'x-remote-user|x-user-'`
 - Tear down with `docker compose down --rmi local` in this directory.

@@ -19,6 +19,17 @@ if [ ! -f /etc/apache2/mellon/sp-key.pem ]; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=netbox-ssotest-sp" \
     -keyout /etc/apache2/mellon/sp-key.pem -out /etc/apache2/mellon/sp-cert.pem 2>/dev/null
 fi
+# Server TLS cert (separate from the SAML signing pair). Browsers require a
+# SubjectAltName that matches — an IP needs IP:, a name needs DNS:.
+if [ ! -f /etc/apache2/mellon/tls-key.pem ]; then
+  case "$TEST_HOST" in
+    *[a-zA-Z]*) SAN="DNS:${TEST_HOST}" ;;
+    *)          SAN="IP:${TEST_HOST}" ;;
+  esac
+  openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=${TEST_HOST}" \
+    -addext "subjectAltName=${SAN}" \
+    -keyout /etc/apache2/mellon/tls-key.pem -out /etc/apache2/mellon/tls-cert.pem 2>/dev/null
+fi
 
 # Metadata must be fetched via the PUBLISHED URL: the endpoints inside it are
 # built from the Host header, and the browser has to be able to reach them.
