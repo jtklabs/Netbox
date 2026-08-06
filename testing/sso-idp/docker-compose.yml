@@ -1,0 +1,39 @@
+# Throwaway SAML test rig: a SimpleSAMLphp IdP + an Apache running REAL
+# mod_auth_mellon, proxying to an existing NetBox. Lets you rehearse every SSO
+# change against a real SAML round trip before touching the prod Apache.
+#
+#   TEST_HOST=<this host's LAN IP> NETBOX_BACKEND=http://172.17.0.1:8080 \
+#     docker compose up -d --build
+#
+# Then browse to http://$TEST_HOST:8082/netbox/ and log in as jdoe/jdoepass
+# (superuser via netbox-admins) or msmith/msmithpass (netops only, no admin).
+# The SP tests the CURRENT ../../apache/netbox.conf straight from the repo —
+# with its commented Mellon mapping block force-enabled by the entrypoint.
+name: netbox-ssotest
+services:
+  idp:
+    image: kristophjunge/test-saml-idp   # amd64 only
+    container_name: netbox-ssotest-idp
+    ports:
+      - "8083:8080"
+    environment:
+      SIMPLESAMLPHP_SP_ENTITY_ID: http://${TEST_HOST:?set TEST_HOST to this host's LAN IP}:8082/mellon/metadata
+      SIMPLESAMLPHP_SP_ASSERTION_CONSUMER_SERVICE: http://${TEST_HOST}:8082/mellon/postResponse
+      SIMPLESAMLPHP_SP_SINGLE_LOGOUT_SERVICE: http://${TEST_HOST}:8082/mellon/logout
+    volumes:
+      - ./authsources.php:/var/www/simplesamlphp/config/authsources.php:ro
+  sp:
+    build: ./sp
+    container_name: netbox-ssotest-sp
+    ports:
+      - "8082:80"
+    environment:
+      TEST_HOST: ${TEST_HOST}
+      # As reachable FROM THIS CONTAINER; the docker bridge gateway
+      # (172.17.0.1) reaches a NetBox published on the host.
+      NETBOX_BACKEND: ${NETBOX_BACKEND:?e.g. http://172.17.0.1:8080}
+      IDP_METADATA_URL: http://${TEST_HOST}:8083/simplesaml/saml2/idp/metadata.php
+    volumes:
+      - ../../apache/netbox.conf:/opt/netbox.conf.src:ro
+    depends_on:
+      - idp

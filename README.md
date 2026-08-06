@@ -107,6 +107,7 @@ NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discove
 - `apache/netbox.conf` — include for the **existing** Apache/Mellon server (a separate host): protects `/netbox`, strips spoofed identity headers, proxies over the private network + static mapping
 - `collector/` — remote collector kit: drop it on a box at a remote site and it discovers locally, pushing outbound to the central Diode. Includes a custom-Python worker skeleton. Build and push one (or a whole fleet) with `scripts/deploy-collector.sh`; see [collector/README.md](collector/README.md)
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures
+- `testing/sso-idp/` — throwaway SAML IdP + real mod_auth_mellon SP for rehearsing the prod SSO config against a real round trip; see its README
 - `scripts/clean_inventory.py` — standalone utility (unrelated to the deployment): cleans an inventory CSV by stripping component serials (modules, PSUs, line cards, optics) via the Cisco Product Information API, keeping real devices. Only rows whose name contains parentheses — the `(1)`/`(2)` duplicates — are sent to Cisco; `--check-all` overrides. On those rows a "no record at Cisco" also removes the row (`--keep-unknown` disables). Rows with plain names are never looked up or removed, and a failed lookup never removes anything. `--mode switches` narrows the result to switches only.
 
 ## Prod (summary)

@@ -212,6 +212,11 @@ yet at this point.
 
 ### SSO prompts, but no account is created
 
+Rehearse the whole flow against a real IdP first — `testing/sso-idp/` stands
+up a throwaway SAML IdP plus a real mod_auth_mellon Apache running this
+repo's `netbox.conf`, so every failure mode below can be reproduced and
+fixed without touching prod.
+
 The IdP round-trip working proves only Mellon's *authentication*. Identity
 reaches NetBox as HTTP headers, and mod_auth_mellon **does not set headers** —
 it exports SAML attributes as Apache environment variables (`MELLON_<attr>`),
