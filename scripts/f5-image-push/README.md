@@ -61,6 +61,22 @@ Behavior:
   automatic re-login and chunk retry.
 - Exit code is non-zero if any unit failed; the summary names the failures.
 
+## Disk size report
+
+`f5_disk_report.py` is a read-only companion that uses the same `config.ini`
+and `devices.csv`. For every unit it queries the logical disks over REST
+(`/mgmt/tm/sys/disk/logical-disk`) and reports each disk's total size,
+volume-group usage, and the current free space in `/shared/images` — useful
+for spotting units that will fail the image push space check before you start.
+
+```bash
+./f5_disk_report.py                          # table on stdout
+./f5_disk_report.py --output disk-report.csv # also write one row per disk
+```
+
+Unlike `push-report.csv`, the `--output` file is a point-in-time snapshot and
+is overwritten on each run.
+
 ## Run report and re-runs
 
 Every device outcome is appended to `push-report.csv` (override with

@@ -15,6 +15,7 @@ compose/dev-tls/
 scripts/f5-image-push/config.ini
 scripts/f5-image-push/devices.csv
 scripts/f5-image-push/push-report.csv
+scripts/f5-image-push/disk-report.csv
 scripts/f5-image-push/*.iso
 *.pyc
 __pycache__/
