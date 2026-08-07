@@ -16,7 +16,8 @@ Endpoints used (all iControl REST over HTTPS on the management interface):
   DELETE /mgmt/shared/authz/tokens/{token}                 log out
 
 Usage:
-  ./f5_image_push.py --image BIGIP-17.1.1.3-0.0.5.iso [--csv devices.csv] [--config config.ini]
+  ./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --csv devices.csv
+  ./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --host 10.0.10.11
 """
 
 import argparse
@@ -414,9 +415,12 @@ def load_devices(csv_path, settings):
 
 
 def main():
-    argp = argparse.ArgumentParser(description="Upload an F5 software image to every unit in a CSV.")
+    argp = argparse.ArgumentParser(description="Upload an F5 software image to one unit or a CSV fleet.")
     argp.add_argument("--image", required=True, help="path to the BIG-IP .iso to distribute")
-    argp.add_argument("--csv", default="devices.csv", help="device inventory CSV (default: devices.csv)")
+    target = argp.add_mutually_exclusive_group(required=True)
+    target.add_argument("--csv", help="device inventory CSV (host,name)")
+    target.add_argument("--host", metavar="IP",
+                        help="single unit to target (management IP or DNS name) instead of a CSV")
     argp.add_argument("--config", default="config.ini", help="credentials/settings INI (default: config.ini)")
     argp.add_argument("--workers", type=int, help="parallel uploads (default from config)")
     argp.add_argument("--force", action="store_true", help="re-upload even if the unit already lists the image")
@@ -429,7 +433,11 @@ def main():
     args = argp.parse_args()
 
     settings = load_settings(args.config)
-    devices = load_devices(args.csv, settings)
+    if args.host:
+        devices = [Device(host=args.host, name=args.host, port=settings["port"],
+                          username=settings["username"], password=settings["password"])]
+    else:
+        devices = load_devices(args.csv, settings)
     if not os.path.isfile(args.image):
         sys.exit(f"image not found: {args.image}")
     if not settings["verify_ssl"]:
@@ -439,7 +447,7 @@ def main():
     size_mb = os.path.getsize(args.image) // (1024 * 1024)
     workers = args.workers or settings["workers"]
     print(f"image:   {filename} ({size_mb} MB)")
-    print(f"devices: {len(devices)} from {args.csv}, {workers} parallel upload(s)")
+    print(f"devices: {len(devices)} from {args.csv or args.host}, {workers} parallel upload(s)")
 
     if args.dry_run:
         extra = " (pruning other installers first)" if args.prune else ""

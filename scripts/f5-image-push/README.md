@@ -34,10 +34,14 @@ come exclusively from `config.ini`, so no secrets ever live in the device list.
 
 ## Usage
 
+Target either the whole fleet (`--csv`) or a single unit (`--host`) — exactly
+one of the two is required:
+
 ```bash
-./f5_image_push.py --image BIGIP-17.1.1.3-0.0.5.iso
-./f5_image_push.py --image BIGIP-17.1.1.3-0.0.5.iso --dry-run   # preview targets
-./f5_image_push.py --image BIGIP-17.1.1.3-0.0.5.iso --workers 6 --force
+./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --csv devices.csv
+./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --host 10.0.10.11
+./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --csv devices.csv --dry-run
+./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --csv devices.csv --workers 6 --force
 ```
 
 Behavior:
