@@ -151,9 +151,10 @@ class F5Client:
         resp.raise_for_status()
         return resp.json()
 
-    def post_json(self, path, payload):
+    def post_json(self, path, payload, timeout=None):
         resp = self.session.post(
-            f"{self.base}{path}", json=payload, verify=self.verify, timeout=self.timeout
+            f"{self.base}{path}", json=payload, verify=self.verify,
+            timeout=timeout or self.timeout
         )
         resp.raise_for_status()
         return resp.json()
@@ -200,16 +201,15 @@ def find_listed_image(client, filename):
     return None
 
 
-def remote_md5(client, filename):
-    """md5sum of the file as it sits in /shared/images on the unit, or None if
-    the check can't run (util/bash disabled). This is the only trustworthy
-    checksum comparison: the 'checksum' metadata field on sys/software/image
-    is NOT the plain md5 of the ISO file, so it must never be compared against
-    a locally computed md5."""
+def remote_md5(client, filename, directory="/shared/images"):
+    """md5sum of a file on the unit, or None if the check can't run (util/bash
+    disabled). This is the only trustworthy checksum comparison: the 'checksum'
+    metadata field on sys/software/image is NOT the plain md5 of the ISO file,
+    so it must never be compared against a locally computed md5."""
     try:
         result = client.post_json("/mgmt/tm/util/bash", {
             "command": "run",
-            "utilCmdArgs": f"-c \"md5sum '/shared/images/{filename}'\"",
+            "utilCmdArgs": f"-c \"md5sum '{directory}/{filename}'\"",
         })
         out = result.get("commandResult", "").split()
         if out and len(out[0]) == 32:
@@ -342,6 +342,7 @@ def load_settings(config_path):
         "username": creds.get("username", ""),
         "password": creds.get("password", ""),
         "login_provider": creds.get("login_provider", "tmos"),
+        "ucs_passphrase": creds.get("ucs_passphrase", ""),
         "port": int(defaults.get("port", 443)),
         "verify_ssl": str(defaults.get("verify_ssl", "false")).strip().lower() in ("1", "true", "yes"),
         "workers": int(defaults.get("workers", 3)),

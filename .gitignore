@@ -16,7 +16,10 @@ scripts/f5-image-push/config.ini
 scripts/f5-image-push/devices.csv
 scripts/f5-image-push/push-report.csv
 scripts/f5-image-push/disk-report.csv
+scripts/f5-image-push/ucs-report.csv
+scripts/f5-image-push/ucs-backups/
 scripts/f5-image-push/*.iso
+scripts/f5-image-push/*.ucs
 *.pyc
 __pycache__/
 .DS_Store

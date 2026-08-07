@@ -77,6 +77,27 @@ for spotting units that will fail the image push space check before you start.
 Unlike `push-report.csv`, the `--output` file is a point-in-time snapshot and
 is overwritten on each run.
 
+## UCS backup pull
+
+`f5_ucs_pull.py` runs the flow in reverse: for every unit in `devices.csv` it
+saves a fresh UCS archive on the box (`POST /mgmt/tm/sys/ucs`), downloads it
+in chunks to this server via `/mgmt/shared/file-transfer/ucs-downloads/`, and
+md5-verifies the local copy against `md5sum` on the unit.
+
+```bash
+./f5_ucs_pull.py                 # archives land in ucs-backups/<device>-<stamp>.ucs
+./f5_ucs_pull.py --cleanup       # also delete the UCS from each unit after verifying
+```
+
+Outcomes append to `ucs-report.csv` (same append-only rules as the push
+report). Saving a UCS on a large config can take a few minutes per unit —
+that's the box building the archive, not the download.
+
+**UCS files are secrets**: they contain the entire configuration including
+SSL private keys and the local user database. The `ucs-backups/` directory
+and `*.ucs` are gitignored; set `ucs_passphrase` in `config.ini` to have the
+units encrypt the archives (you'll need the passphrase again to restore).
+
 ## Run report and re-runs
 
 Every device outcome is appended to `push-report.csv` (override with

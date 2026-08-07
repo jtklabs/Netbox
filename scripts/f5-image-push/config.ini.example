@@ -8,6 +8,9 @@ password = changeme
 # Auth source for the login token. "tmos" covers local accounts and BIG-IP
 # remote auth (TACACS+/RADIUS/LDAP) — leave it unless you know otherwise.
 login_provider = tmos
+# Optional: passphrase for f5_ucs_pull.py backups. UCS archives contain SSL
+# private keys — strongly recommended. You'll need it again to restore.
+#ucs_passphrase =
 
 [defaults]
 # Management HTTPS port, applied to every unit in the CSV.

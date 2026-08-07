@@ -23,6 +23,8 @@ try:
 except ImportError:
     sys.exit("This tool needs the 'requests' package: pip install -r requirements.txt")
 
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from f5_image_push import F5Client, free_space_kb, load_devices, load_settings, log
 
 
