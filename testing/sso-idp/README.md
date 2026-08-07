@@ -39,9 +39,10 @@ the `REMOTE_AUTH_*` block from `env/prod.env.example` active.
 
 ## Notes
 
-- Attribute names mirror prod's (`MELLON_username` etc. — the entrypoint
-  substitutes the repo example's `MELLON_uid`). Edit `authsources.php` to test
-  other shapes; it is mounted, so `docker compose restart idp` applies it.
+- Attribute names are exactly prod's (`username`, `email`, `firstName`,
+  `lastName`, `memberOf`), so the mapping block runs unmodified. Edit
+  `authsources.php` to test other shapes; it is mounted, so
+  `docker compose restart idp` applies it.
 - The SP is **https on purpose**: this mellon build stamps `SameSite=None` on
   its cookies regardless of `MellonCookieSameSite`, and browsers drop
   None-without-Secure — a plain-http rig fails the cookie test in every real

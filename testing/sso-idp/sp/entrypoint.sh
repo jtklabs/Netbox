@@ -3,12 +3,10 @@ set -e
 
 # Build the conf under test from the mounted repo file:
 #  1. real backend address,
-#  2. force-enable the commented "Mellon attributes -> identity headers" block,
-#  3. this IdP names its username attribute "username" (like prod's
-#     MELLON_username), while the repo example says MELLON_uid.
+#  2. force-enable the commented "Mellon attributes -> identity headers" block
+#     (its MELLON_* names are the prod IdP's; authsources.php sends the same).
 sed -e "s|^Define NETBOX_BACKEND .*|Define NETBOX_BACKEND ${NETBOX_BACKEND}|" \
     -e '/^# <Location \/netbox>/,/^# <\/Location>/ s/^# \{0,1\}//' \
-    -e 's/MELLON_uid/MELLON_username/g' \
     /opt/netbox.conf.src > /etc/apache2/conf-available/netbox.conf
 grep -q '^<Location /netbox>' /etc/apache2/conf-available/netbox.conf \
   || { echo "FATAL: mapping block not found/uncommented — did apache/netbox.conf change shape?"; exit 1; }
