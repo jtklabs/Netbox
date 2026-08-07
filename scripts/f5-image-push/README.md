@@ -77,25 +77,24 @@ for spotting units that will fail the image push space check before you start.
 Unlike `push-report.csv`, the `--output` file is a point-in-time snapshot and
 is overwritten on each run.
 
-## Pruning old installers
+## Pruning old installers (`--prune`)
 
-`f5_image_prune.py` lists every software and hotfix ISO sitting in
-`/shared/images` on each unit and can delete them over the same API
-(`DELETE /mgmt/tm/sys/software/image/<name>` and `.../hotfix/<name>`).
-Deleting an installer never touches installed boot volumes or the running
-software — it only removes files from the GUI Image List / Hotfix List.
+`--prune` on the push deletes every other software and hotfix ISO on each
+unit before uploading, over the same API (`DELETE
+/mgmt/tm/sys/software/image/<name>` and `.../hotfix/<name>`). Only the image
+being pushed survives. Deleting an installer never touches installed boot
+volumes or the running software — it only removes files from the GUI Image
+List / Hotfix List.
 
 ```bash
-./f5_image_prune.py --keep BIGIP-17.5.1.8-0.0.19.iso            # dry-run listing
-./f5_image_prune.py --keep BIGIP-17.5.1.8-0.0.19.iso --delete   # actually delete
+./f5_image_push.py --image BIGIP-17.5.1.8-0.0.19.iso --prune
 ```
 
-Dry-run is the default; nothing is removed without `--delete`. `--keep` is
-repeatable and protects the named ISOs (always keep the release you're
-rolling out). Actual deletions append to `prune-report.csv`, and each unit
-logs its `/shared/images` free space at the end so you can see what was
-reclaimed. Typical order for a tight-on-space fleet: prune old installers,
-then run the image push.
+Pruning runs before the free-space check, so the reclaimed space counts
+toward it. Every deletion is appended to `push-report.csv` as a `pruned`
+row; a delete the unit refuses (e.g. an install is in progress from that
+ISO) is logged as `prune-failed` and the push still proceeds — the space
+check decides whether the upload can happen.
 
 ## UCS backup pull
 

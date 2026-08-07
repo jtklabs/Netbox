@@ -192,13 +192,48 @@ def free_space_kb(client):
         return None
 
 
+SOFTWARE_COLLECTIONS = (
+    ("image", "/mgmt/tm/sys/software/image"),
+    ("hotfix", "/mgmt/tm/sys/software/hotfix"),
+)
+
+
 def find_listed_image(client, filename):
     """Return the image/hotfix entry for filename if the unit lists it."""
-    for path in ("/mgmt/tm/sys/software/image", "/mgmt/tm/sys/software/hotfix"):
+    for _, path in SOFTWARE_COLLECTIONS:
         for item in client.get_json(path).get("items", []):
             if item.get("name") == filename:
                 return item
     return None
+
+
+def prune_other_images(client, keep, report):
+    """Delete every software/hotfix ISO on the unit except `keep`.
+
+    Removes installer files from /shared/images via the sys/software
+    endpoints (tmsh 'delete sys software image/hotfix' equivalents) —
+    installed boot volumes and the running software are never touched.
+    A failed delete is logged and reported but doesn't stop the push;
+    the space pre-check decides whether the upload can proceed.
+    """
+    device = client.device
+    for kind, path in SOFTWARE_COLLECTIONS:
+        for item in client.get_json(path).get("items", []):
+            name = item.get("name", "")
+            if name == keep:
+                continue
+            info = f"{kind} {name} ({item.get('version', '?')}, {item.get('fileSize', '? size')})"
+            resp = client.session.delete(
+                f"{client.base}{path}/{name}",
+                verify=client.verify, timeout=max(client.timeout, 120),
+            )
+            if resp.ok:
+                log(device.name, f"pruned {info}")
+                report.record(name, device, "pruned", info)
+            else:
+                log(device.name, f"prune failed: {info} — HTTP {resp.status_code}")
+                report.record(name, device, "prune-failed",
+                              f"{info} — HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 def remote_md5(client, filename, directory="/shared/images"):
@@ -273,11 +308,13 @@ def wait_until_listed(client, filename, local_md5, verify_timeout):
     )
 
 
-def push_to_device(device, image_path, local_md5, settings, force, report):
+def push_to_device(device, image_path, local_md5, settings, force, prune, report):
     filename = os.path.basename(image_path)
     client = F5Client(device, settings["login_provider"], settings["verify_ssl"], settings["timeout"])
     try:
         client.login()
+        if prune:
+            prune_other_images(client, filename, report)
         existing = find_listed_image(client, filename)
         if existing and not force:
             device_md5 = remote_md5(client, filename)
@@ -383,6 +420,9 @@ def main():
     argp.add_argument("--config", default="config.ini", help="credentials/settings INI (default: config.ini)")
     argp.add_argument("--workers", type=int, help="parallel uploads (default from config)")
     argp.add_argument("--force", action="store_true", help="re-upload even if the unit already lists the image")
+    argp.add_argument("--prune", action="store_true",
+                      help="before uploading, delete every other software/hotfix ISO on the unit "
+                           "(only installer files are removed; installed volumes are untouched)")
     argp.add_argument("--dry-run", action="store_true", help="show what would be done without connecting")
     argp.add_argument("--report", default="push-report.csv",
                       help="append-only run history CSV (default: push-report.csv)")
@@ -402,8 +442,9 @@ def main():
     print(f"devices: {len(devices)} from {args.csv}, {workers} parallel upload(s)")
 
     if args.dry_run:
+        extra = " (pruning other installers first)" if args.prune else ""
         for dev in devices:
-            print(f"  would upload to {dev.name} ({dev.host}:{dev.port} as {dev.username})")
+            print(f"  would upload to {dev.name} ({dev.host}:{dev.port} as {dev.username}){extra}")
         return 0
 
     print("computing local MD5 (the unit re-checks this after upload)...")
@@ -414,7 +455,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(
-            lambda dev: push_to_device(dev, args.image, local_md5, settings, args.force, report),
+            lambda dev: push_to_device(dev, args.image, local_md5, settings,
+                                       args.force, args.prune, report),
             devices,
         ))
 
