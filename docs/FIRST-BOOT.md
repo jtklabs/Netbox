@@ -135,10 +135,24 @@ BIND_ADDRESS=0.0.0.0
 EOF
 ```
 
-Running discovery on this host too? Append the diode block + DISCOVERY_* creds
-to that `.env` (copy the block shape from your dev `.env`), append
-`:compose/discovery.yml` to COMPOSE_FILE, and place `client-credentials.json`
-at `/mnt/data_disk/netbox-secrets/` with fresh secrets matching the .env values.
+Running discovery on this host (required before any remote collector can push
+to it)? Do not assemble it by hand — three OAuth secrets must agree between
+`.env` and `client-credentials.json`, and a mismatch surfaces later as opaque
+auth failures between the Diode components. One command does all of it with a
+single source of truth, idempotently:
+
+```bash
+sudo ./scripts/enable-discovery-prod.sh
+```
+
+(appends the discovery block with fresh secrets, adds `:compose/discovery.yml`
+to COMPOSE_FILE, generates a matching `client-credentials.json`, adds the
+compose-internal name `netbox` to ALLOWED_HOSTS, and verifies the files
+agree). Then `sudo systemctl restart netbox-compose`, run
+`sudo docker compose up -d diode-auth-bootstrap` once more (idempotent — the
+hydra client registration can race hydra's first boot), open the Diode port
+(8090, plaintext gRPC) to collector IPs only, and mint collectors with
+`scripts/deploy-collector.sh`.
 
 Lock the secrets down — everything above was written with the default umask:
 
