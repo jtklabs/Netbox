@@ -82,6 +82,7 @@ if findmnt -no OPTIONS -T "$probe" | tr ',' '\n' | grep -qx noexec; then
   log "       benchmark wants a separate partition there and does not ask for"
   log "       noexec on it), or re-run with DOCKER_DATA_ROOT=<exec-permitted"
   log "       path> and this script will point the daemon at it."
+  log "       Full procedure: docs/RUNBOOK-noexec-recovery.md"
   exit 1
 fi
 if [ -n "${DOCKER_DATA_ROOT:-}" ]; then log "docker data root: $DOCKER_DATA_ROOT"; fi
