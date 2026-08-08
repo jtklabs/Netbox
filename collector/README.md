@@ -8,6 +8,24 @@ What a collector needs: Docker, and outbound reach to the Diode endpoint. That
 is all. It never touches PostgreSQL, Redis, or any NetBox credential — the only
 secret it holds is its own scoped ingest credential, revocable on its own.
 
+## Preparing a fresh box (Ubuntu 24 / RHEL 9)
+
+`scripts/prepare-docker-host.sh` (run as root) installs Docker + Compose v2 and
+pins **all** Docker networking into the CGNAT range (`100.64.0.0/10`) — 
+required in this environment, because Docker's 172.17/12 defaults collide with
+real networks here, and the collision fails silently: container traffic to a
+real 172.x host routes into the bridge instead. To also authorize the central
+server for the unattended `--host` push (SSH key + passwordless sudo for a
+dedicated deploy user):
+
+```bash
+sudo DEPLOY_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" DEPLOY_USER=netdeploy ./prepare-docker-host.sh
+```
+
+(with the pubkey coming from the central server; generate one there first with
+`ssh-keygen -t ed25519 -N ''` if needed). Then deploy with
+`--host netdeploy@<box>`. Re-running the script is safe.
+
 ## Standing one up
 
 **From the central server**, build a ready-to-run bundle for the site. This

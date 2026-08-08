@@ -8,7 +8,10 @@ boot" — zero manual steps once first-boot setup exists.
 
 1. **Build/refresh the AMI** (your compliance pipeline): Ubuntu 24 base +
    docker engine + compose plugin + this repo checked out at the pinned tag
-   under `/opt/netbox` + `netbox-compose.service` enabled. App version pins do
+   under `/opt/netbox` + `netbox-compose.service` enabled.
+   `scripts/prepare-docker-host.sh` covers the docker/compose install **and
+   pins Docker networking to CGNAT** (100.64.0.0/10) — bake it in so the
+   NetBox host's own bridge networks cannot collide with real 172.x space. App version pins do
    NOT change here (see RUNBOOK-upgrade.md — decoupled on purpose, D7).
 2. **Stop the old instance** (do not terminate yet — it's the rollback).
 3. **Detach the data disk** from the old instance; **attach to the new one**.
