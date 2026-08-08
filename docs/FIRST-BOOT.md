@@ -210,6 +210,26 @@ sudo apachectl configtest && sudo systemctl reload apache2
 Verification comes after step 6 starts the stack — there is nothing listening
 yet at this point.
 
+### API clients get redirected to the IdP instead of answered
+
+`<Location /netbox>` puts everything behind Mellon — including `/netbox/api/`,
+which non-browser clients call with NetBox tokens, not SAML. The shipped
+`apache/netbox.conf` carries a `<Location /netbox/api>` block that opts the API
+out of Mellon (NetBox's own auth becomes the only gate; the spoof-protection
+unsets still strip identity headers there). If your installed copy predates it,
+add that block — it must appear AFTER the `<Location /netbox>` auth block,
+because later Location sections override earlier ones.
+
+Token formats (NetBox 4.6 — the UI shows the full string once, at creation):
+
+```bash
+curl -H 'Authorization: Bearer nbt_<key>.<secret>' https://netbox.example.com/netbox/api/dcim/devices/
+```
+
+Legacy v1 tokens use `Authorization: Token <40-char-key>`. A 403 with
+`{"detail":"Invalid v1 token"}` means the header reached NetBox but the value
+is in the wrong format for its version — it is not an Apache problem.
+
 ### A POST fails "CSRF token from POST incorrect" (GETs all fine)
 
 Classic same-hostname cookie collision: the front-end app on this vhost also

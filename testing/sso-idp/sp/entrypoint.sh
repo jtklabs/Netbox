@@ -6,7 +6,7 @@ set -e
 #  2. force-enable the commented "Mellon attributes -> identity headers" block
 #     (its MELLON_* names are the prod IdP's; authsources.php sends the same).
 sed -e "s|^Define NETBOX_BACKEND .*|Define NETBOX_BACKEND ${NETBOX_BACKEND}|" \
-    -e '/^# <Location \/netbox>/,/^# <\/Location>/ s/^# \{0,1\}//' \
+    -e '/^# <Location \/netbox>$/,/^# <\/Location>$/ s/^# \{0,1\}//' \
     /opt/netbox.conf.src > /etc/apache2/conf-available/netbox.conf
 grep -q '^<Location /netbox>' /etc/apache2/conf-available/netbox.conf \
   || { echo "FATAL: mapping block not found/uncommented — did apache/netbox.conf change shape?"; exit 1; }
