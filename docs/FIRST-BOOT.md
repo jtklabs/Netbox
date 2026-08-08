@@ -210,6 +210,16 @@ sudo apachectl configtest && sudo systemctl reload apache2
 Verification comes after step 6 starts the stack — there is nothing listening
 yet at this point.
 
+### A POST fails "CSRF token from POST incorrect" (GETs all fine)
+
+Classic same-hostname cookie collision: the front-end app on this vhost also
+uses cookies named `csrftoken`/`sessionid`, and the two applications overwrite
+each other's. The fix is shipped in `prod.env.example` (`CSRF_COOKIE_NAME` /
+`SESSION_COOKIE_NAME`) — confirm both are present in the data-disk `prod.env`
+and force-recreate. Signature if you want proof first: hard-refresh a NetBox
+page and the POST works immediately, then fails again after visiting the other
+application.
+
 ### SSO prompts, but no account is created
 
 Rehearse the whole flow against a real IdP first — `testing/sso-idp/` stands
