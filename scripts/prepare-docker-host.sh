@@ -20,6 +20,11 @@
 # and prints the recreate commands instead of destroying anything.
 #
 # Overrides (env): POOL_BASE=100.64.0.0/10  POOL_SIZE=24  BIP=100.64.0.1/24
+#                  DOCKER_DATA_ROOT=/path  — relocate Docker's data root when
+#                  the filesystem under /var/lib/docker is mounted noexec
+#                  (hardened baselines): runc must exec binaries from the data
+#                  root, so noexec there fails EVERY container at create-task
+#                  with a bare "permission denied".
 set -euo pipefail
 
 POOL_BASE=${POOL_BASE:-100.64.0.0/10}
@@ -60,6 +65,27 @@ if ip -4 route show 2>/dev/null | awk '{print $1}' | grep -qE '^100\.(6[4-9]|[7-
   log "     sub-range (e.g. POOL_BASE=100.96.0.0/11) and re-run."
 fi
 
+# --- 1b. The Docker data root must be exec-able --------------------------------
+# Container filesystems live under the data root and runc execs binaries from
+# them. A noexec mount there (common under CIS-style hardening of /var) fails
+# every container with "failed to create task ... permission denied" and the
+# error never names the mount option. Check before installing anything, on the
+# nearest existing parent so a not-yet-created custom path still resolves.
+DATA_ROOT=${DOCKER_DATA_ROOT:-/var/lib/docker}
+probe=$DATA_ROOT
+while [ ! -e "$probe" ]; do probe=$(dirname "$probe"); done
+if findmnt -no OPTIONS -T "$probe" | tr ',' '\n' | grep -qx noexec; then
+  log "FATAL: the filesystem under $DATA_ROOT is mounted noexec:"
+  findmnt -T "$probe" -o TARGET,SOURCE,OPTIONS | sed 's/^/    /'
+  log "       Containers cannot start from a noexec data root. Either give"
+  log "       /var/lib/docker its own exec-permitted filesystem (the CIS docker"
+  log "       benchmark wants a separate partition there and does not ask for"
+  log "       noexec on it), or re-run with DOCKER_DATA_ROOT=<exec-permitted"
+  log "       path> and this script will point the daemon at it."
+  exit 1
+fi
+if [ -n "${DOCKER_DATA_ROOT:-}" ]; then log "docker data root: $DOCKER_DATA_ROOT"; fi
+
 # --- 2. Install Docker Engine + Compose v2 -----------------------------------
 if [ "$FAMILY" = debian ]; then
   # Ubuntu's own archive: docker.io is current enough and needs no third-party
@@ -90,9 +116,9 @@ fi
 # Merge, never clobber: the host may already carry daemon.json settings
 # (log drivers, proxies). Only our two keys are enforced.
 mkdir -p /etc/docker
-CHANGED=$(python3 - "$BIP" "$POOL_BASE" "$POOL_SIZE" <<'PY'
+CHANGED=$(python3 - "$BIP" "$POOL_BASE" "$POOL_SIZE" "${DOCKER_DATA_ROOT:-}" <<'PY'
 import json, os, sys, shutil, time
-bip, base, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
+bip, base, size, data_root = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 path = "/etc/docker/daemon.json"
 cfg = {}
 if os.path.exists(path):
@@ -100,12 +126,16 @@ if os.path.exists(path):
         text = f.read().strip()
     cfg = json.loads(text) if text else {}
 pools = [{"base": base, "size": size}]
-if cfg.get("bip") == bip and cfg.get("default-address-pools") == pools:
+desired = dict(cfg)
+desired["bip"] = bip
+desired["default-address-pools"] = pools
+if data_root:
+    desired["data-root"] = data_root
+if cfg == desired:
     print("unchanged"); raise SystemExit
 if os.path.exists(path):
     shutil.copy2(path, path + ".bak-" + time.strftime("%Y%m%d%H%M%S"))
-cfg["bip"] = bip
-cfg["default-address-pools"] = pools
+cfg = desired
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2); f.write("\n")
