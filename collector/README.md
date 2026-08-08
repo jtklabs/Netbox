@@ -14,17 +14,13 @@ secret it holds is its own scoped ingest credential, revocable on its own.
 pins **all** Docker networking into the CGNAT range (`100.64.0.0/10`) — 
 required in this environment, because Docker's 172.17/12 defaults collide with
 real networks here, and the collision fails silently: container traffic to a
-real 172.x host routes into the bridge instead. To also authorize the central
-server for the unattended `--host` push (SSH key + passwordless sudo for a
-dedicated deploy user):
+real 172.x host routes into the bridge instead. Re-running the script is safe.
 
-```bash
-sudo DEPLOY_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" DEPLOY_USER=netdeploy ./prepare-docker-host.sh
-```
-
-(with the pubkey coming from the central server; generate one there first with
-`ssh-keygen -t ed25519 -N ''` if needed). Then deploy with
-`--host netdeploy@<box>`. Re-running the script is safe.
+SSH access for the unattended `--host` push is distributed by hand: put the
+central server's public key in the target user's `authorized_keys`, and give
+that user **passwordless** sudo — the remote install runs `sudo` in a session
+with no TTY, where a password prompt is a failure, not a question. Without
+those two, skip `--host` and carry the bundle over manually.
 
 ## Standing one up
 

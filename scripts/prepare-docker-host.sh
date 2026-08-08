@@ -20,10 +20,6 @@
 # and prints the recreate commands instead of destroying anything.
 #
 # Overrides (env): POOL_BASE=100.64.0.0/10  POOL_SIZE=24  BIP=100.64.0.1/24
-#
-# Optional collector-deploy access (see section 5): set DEPLOY_PUBKEY (and
-# DEPLOY_USER) to let the central server's scripts/deploy-collector.sh push
-# bundles here unattended.
 set -euo pipefail
 
 POOL_BASE=${POOL_BASE:-100.64.0.0/10}
@@ -139,60 +135,7 @@ if [ -n "$STALE" ]; then
   log "     (or for orphans:  docker network rm <name>)"
 fi
 
-# --- 5. Optional: SSH access for unattended collector deployment --------------
-# scripts/deploy-collector.sh --host pushes the bundle with plain `ssh` and
-# runs the install with `sudo` in a session that has no TTY. Unattended, that
-# requires two things of the target user: the central server's public key in
-# authorized_keys, and PASSWORDLESS sudo — a sudo password prompt in a
-# non-interactive session is not answered, it is a failure. Both are set up
-# here only when DEPLOY_PUBKEY is provided:
-#
-#   central server, once:   ssh-keygen -t ed25519 -N ''     # default identity
-#   each collector box:     sudo DEPLOY_PUBKEY="ssh-ed25519 AAAA... central" \
-#                                DEPLOY_USER=netdeploy ./prepare-docker-host.sh
-#   central server, then:   ./scripts/deploy-collector.sh site-x ... --host netdeploy@<box>
-#
-# NOPASSWD sudo is exactly what "unattended install" means — give it to a
-# dedicated deploy user, not a person's account. The user is created if
-# missing. Nothing in this section runs when DEPLOY_PUBKEY is unset.
-if [ -n "${DEPLOY_PUBKEY:-}" ]; then
-  DEPLOY_USER=${DEPLOY_USER:-${SUDO_USER:-root}}
-  case "$DEPLOY_PUBKEY" in
-    ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*|sk-ssh-*) ;;
-    *) log "FATAL: DEPLOY_PUBKEY does not look like an OpenSSH public key"; exit 1 ;;
-  esac
-  if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
-    log "creating deploy user $DEPLOY_USER"
-    useradd -m -s /bin/bash "$DEPLOY_USER"
-  fi
-  dgroup=$(id -gn "$DEPLOY_USER")
-  dhome=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
-  install -d -m 700 -o "$DEPLOY_USER" -g "$dgroup" "$dhome/.ssh"
-  touch "$dhome/.ssh/authorized_keys"
-  if ! grep -qxF "$DEPLOY_PUBKEY" "$dhome/.ssh/authorized_keys"; then
-    printf '%s\n' "$DEPLOY_PUBKEY" >> "$dhome/.ssh/authorized_keys"
-  fi
-  chmod 600 "$dhome/.ssh/authorized_keys"
-  chown "$DEPLOY_USER:$dgroup" "$dhome/.ssh/authorized_keys"
-  log "deploy key authorized for $DEPLOY_USER"
-  if [ "$DEPLOY_USER" != root ]; then
-    # Never install a sudoers fragment that visudo has not validated — a bad
-    # one can lock sudo for the whole host.
-    sudo_tmp=$(mktemp)
-    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$DEPLOY_USER" > "$sudo_tmp"
-    if visudo -cf "$sudo_tmp" >/dev/null 2>&1; then
-      install -m 440 "$sudo_tmp" /etc/sudoers.d/netbox-collector-deploy
-      log "passwordless sudo granted to $DEPLOY_USER (/etc/sudoers.d/netbox-collector-deploy)"
-    else
-      rm -f "$sudo_tmp"
-      log "FATAL: generated sudoers entry failed visudo validation — not installed"
-      exit 1
-    fi
-    rm -f "$sudo_tmp"
-  fi
-fi
-
-# --- 6. Verify ---------------------------------------------------------------
+# --- 5. Verify ---------------------------------------------------------------
 fail=0
 command -v docker >/dev/null || { log "FATAL: docker not on PATH"; exit 1; }
 docker compose version >/dev/null 2>&1 || { log "FATAL: Compose v2 missing — 'docker compose' does not work"; fail=1; }
