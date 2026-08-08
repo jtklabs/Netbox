@@ -210,6 +210,21 @@ sudo apachectl configtest && sudo systemctl reload apache2
 Verification comes after step 6 starts the stack — there is nothing listening
 yet at this point.
 
+**If a provisioning/config-management system owns that Apache server**, put the
+fully-edited `netbox.conf` into ITS source of truth — a provisioning run that
+"restores" a template version silently drops the hand-applied pieces. Each loss
+has a distinct signature: mapping block gone → SSO users created with no
+account; `/netbox/api` block gone → API tokens bounce to the IdP; proxy section
+gone → 503 everywhere; spoof-protection unsets gone → **no symptom at all**,
+just a missing security control. `configtest` cannot catch any of this (absent
+blocks are valid syntax) — after any provisioning cycle, run:
+
+```bash
+for m in 'Define NETBOX_BACKEND http' 'RequestHeader unset X-Remote-User early' 'RequestHeader set X-Remote-User' '<Location /netbox/api>' 'ProxyPass        /netbox/'; do grep -qF "$m" /etc/apache2/conf-available/netbox.conf && echo "ok       $m" || echo "MISSING  $m"; done
+```
+
+Five `ok` lines means every load-bearing piece survived.
+
 ### API clients get redirected to the IdP instead of answered
 
 `<Location /netbox>` puts everything behind Mellon — including `/netbox/api/`,
