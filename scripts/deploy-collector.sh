@@ -46,9 +46,16 @@ done
 json() { python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))"; }
 
 # --- admin token, reused across the whole fleet ----------------------------
-[ -f .env ] || { echo "error: .env not found — run scripts/init-dev-env.sh first" >&2; exit 1; }
+# -r, not -f: in prod .env is a root-owned symlink onto the data disk, and an
+# unprivileged run sees "missing" when the truth is "not yours to read".
+[ -r .env ] || { echo "error: .env not found or not readable.
+  prod: it is root-owned on the data disk — run this script with sudo.
+  dev:  run scripts/init-dev-env.sh first." >&2; exit 1; }
 admin_secret=$(grep '^NETBOX_TO_DIODE_CLIENT_SECRET=' .env | tail -1 | cut -d= -f2-)
-[ -n "$admin_secret" ] || { echo "error: NETBOX_TO_DIODE_CLIENT_SECRET missing from .env" >&2; exit 1; }
+[ -n "$admin_secret" ] || { echo "error: NETBOX_TO_DIODE_CLIENT_SECRET missing from .env.
+  prod: add the diode/discovery block from .env.example to
+  /mnt/data_disk/netbox-secrets/.env — enabling discovery is a .env change,
+  and the boot-time drift check only covers prod.env, not this file." >&2; exit 1; }
 
 token=$(curl -sS -X POST "$DIODE_URL/diode/auth/token" \
   -H 'Content-Type: application/x-www-form-urlencoded' \
