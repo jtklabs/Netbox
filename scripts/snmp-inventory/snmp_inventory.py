@@ -40,6 +40,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from snmpinv import config as config_module
+from snmpinv import onboarding
+from snmpinv import __version__
 from snmpinv.collect import Collector, DeviceFacts
 from snmpinv.model import ScanResult, build_scan_result
 from snmpinv.netbox import NetBox, NetBoxError
@@ -84,6 +86,17 @@ def main(argv=None) -> int:
         dry_run=args.dry_run,
     )
 
+    collector = Collector(
+        config.credentials,
+        timeout=config.snmp.timeout,
+        retries=config.snmp.retries,
+        use_bulk=config.snmp.use_bulk,
+    )
+    syncer = Syncer(netbox, config.sync)
+
+    if args.onboard:
+        return run_onboarding(netbox, config, collector, syncer, args)
+
     try:
         targets = build_target_list(netbox, config, args)
     except (NetBoxError, ValueError) as exc:
@@ -99,14 +112,6 @@ def main(argv=None) -> int:
         return 0
 
     log.info("scanning %d targets with %d workers", len(targets), config.snmp.workers)
-    collector = Collector(
-        config.credentials,
-        timeout=config.snmp.timeout,
-        retries=config.snmp.retries,
-        use_bulk=config.snmp.use_bulk,
-    )
-    syncer = Syncer(netbox, config.sync)
-
     started = time.time()
     scanned = failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.snmp.workers) as pool:
@@ -152,6 +157,45 @@ def main(argv=None) -> int:
         elapsed, scanned, failed, netbox.summary(),
     )
     return 0 if scanned else 1
+
+
+def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
+                   args) -> int:
+    """Check in with the Discovery plugin and work whatever it hands back.
+
+    Run this on a short timer — a couple of minutes — because a person is
+    sitting in NetBox waiting for it. The full sweep is the slow nightly job;
+    this is the responsive one.
+    """
+    if not onboarding.plugin_available(netbox):
+        log.error(
+            "the Discovery plugin is not installed on %s, so there is no "
+            "onboarding queue to work", config.netbox.url
+        )
+        return 2
+
+    started = time.time()
+    try:
+        jobs = onboarding.check_in(
+            netbox, config.poller_name,
+            version=__version__,
+            summary=args.summary,
+            claim=not args.dry_run,
+            limit=args.limit or 25,
+        )
+    except NetBoxError as exc:
+        log.error("check-in failed: %s", exc)
+        return 1
+
+    if not jobs:
+        log.info("check-in: nothing waiting")
+        return 0
+
+    counts = onboarding.run_jobs(netbox, collector, syncer, jobs, dry_run=args.dry_run)
+    summary = ", ".join("%d %s" % (n, name) for name, n in sorted(counts.items()))
+    log.info("onboarding done in %.1fs — %s; NetBox: %s",
+             time.time() - started, summary or "nothing done", netbox.summary())
+    return 0
 
 
 def build_target_list(netbox: NetBox, config, args) -> list[Target]:
@@ -289,6 +333,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="site to file --host results under, when it cannot be derived")
     parser.add_argument("--list-targets", action="store_true",
                         help="print the selected targets and exit")
+    parser.add_argument("--onboard", action="store_true",
+                        help="work the Discovery plugin's onboarding queue instead "
+                             "of sweeping; run this on a short timer")
+    parser.add_argument("--summary", default="",
+                        help="note shown against this poller in NetBox after check-in")
     parser.add_argument("--new-only", action="store_true",
                         help="only scan IPAM addresses, skipping rescans of known devices")
     parser.add_argument("--limit", type=int, default=0,

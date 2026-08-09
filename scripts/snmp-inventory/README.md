@@ -218,6 +218,97 @@ The NetBox token can live in the config or, better, in `NETBOX_TOKEN` — the
 environment wins, so a systemd unit or secrets agent can supply it without the
 token ever being on disk.
 
+## Onboarding a single device from NetBox
+
+For adding one device rather than importing a list, the **Discovery** plugin
+(`plugins/netbox-discovery/`) puts a form in NetBox: someone types the
+management IP and nothing else.
+
+The address is enough because of the same chain the sweep uses, run backwards:
+
+```
+address  ->  most specific containing prefix
+         ->  that prefix's site
+         ->  the site's (or nearest region's) poller-<name> tag
+         ->  the poller that will scan it
+```
+
+If the address falls in no prefix, or the prefix has no site, or nothing is
+tagged, the form **refuses it there and then** and says which of those to fix.
+Accepting it would mean a request sitting in a queue that nothing will ever
+service.
+
+Then:
+
+1. The poller picks the job up on its next check-in and scans the device.
+2. It reports what it found — model, serial, version, stack members — and
+   **writes nothing**. The request waits in *Awaiting review*.
+3. Someone looks at it, optionally overrides the name, site or role, and
+   applies.
+4. The poller creates the device on its next check-in.
+
+Run the queue on a short timer, separately from the nightly sweep — somebody is
+sitting in NetBox waiting for it:
+
+```
+*/2 * * * *  cd /opt/snmp-inventory && ./snmp_inventory.py --config snmp-inventory.conf --onboard --quiet
+```
+
+`--onboard` replaces the sweep for that run; it does not scan anything else.
+
+### The same workflow over the API
+
+Everything the form and the buttons do is available over REST, so onboarding
+can be driven from a provisioning script or a ticket system. The API and the UI
+call the same functions, so they accept and refuse exactly the same things.
+
+```bash
+NB=https://netbox.example.com/netbox/api
+AUTH="Authorization: Bearer nbt_..."
+
+# Add — the address is the only required field.
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{"address": "10.10.1.5"}'
+# -> 201 with the resolved site and poller, or 400 saying which prefix is missing
+
+# Review — read what the poller found.
+curl -s "$NB/plugins/discovery/onboarding-requests/12/" -H "$AUTH"
+# -> status "review", discovered.devices[] with model, serial, version, members
+
+# Approve — empty body means "as scanned".
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/approve/" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{}'
+# -> 200 status "approved"; 409 if it is not awaiting review
+
+# Approve with overrides
+  -d '{"override_name": "core-sw-01", "override_site": 3, "role": 7}'
+
+# Reject, with a reason that stays on the record
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/reject/" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{"reason": "decommissioned"}'
+
+# Retry a failed one, re-running resolution
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/retry/" -H "$AUTH"
+```
+
+Useful filters: `?status=review`, `?needs_attention=true` (anything waiting on
+a person rather than on a poller), `?poller=boston`, `?site_id=3`.
+
+The poller's own three calls are on the same API — `pollers/check-in/`,
+`onboarding-requests/{id}/scanned/` and `.../applied/` — which is all
+`--onboard` uses. Nothing about the poller is privileged; it is just another
+API client.
+
+Two behaviours worth knowing:
+
+- **Apply re-reads the device.** A preview can be hours old by the time someone
+  looks at it, and the device is right there to ask. If the serial or model has
+  changed since the review, the request goes *back* to review rather than
+  applying — the person approved a specific box and this is no longer that box.
+- **Pollers register themselves.** The first check-in creates the poller record.
+  The UI shows when each last checked in, so a request that has not moved is
+  visibly waiting on a poller rather than mysteriously stuck.
+
 ## Importing your existing address list
 
 `import_ips.py` takes a CSV. `address` is the only required column:
