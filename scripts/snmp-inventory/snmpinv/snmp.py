@@ -44,14 +44,34 @@ _AUTH_FAILURE_PATTERNS = (
 _TIMEOUT_PATTERNS = (
     "Timeout: No Response",
     "No Response from",
+    # A closed UDP port produces the terse form: "snmpbulkwalk: Timeout".
+    "snmpwalk: Timeout",
+    "snmpbulkwalk: Timeout",
+    "snmpget: Timeout",
 )
 _UNREACHABLE_PATTERNS = (
-    "Cannot find module",           # not unreachable, but fatal for this host
     "unknown host",
     "Unknown host",
     "No route to host",
     "Network is unreachable",
     "Connection refused",
+)
+
+# net-snmp chatters on stderr about MIBs it cannot parse. On a stock Ubuntu
+# poller — the documented target — the IETF MIBs are not installed at all, so
+# "Cannot find module (SNMPv2-MIB)" is printed on every single invocation.
+# It says nothing about the device and must never be mistaken for a failure;
+# we ask for numeric OIDs and never need a MIB loaded.
+_IGNORED_STDERR_PATTERNS = (
+    "Cannot find module",
+    "Did not find",
+    "Cannot adopt OID",
+    "Unlinked OID",
+    "Undefined identifier",
+    "MIB search path",
+    # net-snmp creates a cert_indexes directory under its persistent dir on
+    # first use and announces it on stderr.
+    "Created directory:",
 )
 
 # A walk that returns these for the very first OID means the agent has nothing
@@ -78,6 +98,15 @@ class SnmpTimeoutError(SnmpError):
 
 class SnmpToolMissing(SnmpError):
     """net-snmp is not installed on this poller."""
+
+
+class SnmpInvocationError(SnmpError):
+    """net-snmp rejected our arguments.
+
+    Always a bug here, never a device problem, so it is deliberately not
+    caught by the GETBULK-to-GETNEXT fallback: falling back would paper over a
+    malformed command line and turn it into a silent per-device slowdown.
+    """
 
 
 @dataclass(frozen=True)
@@ -185,6 +214,11 @@ class CredentialSession:
         # service account /var/lib/snmp is usually not writable, and a stale
         # engine time from a previous run causes spurious auth failures.
         env["SNMP_PERSISTENT_DIR"] = self._dir or ""
+        # Every OID we send is numeric, so loading the MIB tree buys nothing.
+        # Turning it off removes a few hundred milliseconds per invocation and
+        # silences the "Cannot find module" chatter that a poller without the
+        # IETF MIBs installed would otherwise print on every call.
+        env["MIBS"] = ""
         return env
 
     def _run(self, tool: str, host: str, oid: str) -> str:
@@ -198,7 +232,11 @@ class CredentialSession:
             )
         argv = [binary, "-On", "-Oe", "-Ot", "-t", str(self.timeout), "-r", str(self.retries)]
         if tool == "snmpbulkwalk":
-            argv += ["-Cr", str(self.max_repetitions)]
+            # net-snmp's application-specific -C options take their value
+            # attached, not as a separate argument: "-Cr25", never "-Cr 25".
+            # The spaced form is rejected outright with a usage message, which
+            # would break every bulk walk.
+            argv.append(f"-Cr{self.max_repetitions}")
         argv += [host, oid]
         # Note there is no -u/-A/-X/-l here on purpose: everything about the
         # credential comes from SNMPCONFPATH.
@@ -215,8 +253,8 @@ class CredentialSession:
         except subprocess.TimeoutExpired as exc:
             raise SnmpTimeoutError(f"{tool} against {host} exceeded its overall time budget") from exc
 
-        combined = f"{proc.stdout}\n{proc.stderr}"
-        _raise_for_message(combined, host)
+        _raise_for_message(_meaningful(proc.stdout, proc.stderr), host,
+                           returncode=proc.returncode)
         return proc.stdout
 
     def walk(self, host: str, oid: str) -> list[VarBind]:
@@ -224,9 +262,7 @@ class CredentialSession:
         if self.use_bulk:
             try:
                 return parse_varbinds(self._run("snmpbulkwalk", host, oid))
-            except SnmpAuthError:
-                raise
-            except SnmpTimeoutError:
+            except (SnmpAuthError, SnmpTimeoutError, SnmpInvocationError, SnmpToolMissing):
                 raise
             except SnmpError:
                 # Some older agents answer GETNEXT fine but mishandle GETBULK.
@@ -248,11 +284,10 @@ class CredentialSession:
                                   timeout=max(30, self.timeout * (self.retries + 1) * 4))
         except subprocess.TimeoutExpired as exc:
             raise SnmpTimeoutError(f"snmpget against {host} timed out") from exc
-        combined = f"{proc.stdout}\n{proc.stderr}"
         # snmpget returns non-zero when *any* requested OID is absent, which is
         # routine when probing several vendors' scalars, so only genuine
         # transport/auth failures are escalated.
-        _raise_for_message(combined, host)
+        _raise_for_message(_meaningful(proc.stdout, proc.stderr), host)
         return {bind.oid: bind for bind in parse_varbinds(proc.stdout)}
 
     def probe(self, host: str) -> bool:
@@ -261,7 +296,20 @@ class CredentialSession:
         return bool(binds)
 
 
-def _raise_for_message(text: str, host: str) -> None:
+def _meaningful(stdout: str, stderr: str) -> str:
+    """Combine output, dropping net-snmp's MIB-loading chatter.
+
+    Without this the harmless "Cannot find module" lines a MIB-less poller
+    prints get matched against the failure patterns below.
+    """
+    lines = [
+        line for line in f"{stdout}\n{stderr}".splitlines()
+        if not any(noise in line for noise in _IGNORED_STDERR_PATTERNS)
+    ]
+    return "\n".join(lines)
+
+
+def _raise_for_message(text: str, host: str, returncode: int = 0) -> None:
     """Turn net-snmp's diagnostics into the right exception type.
 
     The distinction that matters is auth-failure versus timeout. On an auth
@@ -269,6 +317,12 @@ def _raise_for_message(text: str, host: str) -> None:
     not answering at all and trying five more credential sets just multiplies
     the wait by five.
     """
+    if text.lstrip().startswith("USAGE:") or "\nUSAGE:" in text:
+        # Our own command line is wrong. Without this the empty stdout looks
+        # like a device that answered with nothing, and the scan reports a
+        # credential problem on every host in the fleet.
+        first_line = next((l for l in text.splitlines() if l.strip()), "")
+        raise SnmpInvocationError(f"net-snmp rejected our arguments: {first_line}")
     for pattern in _AUTH_FAILURE_PATTERNS:
         if pattern in text:
             raise SnmpAuthError(f"{host}: {pattern}")
@@ -278,6 +332,13 @@ def _raise_for_message(text: str, host: str) -> None:
     for pattern in _UNREACHABLE_PATTERNS:
         if pattern in text:
             raise SnmpTimeoutError(f"{host}: {pattern}")
+    if returncode != 0 and not text.strip():
+        # net-snmp exited non-zero and said nothing. That happens when a UDP
+        # port is closed and the ICMP unreachable comes back before any retry —
+        # common on loopback and on well-firewalled hosts. Without this the
+        # caller sees an empty walk and blames the credentials, then patiently
+        # tries every remaining credential set against a host that is not there.
+        raise SnmpTimeoutError(f"{host}: no response (net-snmp exited {returncode})")
 
 
 # `.1.3.6.1.2.1.1.1.0 = STRING: "Linux host"` — the value may then continue on

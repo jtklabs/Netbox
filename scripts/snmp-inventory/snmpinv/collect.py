@@ -239,6 +239,10 @@ class Collector:
 
         if profile is not None:
             _apply_vendor_scalars(session, host, facts, profile)
+            if not facts.vendor_model:
+                # Palo Alto, Fortinet and Opengear name the model in sysDescr
+                # and publish no model scalar to read it from.
+                facts.vendor_model = vendors.extract_model(facts.sys_descr, profile.model_patterns)
             if profile.name == "aruba":
                 facts.access_points = _walk_access_points(session, host)
 

@@ -63,6 +63,12 @@ class VendorProfile:
     model_oids: tuple[str, ...] = ()
     # Applied to sysDescr when no version OID answered.
     version_patterns: tuple[str, ...] = ()
+    # Applied to sysDescr when no model OID answered. Only for vendors that
+    # publish no model scalar at all — Palo Alto and Fortinet both name the
+    # model in sysDescr and nowhere else queryable. This is still the device
+    # reporting its own model in its own words; it is not a sysObjectID lookup
+    # table, which is the thing this scanner exists to avoid.
+    model_patterns: tuple[str, ...] = ()
     # Extra subtrees to walk for this vendor (e.g. the Aruba AP table).
     extra_walks: tuple[str, ...] = ()
     # ENTITY-MIB is authoritative where it is populated. Appliances that leave
@@ -118,6 +124,9 @@ PROFILES: dict[int, VendorProfile] = {
         version_oids=("1.3.6.1.4.1.25461.2.1.2.1.1.0",),   # panSysSwVersion
         serial_oids=("1.3.6.1.4.1.25461.2.1.2.1.3.0",),    # panSysSerialNumber
         version_patterns=(r"PAN-OS\s+([\w.\-]+)",),
+        # "Palo Alto Networks PA-3220 series firewall". PAN-COMMON-MIB has no
+        # model scalar — panSysHwVersion is the hardware revision, not the PID.
+        model_patterns=(r"\b(PA-[\w\-]+)", r"\b(VM-\d+)", r"\b(M-\d+)"),
         entity_mib_sparse=True,
     ),
     12356: VendorProfile(
@@ -127,6 +136,8 @@ PROFILES: dict[int, VendorProfile] = {
         version_oids=("1.3.6.1.4.1.12356.101.4.1.1.0",),   # fgSysVersion
         serial_oids=("1.3.6.1.4.1.12356.100.1.1.1.0",),    # fnSysSerial
         version_patterns=(r"v([0-9]+\.[0-9]+\.[0-9]+)",),
+        # "FortiGate-600E v7.2.8,build1639,240110 (GA)"
+        model_patterns=(r"\b(Forti\w+-[\w\-]+)",),
         entity_mib_sparse=True,
     ),
     3375: VendorProfile(
@@ -172,6 +183,8 @@ PROFILES: dict[int, VendorProfile] = {
         manufacturer="Opengear",
         platform="Opengear",
         version_patterns=(r"[Vv]ersion\s+([0-9][\w.\-]*)", r"\b([0-9]+\.[0-9]+\.[0-9]+)\b"),
+        # "Opengear CM7148-2-DAC console server version 4.13.0"
+        model_patterns=(r"Opengear\s+([A-Z]{2}\d[\w\-]*)",),
         entity_mib_sparse=True,
     ),
 }
@@ -206,6 +219,22 @@ def enterprise_number(sys_object_id: str) -> int | None:
         return None
 
 
+def extract_model(sys_descr: str, patterns: tuple[str, ...]) -> str:
+    """Pull a model out of sysDescr for vendors that publish it nowhere else.
+
+    Unlike version extraction there is no generic fallback: a wrong model is
+    exactly the failure this scanner exists to prevent, so a vendor either has
+    an explicit pattern or reports no model at all.
+    """
+    if not sys_descr or not patterns:
+        return ""
+    for pattern in patterns:
+        match = re.search(pattern, sys_descr)
+        if match:
+            return match.group(1).strip().rstrip(",")
+    return ""
+
+
 def extract_version(sys_descr: str, patterns: tuple[str, ...]) -> str:
     """Pull a software version out of sysDescr using the profile's patterns.
 
@@ -231,7 +260,9 @@ PLATFORM_HINTS: tuple[tuple[str, str, str], ...] = (
     ("cisco", "NX-OS", "Cisco NX-OS"),
     ("cisco", "IOS-XE", "Cisco IOS-XE"),
     ("cisco", "IOS XE", "Cisco IOS-XE"),
-    ("cisco", "IOS-XR", "Cisco IOS-XR"),
+    # IOS-XE boxes usually only give themselves away through the image name,
+    # e.g. "Catalyst L3 Switch Software (CAT9K_IOSXE)" — with no separator.
+    ("cisco", "IOSXE", "Cisco IOS-XE"),
     ("cisco", "Adaptive Security Appliance", "Cisco ASA"),
     ("aruba", "ArubaOS-CX", "ArubaOS-CX"),
     ("aruba", "ClearPass", "Aruba ClearPass"),
