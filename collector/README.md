@@ -77,8 +77,10 @@ fill them in `collector.env` (or set `DISCOVERY_*` centrally so every bundle
 inherits them) and re-run.
 
 **Changing what a collector scans:** edit `policies.yaml` and re-run
-`./install.sh` — it re-renders the config and restarts the agent only if the
-config actually changed. Do **not** edit `agent.yaml`: it is generated from
+`./install.sh` — it re-renders the config and recreates the agent only if the
+config actually changed. (`docker compose up -d` alone will not do it: the
+container definition is unchanged, so Compose leaves the old config running.
+That is why an edit can appear to have been applied and silently was not.) Do **not** edit `agent.yaml`: it is generated from
 `agent.yaml.template` + `policies.yaml` on every install and your edits will be
 overwritten. Agent-level settings belong in the template.
 

@@ -142,11 +142,14 @@ fi
 
 echo '==> starting the collector'
 docker compose up -d
-# up -d cannot notice a changed bind-mounted file, so restart explicitly when
-# the config moved. Harmless when the container was only just created.
+# up -d cannot notice a changed bind-mounted file — the container definition is
+# unchanged — so it leaves the agent running with the config it started with.
+# Recreate rather than restart: recreating is what operators found actually
+# picks up an edited policy set, and it costs a couple of seconds on a
+# stateless collector (the pip cache is a named volume and survives).
 if [ "$config_changed" = true ]; then
-  echo '    agent config changed — restarting the agent to load it'
-  docker compose restart orb-agent
+  echo '    agent config changed — recreating the agent to load it'
+  docker compose up -d --force-recreate orb-agent
 fi
 sleep 5
 docker compose ps
