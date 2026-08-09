@@ -147,7 +147,7 @@ class SoftwareVersionFilterSet(NetBoxModelFilterSet):
     def filter_has_image(self, queryset, name, value):
         # image_filename counts because a filename plus the configured
         # image_base_url resolves to a working download link.
-        query = ~Q(image_url='') | ~Q(image_file='') | ~Q(image_filename='')
+        query = ~Q(image_url='') | ~Q(image_filename='')
         return queryset.filter(query) if value else queryset.exclude(query)
 
 

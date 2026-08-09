@@ -252,7 +252,7 @@ class SoftwareVersionForm(NetBoxModelForm):
     fieldsets = (
         FieldSet('platform', 'version', 'release_date', name='Version'),
         FieldSet(
-            'image_filename', 'image_url', 'image_file', 'image_size',
+            'image_filename', 'image_url', 'image_size',
             'checksum_type', 'checksum', name='Image',
         ),
         FieldSet('description', name='Reference'),
@@ -263,7 +263,7 @@ class SoftwareVersionForm(NetBoxModelForm):
         model = SoftwareVersion
         fields = (
             'platform', 'version', 'release_date',
-            'image_filename', 'image_url', 'image_file', 'image_size',
+            'image_filename', 'image_url', 'image_size',
             'checksum_type', 'checksum',
             'description', 'comments', 'tags',
         )

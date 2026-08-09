@@ -77,7 +77,7 @@ class SoftwareVersionSerializer(NetBoxModelSerializer):
         model = SoftwareVersion
         fields = (
             'url', 'id', 'display', 'platform', 'version', 'release_date',
-            'image_filename', 'image_url', 'image_file', 'image_size',
+            'image_filename', 'image_url', 'image_size',
             'checksum_type', 'checksum', 'download_url', 'installed_count',
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )

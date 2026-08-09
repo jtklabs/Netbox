@@ -16,5 +16,11 @@ PLUGINS_CONFIG = {
         # environment rather than in this file so nothing secret is committed.
         "cisco_client_id": environ.get("CISCO_CLIENT_ID", ""),
         "cisco_client_secret": environ.get("CISCO_CLIENT_SECRET", ""),
+        # Base URL of the internal HTTP server holding software images. Set it
+        # and a software version needs only a filename to get a download link;
+        # the image server can then move without touching any record. Plain
+        # http is expected — these are download links, never page resources.
+        # e.g. IMAGE_BASE_URL=http://images.internal/network
+        "image_base_url": environ.get("IMAGE_BASE_URL", ""),
     },
 }

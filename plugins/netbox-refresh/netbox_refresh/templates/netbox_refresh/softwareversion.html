@@ -50,12 +50,13 @@
             <tr><th>Link</th>
               <td>{% if object.download_url %}
                     <a href="{{ object.download_url }}">{{ object.download_url }}</a>
+                    {% if not object.image_url %}
+                      <div class="form-text">Derived from the filename and the
+                        <code>image_base_url</code> setting</div>
+                    {% endif %}
                   {% else %}
                     <span class="text-muted">No image location recorded</span>
                   {% endif %}</td></tr>
-            <tr><th>Stored in NetBox</th>
-              <td>{% if object.image_file %}{{ object.image_file.name }}
-                  {% else %}<span class="text-muted">No — served from the image server</span>{% endif %}</td></tr>
           </table>
         </div>
       </div>

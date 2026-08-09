@@ -262,20 +262,19 @@ class SoftwareVersion(PrimaryModel):
         blank=True, null=True, help_text='Date the vendor released this version'
     )
 
-    # --- The image itself. The bytes normally live on an internal HTTP file
-    # server rather than in NetBox, so what we store is a link plus enough
-    # metadata to verify a download. image_file exists for the cases where
-    # somebody does want NetBox to hold the bytes — see download_url.
+    # --- Where the image is, not the image. Images are published to the
+    # internal HTTP file server by whatever process builds them; NetBox stores
+    # the link and enough metadata to verify a download. It deliberately never
+    # holds the bytes: at 300MB–1GB an upload through Apache and gunicorn is a
+    # timeout waiting to happen, and a second copy is a second thing to be
+    # wrong about.
     image_filename = models.CharField(
         max_length=255, blank=True, help_text='e.g. cat9k_iosxe.17.09.04a.SPA.bin'
     )
     image_url = models.URLField(
         max_length=500, blank=True,
-        help_text='Direct download link, typically the internal image server',
-    )
-    image_file = models.FileField(
-        upload_to='netbox-refresh/images/', blank=True,
-        help_text='Optional: store the image in NetBox itself',
+        help_text='Direct download link on the image server. Leave empty to derive '
+                  'it from the filename and the image_base_url plugin setting.',
     )
     image_size = models.BigIntegerField(
         blank=True, null=True, help_text='Image size in bytes, as published by the vendor'
@@ -319,9 +318,10 @@ class SoftwareVersion(PrimaryModel):
     def download_url(self):
         """Where a human should click to get this image.
 
-        Preference order matters. Images are 300MB–1GB, so an explicit link to
-        the internal file server wins; then one derived from the configured
-        base URL plus the filename; and only then a file uploaded into NetBox.
+        An explicit image_url wins; otherwise it is derived from the filename
+        and the image_base_url setting, so populating a hundred versions means
+        typing a hundred filenames rather than a hundred URLs, and moving the
+        image server later is one config change instead of a bulk edit.
 
         A plain http:// link here is expected and works. NetBox is served over
         https, but clicking a download link is a top-level navigation, which
@@ -333,8 +333,6 @@ class SoftwareVersion(PrimaryModel):
         base = _plugin_settings().get('image_base_url', '')
         if base and self.image_filename:
             return '%s/%s' % (base.rstrip('/'), self.image_filename.lstrip('/'))
-        if self.image_file:
-            return self.image_file.url
         return ''
 
     @property

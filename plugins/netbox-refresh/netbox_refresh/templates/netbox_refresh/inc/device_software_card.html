@@ -33,18 +33,31 @@
       <tr>
         <td>Running</td>
         <td>
-          {% if software.software_version %}{{ software.software_version|linkify }}
+          {% if software.software_version %}
+            {{ software.software_version|linkify }}
+            {% if software.software_version.download_url %}
+              <a href="{{ software.software_version.download_url }}" class="ms-1"
+                 title="Download {{ software.software_version.image_filename|default:'image' }}">
+                <i class="mdi mdi-download" aria-hidden="true"></i>
+              </a>
+            {% endif %}
           {% elif software.raw_version %}<code>{{ software.raw_version }}</code>
           {% else %}<span class="text-muted">Never collected</span>{% endif %}
         </td>
       </tr>
       <tr>
+        {# The images people actually want from a device page: what it should #}
+        {# be running, one click from the device itself.                      #}
         <td>Approved</td>
         <td>
           {% with standard=software.standard %}
             {% if standard %}
               {% for version in standard.approved_versions.all %}
-                <a href="{{ version.get_absolute_url }}">{{ version.version }}</a>{% if not forloop.last %}, {% endif %}
+                <a href="{{ version.get_absolute_url }}">{{ version.version }}</a>{% if version.pk == standard.preferred_version_id %} <span class="text-muted small">(preferred)</span>{% endif %}{% if version.download_url %}
+                  <a href="{{ version.download_url }}"
+                     title="Download {{ version.image_filename|default:'image' }}">
+                    <i class="mdi mdi-download" aria-hidden="true"></i>
+                  </a>{% endif %}{% if not forloop.last %}, {% endif %}
               {% empty %}
                 <span class="text-muted">none listed</span>
               {% endfor %}
