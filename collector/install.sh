@@ -35,6 +35,25 @@ for var in COLLECTOR_NAME DIODE_CLIENT_ID DIODE_CLIENT_SECRET DIODE_TARGET; do
   [ -n "${!var:-}" ] || fail "$var is empty in collector.env"
 done
 
+# Device credentials are not fatal — a collector may legitimately run only one
+# backend — but empty ones fail in a way nobody finds. snmp_discovery REJECTS a
+# policy whose credential variables are unset ("failed to resolve environment
+# variables ... SNMP_USER is not set") and logs one WARN, so the backend simply
+# never scans and looks idle. device_discovery applies the policy and fails
+# per-host instead. Both are much easier to see here.
+missing_creds=""
+for var in SNMP_USER SNMP_AUTH_PASS SNMP_PRIV_PASS DEVICE_USER DEVICE_PASS; do
+  [ -n "${!var:-}" ] || missing_creds="$missing_creds $var"
+done
+if [ -n "$missing_creds" ]; then
+  echo "  WARNING: empty device credentials in collector.env:$missing_creds"
+  echo "           snmp_discovery will REJECT its policy outright if any SNMP_*"
+  echo "           value is empty (one WARN in the log, then it never scans);"
+  echo "           device_discovery will apply and then fail to log in."
+  echo "           Fill them in and re-run ./install.sh. Defaults come from"
+  echo "           DISCOVERY_* in the central server's .env at mint time."
+fi
+
 # --- 2. render agent.yaml from the template + policies ----------------------
 # The agent wants a single file; keeping policies separate makes them easy to
 # edit and diff, so they are appended here under `policies:`.

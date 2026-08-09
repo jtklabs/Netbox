@@ -68,6 +68,14 @@ anything. Re-running is safe.
 
 Managing it afterwards:
 
+**Empty device credentials look like a dead collector.** `snmp_discovery`
+validates `SNMP_USER`/`SNMP_AUTH_PASS`/`SNMP_PRIV_PASS` when the policy is
+*applied*: if any is empty it rejects the policy with a single `WARN` and never
+scans again, regardless of schedule. `device_discovery` is more forgiving — it
+applies and then fails per host. `install.sh` now warns about empty values;
+fill them in `collector.env` (or set `DISCOVERY_*` centrally so every bundle
+inherits them) and re-run.
+
 **Changing what a collector scans:** edit `policies.yaml` and re-run
 `./install.sh` — it re-renders the config and restarts the agent only if the
 config actually changed. Do **not** edit `agent.yaml`: it is generated from
