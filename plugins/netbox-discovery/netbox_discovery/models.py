@@ -328,6 +328,19 @@ class OnboardingRequest(PrimaryModel):
         return self.status in OnboardingStatusChoices.NEEDS_ATTENTION
 
     @property
+    def claim_is_fresh(self):
+        """Is a poller believed to be working on this right now?
+
+        Handing the same request to two pollers means scanning the device twice
+        and, for an apply, racing to create the same objects. A claim is how
+        one of them is told to leave it alone.
+        """
+        if self.claimed_at is None:
+            return False
+        timeout = timedelta(minutes=plugin_setting('claim_timeout_minutes'))
+        return timezone.now() - self.claimed_at <= timeout
+
+    @property
     def claim_expired(self):
         """Has a claimed request been held too long to still be running?
 
@@ -336,8 +349,7 @@ class OnboardingRequest(PrimaryModel):
         """
         if self.status != OnboardingStatusChoices.STATUS_SCANNING or self.claimed_at is None:
             return False
-        timeout = timedelta(minutes=plugin_setting('claim_timeout_minutes'))
-        return timezone.now() - self.claimed_at > timeout
+        return not self.claim_is_fresh
 
     @property
     def waiting_on(self):

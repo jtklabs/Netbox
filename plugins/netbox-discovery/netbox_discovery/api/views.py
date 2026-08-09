@@ -105,8 +105,14 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                 action_name = self._action_for(entry)
                 if action_name is None:
                     continue
-                if claim and action_name == 'scan':
-                    entry.status = OnboardingStatusChoices.STATUS_SCANNING
+                if claim:
+                    # Both kinds are claimed. A scan also changes status, which
+                    # is what the UI shows; an apply keeps its status because
+                    # `approved` is still the truth about it — the claim alone
+                    # is what stops a second poller taking it while the first
+                    # is part way through creating things.
+                    if action_name == 'scan':
+                        entry.status = OnboardingStatusChoices.STATUS_SCANNING
                     entry.claimed_at = timezone.now()
                     entry.save()
                 site = entry.target_site
@@ -133,7 +139,9 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
         if entry.status in OnboardingStatusChoices.CLAIMABLE_FOR_SCAN:
             return 'scan'
         if entry.status in OnboardingStatusChoices.CLAIMABLE_FOR_APPLY:
-            return 'apply'
+            # Already being applied by somebody. Handing it out again would
+            # have two pollers creating the same device at once.
+            return None if entry.claim_is_fresh else 'apply'
         # A request whose poller died mid-scan is offered again rather than
         # being left stuck in `scanning` with nothing to move it on.
         if entry.claim_expired:
@@ -281,6 +289,9 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
         else:
             entry.error = result['error']
             entry.status = OnboardingStatusChoices.STATUS_FAILED
+        # The scan is over, so its claim is released. Holding it would block
+        # the apply that follows an approval for the whole claim timeout.
+        entry.claimed_at = None
         entry.save()
         return Response(
             OnboardingRequestSerializer(entry, context={'request': request}).data
@@ -314,6 +325,9 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
             # apply, not to start again.
             entry.status = OnboardingStatusChoices.STATUS_REVIEW
             entry.error = result['error']
+        # Released either way: on success it is finished, and on failure the
+        # next poller to come along should be free to try again.
+        entry.claimed_at = None
         entry.save()
         return Response(
             OnboardingRequestSerializer(entry, context={'request': request}).data
