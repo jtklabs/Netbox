@@ -42,6 +42,15 @@ set_primary_ip = true
 # Leaving it also lets a stack end up split across two sites. Turn off if you
 # place devices by hand and want that to win.
 move_devices_between_sites = true
+# When a rescan finds a different serial under a name we already knew, keep the
+# old unit rather than overwriting its serial: the chassis record is retired and
+# renamed, a new device is created, and a Hardware Replacement row records both
+# serials. Serials are what support contracts are matched on, so a silent
+# overwrite loses the thread on hardware that may still be covered.
+retain_replaced_hardware = true
+# Status given to the retired record. `inventory` says "we still have this
+# metal, it is just not in service".
+retired_device_status = inventory
 # Collect the running software version into a `software_version` custom field
 # on dcim.device. The field is created automatically if it does not exist —
 # NetBox has no native per-device software version.

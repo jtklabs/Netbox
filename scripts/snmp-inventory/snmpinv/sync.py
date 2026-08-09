@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .model import DeviceRecord, InterfaceRecord, ModuleRecord, ScanResult
 from .netbox import NetBox, NetBoxError
@@ -65,6 +66,16 @@ SOFTWARE_VERSION_CUSTOM_FIELD = {
 }
 
 
+# Where a replaced unit's record goes. `inventory` says "we still have this
+# metal, it is just not in service", which is what an RMA'd or shelved unit
+# actually is; `decommissioning` and `offline` are the other sensible answers
+# depending on how the estate is run.
+RETIRED_DEVICE_STATUS = "inventory"
+RETIRED_TAG = "replaced"
+
+REPLACEMENT_ENDPOINT = "/plugins/discovery/hardware-replacements/"
+
+
 @dataclass
 class SyncOptions:
     device_role: str = "network"
@@ -83,6 +94,12 @@ class SyncOptions:
     # record was not. Leaving it also allows a virtual chassis to end up split
     # across two sites, which is never right.
     move_devices_between_sites: bool = True
+    # A serial that changed under a name we already knew means the metal was
+    # swapped. Retiring the old record rather than overwriting its serial keeps
+    # the thread on a unit that may still be under support — serials are what
+    # contracts and quotes are matched on.
+    retain_replaced_hardware: bool = True
+    retired_device_status: str = RETIRED_DEVICE_STATUS
 
 
 class Syncer:
@@ -91,6 +108,10 @@ class Syncer:
         self.options = options or SyncOptions()
         self._custom_field_ready = False
         self._use_lifecycle: bool | None = None
+        self._replacements_ok: bool | None = None
+        # Chassis swaps are detected before the replacement device exists, so
+        # the audit row waits here until it has something to point at.
+        self._pending_replacements: list[dict] = []
         # Version readings are batched and sent once at the end of a run. The
         # ingest endpoint takes a list, and one call for a fleet beats one call
         # per device across a WAN.
@@ -183,9 +204,15 @@ class Syncer:
             desired["custom_fields"] = {SOFTWARE_VERSION_FIELD: record.software_version}
 
         if existing is not None:
-            self._log_model_correction(existing, device_type, record)
-            self._apply_site_move(existing, site_id, desired, record)
-            return self._patch_device(existing, desired, record)
+            replaced = self._handle_serial_change(existing, record, site_id)
+            if replaced is not None:
+                # The old record has been retired and given up the name; fall
+                # through and create a fresh device for the new hardware.
+                existing = None
+            else:
+                self._log_model_correction(existing, device_type, record)
+                self._apply_site_move(existing, site_id, desired, record)
+                return self._patch_device(existing, desired, record)
 
         if device_type is None:
             # Without a model we cannot pick a device type, and NetBox requires
@@ -208,7 +235,139 @@ class Syncer:
             "status": self.options.device_status,
         }
         payload.update({k: v for k, v in desired.items() if k != "device_type"})
-        return self.netbox.create("/dcim/devices/", payload, label=f"device {record.name}")
+        created = self.netbox.create("/dcim/devices/", payload,
+                                     label=f"device {record.name}")
+        self._flush_pending_replacements(record, created)
+        return created
+
+    def _handle_serial_change(self, existing: dict, record: DeviceRecord,
+                              site_id: int) -> dict | None:
+        """Retire a device whose serial no longer matches what is at the address.
+
+        A different serial under the same name is a chassis swap — an RMA, or a
+        spare pulled off the shelf. Overwriting the serial in place would make
+        the old unit vanish from NetBox entirely, and with it any support
+        contract or quote matched on that serial. So the old record is kept,
+        retired and renamed to free the name, and the caller creates a new
+        device for the metal that is actually there now.
+
+        Returns the retired record when a swap happened, else None.
+        """
+        old_serial = (existing.get("serial") or "").strip()
+        new_serial = record.serial.strip()
+        if not self.options.retain_replaced_hardware:
+            return None
+        # Only a change between two known serials counts. Filling in a blank is
+        # the first successful read, not a replacement.
+        if not old_serial or not new_serial or old_serial == new_serial:
+            return None
+
+        log.warning(
+            "%s: serial changed %s -> %s — the old unit is being retained as a "
+            "separate device rather than overwritten",
+            record.name, old_serial, new_serial,
+        )
+
+        retired_name = self._retired_name(existing.get("name") or record.name, old_serial)
+        changes = {
+            "name": retired_name,
+            "status": self.options.retired_device_status,
+            # Free the address so the retired record is not rescanned and does
+            # not hold the IP the replacement needs.
+            "primary_ip4": None,
+        }
+        self.netbox.update("/dcim/devices/", existing["id"], changes,
+                           label=f"retire replaced device {existing.get('name')}")
+        self._tag_retired(existing)
+        self._record_replacement(
+            kind="chassis", device_id=None, replaced_device_id=existing["id"],
+            old_serial=old_serial, new_serial=new_serial, model=record.model,
+            pending_for=record,
+        )
+        return existing
+
+    @staticmethod
+    def _retired_name(name: str, old_serial: str) -> str:
+        """Free the live name while keeping the retired record recognisable.
+
+        Device names are unique per (name, site, tenant), so the old record has
+        to give the name up before the replacement can take it.
+        """
+        suffix = f" [replaced {old_serial}]"
+        return (name[: 64 - len(suffix)] + suffix) if len(name) + len(suffix) > 64 else name + suffix
+
+    def _tag_retired(self, device: dict) -> None:
+        tags = [t.get("slug") for t in device.get("tags", []) if t.get("slug")]
+        if RETIRED_TAG in tags:
+            return
+        self.netbox.ensure_tag(RETIRED_TAG, name="Replaced")
+        self.netbox.update(
+            "/dcim/devices/", device["id"],
+            {"tags": [{"slug": slug} for slug in tags + [RETIRED_TAG]]},
+            label=f"tag {device.get('name')} replaced",
+        )
+
+    def _record_replacement(self, kind, device_id, replaced_device_id,
+                            old_serial, new_serial, model, pending_for=None,
+                            module_bay="") -> None:
+        """Log the swap where it can be reported on.
+
+        NetBox's changelog holds the old value too, but only as a diff on one
+        object at one moment. This is the queryable form, and for a module it
+        is the only surviving trace — Module.module_bay is not nullable, so the
+        old row cannot stay once the bay is refilled.
+        """
+        if not self._replacements_available():
+            return
+        if device_id is None:
+            # The replacement device does not exist yet; hold it until it does.
+            self._pending_replacements.append({
+                "kind": kind, "replaced_device": replaced_device_id,
+                "old_serial": old_serial, "new_serial": new_serial,
+                "model_name": model, "module_bay": module_bay,
+                "_for_serial": new_serial,
+            })
+            return
+        self._post_replacement({
+            "kind": kind, "device": device_id, "replaced_device": replaced_device_id,
+            "old_serial": old_serial, "new_serial": new_serial,
+            "model_name": model, "module_bay": module_bay,
+        })
+
+    def _post_replacement(self, payload: dict) -> None:
+        payload.setdefault("detected_at", datetime.now(timezone.utc).isoformat())
+        try:
+            self.netbox.create(REPLACEMENT_ENDPOINT, payload,
+                               label="hardware replacement %s -> %s"
+                                     % (payload["old_serial"], payload["new_serial"]))
+        except NetBoxError as exc:
+            # The inventory is already correct; losing the audit row is not
+            # worth failing the scan over, but it must be said out loud.
+            log.error("could not record hardware replacement: %s", exc)
+
+    def _replacements_available(self) -> bool:
+        if self._replacements_ok is None:
+            self._replacements_ok = self.netbox.endpoint_available(REPLACEMENT_ENDPOINT)
+            if not self._replacements_ok:
+                log.warning(
+                    "the Discovery plugin is not installed, so serial changes cannot "
+                    "be recorded; replaced devices are still retained"
+                )
+        return self._replacements_ok
+
+    def _flush_pending_replacements(self, record: DeviceRecord, device: dict) -> None:
+        """Attach held replacement rows once the new device exists."""
+        if not self._pending_replacements or device is None or device.get("id", 0) < 0:
+            return
+        remaining = []
+        for pending in self._pending_replacements:
+            if pending.get("_for_serial") == record.serial.strip():
+                payload = {k: v for k, v in pending.items() if not k.startswith("_")}
+                payload["device"] = device["id"]
+                self._post_replacement(payload)
+            else:
+                remaining.append(pending)
+        self._pending_replacements = remaining
 
     def _find_device(self, record: DeviceRecord, site_id: int) -> dict | None:
         """Find an existing device: serial first, then name.
@@ -475,6 +634,7 @@ class Syncer:
             if module.serial:
                 desired["serial"] = module.serial
             if existing is not None:
+                self._note_module_replacement(device, existing, module, record)
                 self.netbox.ensure_fields(
                     "/dcim/modules/", existing, desired,
                     label=f"module in {module.bay_name} on {record.name}",
@@ -485,6 +645,36 @@ class Syncer:
                 {"device": device["id"], "module_bay": bay["id"], **desired},
                 label=f"module {module.model} in {module.bay_name} on {record.name}",
             )
+
+    def _note_module_replacement(self, device: dict | None, existing: dict,
+                                 module: ModuleRecord, record: DeviceRecord) -> None:
+        """Record a line card swap before the new serial overwrites the old.
+
+        Unlike a chassis, the old module record cannot be kept: NetBox requires
+        a module to sit in a bay, and the bay is about to hold the new part.
+        So the audit row is written first and is the only place the removed
+        serial survives — which is exactly why it is written at all.
+        """
+        if not self.options.retain_replaced_hardware:
+            return
+        old_serial = (existing.get("serial") or "").strip()
+        new_serial = (module.serial or "").strip()
+        if not old_serial or not new_serial or old_serial == new_serial:
+            return
+        if device is None or device.get("id", 0) < 0:
+            return
+
+        log.warning(
+            "%s bay %s: module serial changed %s -> %s — recording the swap; the "
+            "removed part cannot be kept as a module row because its bay is being "
+            "refilled",
+            record.name, module.bay_name, old_serial, new_serial,
+        )
+        self._record_replacement(
+            kind="module", device_id=device["id"], replaced_device_id=None,
+            old_serial=old_serial, new_serial=new_serial, model=module.model,
+            module_bay=module.bay_name,
+        )
 
     # --- interfaces and addresses -------------------------------------------
 

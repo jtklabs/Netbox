@@ -416,6 +416,56 @@ Once it looks right, run it from cron or a systemd timer:
 17 3 * * *  cd /opt/snmp-inventory && ./snmp_inventory.py --config snmp-inventory.conf --quiet
 ```
 
+### Two schedules
+
+The sweep and the onboarding queue answer different questions and want
+different cadences:
+
+```cron
+# Onboarding queue — someone is waiting, so run it often. One request when idle.
+* * * * *   flock -n /var/lock/snmpinv-onboard.lock /opt/snmp-inventory/snmp_inventory.py --config /opt/snmp-inventory/snmp-inventory.conf --onboard --quiet
+
+# Full re-scan — catches everything that changed on its own.
+7 */6 * * * flock -n /var/lock/snmpinv-sweep.lock /opt/snmp-inventory/snmp_inventory.py --config /opt/snmp-inventory/snmp-inventory.conf --quiet
+```
+
+Six-hourly is a sensible sweep: it picks up code upgrades, new line cards,
+re-cabled interfaces and swapped hardware without hammering the fleet. Nothing
+is written unless a value actually differs, so a sweep over an unchanged estate
+produces no changelog entries at all — which is what makes running it four
+times a day reasonable.
+
+Use a separate lock from the onboarding job so a long sweep never blocks
+onboarding; they are independent and can overlap safely.
+
+### When a serial changes
+
+A rescan finding a different serial under a name we already knew means the
+metal was swapped — an RMA, a spare off the shelf, a replaced line card. The
+serial is **never overwritten in place**, because serials are what support
+contracts and quotes are matched on and losing one silently loses the thread on
+a box that may still be under contract.
+
+For a **chassis**, the old Device record is kept:
+
+- renamed to `<name> [replaced <old-serial>]`, freeing the name
+- status set to `inventory` (configurable via `retired_device_status`)
+- tagged `replaced`, and its primary IP cleared so it is not rescanned
+- the new unit is created and takes the name and the address
+
+For a **module**, the old row cannot be kept — NetBox requires a module to sit
+in a bay, and the bay is being refilled — so the swap is recorded *before* the
+serial is overwritten.
+
+Either way a **Hardware Replacement** record is written, with both serials, the
+model, the bay for a module swap, and a link to the retained device for a
+chassis swap. That is the queryable history: *"every serial that changed in the
+last quarter"* is one filter, which is the form the question actually gets asked
+in when reconciling contracts. NetBox's changelog holds the old value too, but
+only as a diff on one object at one moment.
+
+Set `retain_replaced_hardware = false` to go back to overwriting in place.
+
 ### What it writes
 
 Auto-created when missing: manufacturer, device type, module type, module bay,

@@ -102,6 +102,8 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             set_primary_ip=section.getboolean("set_primary_ip", True),
             manage_software_version=section.getboolean("manage_software_version", True),
             move_devices_between_sites=section.getboolean("move_devices_between_sites", True),
+            retain_replaced_hardware=section.getboolean("retain_replaced_hardware", True),
+            retired_device_status=section.get("retired_device_status", "inventory"),
         )
 
     if parser.has_section("snmp"):
