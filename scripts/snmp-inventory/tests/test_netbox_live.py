@@ -6,6 +6,12 @@ can never check. It is also where idempotency is demonstrated honestly: the
 same scan is run twice against a live instance and the object counts must not
 move.
 
+Scan results come from recorded walks, not from an emulated device. Needing a
+NetBox and needing net-snmp are independent, and tying them together meant
+these tests could not run on a machine that had one but not the other — which
+is most machines, since macOS ships a net-snmp too old for the emulator. What
+is under test here is the NetBox side; the wire is covered in test_emulated.py.
+
 Opt in by pointing it at a NetBox you do not mind writing to:
 
     export SNMPINV_TEST_NETBOX_URL=http://10.50.10.132:8080/netbox
@@ -22,10 +28,8 @@ from __future__ import annotations
 import os
 
 import pytest
-from conftest import LAB_CREDENTIAL, fixture_path, needs_snmpd
-from emulator import EmulatedDevice
+from conftest import collect_fixture
 
-from snmpinv.collect import Collector
 from snmpinv.model import build_scan_result
 from snmpinv.netbox import NetBox
 from snmpinv.selection import resolve_ownership, select_targets
@@ -36,6 +40,14 @@ from snmpinv.sync import (
     Syncer,
     SyncOptions,
 )
+
+
+def _choice(value):
+    """Read a NetBox choice field, which serializes as either a bare string or
+    a {"value": ..., "label": ...} object depending on the serializer."""
+    if isinstance(value, dict):
+        return value.get("value")
+    return value
 
 
 def _lifecycle_ready(netbox) -> bool:
@@ -62,9 +74,6 @@ THEIR_POLLER = "snmpinv-test-dallas"
 OUR_TAG = f"poller-{OUR_POLLER}"
 THEIR_TAG = f"poller-{THEIR_POLLER}"
 SCAN_TAG = f"{SLUG_PREFIX}scan"
-
-BASE_PORT = 11900
-
 
 @pytest.fixture(scope="module")
 def netbox():
@@ -316,21 +325,18 @@ def synced(netbox, lab):
         device_role=f"{SLUG_PREFIX}network",
         access_point_role=f"{SLUG_PREFIX}ap",
     )
-    with EmulatedDevice(fixture_path("cisco-c9300-stack"), port=BASE_PORT) as device:
-        collector = Collector([LAB_CREDENTIAL], timeout=3)
-        result = build_scan_result(collector.collect(device.address))
-        syncer = Syncer(netbox, options)
-        syncer.sync(result, site_id, scanned_address="10.10.1.5")
-        syncer.flush_software_reports()
-        first = _snapshot(netbox, site_id)
-        # Second pass over the identical data. Nothing may be created.
-        syncer.sync(result, site_id, scanned_address="10.10.1.5")
-        syncer.flush_software_reports()
-        second = _snapshot(netbox, site_id)
+    result = build_scan_result(collect_fixture("cisco-c9300-stack"))
+    syncer = Syncer(netbox, options)
+    syncer.sync(result, site_id, scanned_address="10.10.1.5")
+    syncer.flush_software_reports()
+    first = _snapshot(netbox, site_id)
+    # Second pass over the identical data. Nothing may be created.
+    syncer.sync(result, site_id, scanned_address="10.10.1.5")
+    syncer.flush_software_reports()
+    second = _snapshot(netbox, site_id)
     return {"result": result, "site_id": site_id, "first": first, "second": second}
 
 
-@needs_snmpd
 class TestFullScanAndSync:
     """Scan an emulated stack and write it into a real NetBox, twice."""
 
@@ -372,10 +378,13 @@ class TestFullScanAndSync:
             version = record.get("raw_version") or \
                 (record.get("software_version") or {}).get("version")
             assert version == "17.03.04a"
-            assert (record.get("source") or {}).get("value") == "snmp"
+            assert _choice(record.get("source")) == "snmp"
             # The verbatim sysDescr is kept so a wrong-looking version can be
             # traced to what the device actually said.
             assert "Version 17.03.04a" in (record.get("raw_report") or "")
+            # collected_at is when the device was walked, not when the batch
+            # was pushed — that is what makes an old reading render as stale.
+            assert record.get("collected_at"), "collected_at was not recorded"
             # And the custom field is not also written — one fact, one home.
             assert not device["custom_fields"].get(SOFTWARE_VERSION_FIELD)
         else:
@@ -443,11 +452,9 @@ class TestFullScanAndSync:
         assert (netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
                 ["site"]["id"]) == lab["site_reclaimed"]["id"]
 
-        with EmulatedDevice(fixture_path("cisco-c9300-stack"), port=BASE_PORT + 2) as emulated:
-            result = build_scan_result(Collector([LAB_CREDENTIAL], timeout=3)
-                                       .collect(emulated.address))
-            Syncer(netbox, SyncOptions(device_role=f"{SLUG_PREFIX}network")).sync(
-                result, synced["site_id"], scanned_address="10.10.1.5")
+        result = build_scan_result(collect_fixture("cisco-c9300-stack"))
+        Syncer(netbox, SyncOptions(device_role=f"{SLUG_PREFIX}network")).sync(
+            result, synced["site_id"], scanned_address="10.10.1.5")
 
         moved = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
         assert moved["site"]["id"] == synced["site_id"]
@@ -463,17 +470,14 @@ class TestFullScanAndSync:
         )
 
 
-@needs_snmpd
 def test_dry_run_writes_nothing(netbox, lab):
     site_id = lab["site_ours"]["id"]
     before = _snapshot(netbox, site_id)
     dry = NetBox(URL, TOKEN, verify_ssl=False, dry_run=True)
-    with EmulatedDevice(fixture_path("arista-7050sx"), port=BASE_PORT + 1) as device:
-        collector = Collector([LAB_CREDENTIAL], timeout=3)
-        result = build_scan_result(collector.collect(device.address))
-        Syncer(dry, SyncOptions(device_role=f"{SLUG_PREFIX}network")).sync(
-            result, site_id, scanned_address="10.30.0.11"
-        )
+    result = build_scan_result(collect_fixture("arista-7050sx"))
+    Syncer(dry, SyncOptions(device_role=f"{SLUG_PREFIX}network")).sync(
+        result, site_id, scanned_address="10.30.0.11"
+    )
     assert _snapshot(netbox, site_id) == before
     # ...but it must still report what it would have done.
     assert dry.created, "dry run reported no intended changes"

@@ -351,9 +351,14 @@ skipped without saying why:
 
 | Where | Passes | What runs |
 |---|---|---|
-| Any machine with Python | 77 | parsing, collection, modelling, ownership |
-| + net-snmp 5.8 or newer | 96 | the above, plus the emulated devices |
-| + a NetBox to write to | 118 | the above, plus the live instance |
+| Any machine with Python | 81 | parsing, collection, modelling, ownership |
+| + net-snmp 5.8 or newer | 100 | the above, plus the emulated devices |
+| + a NetBox to write to | 122 | the above, plus the live instance |
+
+The two axes are independent: the live-NetBox tests drive the sync layer from
+recorded walks rather than an emulated device, so they need a NetBox but not
+net-snmp. Tying them together would have made them unrunnable on a Mac, which
+is where the NetBox dev stack actually lives.
 
 The middle tier needs net-snmp 5.8+ because the emulated devices authenticate
 with SHA-256/AES. macOS ships 5.6, which offers only MD5 and SHA-1 and whose
