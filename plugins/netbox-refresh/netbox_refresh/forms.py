@@ -1,4 +1,12 @@
-from dcim.models import DeviceType, Manufacturer, ModuleType, Site
+from dcim.models import (
+    Device,
+    DeviceRole,
+    DeviceType,
+    Manufacturer,
+    ModuleType,
+    Platform,
+    Site,
+)
 from django import forms
 from netbox.forms import (
     NetBoxModelBulkEditForm,
@@ -14,10 +22,20 @@ from utilities.forms.fields import (
     TagFilterField,
 )
 from utilities.forms.rendering import FieldSet, TabbedGroups
-from utilities.forms.widgets import DatePicker
+from utilities.forms.widgets import DatePicker, DateTimePicker
 
-from netbox_refresh.choices import LifecycleSourceChoices
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.choices import (
+    ChecksumTypeChoices,
+    ComplianceStatusChoices,
+    LifecycleSourceChoices,
+    SoftwareSourceChoices,
+)
+from netbox_refresh.models import (
+    DeviceSoftware,
+    ModelLifecycle,
+    SoftwareStandard,
+    SoftwareVersion,
+)
 
 __all__ = (
     'ModelLifecycleForm',
@@ -25,6 +43,18 @@ __all__ = (
     'ModelLifecycleImportForm',
     'ModelLifecycleBulkEditForm',
     'RefreshReportForm',
+    'SoftwareVersionForm',
+    'SoftwareVersionFilterForm',
+    'SoftwareVersionImportForm',
+    'SoftwareVersionBulkEditForm',
+    'SoftwareStandardForm',
+    'SoftwareStandardFilterForm',
+    'SoftwareStandardBulkEditForm',
+    'DeviceSoftwareForm',
+    'DeviceSoftwareFilterForm',
+    'DeviceSoftwareImportForm',
+    'DeviceSoftwareBulkEditForm',
+    'ComplianceReportForm',
 )
 
 DATE_FIELDS = (
@@ -209,4 +239,351 @@ class RefreshReportForm(forms.Form):
     site = DynamicModelMultipleChoiceField(
         queryset=Site.objects.all(), required=False,
         help_text='Only count installed units at these sites',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Software
+# --------------------------------------------------------------------------- #
+
+class SoftwareVersionForm(NetBoxModelForm):
+    platform = DynamicModelChoiceField(queryset=Platform.objects.all(), selector=True)
+
+    fieldsets = (
+        FieldSet('platform', 'version', 'release_date', name='Version'),
+        FieldSet(
+            'image_filename', 'image_url', 'image_file', 'image_size',
+            'checksum_type', 'checksum', name='Image',
+        ),
+        FieldSet('description', name='Reference'),
+        FieldSet('tags', name='Tags'),
+    )
+
+    class Meta:
+        model = SoftwareVersion
+        fields = (
+            'platform', 'version', 'release_date',
+            'image_filename', 'image_url', 'image_file', 'image_size',
+            'checksum_type', 'checksum',
+            'description', 'comments', 'tags',
+        )
+        widgets = {'release_date': DatePicker()}
+        help_texts = {
+            'image_url': 'Direct link, typically the internal image server. '
+                         'Plain http is fine — this is a download link, not a page resource.',
+        }
+
+
+class SoftwareVersionFilterForm(NetBoxModelFilterSetForm):
+    model = SoftwareVersion
+    platform_id = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False, label='Platform',
+    )
+    release_date__gte = forms.DateField(
+        required=False, widget=DatePicker(), label='Released after',
+    )
+    release_date__lte = forms.DateField(
+        required=False, widget=DatePicker(), label='Released before',
+    )
+    checksum_type = forms.MultipleChoiceField(choices=ChecksumTypeChoices, required=False)
+    has_image = forms.NullBooleanField(required=False, label='Has a downloadable image')
+    tag = TagFilterField(model)
+
+
+class SoftwareVersionImportForm(NetBoxModelImportForm):
+    platform = CSVModelChoiceField(
+        queryset=Platform.objects.all(), to_field_name='name',
+        help_text='Platform name',
+    )
+    checksum_type = CSVChoiceField(choices=ChecksumTypeChoices, required=False)
+
+    class Meta:
+        model = SoftwareVersion
+        fields = (
+            'platform', 'version', 'release_date',
+            'image_filename', 'image_url', 'image_size', 'checksum_type', 'checksum',
+            'description', 'comments', 'tags',
+        )
+
+
+class SoftwareVersionBulkEditForm(NetBoxModelBulkEditForm):
+    model = SoftwareVersion
+    platform = DynamicModelChoiceField(queryset=Platform.objects.all(), required=False)
+    release_date = forms.DateField(required=False, widget=DatePicker())
+    image_url = forms.URLField(required=False, max_length=500)
+    checksum_type = forms.ChoiceField(
+        choices=[('', '---------')] + list(ChecksumTypeChoices), required=False,
+    )
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ('release_date', 'image_url', 'checksum_type', 'description')
+
+
+class SoftwareStandardForm(NetBoxModelForm):
+    device_type = DynamicModelChoiceField(
+        queryset=DeviceType.objects.all(), required=False, selector=True,
+    )
+    platform = DynamicModelChoiceField(
+        queryset=Platform.objects.all(), required=False, selector=True,
+    )
+    approved_versions = DynamicModelMultipleChoiceField(
+        queryset=SoftwareVersion.objects.all(),
+        help_text='Every version that counts as compliant. List them explicitly — '
+                  'there is no "at or above" rule.',
+    )
+    preferred_version = DynamicModelChoiceField(
+        queryset=SoftwareVersion.objects.all(), required=False,
+        help_text='Which of the approved versions to deploy on new kit',
+    )
+
+    fieldsets = (
+        FieldSet(
+            TabbedGroups(
+                FieldSet('device_type', name='Device Type'),
+                FieldSet('platform', name='Platform'),
+            ),
+            name='Applies to',
+        ),
+        FieldSet('approved_versions', 'preferred_version', name='Approved software'),
+        FieldSet('valid_from', 'valid_to', name='In force'),
+        FieldSet('description', name='Reference'),
+        FieldSet('tags', name='Tags'),
+    )
+
+    class Meta:
+        model = SoftwareStandard
+        fields = (
+            'approved_versions', 'preferred_version', 'valid_from', 'valid_to',
+            'description', 'comments', 'tags',
+        )
+        widgets = {'valid_from': DatePicker(), 'valid_to': DatePicker()}
+        help_texts = {
+            'valid_from': 'The date we adopted this standard.',
+            'valid_to': 'Leave empty while this standard is current. Set it when '
+                        'superseding, so the history stays queryable.',
+        }
+
+    def __init__(self, *args, **kwargs):
+        instance = kwargs.get('instance')
+        initial = kwargs.get('initial', {}).copy()
+        if instance is not None and instance.assigned_object:
+            field = ('device_type' if instance.assigned_object._meta.model_name == 'devicetype'
+                     else 'platform')
+            initial[field] = instance.assigned_object
+        kwargs['initial'] = initial
+        super().__init__(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        device_type = self.cleaned_data.get('device_type')
+        platform = self.cleaned_data.get('platform')
+        if device_type and platform:
+            raise forms.ValidationError('Select a device type or a platform, not both.')
+        target = device_type or platform
+        if target is None:
+            raise forms.ValidationError('Select what this standard applies to.')
+        self.instance.assigned_object = target
+
+        # The model cannot check this on create — the M2M does not exist until
+        # the row is saved — so it is enforced here against the submitted data.
+        approved = self.cleaned_data.get('approved_versions')
+        preferred = self.cleaned_data.get('preferred_version')
+        if approved and preferred and preferred not in approved:
+            raise forms.ValidationError(
+                {'preferred_version': 'The preferred version must be one of the approved versions.'}
+            )
+
+        # A platform-scoped standard approving versions of some other OS family
+        # is always a mistake, and it would silently never match anything.
+        if platform and approved:
+            wrong = [v for v in approved if v.platform_id != platform.pk]
+            if wrong:
+                raise forms.ValidationError({
+                    'approved_versions': 'These are not %s versions: %s' % (
+                        platform, ', '.join(str(v) for v in wrong)
+                    )
+                })
+
+
+class SoftwareStandardFilterForm(NetBoxModelFilterSetForm):
+    model = SoftwareStandard
+    device_type_id = DynamicModelMultipleChoiceField(
+        queryset=DeviceType.objects.all(), required=False, label='Device type',
+    )
+    platform_id = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False, label='Platform',
+    )
+    approved_version_id = DynamicModelMultipleChoiceField(
+        queryset=SoftwareVersion.objects.all(), required=False, label='Approves version',
+    )
+    is_active = forms.NullBooleanField(required=False, label='In force today')
+    valid_from__gte = forms.DateField(required=False, widget=DatePicker(), label='Adopted after')
+    valid_from__lte = forms.DateField(required=False, widget=DatePicker(), label='Adopted before')
+    tag = TagFilterField(model)
+
+
+class SoftwareStandardBulkEditForm(NetBoxModelBulkEditForm):
+    model = SoftwareStandard
+    valid_to = forms.DateField(
+        required=False, widget=DatePicker(),
+        help_text='Close out several standards at once when superseding them',
+    )
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ('valid_to', 'description')
+
+
+class DeviceSoftwareForm(NetBoxModelForm):
+    device = DynamicModelChoiceField(queryset=Device.objects.all(), selector=True)
+    software_version = DynamicModelChoiceField(
+        queryset=SoftwareVersion.objects.all(), required=False,
+        help_text='Leave empty if the running version is genuinely unknown',
+    )
+
+    fieldsets = (
+        FieldSet('device', 'software_version', 'raw_version', name='Running software'),
+        FieldSet('source', 'collected_at', 'last_checked', name='Provenance'),
+        FieldSet(
+            'exempt', 'exempt_reason', 'exempt_approved_by', 'exempt_approved_on',
+            'exempt_review_by', name='Do not upgrade',
+        ),
+        FieldSet('description', name='Reference'),
+        FieldSet('tags', name='Tags'),
+    )
+
+    class Meta:
+        model = DeviceSoftware
+        fields = (
+            'device', 'software_version', 'raw_version', 'source',
+            'collected_at', 'last_checked',
+            'exempt', 'exempt_reason', 'exempt_approved_by', 'exempt_approved_on',
+            'exempt_review_by', 'description', 'comments', 'tags',
+        )
+        widgets = {
+            'collected_at': DateTimePicker(),
+            'last_checked': DateTimePicker(),
+            'exempt_approved_on': DatePicker(),
+            'exempt_review_by': DatePicker(),
+        }
+
+
+class DeviceSoftwareFilterForm(NetBoxModelFilterSetForm):
+    model = DeviceSoftware
+    device_id = DynamicModelMultipleChoiceField(
+        queryset=Device.objects.all(), required=False, label='Device',
+    )
+    site_id = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(), required=False, label='Site',
+    )
+    platform_id = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False, label='Platform',
+    )
+    software_version_id = DynamicModelMultipleChoiceField(
+        queryset=SoftwareVersion.objects.all(), required=False, label='Version',
+    )
+    source = forms.MultipleChoiceField(choices=SoftwareSourceChoices, required=False)
+    exempt = forms.NullBooleanField(required=False, label='Do not upgrade')
+    has_version = forms.NullBooleanField(required=False, label='Version known')
+    is_stale = forms.NullBooleanField(required=False, label='Reading is stale')
+    tag = TagFilterField(model)
+
+
+class DeviceSoftwareImportForm(NetBoxModelImportForm):
+    """Bulk import of running versions.
+
+    `platform` and `version` are matched against the version catalogue and the
+    version is CREATED if it is not there yet. That is deliberate: the point of
+    this importer is initial population from whatever inventory you already
+    have, and demanding that every version be catalogued by hand first would
+    make it useless for exactly that job.
+    """
+
+    device = CSVModelChoiceField(
+        queryset=Device.objects.all(), to_field_name='name', help_text='Device name',
+    )
+    platform = CSVModelChoiceField(
+        queryset=Platform.objects.all(), to_field_name='name', required=False,
+        help_text='Platform of the running version; defaults to the device platform',
+    )
+    version = forms.CharField(
+        required=False, help_text='Running version, exactly as the device reports it',
+    )
+    source = CSVChoiceField(choices=SoftwareSourceChoices, required=False)
+
+    class Meta:
+        model = DeviceSoftware
+        fields = (
+            'device', 'platform', 'version', 'source', 'collected_at',
+            'exempt', 'exempt_reason', 'exempt_approved_by', 'exempt_approved_on',
+            'exempt_review_by', 'description', 'comments', 'tags',
+        )
+
+    def clean(self):
+        super().clean()
+        device = self.cleaned_data.get('device')
+        version = (self.cleaned_data.get('version') or '').strip()
+        platform = self.cleaned_data.get('platform') or (device.platform if device else None)
+
+        if not version:
+            return  # a row that only sets an exemption is legitimate
+
+        if platform is None:
+            raise forms.ValidationError({
+                'platform': 'Give a platform, or set one on the device — a version '
+                            'string means nothing without knowing the OS family.'
+            })
+
+        software_version, _created = SoftwareVersion.objects.get_or_create(
+            platform=platform, version=version,
+        )
+        self.instance.software_version = software_version
+        self.instance.raw_version = version
+        if not self.cleaned_data.get('source'):
+            self.instance.source = SoftwareSourceChoices.SOURCE_IMPORT
+
+
+class DeviceSoftwareBulkEditForm(NetBoxModelBulkEditForm):
+    model = DeviceSoftware
+    software_version = DynamicModelChoiceField(
+        queryset=SoftwareVersion.objects.all(), required=False,
+    )
+    source = forms.ChoiceField(
+        choices=[('', '---------')] + list(SoftwareSourceChoices), required=False,
+    )
+    exempt = forms.NullBooleanField(required=False, label='Do not upgrade')
+    exempt_reason = forms.CharField(required=False, widget=forms.Textarea(attrs={'rows': 2}))
+    exempt_approved_by = forms.CharField(required=False, max_length=100)
+    exempt_review_by = forms.DateField(required=False, widget=DatePicker())
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = (
+        'software_version', 'exempt_reason', 'exempt_approved_by', 'exempt_review_by',
+        'description',
+    )
+
+
+class ComplianceReportForm(forms.Form):
+    """Filters for the software compliance report."""
+
+    as_of = forms.DateField(
+        required=False, widget=DatePicker(), label='Standard as of',
+        help_text='Which standard was in force on this date. The running versions '
+                  'shown are always the current ones — we do not snapshot those.',
+    )
+    site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
+    role = DynamicModelMultipleChoiceField(
+        queryset=DeviceRole.objects.all(), required=False, label='Device role',
+    )
+    platform = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False,
+    )
+    manufacturer = DynamicModelMultipleChoiceField(
+        queryset=Manufacturer.objects.all(), required=False,
+    )
+    device_type = DynamicModelMultipleChoiceField(
+        queryset=DeviceType.objects.all(), required=False,
+    )
+    status = forms.MultipleChoiceField(
+        choices=ComplianceStatusChoices, required=False,
+        help_text='Leave empty to show every state, including exempt devices',
     )

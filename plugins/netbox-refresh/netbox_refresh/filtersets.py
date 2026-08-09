@@ -1,13 +1,40 @@
+from datetime import timedelta
+
 import django_filters
-from dcim.models import DeviceType, Manufacturer, ModuleType
+from dcim.models import (
+    Device,
+    DeviceRole,
+    DeviceType,
+    Manufacturer,
+    ModuleType,
+    Platform,
+    Site,
+)
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
+from django.db.models.functions import Coalesce
+from django.utils import timezone
 from netbox.filtersets import NetBoxModelFilterSet
 
-from netbox_refresh.choices import LifecycleSourceChoices
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.choices import (
+    ChecksumTypeChoices,
+    LifecycleSourceChoices,
+    SoftwareSourceChoices,
+)
+from netbox_refresh.models import (
+    DeviceSoftware,
+    ModelLifecycle,
+    SoftwareStandard,
+    SoftwareVersion,
+)
 
-__all__ = ('ModelLifecycleFilterSet',)
+__all__ = (
+    'ModelLifecycleFilterSet',
+    'SoftwareVersionFilterSet',
+    'SoftwareStandardFilterSet',
+    'DeviceSoftwareFilterSet',
+)
 
 
 class ModelLifecycleFilterSet(NetBoxModelFilterSet):
@@ -85,3 +112,177 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
         if value:
             return queryset.filter(replacement_cost__isnull=False)
         return queryset.filter(replacement_cost__isnull=True)
+
+
+class SoftwareVersionFilterSet(NetBoxModelFilterSet):
+    platform_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Platform.objects.all(), label='Platform',
+    )
+    checksum_type = django_filters.MultipleChoiceFilter(choices=ChecksumTypeChoices)
+    has_image = django_filters.BooleanFilter(
+        method='filter_has_image', label='Has a downloadable image',
+    )
+
+    class Meta:
+        model = SoftwareVersion
+        fields = {
+            'id': ['exact'],
+            'version': ['exact', 'icontains'],
+            'release_date': ['exact', 'gte', 'lte'],
+            'image_filename': ['exact', 'icontains'],
+            'checksum': ['exact'],
+        }
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(version__icontains=value)
+            | Q(image_filename__icontains=value)
+            | Q(platform__name__icontains=value)
+            | Q(description__icontains=value)
+            | Q(comments__icontains=value)
+        ).distinct()
+
+    def filter_has_image(self, queryset, name, value):
+        # image_filename counts because a filename plus the configured
+        # image_base_url resolves to a working download link.
+        query = ~Q(image_url='') | ~Q(image_file='') | ~Q(image_filename='')
+        return queryset.filter(query) if value else queryset.exclude(query)
+
+
+class SoftwareStandardFilterSet(NetBoxModelFilterSet):
+    device_type_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DeviceType.objects.all(), method='filter_device_type',
+        label='Device type',
+    )
+    platform_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Platform.objects.all(), method='filter_platform', label='Platform',
+    )
+    approved_version_id = django_filters.ModelMultipleChoiceFilter(
+        field_name='approved_versions', queryset=SoftwareVersion.objects.all(),
+        label='Approves version',
+    )
+    preferred_version_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=SoftwareVersion.objects.all(), label='Preferred version',
+    )
+    is_active = django_filters.BooleanFilter(
+        method='filter_is_active', label='In force today',
+    )
+
+    class Meta:
+        model = SoftwareStandard
+        fields = {
+            'id': ['exact'],
+            'valid_from': ['exact', 'gte', 'lte'],
+            'valid_to': ['exact', 'gte', 'lte'],
+        }
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        device_types = DeviceType.objects.filter(
+            model__icontains=value
+        ).values_list('pk', flat=True)
+        platforms = Platform.objects.filter(
+            name__icontains=value
+        ).values_list('pk', flat=True)
+        return queryset.filter(
+            Q(description__icontains=value)
+            | Q(comments__icontains=value)
+            | Q(approved_versions__version__icontains=value)
+            | Q(assigned_object_type__model='devicetype',
+                assigned_object_id__in=list(device_types))
+            | Q(assigned_object_type__model='platform',
+                assigned_object_id__in=list(platforms))
+        ).distinct()
+
+    def _scoped(self, queryset, model_class, value):
+        content_type = ContentType.objects.get_for_model(model_class)
+        return queryset.filter(
+            assigned_object_type=content_type,
+            assigned_object_id__in=[obj.pk for obj in value],
+        )
+
+    def filter_device_type(self, queryset, name, value):
+        return self._scoped(queryset, DeviceType, value) if value else queryset
+
+    def filter_platform(self, queryset, name, value):
+        return self._scoped(queryset, Platform, value) if value else queryset
+
+    def filter_is_active(self, queryset, name, value):
+        today = timezone.localdate()
+        query = Q(valid_from__lte=today) & (Q(valid_to__isnull=True) | Q(valid_to__gte=today))
+        return queryset.filter(query) if value else queryset.exclude(query)
+
+
+class DeviceSoftwareFilterSet(NetBoxModelFilterSet):
+    device_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Device.objects.all(), label='Device',
+    )
+    site_id = django_filters.ModelMultipleChoiceFilter(
+        field_name='device__site', queryset=Site.objects.all(), label='Site',
+    )
+    platform_id = django_filters.ModelMultipleChoiceFilter(
+        field_name='device__platform', queryset=Platform.objects.all(),
+        label='Device platform',
+    )
+    device_type_id = django_filters.ModelMultipleChoiceFilter(
+        field_name='device__device_type', queryset=DeviceType.objects.all(),
+        label='Device type',
+    )
+    role_id = django_filters.ModelMultipleChoiceFilter(
+        field_name='device__role', queryset=DeviceRole.objects.all(), label='Device role',
+    )
+    software_version_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=SoftwareVersion.objects.all(), label='Version',
+    )
+    source = django_filters.MultipleChoiceFilter(choices=SoftwareSourceChoices)
+    has_version = django_filters.BooleanFilter(
+        method='filter_has_version', label='Version known',
+    )
+    is_stale = django_filters.BooleanFilter(
+        method='filter_is_stale', label='Reading is stale',
+    )
+
+    class Meta:
+        model = DeviceSoftware
+        fields = {
+            'id': ['exact'],
+            'raw_version': ['exact', 'icontains'],
+            'exempt': ['exact'],
+            'collected_at': ['gte', 'lte'],
+            'exempt_review_by': ['exact', 'gte', 'lte'],
+        }
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(device__name__icontains=value)
+            | Q(raw_version__icontains=value)
+            | Q(software_version__version__icontains=value)
+            | Q(exempt_reason__icontains=value)
+            | Q(description__icontains=value)
+        ).distinct()
+
+    def filter_has_version(self, queryset, name, value):
+        if value:
+            return queryset.filter(software_version__isnull=False)
+        return queryset.filter(software_version__isnull=True)
+
+    def filter_is_stale(self, queryset, name, value):
+        """Stale = we have a version, but nothing has confirmed it recently.
+
+        as_of is a property (collected_at, else last_checked, else last_updated),
+        so it is rebuilt here with Coalesce to keep the filter in the database
+        instead of walking every row in Python.
+        """
+        days = settings.PLUGINS_CONFIG.get('netbox_refresh', {}).get('stale_after_days', 90)
+        threshold = timezone.now() - timedelta(days=days)
+        queryset = queryset.annotate(
+            _as_of=Coalesce('collected_at', 'last_checked', 'last_updated')
+        )
+        if value:
+            return queryset.filter(software_version__isnull=False, _as_of__lt=threshold)
+        return queryset.filter(Q(software_version__isnull=True) | Q(_as_of__gte=threshold))

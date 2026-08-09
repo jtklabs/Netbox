@@ -2,7 +2,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from netbox.plugins import PluginTemplateExtension
 
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.models import DeviceSoftware, ModelLifecycle, SoftwareStandard
 
 PLUGIN_SETTINGS = settings.PLUGINS_CONFIG.get('netbox_refresh', {})
 
@@ -64,9 +64,67 @@ class ModuleLifecycleCard(BaseLifecycleCard):
         return module.module_type if module else None
 
 
+class DeviceSoftwareCard(PluginTemplateExtension):
+    """Running software and compliance, on the device page itself.
+
+    This is where most people will actually meet the feature — nobody opens a
+    compliance report to ask about one device. An exempt device says so here
+    rather than showing nothing.
+    """
+
+    models = ['dcim.device']
+
+    def full_width_page(self):
+        device = self.context.get('object')
+        if device is None:
+            return ''
+        record = DeviceSoftware.objects.filter(device=device).select_related(
+            'software_version', 'software_version__platform'
+        ).first()
+        return self.render(
+            'netbox_refresh/inc/device_software_card.html',
+            extra_context={'software': record, 'device': device},
+        )
+
+
+class BaseStandardCard(PluginTemplateExtension):
+    """The software standard in force for whatever this page is about."""
+
+    def _scope(self):
+        return self.context.get('object')
+
+    def _standard_for(self, obj):
+        if obj is None:
+            return None
+        from netbox_refresh.compliance import active_standards
+
+        content_type = ContentType.objects.get_for_model(obj)
+        return active_standards().filter(
+            assigned_object_type=content_type, assigned_object_id=obj.pk
+        ).prefetch_related('approved_versions').first()
+
+    def right_page(self):
+        scope = self._scope()
+        return self.render(
+            'netbox_refresh/inc/software_standard_card.html',
+            extra_context={'standard': self._standard_for(scope), 'scope': scope},
+        )
+
+
+class DeviceTypeStandardCard(BaseStandardCard):
+    models = ['dcim.devicetype']
+
+
+class PlatformStandardCard(BaseStandardCard):
+    models = ['dcim.platform']
+
+
 template_extensions = (
     DeviceTypeLifecycleCard,
     ModuleTypeLifecycleCard,
     DeviceLifecycleCard,
     ModuleLifecycleCard,
+    DeviceSoftwareCard,
+    DeviceTypeStandardCard,
+    PlatformStandardCard,
 )

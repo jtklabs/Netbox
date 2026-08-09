@@ -2,8 +2,16 @@ from django.urls import path
 from netbox.views.generic import ObjectChangeLogView
 
 from netbox_refresh import views
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.models import (
+    DeviceSoftware,
+    ModelLifecycle,
+    SoftwareStandard,
+    SoftwareVersion,
+)
 
+# Route names must match the lowercased model class name — NetBox's generic
+# views and get_absolute_url() both derive the name that way, and a mismatch
+# fails at reverse() time rather than at import time.
 urlpatterns = [
     path('lifecycle/', views.ModelLifecycleListView.as_view(), name='modellifecycle_list'),
     path('lifecycle/add/', views.ModelLifecycleEditView.as_view(), name='modellifecycle_add'),
@@ -21,6 +29,63 @@ urlpatterns = [
     path('lifecycle/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='modellifecycle_changelog', kwargs={'model': ModelLifecycle}),
 
+    path('software-versions/', views.SoftwareVersionListView.as_view(),
+         name='softwareversion_list'),
+    path('software-versions/add/', views.SoftwareVersionEditView.as_view(),
+         name='softwareversion_add'),
+    path('software-versions/import/', views.SoftwareVersionBulkImportView.as_view(),
+         name='softwareversion_bulk_import'),
+    path('software-versions/edit/', views.SoftwareVersionBulkEditView.as_view(),
+         name='softwareversion_bulk_edit'),
+    path('software-versions/delete/', views.SoftwareVersionBulkDeleteView.as_view(),
+         name='softwareversion_bulk_delete'),
+    path('software-versions/<int:pk>/', views.SoftwareVersionView.as_view(),
+         name='softwareversion'),
+    path('software-versions/<int:pk>/edit/', views.SoftwareVersionEditView.as_view(),
+         name='softwareversion_edit'),
+    path('software-versions/<int:pk>/delete/', views.SoftwareVersionDeleteView.as_view(),
+         name='softwareversion_delete'),
+    path('software-versions/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='softwareversion_changelog', kwargs={'model': SoftwareVersion}),
+
+    path('software-standards/', views.SoftwareStandardListView.as_view(),
+         name='softwarestandard_list'),
+    path('software-standards/add/', views.SoftwareStandardEditView.as_view(),
+         name='softwarestandard_add'),
+    path('software-standards/edit/', views.SoftwareStandardBulkEditView.as_view(),
+         name='softwarestandard_bulk_edit'),
+    path('software-standards/delete/', views.SoftwareStandardBulkDeleteView.as_view(),
+         name='softwarestandard_bulk_delete'),
+    path('software-standards/<int:pk>/', views.SoftwareStandardView.as_view(),
+         name='softwarestandard'),
+    path('software-standards/<int:pk>/edit/', views.SoftwareStandardEditView.as_view(),
+         name='softwarestandard_edit'),
+    path('software-standards/<int:pk>/delete/', views.SoftwareStandardDeleteView.as_view(),
+         name='softwarestandard_delete'),
+    path('software-standards/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='softwarestandard_changelog', kwargs={'model': SoftwareStandard}),
+
+    path('device-software/', views.DeviceSoftwareListView.as_view(),
+         name='devicesoftware_list'),
+    path('device-software/add/', views.DeviceSoftwareEditView.as_view(),
+         name='devicesoftware_add'),
+    path('device-software/import/', views.DeviceSoftwareBulkImportView.as_view(),
+         name='devicesoftware_bulk_import'),
+    path('device-software/edit/', views.DeviceSoftwareBulkEditView.as_view(),
+         name='devicesoftware_bulk_edit'),
+    path('device-software/delete/', views.DeviceSoftwareBulkDeleteView.as_view(),
+         name='devicesoftware_bulk_delete'),
+    path('device-software/<int:pk>/', views.DeviceSoftwareView.as_view(),
+         name='devicesoftware'),
+    path('device-software/<int:pk>/edit/', views.DeviceSoftwareEditView.as_view(),
+         name='devicesoftware_edit'),
+    path('device-software/<int:pk>/delete/', views.DeviceSoftwareDeleteView.as_view(),
+         name='devicesoftware_delete'),
+    path('device-software/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='devicesoftware_changelog', kwargs={'model': DeviceSoftware}),
+
     path('report/', views.RefreshReportView.as_view(), name='refresh_report'),
+    path('compliance/', views.ComplianceReportView.as_view(), name='compliance_report'),
+    path('compliance/rollup/', views.VersionRollupView.as_view(), name='version_rollup'),
     path('sync/cisco/', views.CiscoSyncView.as_view(), name='cisco_sync'),
 ]

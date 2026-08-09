@@ -17,8 +17,13 @@ from netbox.views.generic import (
 )
 from utilities.views import register_model_view
 
-from netbox_refresh import filtersets, forms, tables
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh import compliance, filtersets, forms, tables
+from netbox_refresh.models import (
+    DeviceSoftware,
+    ModelLifecycle,
+    SoftwareStandard,
+    SoftwareVersion,
+)
 
 
 @register_model_view(ModelLifecycle, name='list')
@@ -182,6 +187,284 @@ class RefreshReportView(PermissionRequiredMixin, View):
             'totals': dict(totals),
             'missing_cost': missing_cost,
             'date_label': dict(forms.RefreshReportForm.DATE_FIELD_CHOICES).get(date_field),
+        })
+
+
+# --------------------------------------------------------------------------- #
+# Software versions
+# --------------------------------------------------------------------------- #
+
+@register_model_view(SoftwareVersion, name='list')
+class SoftwareVersionListView(ObjectListView):
+    queryset = SoftwareVersion.objects.select_related('platform')
+    table = tables.SoftwareVersionTable
+    filterset = filtersets.SoftwareVersionFilterSet
+    filterset_form = forms.SoftwareVersionFilterForm
+
+
+@register_model_view(SoftwareVersion)
+class SoftwareVersionView(ObjectView):
+    queryset = SoftwareVersion.objects.select_related('platform')
+
+    def get_extra_context(self, request, instance):
+        devices = DeviceSoftware.objects.filter(
+            software_version=instance
+        ).select_related('device', 'device__site')[:100]
+        standards = instance.approved_by_standards.prefetch_related(
+            'assigned_object_type'
+        )
+        return {'running_on': devices, 'standards': standards}
+
+
+@register_model_view(SoftwareVersion, 'edit')
+class SoftwareVersionEditView(ObjectEditView):
+    queryset = SoftwareVersion.objects.all()
+    form = forms.SoftwareVersionForm
+
+
+@register_model_view(SoftwareVersion, 'delete')
+class SoftwareVersionDeleteView(ObjectDeleteView):
+    queryset = SoftwareVersion.objects.all()
+
+
+@register_model_view(SoftwareVersion, 'bulk_edit')
+class SoftwareVersionBulkEditView(BulkEditView):
+    queryset = SoftwareVersion.objects.all()
+    filterset = filtersets.SoftwareVersionFilterSet
+    table = tables.SoftwareVersionTable
+    form = forms.SoftwareVersionBulkEditForm
+
+
+@register_model_view(SoftwareVersion, 'bulk_delete')
+class SoftwareVersionBulkDeleteView(BulkDeleteView):
+    queryset = SoftwareVersion.objects.all()
+    filterset = filtersets.SoftwareVersionFilterSet
+    table = tables.SoftwareVersionTable
+
+
+@register_model_view(SoftwareVersion, 'bulk_import')
+class SoftwareVersionBulkImportView(BulkImportView):
+    queryset = SoftwareVersion.objects.all()
+    model_form = forms.SoftwareVersionImportForm
+
+
+# --------------------------------------------------------------------------- #
+# Software standards
+# --------------------------------------------------------------------------- #
+
+@register_model_view(SoftwareStandard, name='list')
+class SoftwareStandardListView(ObjectListView):
+    queryset = SoftwareStandard.objects.prefetch_related(
+        'assigned_object_type', 'approved_versions', 'preferred_version'
+    )
+    table = tables.SoftwareStandardTable
+    filterset = filtersets.SoftwareStandardFilterSet
+    filterset_form = forms.SoftwareStandardFilterForm
+
+
+@register_model_view(SoftwareStandard)
+class SoftwareStandardView(ObjectView):
+    queryset = SoftwareStandard.objects.prefetch_related('approved_versions')
+
+    def get_extra_context(self, request, instance):
+        """Show the standard's own history, so supersession is visible in place."""
+        history = SoftwareStandard.objects.filter(
+            assigned_object_type=instance.assigned_object_type_id,
+            assigned_object_id=instance.assigned_object_id,
+        ).exclude(pk=instance.pk).order_by('-valid_from')
+        return {'history': history}
+
+
+@register_model_view(SoftwareStandard, 'edit')
+class SoftwareStandardEditView(ObjectEditView):
+    queryset = SoftwareStandard.objects.all()
+    form = forms.SoftwareStandardForm
+
+
+@register_model_view(SoftwareStandard, 'delete')
+class SoftwareStandardDeleteView(ObjectDeleteView):
+    queryset = SoftwareStandard.objects.all()
+
+
+@register_model_view(SoftwareStandard, 'bulk_edit')
+class SoftwareStandardBulkEditView(BulkEditView):
+    queryset = SoftwareStandard.objects.all()
+    filterset = filtersets.SoftwareStandardFilterSet
+    table = tables.SoftwareStandardTable
+    form = forms.SoftwareStandardBulkEditForm
+
+
+@register_model_view(SoftwareStandard, 'bulk_delete')
+class SoftwareStandardBulkDeleteView(BulkDeleteView):
+    queryset = SoftwareStandard.objects.all()
+    filterset = filtersets.SoftwareStandardFilterSet
+    table = tables.SoftwareStandardTable
+
+
+# --------------------------------------------------------------------------- #
+# Per-device running software
+# --------------------------------------------------------------------------- #
+
+@register_model_view(DeviceSoftware, name='list')
+class DeviceSoftwareListView(ObjectListView):
+    queryset = DeviceSoftware.objects.select_related(
+        'device', 'device__site', 'software_version', 'software_version__platform'
+    )
+    table = tables.DeviceSoftwareTable
+    filterset = filtersets.DeviceSoftwareFilterSet
+    filterset_form = forms.DeviceSoftwareFilterForm
+
+
+@register_model_view(DeviceSoftware)
+class DeviceSoftwareView(ObjectView):
+    queryset = DeviceSoftware.objects.select_related(
+        'device', 'software_version', 'software_version__platform'
+    )
+
+
+@register_model_view(DeviceSoftware, 'edit')
+class DeviceSoftwareEditView(ObjectEditView):
+    queryset = DeviceSoftware.objects.all()
+    form = forms.DeviceSoftwareForm
+
+
+@register_model_view(DeviceSoftware, 'delete')
+class DeviceSoftwareDeleteView(ObjectDeleteView):
+    queryset = DeviceSoftware.objects.all()
+
+
+@register_model_view(DeviceSoftware, 'bulk_edit')
+class DeviceSoftwareBulkEditView(BulkEditView):
+    queryset = DeviceSoftware.objects.all()
+    filterset = filtersets.DeviceSoftwareFilterSet
+    table = tables.DeviceSoftwareTable
+    form = forms.DeviceSoftwareBulkEditForm
+
+
+@register_model_view(DeviceSoftware, 'bulk_delete')
+class DeviceSoftwareBulkDeleteView(BulkDeleteView):
+    queryset = DeviceSoftware.objects.all()
+    filterset = filtersets.DeviceSoftwareFilterSet
+    table = tables.DeviceSoftwareTable
+
+
+@register_model_view(DeviceSoftware, 'bulk_import')
+class DeviceSoftwareBulkImportView(BulkImportView):
+    queryset = DeviceSoftware.objects.all()
+    model_form = forms.DeviceSoftwareImportForm
+
+
+class ComplianceReportView(PermissionRequiredMixin, View):
+    """Which devices run approved code, which do not, and which we cannot say.
+
+    The report iterates DEVICES, not software records, so a device nobody has
+    ever scanned shows up as Unknown instead of quietly not existing. Exempt
+    devices are shown as exempt rather than filtered out, for the same reason.
+
+    Status is derived rather than stored, so status filtering happens in Python
+    after the rows are built. Everything that can be pushed into SQL — site,
+    role, platform, manufacturer, device type — is applied to the device
+    queryset first, which is what keeps that affordable.
+    """
+
+    permission_required = 'netbox_refresh.view_devicesoftware'
+    template_name = 'netbox_refresh/compliance_report.html'
+
+    def get(self, request):
+        form = forms.ComplianceReportForm(request.GET or None)
+        form.is_valid()
+        data = form.cleaned_data if form.is_bound else {}
+
+        devices = Device.objects.select_related(
+            'site', 'device_type', 'device_type__manufacturer', 'platform', 'role'
+        )
+        if data.get('site'):
+            devices = devices.filter(site__in=data['site'])
+        if data.get('role'):
+            devices = devices.filter(role__in=data['role'])
+        if data.get('platform'):
+            devices = devices.filter(platform__in=data['platform'])
+        if data.get('manufacturer'):
+            devices = devices.filter(device_type__manufacturer__in=data['manufacturer'])
+        if data.get('device_type'):
+            devices = devices.filter(device_type__in=data['device_type'])
+
+        rows = compliance.device_compliance_rows(devices, on_date=data.get('as_of'))
+        summary = compliance.summarise(rows)
+
+        wanted = data.get('status')
+        if wanted:
+            rows = [row for row in rows if row['status'] in wanted]
+
+        rows.sort(key=lambda row: (row['status'], str(row['device'])))
+        stale_count = sum(1 for row in rows if row['is_stale'])
+
+        return render(request, self.template_name, {
+            'form': form,
+            'table': tables.ComplianceReportTable(rows),
+            'summary': summary,
+            'row_count': len(rows),
+            'total_devices': sum(item['count'] for item in summary),
+            'stale_count': stale_count,
+            'as_of': data.get('as_of'),
+            'filtered': bool(wanted),
+        })
+
+
+class VersionRollupView(PermissionRequiredMixin, View):
+    """Devices per version per model — what an upgrade campaign is planned from."""
+
+    permission_required = 'netbox_refresh.view_devicesoftware'
+    template_name = 'netbox_refresh/version_rollup.html'
+
+    def get(self, request):
+        form = forms.ComplianceReportForm(request.GET or None)
+        form.is_valid()
+        data = form.cleaned_data if form.is_bound else {}
+
+        devices = Device.objects.select_related(
+            'site', 'device_type', 'device_type__manufacturer', 'platform'
+        )
+        if data.get('site'):
+            devices = devices.filter(site__in=data['site'])
+        if data.get('role'):
+            devices = devices.filter(role__in=data['role'])
+        if data.get('platform'):
+            devices = devices.filter(platform__in=data['platform'])
+        if data.get('manufacturer'):
+            devices = devices.filter(device_type__manufacturer__in=data['manufacturer'])
+        if data.get('device_type'):
+            devices = devices.filter(device_type__in=data['device_type'])
+
+        rows = compliance.device_compliance_rows(devices, on_date=data.get('as_of'))
+
+        # Group on (device type, version). Compliance is constant within a group:
+        # the standard is resolved from device type then platform, both of which
+        # are fixed inside the group.
+        groups = {}
+        for row in rows:
+            device = row['device']
+            key = (str(device.device_type), str(device.platform or '—'), row['version'] or '—')
+            bucket = groups.setdefault(key, {
+                'device_type': key[0],
+                'platform': key[1],
+                'version': key[2],
+                'version_url': (row['record'].software_version.get_absolute_url()
+                                if row['record'] and row['record'].software_version_id else None),
+                'status_label': row['status_label'],
+                'status_color': row['status_color'],
+                'count': 0,
+            })
+            bucket['count'] += 1
+
+        table_rows = sorted(
+            groups.values(), key=lambda item: (-item['count'], item['device_type'])
+        )
+        return render(request, self.template_name, {
+            'form': form,
+            'table': tables.VersionRollupTable(table_rows),
+            'group_count': len(table_rows),
+            'total_devices': sum(item['count'] for item in table_rows),
         })
 
 

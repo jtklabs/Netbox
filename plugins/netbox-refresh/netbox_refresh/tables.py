@@ -1,9 +1,30 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.models import (
+    DeviceSoftware,
+    ModelLifecycle,
+    SoftwareStandard,
+    SoftwareVersion,
+)
 
-__all__ = ('ModelLifecycleTable', 'RefreshReportTable')
+__all__ = (
+    'ModelLifecycleTable',
+    'RefreshReportTable',
+    'SoftwareVersionTable',
+    'SoftwareStandardTable',
+    'DeviceSoftwareTable',
+    'ComplianceReportTable',
+    'VersionRollupTable',
+)
+
+# Rendered next to a version that nothing has confirmed recently. The compliance
+# state and the freshness of the reading are separate facts, and a stale reading
+# should not be able to hide behind a green badge.
+STALE_MARKER = (
+    '{% if record.is_stale %}<span class="text-warning ms-1" '
+    'title="Not confirmed recently"><i class="mdi mdi-clock-alert-outline"></i></span>{% endif %}'
+)
 
 
 class ModelLifecycleTable(NetBoxTable):
@@ -54,4 +75,134 @@ class RefreshReportTable(tables.Table):
     class Meta:
         attrs = {'class': 'table table-hover object-list'}
         empty_text = 'No hardware models reach this milestone in the selected window.'
+        orderable = False
+
+
+class SoftwareVersionTable(NetBoxTable):
+    version = tables.Column(linkify=True)
+    platform = tables.Column(linkify=True)
+    image = columns.TemplateColumn(
+        template_code='{% if record.download_url %}'
+                      '<a href="{{ record.download_url }}">'
+                      '<i class="mdi mdi-download"></i> {{ record.image_filename|default:"Download" }}</a>'
+                      '{% else %}<span class="text-muted">&mdash;</span>{% endif %}',
+        orderable=False,
+    )
+    image_size = columns.TemplateColumn(
+        template_code='{% if record.image_size %}{{ record.image_size|filesizeformat }}'
+                      '{% else %}<span class="text-muted">&mdash;</span>{% endif %}',
+        verbose_name='Size',
+    )
+    checksum_type = columns.ChoiceFieldColumn()
+    installed_count = tables.Column(orderable=False, verbose_name='Devices')
+
+    class Meta(NetBoxTable.Meta):
+        model = SoftwareVersion
+        fields = (
+            'pk', 'id', 'version', 'platform', 'release_date', 'image',
+            'image_filename', 'image_url', 'image_size', 'checksum_type', 'checksum',
+            'installed_count', 'description', 'created', 'last_updated',
+        )
+        default_columns = (
+            'version', 'platform', 'release_date', 'image', 'image_size',
+            'installed_count',
+        )
+
+
+class SoftwareStandardTable(NetBoxTable):
+    assigned_object = tables.Column(
+        linkify=True, orderable=False, verbose_name='Applies to',
+    )
+    scope_type = tables.Column(orderable=False, verbose_name='Scope')
+    approved_versions = columns.ManyToManyColumn(
+        linkify_item=True, verbose_name='Approved versions',
+    )
+    preferred_version = tables.Column(linkify=True)
+    is_active = columns.BooleanColumn(orderable=False, verbose_name='In force')
+
+    class Meta(NetBoxTable.Meta):
+        model = SoftwareStandard
+        fields = (
+            'pk', 'id', 'assigned_object', 'scope_type', 'approved_versions',
+            'preferred_version', 'valid_from', 'valid_to', 'is_active',
+            'description', 'created', 'last_updated',
+        )
+        default_columns = (
+            'assigned_object', 'scope_type', 'approved_versions', 'preferred_version',
+            'valid_from', 'valid_to', 'is_active',
+        )
+
+
+class DeviceSoftwareTable(NetBoxTable):
+    device = tables.Column(linkify=True)
+    software_version = tables.Column(linkify=True, verbose_name='Running version')
+    compliance = columns.TemplateColumn(
+        template_code='{% load helpers %}{% badge record.get_compliance_status_display '
+                      'bg_color=record.get_compliance_status_color %}' + STALE_MARKER,
+        orderable=False,
+    )
+    source = columns.ChoiceFieldColumn()
+    site = tables.Column(accessor='device__site', linkify=True, verbose_name='Site')
+    exempt = columns.BooleanColumn(verbose_name='Do not upgrade')
+    as_of = columns.DateTimeColumn(orderable=False, verbose_name='Confirmed')
+
+    class Meta(NetBoxTable.Meta):
+        model = DeviceSoftware
+        fields = (
+            'pk', 'id', 'device', 'site', 'software_version', 'raw_version',
+            'compliance', 'source', 'collected_at', 'last_checked', 'as_of',
+            'exempt', 'exempt_reason', 'exempt_approved_by', 'exempt_approved_on',
+            'exempt_review_by', 'description', 'created', 'last_updated',
+        )
+        default_columns = (
+            'device', 'site', 'software_version', 'compliance', 'source', 'as_of',
+        )
+
+
+class ComplianceReportTable(tables.Table):
+    """Report rows are plain dicts assembled by the view, not model instances.
+
+    Rows come from the Device queryset rather than from DeviceSoftware, so a
+    device with no software record at all still appears — as Unknown. Dropping
+    those is the failure mode that makes a compliance report worse than useless.
+    """
+
+    device = tables.Column(linkify=lambda record: record['device'].get_absolute_url())
+    site = tables.Column(accessor='device__site', linkify=True)
+    device_type = tables.Column(accessor='device__device_type', linkify=True)
+    platform = tables.Column(accessor='device__platform', linkify=True)
+    version = tables.Column(verbose_name='Running version')
+    status = columns.TemplateColumn(
+        template_code='{% load helpers %}{% badge record.status_label '
+                      'bg_color=record.status_color %}' + STALE_MARKER,
+        verbose_name='Compliance',
+    )
+    approved = tables.Column(verbose_name='Approved versions')
+    source = tables.Column()
+    as_of = tables.DateTimeColumn(verbose_name='Confirmed')
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'No devices match these filters.'
+        orderable = False
+
+
+class VersionRollupTable(tables.Table):
+    """Devices per version per model — the view that drives upgrade planning."""
+
+    device_type = tables.Column(verbose_name='Device type')
+    platform = tables.Column()
+    version = tables.Column(
+        linkify=lambda record: record['version_url'], verbose_name='Running version'
+    )
+    count = tables.Column(verbose_name='Devices')
+    status = columns.TemplateColumn(
+        template_code='{% load helpers %}{% badge record.status_label '
+                      'bg_color=record.status_color %}',
+        verbose_name='Compliance',
+    )
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'No devices match these filters.'
         orderable = False
