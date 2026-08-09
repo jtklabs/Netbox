@@ -852,3 +852,66 @@ class TestManualEntry:
                             {"name": "x", "manufacturer": "Cisco", "model": ""},
                             label="manual entry")
         assert "400" in str(exc.value)
+
+
+class TestWorkIsHandedOutOnce:
+    """A minute-by-minute check-in must not keep re-offering the same device.
+
+    Two pollers — or one poller whose previous run has not finished — taking
+    the same request means scanning a device twice and, for an apply, racing to
+    create the same objects.
+    """
+
+    def test_a_claimed_scan_is_not_offered_again(self, netbox, lab):
+        entry = submit(netbox, "192.0.2.120")
+        first = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        assert first, "the first check-in should get it"
+        assert refresh(netbox, entry["id"])["status"] == "scanning"
+
+        for _ in range(3):
+            again = [j for j in onboarding.check_in(netbox, POLLER)
+                     if j["id"] == entry["id"]]
+            assert again == [], "a claimed scan was handed out twice"
+
+    def test_the_claim_is_released_when_the_scan_reports(self, netbox, lab, us_region):
+        """Otherwise an approval sits unworkable for the whole claim timeout."""
+        entry = submit(netbox, "198.19.88.5")   # no prefix -> stops for review
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+
+        after = refresh(netbox, entry["id"])
+        assert after["status"] == "review"
+        assert after["claimed_at"] is None, "the scan's claim outlived the scan"
+
+        approve(netbox, entry["id"], override_site=lab["site"]["id"])
+        offered = [j for j in onboarding.check_in(netbox, POLLER)
+                   if j["id"] == entry["id"]]
+        assert offered and offered[0]["action"] == "apply", (
+            "an approved request should be workable straight away"
+        )
+
+    def test_an_apply_in_flight_is_not_handed_out_again(self, netbox, lab, us_region):
+        entry = submit(netbox, "198.19.88.6")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("f5-bigip"), syncer, jobs)
+        approve(netbox, entry["id"], override_site=lab["site"]["id"])
+
+        first = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        assert first and first[0]["action"] == "apply"
+        for _ in range(3):
+            again = [j for j in onboarding.check_in(netbox, POLLER)
+                     if j["id"] == entry["id"]]
+            assert again == [], "an apply already in flight was handed out again"
+
+    def test_a_finished_request_is_never_offered(self, netbox, lab):
+        """The sweep re-reads devices; the queue does not re-do finished work."""
+        entry = submit(netbox, "192.0.2.121")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("opengear-cm7148"), syncer, jobs)
+
+        for _ in range(3):
+            assert [j for j in onboarding.check_in(netbox, POLLER)
+                    if j["id"] == entry["id"]] == []
