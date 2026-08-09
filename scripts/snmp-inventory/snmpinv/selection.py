@@ -100,7 +100,11 @@ def resolve_ownership(netbox: NetBox, poller_name: str) -> Ownership:
     our_tag = poller_tag(poller_name)
     ownership = Ownership(our_tag=our_tag)
 
-    regions = netbox.all("/dcim/regions/", {"brief": 0})
+    # No `brief` parameter here, not even brief=0: NetBox decides brief mode on
+    # the parameter being *present*, whatever its value, and a brief region
+    # carries neither `parent` nor `tags` — which is everything this function
+    # needs. Sending brief=0 silently disables region inheritance entirely.
+    regions = netbox.all("/dcim/regions/")
     region_tags: dict[int, list[str]] = {}
     region_parent: dict[int, int | None] = {}
     for region in regions:
