@@ -1,0 +1,52 @@
+# Copy to snmp-inventory.conf and fill in. snmp-inventory.conf is gitignored.
+# SNMPv3 passphrases do NOT go here — they live in the credentials file below.
+
+[netbox]
+# Include the BASE_PATH if your NetBox is served under one. Either form works:
+# the client appends /api/ if you leave it off.
+url = https://netbox.example.com/netbox
+# A NetBox 4.6 v2 token looks like nbt_<key>.<secret>. Prefer the NETBOX_TOKEN
+# environment variable — it beats this setting, so a systemd unit or a secrets
+# agent can hand the poller its token without it ever being on disk.
+token =
+# Set false only if the NetBox certificate is not one this box trusts.
+verify_ssl = true
+timeout = 30
+
+[poller]
+# This poller's name. Devices, sites and regions are assigned to it with the
+# tag `poller-<name>` — so `name = boston` means the tag slug `poller-boston`.
+# Precedence is device tag > site tag > region tag.
+name = boston
+# Where the SNMPv3 credential sets live. Relative paths resolve against this
+# file's directory. chmod 600 it.
+credentials_file = snmp-credentials.conf
+# Only scan IPAM addresses carrying this tag. Leave blank to scan every address
+# inside a prefix scoped to one of our sites.
+scan_tag = scan
+# Role given to devices this scanner creates.
+device_role = network
+# Role given to access points learned from a wireless controller.
+access_point_role = wireless-ap
+device_status = active
+# Each of these can be turned off if you want a narrower scan.
+sync_interfaces = true
+sync_ips = true
+sync_modules = true
+sync_access_points = true
+set_primary_ip = true
+# Collect the running software version into a `software_version` custom field
+# on dcim.device. The field is created automatically if it does not exist —
+# NetBox has no native per-device software version.
+manage_software_version = true
+
+[snmp]
+# Per-request timeout in seconds and how many times to retry a request.
+timeout = 5
+retries = 1
+# GETBULK is much faster on big interface tables. Devices that mishandle it
+# fall back to GETNEXT automatically, so leave this on unless you have a reason.
+use_bulk = true
+max_repetitions = 25
+# How many devices to scan at once.
+workers = 8

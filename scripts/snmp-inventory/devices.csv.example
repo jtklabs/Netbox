@@ -1,0 +1,15 @@
+# Copy to devices.csv and list your device management addresses.
+# devices.csv is gitignored. Import it with:
+#   ./import_ips.py --config snmp-inventory.conf --csv devices.csv --dry-run
+#
+# `address` is the only required column. A mask is optional — without one the
+# mask of the containing prefix in NetBox is used.
+#
+# There is no site column on purpose. The site comes from the prefix the
+# address falls inside, so create your prefixes and scope them to sites first.
+address,dns_name,description
+10.10.1.5,core-sw-01.example.net,Building A core stack
+10.10.1.6,,Building A access stack
+10.10.1.20/24,fw-edge-01.example.net,Palo Alto edge pair
+10.20.0.9,,Dallas WLC
+10.20.0.10,,Dallas ClearPass

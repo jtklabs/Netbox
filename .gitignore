@@ -25,3 +25,8 @@ __pycache__/
 .DS_Store
 # Collector bundles contain live credentials
 dist/
+# SNMP inventory scanner — real config, credentials and inventory stay local
+scripts/snmp-inventory/snmp-inventory.conf
+scripts/snmp-inventory/snmp-credentials.conf
+scripts/snmp-inventory/devices.csv
+scripts/snmp-inventory/*.log
