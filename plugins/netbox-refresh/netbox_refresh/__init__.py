@@ -28,6 +28,12 @@ class RefreshConfig(PluginConfig):
     author_email = 'noreply@example.com'
     base_url = 'refresh'
     min_version = '4.6.0'
+    # Pointed at explicitly rather than left to the default ('graphql.schema'),
+    # which resolves the attribute `schema` on the package netbox_refresh.graphql
+    # — where the submodule of the same name shadows it depending on import
+    # order. This form is unambiguous: module netbox_refresh.graphql.schema,
+    # attribute `schema`.
+    graphql_schema = 'graphql.schema.schema'
     default_settings = {
         # Manufacturer names whose part numbers are Cisco PIDs, used by the
         # EoX sync to decide which device/module types to look up.
