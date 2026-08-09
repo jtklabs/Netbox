@@ -100,12 +100,42 @@ def collect_fixture(name: str, host: str = "192.0.2.1") -> DeviceFacts:
     return ReplayCollector(fixture_path(name)).collect(host)
 
 
+def _emulator_supported() -> tuple[bool, str]:
+    """Can this machine run the emulated devices?
+
+    Presence of an `snmpd` binary is not enough. macOS ships net-snmp 5.6,
+    whose client tools support only MD5 and SHA-1 — no SHA-256 — and whose
+    /usr/sbin/snmpd is a launchd stub that never serves anything. Without this
+    check the emulator tests are collected there and then hang until each
+    device's readiness timeout expires, which turns a two-second offline run
+    into several minutes of nothing.
+    """
+    import subprocess
+
+    if shutil.which("snmpd") is None:
+        return False, "net-snmp's snmpd is not installed"
+    if shutil.which("snmpwalk") is None:
+        return False, "net-snmp's client tools are not installed"
+    try:
+        usage = subprocess.run(["snmpwalk", "-h"], capture_output=True, text=True,
+                               timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not query net-snmp capabilities: {exc}"
+    text = (usage.stdout or "") + (usage.stderr or "")
+    if "SHA-256" not in text:
+        return False, (
+            "net-snmp here is too old for the emulator's SHA-256/AES credentials "
+            "(needs 5.8+; macOS ships 5.6)"
+        )
+    return True, ""
+
+
+_EMULATOR_OK, _EMULATOR_WHY = _emulator_supported()
+
+
 @pytest.fixture(scope="session")
 def snmpd_available() -> bool:
-    return shutil.which("snmpd") is not None
+    return _EMULATOR_OK
 
 
-needs_snmpd = pytest.mark.skipif(
-    shutil.which("snmpd") is None,
-    reason="net-snmp's snmpd is not installed; the emulator tests need it",
-)
+needs_snmpd = pytest.mark.skipif(not _EMULATOR_OK, reason=_EMULATOR_WHY)

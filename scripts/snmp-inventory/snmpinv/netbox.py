@@ -84,6 +84,8 @@ class NetBox:
         # always positive, so a negative id anywhere downstream is
         # unambiguously an object this run only pretended to create.
         self._next_placeholder_id = -1
+        self._plugins: dict | None = None
+        self._endpoints: dict[str, bool] = {}
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -219,6 +221,53 @@ class NetBox:
         return updated or existing
 
     # --- helpers used across the sync layer ---------------------------------
+
+    def plugin_installed(self, name: str) -> bool:
+        """Is a NetBox plugin present on this instance? Read once and cached."""
+        if self._plugins is None:
+            try:
+                self._plugins = self.get("/status/").get("plugins", {}) or {}
+            except NetBoxError:
+                self._plugins = {}
+        return name in self._plugins
+
+    def endpoint_available(self, path: str) -> bool:
+        """Does this instance actually serve `path`?
+
+        Checking the plugin is installed is not enough. A poller ships on its
+        own schedule and may well be pointed at a NetBox running an older
+        version of a plugin — one that exists but does not yet have the
+        endpoint we want. Probing the endpoint is the only honest test, and it
+        makes the scanner degrade to its fallback instead of failing every
+        write with an HTML 404 page.
+        """
+        if path in self._endpoints:
+            return self._endpoints[path]
+        try:
+            response = self._request("GET", path, params={"limit": 1})
+            available = response.status_code == 200
+        except NetBoxError:
+            available = False
+        self._endpoints[path] = available
+        return available
+
+    def post_raw(self, path: str, payload, label: str = "") -> dict | None:
+        """POST an arbitrary payload, honouring dry-run.
+
+        Used for plugin endpoints that are not plain object creates, so they do
+        not get counted as created objects.
+        """
+        if self.dry_run:
+            count = len(payload) if isinstance(payload, list) else 1
+            log.info("[dry-run] would post %d item(s) to %s", count, label or path)
+            return None
+        response = self._request("POST", path, json=payload)
+        if not response.ok:
+            raise NetBoxError(f"POST {path} -> {response.status_code}: {response.text[:400]}")
+        try:
+            return response.json()
+        except ValueError:
+            return None
 
     def tag_exists(self, slug: str) -> bool:
         """Check a tag exists before filtering by it.

@@ -29,7 +29,23 @@ from snmpinv.collect import Collector
 from snmpinv.model import build_scan_result
 from snmpinv.netbox import NetBox
 from snmpinv.selection import resolve_ownership, select_targets
-from snmpinv.sync import SOFTWARE_VERSION_FIELD, Syncer, SyncOptions
+from snmpinv.sync import (
+    LIFECYCLE_ENDPOINT,
+    LIFECYCLE_PLUGIN,
+    SOFTWARE_VERSION_FIELD,
+    Syncer,
+    SyncOptions,
+)
+
+
+def _lifecycle_ready(netbox) -> bool:
+    """Does this instance have the Lifecycle software endpoints?
+
+    An instance can run a Lifecycle plugin older than the software models, so
+    the endpoint is probed rather than the plugin's presence trusted.
+    """
+    return (netbox.plugin_installed(LIFECYCLE_PLUGIN)
+            and netbox.endpoint_available(LIFECYCLE_ENDPOINT))
 
 URL = os.environ.get("SNMPINV_TEST_NETBOX_URL", "")
 TOKEN = os.environ.get("SNMPINV_TEST_NETBOX_TOKEN", "")
@@ -305,9 +321,11 @@ def synced(netbox, lab):
         result = build_scan_result(collector.collect(device.address))
         syncer = Syncer(netbox, options)
         syncer.sync(result, site_id, scanned_address="10.10.1.5")
+        syncer.flush_software_reports()
         first = _snapshot(netbox, site_id)
         # Second pass over the identical data. Nothing may be created.
         syncer.sync(result, site_id, scanned_address="10.10.1.5")
+        syncer.flush_software_reports()
         second = _snapshot(netbox, site_id)
     return {"result": result, "site_id": site_id, "first": first, "second": second}
 
@@ -342,9 +360,38 @@ class TestFullScanAndSync:
         members = netbox.all("/dcim/devices/", {"virtual_chassis_id": vc["id"]})
         assert sorted(d["vc_position"] for d in members) == [1, 2, 3]
 
-    def test_software_version_landed_in_the_custom_field(self, netbox, synced):
+    def test_software_version_recorded(self, netbox, synced):
+        """Where the version lands depends on whether the Lifecycle plugin is
+        installed — its DeviceSoftware model when it is, a custom field when
+        it is not. Deliberately never both."""
         device = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
-        assert device["custom_fields"].get(SOFTWARE_VERSION_FIELD) == "17.03.04a"
+        if _lifecycle_ready(netbox):
+            record = netbox.first("/plugins/refresh/device-software/",
+                                  {"device_id": device["id"]})
+            assert record is not None, "no DeviceSoftware record was created"
+            version = record.get("raw_version") or \
+                (record.get("software_version") or {}).get("version")
+            assert version == "17.03.04a"
+            assert (record.get("source") or {}).get("value") == "snmp"
+            # The verbatim sysDescr is kept so a wrong-looking version can be
+            # traced to what the device actually said.
+            assert "Version 17.03.04a" in (record.get("raw_report") or "")
+            # And the custom field is not also written — one fact, one home.
+            assert not device["custom_fields"].get(SOFTWARE_VERSION_FIELD)
+        else:
+            assert device["custom_fields"].get(SOFTWARE_VERSION_FIELD) == "17.03.04a"
+
+    def test_software_report_is_not_written_per_scan(self, netbox, synced):
+        """The plugin's ingest endpoint bumps an unchanged version without a
+        changelog entry, so a nightly sweep does not bury real changes."""
+        if not _lifecycle_ready(netbox):
+            pytest.skip("Lifecycle plugin has no device-software endpoint here")
+        device = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
+        record = netbox.first("/plugins/refresh/device-software/", {"device_id": device["id"]})
+        assert record is not None
+        # synced ran the sync twice; there must still be exactly one record.
+        assert netbox.count("/plugins/refresh/device-software/",
+                            {"device_id": device["id"]}) == 1
 
     def test_platform_was_set(self, netbox, synced):
         device = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})

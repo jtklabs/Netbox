@@ -3,22 +3,23 @@
 Collects hardware inventory over SNMPv3 and writes it into NetBox through the
 REST API. Runs on poller boxes near the gear, one poller per site or region.
 
-Additive. It does not touch the orb-agent + Diode stack in
-`compose/discovery.yml`; run the two side by side until this one has proved
-itself.
+This is the project's discovery mechanism. It replaced the orb-agent + Diode
+stack, which was removed in "Remove Diode and orb-agent: discovery becomes
+ours".
 
 ## Why this exists
 
-Discovery today goes through NetBox Labs' orb-agent into Diode. It derives a
-device's model by looking up `sysObjectID` in tables compiled into a Go binary,
-which produces device types like `aristaDCS7050SX272Q` and `aruba7010` — the
+Discovery used to go through NetBox Labs' orb-agent into Diode: thirteen
+services whose only job was moving data into NetBox. It derived a device's
+model by looking up `sysObjectID` in tables compiled into a Go binary, which
+produced device types like `aristaDCS7050SX272Q` and `aruba7010` — the
 manufacturer glued onto the model, and neither string is what the vendor calls
-the product. Palo Alto comes out right only because the binary happens to embed
+the product. Palo Alto came out right only because the binary happened to embed
 `lookup_extensions/pan.yaml`.
 
-Correcting a model in NetBox does not stick. Diode matches device types on
-manufacturer + model, so the next scan does not recognise the corrected type
-and recreates the bad one. The OSS reconciler also applies everything
+Correcting a model in NetBox did not stick. Diode matches device types on
+manufacturer + model, so the next scan did not recognise the corrected type and
+recreated the bad one. The OSS reconciler also applied everything
 automatically — the review queue is a commercial feature.
 
 This scanner asks the device instead. ENTITY-MIB `entPhysicalTable` is where a
@@ -61,16 +62,43 @@ recalled; see [docs/OID-SOURCES.md](docs/OID-SOURCES.md) for the provenance and
 
 ### Where the software version goes
 
-NetBox 4.6 has no per-device software version field. The scanner creates a
-`software_version` **text custom field on `dcim.device`** the first time it runs
-and writes the running version there — no manual setup needed. It also sets the
-device's **Platform** to the OS family (`Cisco IOS-XE`, `PAN-OS`, `Arista EOS`
-…), which is what Platform is for and makes the fleet filterable by NOS.
+NetBox 4.6 has no per-device software version field, so the reading needs a
+home. There are two, and the scanner picks whichever the instance can take:
+
+**The Lifecycle plugin, when it is installed.** Its `DeviceSoftware` model
+exists for exactly this — it keeps the raw version string, what the reading came
+from, when it was taken, and drives compliance against approved versions. The
+scanner posts the whole fleet's readings to its ingest endpoint in one call at
+the end of a run:
+
+```
+POST /api/plugins/refresh/device-software/report/
+[{"device": 42, "version": "17.03.04a", "platform": "Cisco IOS-XE",
+  "source": "snmp", "raw": "<verbatim sysDescr>"}, ...]
+```
+
+The verbatim `sysDescr` goes with it, so a version that looks wrong can be
+traced to what the device actually said rather than argued about. That endpoint
+also bumps an unchanged version without writing a changelog entry, which is why
+a nightly sweep does not bury the changes that matter.
+
+**A custom field otherwise.** The scanner creates a `software_version` text
+custom field on `dcim.device` and writes there. No manual setup needed.
+
+Never both — the same fact in two places drifts. Which one is in use is logged
+at the start of every run. The choice is made by probing the endpoint, not by
+reading the plugin list, because an instance can run a Lifecycle plugin older
+than its software models.
+
+Either way the device's **Platform** is also set to the OS family (`Cisco
+IOS-XE`, `PAN-OS`, `Arista EOS` …), which is what Platform is for and makes the
+fleet filterable by NOS.
 
 Find everything running a given release:
 
 ```
-/dcim/devices/?cf_software_version=17.03.04a
+/plugins/refresh/device-software/?version=17.03.04a     # with the plugin
+/dcim/devices/?cf_software_version=17.03.04a            # with the custom field
 ```
 
 ## How a poller decides what to scan
@@ -315,17 +343,31 @@ paragraph — so that case is covered against recorded text instead, in
 ### Running the tests
 
 ```bash
-python3 -m pytest tests/ -q                      # offline: 96 tests, no network
+python3 -m pytest tests/ -q
 ```
 
-Add the live NetBox tests by pointing them at an instance you do not mind
-writing to. They create everything under an `SNMPINV_TEST_` prefix and tear it
-down afterwards, and never delete anything they did not create:
+Three tiers, each unlocked by what the machine can do — nothing is silently
+skipped without saying why:
+
+| Where | Passes | What runs |
+|---|---|---|
+| Any machine with Python | 77 | parsing, collection, modelling, ownership |
+| + net-snmp 5.8 or newer | 96 | the above, plus the emulated devices |
+| + a NetBox to write to | 118 | the above, plus the live instance |
+
+The middle tier needs net-snmp 5.8+ because the emulated devices authenticate
+with SHA-256/AES. macOS ships 5.6, which offers only MD5 and SHA-1 and whose
+`/usr/sbin/snmpd` is a launchd stub, so those tests skip there and run on a
+Linux poller.
+
+Add the live tier by pointing it at an instance you do not mind writing to. It
+creates everything under an `SNMPINV_TEST_` prefix and tears it down
+afterwards, and never deletes anything it did not create:
 
 ```bash
 export SNMPINV_TEST_NETBOX_URL=http://10.50.10.132:8080/netbox
 export SNMPINV_TEST_NETBOX_TOKEN=nbt_...
-python3 -m pytest tests/ -q                      # 117 tests
+python3 -m pytest tests/ -q
 ```
 
 The split is deliberate:

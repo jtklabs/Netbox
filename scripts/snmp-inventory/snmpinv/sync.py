@@ -35,9 +35,27 @@ log = logging.getLogger(__name__)
 
 SOFTWARE_VERSION_FIELD = "software_version"
 
-# NetBox has no native per-device software version field. A text custom field
-# on dcim.device is the supported place to put one, and the scanner creates it
-# so a fresh install needs no manual preparation.
+# NetBox has no native per-device software version field, so the version needs
+# a home. There are two, and which one is used depends on the instance:
+#
+#   Lifecycle plugin present  -> its DeviceSoftware ingest endpoint. That model
+#                                exists for exactly this: it keeps the raw
+#                                string, what the reading came from, when it was
+#                                taken, and drives compliance against approved
+#                                versions. Its /report/ endpoint also bumps an
+#                                unchanged version with a queryset update, so a
+#                                nightly sweep does not write one changelog
+#                                entry per device per night.
+#   plugin absent             -> a text custom field on dcim.device, created by
+#                                the scanner so a bare NetBox needs no setup.
+#
+# Deliberately not both. The same fact in two places drifts, and the plugin's
+# copy is the one the compliance reporting reads.
+LIFECYCLE_PLUGIN = "netbox_refresh"
+LIFECYCLE_ENDPOINT = "/plugins/refresh/device-software/"
+LIFECYCLE_REPORT_ENDPOINT = f"{LIFECYCLE_ENDPOINT}report/"
+LIFECYCLE_SOURCE_SNMP = "snmp"
+
 SOFTWARE_VERSION_CUSTOM_FIELD = {
     "name": SOFTWARE_VERSION_FIELD,
     "label": "Software version",
@@ -72,6 +90,11 @@ class Syncer:
         self.netbox = netbox
         self.options = options or SyncOptions()
         self._custom_field_ready = False
+        self._use_lifecycle: bool | None = None
+        # Version readings are batched and sent once at the end of a run. The
+        # ingest endpoint takes a list, and one call for a fleet beats one call
+        # per device across a WAN.
+        self._software_reports: list[dict] = []
 
     # --- entry point --------------------------------------------------------
 
@@ -84,7 +107,7 @@ class Syncer:
             log.warning("%s: no site could be determined, skipping", result.host)
             return
 
-        if self.options.manage_software_version:
+        if self.options.manage_software_version and not self._lifecycle_available():
             self._ensure_software_version_field()
 
         virtual_chassis = None
@@ -112,6 +135,8 @@ class Syncer:
                 self._sync_modules(device, record)
             if self.options.sync_interfaces:
                 self._sync_interfaces(device, record, scanned_address)
+            if self.options.manage_software_version:
+                self._queue_software_report(device, record, result)
 
         if self.options.sync_access_points and result.access_points:
             self._sync_access_points(result, site_id)
@@ -143,7 +168,8 @@ class Syncer:
                 # Highest priority so a NetBox-side election agrees with what
                 # the stack itself reported.
                 desired["vc_priority"] = 255
-        if self.options.manage_software_version and record.software_version:
+        if (self.options.manage_software_version and record.software_version
+                and not self._lifecycle_available()):
             desired["custom_fields"] = {SOFTWARE_VERSION_FIELD: record.software_version}
 
         if existing is not None:
@@ -318,6 +344,81 @@ class Syncer:
         return self.netbox.ensure(
             "/dcim/platforms/", {"slug": slugify(name)}, payload, label=f"platform {name}"
         )
+
+    # --- software version -----------------------------------------------
+
+    def _lifecycle_available(self) -> bool:
+        """Can this NetBox actually take a software report?
+
+        The endpoint is probed rather than the plugin merely being listed: an
+        instance can run a version of the Lifecycle plugin that predates the
+        software models, and the difference between "installed" and "has the
+        endpoint" is the difference between reporting versions and getting an
+        HTML 404 back for every device.
+        """
+        if self._use_lifecycle is None:
+            self._use_lifecycle = (
+                self.netbox.plugin_installed(LIFECYCLE_PLUGIN)
+                and self.netbox.endpoint_available(LIFECYCLE_ENDPOINT)
+            )
+            log.info(
+                "software versions will be recorded in %s",
+                "the Lifecycle plugin" if self._use_lifecycle
+                else f"the '{SOFTWARE_VERSION_FIELD}' custom field",
+            )
+        return self._use_lifecycle
+
+    def _queue_software_report(self, device: dict | None, record: DeviceRecord,
+                               result: ScanResult) -> None:
+        """Record a device's running version for the end-of-run batch.
+
+        Only when the Lifecycle plugin is present — otherwise the version was
+        already written to the custom field as part of the device payload.
+        """
+        if not self._lifecycle_available():
+            return
+        if device is None or not record.software_version:
+            return
+        if device.get("id", 0) < 0:
+            # Dry-run placeholder: there is no device to report against.
+            log.info("[dry-run] would report %s running %s to the Lifecycle plugin",
+                     record.name, record.software_version)
+            return
+        report = {
+            "device": device["id"],
+            "version": record.software_version,
+            "source": LIFECYCLE_SOURCE_SNMP,
+        }
+        if record.platform:
+            report["platform"] = record.platform
+        # The verbatim string the version was read out of, so a version that
+        # looks wrong can be traced to what the device actually said rather
+        # than argued about.
+        facts = result.facts
+        if facts is not None and facts.sys_descr:
+            report["raw"] = facts.sys_descr[:2000]
+        self._software_reports.append(report)
+
+    def flush_software_reports(self) -> None:
+        """Send the batched version readings. Call once at the end of a run."""
+        if not self._software_reports:
+            return
+        batch, self._software_reports = self._software_reports, []
+        try:
+            response = self.netbox.post_raw(
+                LIFECYCLE_REPORT_ENDPOINT, batch, label="device software report"
+            )
+        except NetBoxError as exc:
+            # The inventory itself is already written and correct; losing the
+            # version reading is not worth failing the run over.
+            log.warning("could not report software versions to the Lifecycle plugin: %s", exc)
+            return
+        if response:
+            summary = response.get("summary", {})
+            log.info("reported %d software versions: %s", len(batch), summary or "no summary")
+            for entry in response.get("results", []):
+                if entry.get("result") == "error":
+                    log.warning("  %s: %s", entry.get("device"), entry.get("detail"))
 
     def _ensure_software_version_field(self) -> None:
         if self._custom_field_ready:

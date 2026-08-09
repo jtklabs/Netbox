@@ -142,6 +142,10 @@ def main(argv=None) -> int:
                 log.error("%s: writing to NetBox failed: %s", target.address, exc)
                 failed += 1
 
+    if not args.collect_only:
+        # One call for the whole fleet rather than one per device.
+        syncer.flush_software_reports()
+
     elapsed = time.time() - started
     log.info(
         "done in %.1fs — %d scanned, %d failed; NetBox: %s",
