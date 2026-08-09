@@ -103,7 +103,7 @@ NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discove
 - `docker-compose.yml`, `configuration/`, `env/*.example` — imported from netbox-docker at the tag in [VERSIONS.md](VERSIONS.md) (deviation: the postgres service lives in `compose/dev.yml`; prod uses RDS)
 - `compose/` — env overlays: `dev.yml`, `prod.yml`, `discovery.yml`, `dev-proxy.yml` (HTTPS proxy serving dev at `/netbox`, the prod path)
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin; `Dockerfile-Plugins` builds the image with it + PyPI plugins
-- `plugins/netbox-refresh/` — our hardware-lifecycle plugin: EoL dates on device/module types, replacement model links, replacement cost, Cisco EoX sync (`manage.py sync_cisco_eol`) and the refresh cost report at **Hardware Refresh › Refresh Report**
+- `plugins/netbox-refresh/` — our hardware-lifecycle plugin: EoL dates on device/module types, replacement model links, replacement cost, Cisco EoX sync (`manage.py sync_cisco_eol`) and the refresh cost report at **Hardware Lifecycle › Refresh Report**
 - `apache/netbox.conf` — include for the **existing** Apache/Mellon server (a separate host): protects `/netbox`, strips spoofed identity headers, proxies over the private network + static mapping
 - `collector/` — remote collector kit: drop it on a box at a remote site and it discovers locally, pushing outbound to the central Diode. Includes a custom-Python worker skeleton. Build and push one (or a whole fleet) with `scripts/deploy-collector.sh`; see [collector/README.md](collector/README.md)
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures (incl. `RUNBOOK-noexec-recovery.md` for hardened hosts where containers die at create-task with "permission denied")

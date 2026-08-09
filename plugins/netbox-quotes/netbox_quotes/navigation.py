@@ -41,7 +41,7 @@ lines = PluginMenuItem(
 )
 
 menu = PluginMenu(
-    label='Support Quotes',
+    label='Support Management',
     groups=(('Quotes', (vendors, quotes, lines)),),
     icon_class='mdi mdi-file-document-outline',
 )

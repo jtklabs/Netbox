@@ -3,7 +3,7 @@ from netbox.plugins import PluginConfig
 
 class QuotesConfig(PluginConfig):
     name = 'netbox_quotes'
-    verbose_name = 'Support Quotes'
+    verbose_name = 'Support Management'
     description = 'Vendor support-renewal quotes with serial-matched device assignment'
     version = '0.1.0'
     author = 'Nova Team'

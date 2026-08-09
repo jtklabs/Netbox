@@ -3,7 +3,7 @@ from netbox.plugins import PluginConfig
 
 class RefreshConfig(PluginConfig):
     name = 'netbox_refresh'
-    verbose_name = 'Hardware Refresh'
+    verbose_name = 'Hardware Lifecycle'
     description = 'End-of-life dates, replacement models and refresh cost reporting'
     version = '0.1.0'
     author = 'Nova Team'

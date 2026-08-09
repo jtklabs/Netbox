@@ -27,7 +27,7 @@ report = PluginMenuItem(
 )
 
 menu = PluginMenu(
-    label='Hardware Refresh',
+    label='Hardware Lifecycle',
     groups=(('Lifecycle', (lifecycle, report)),),
     icon_class='mdi mdi-calendar-clock',
 )
