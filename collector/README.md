@@ -68,6 +68,12 @@ anything. Re-running is safe.
 
 Managing it afterwards:
 
+**Changing what a collector scans:** edit `policies.yaml` and re-run
+`./install.sh` — it re-renders the config and restarts the agent only if the
+config actually changed. Do **not** edit `agent.yaml`: it is generated from
+`agent.yaml.template` + `policies.yaml` on every install and your edits will be
+overwritten. Agent-level settings belong in the template.
+
 ```bash
 docker compose logs -f orb-agent   # scan results and ingest confirmations
 docker compose restart orb-agent   # rescan now (unscheduled policies run at start)

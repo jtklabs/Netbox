@@ -42,7 +42,17 @@ done
   cat agent.yaml.template
   echo '  policies:'
   sed 's/^/    /' policies.yaml
-} > agent.yaml
+} > agent.yaml.new
+# Did the rendered config actually change? The agent reads agent.yaml once, at
+# start, and the file arrives via a bind mount — so `docker compose up -d` sees
+# an unchanged container definition and does nothing, leaving the old config
+# running. Without this, editing policies.yaml and re-running install.sh looks
+# like it worked and silently did not.
+config_changed=false
+if [ ! -f agent.yaml ] || ! cmp -s agent.yaml.new agent.yaml; then
+  config_changed=true
+fi
+mv agent.yaml.new agent.yaml
 
 python3 -c "
 import sys
@@ -87,6 +97,12 @@ fi
 # --- 4. run -----------------------------------------------------------------
 echo '==> starting the collector'
 docker compose up -d
+# up -d cannot notice a changed bind-mounted file, so restart explicitly when
+# the config moved. Harmless when the container was only just created.
+if [ "$config_changed" = true ]; then
+  echo '    agent config changed — restarting the agent to load it'
+  docker compose restart orb-agent
+fi
 sleep 5
 docker compose ps
 cat <<EOF
