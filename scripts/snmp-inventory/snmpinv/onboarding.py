@@ -30,7 +30,13 @@ import logging
 import threading
 
 from .collect import Collector
-from .model import ScanResult, build_scan_result
+from .model import (
+    DeviceRecord,
+    InterfaceRecord,
+    ModuleRecord,
+    ScanResult,
+    build_scan_result,
+)
 from .netbox import NetBox, NetBoxError
 from .snmp import SnmpAuthError, SnmpError, SnmpTimeoutError
 from .sync import Syncer
@@ -199,23 +205,37 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
                               "the device.")
         return "no-site"
 
+    from_preview = False
     try:
-        facts = collector.collect(address)
+        result = build_scan_result(collector.collect(address))
     except SnmpError as exc:
-        _report_apply_failure(netbox, request_id, dry_run,
-                              "Could not re-read the device to apply it: %s" % exc)
-        return "unreachable"
+        # The device is not answering now, but somebody already reviewed a
+        # reading of it. Applying what they approved beats making them start
+        # again because a switch happened to be rebooting.
+        result = _reviewed_result(netbox, request_id, address)
+        if result is None:
+            _report_apply_failure(
+                netbox, request_id, dry_run,
+                "Could not re-read the device to apply it (%s), and there is no "
+                "stored scan to fall back on." % exc,
+            )
+            return "unreachable"
+        from_preview = True
+        log.warning(
+            "onboarding %s: unreachable now (%s) — applying the reading that was "
+            "reviewed instead", address, exc,
+        )
 
-    result = build_scan_result(facts)
     if not result.devices:
         _report_apply_failure(netbox, request_id, dry_run,
                               "The device no longer reports a chassis.")
         return "no-chassis"
 
-    changed = _hardware_changed(netbox, request_id, result)
-    if changed:
-        _report_apply_failure(netbox, request_id, dry_run, changed)
-        return "changed"
+    if not from_preview:
+        changed = _hardware_changed(netbox, request_id, result)
+        if changed:
+            _report_apply_failure(netbox, request_id, dry_run, changed)
+            return "changed"
 
     _apply_overrides(result, job)
 
@@ -243,6 +263,18 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
                     label=f"apply result for {address}")
     log.info("onboarding %s: created %s", address, device.get("name"))
     return "applied"
+
+
+def _reviewed_result(netbox: NetBox, request_id: int, address: str) -> ScanResult | None:
+    """The preview the operator approved, rebuilt into something appliable."""
+    try:
+        request = netbox.get(f"{REQUEST_ENDPOINT}{request_id}/")
+    except NetBoxError:
+        return None
+    payload = request.get("discovered") or {}
+    if not payload.get("devices"):
+        return None
+    return scan_result_from_payload(payload, host=address)
 
 
 def _report_apply_failure(netbox: NetBox, request_id: int, dry_run: bool,
@@ -328,10 +360,12 @@ def _find_created_device(netbox: NetBox, result: ScanResult, site_id: int) -> di
 def scan_payload(result: ScanResult) -> dict:
     """Render a scan result as the preview the plugin stores for review.
 
-    Interfaces and modules are summarised rather than sent whole: the review
-    page shows counts and the member breakdown, and a 48-port switch's full
-    interface list would bloat every request row for something nobody reads at
-    that stage. The apply step re-reads the device anyway.
+    Stored in full, not summarised. The review page only shows counts and the
+    member breakdown, so most of this is never displayed — but it is what makes
+    the stored preview *sufficient to apply from*. Without the addresses, MACs
+    and speeds, a request whose device went offline between review and approval
+    could not be completed at all, and somebody would have to start again for
+    no reason. A 48-port stack costs about 5 KB.
     """
     facts = result.facts
     return {
@@ -350,7 +384,17 @@ def scan_payload(result: ScanResult) -> dict:
                 "is_master": bool(device.vc_is_master) or device is result.primary,
                 "vc_position": device.vc_position,
                 "interfaces": [
-                    {"name": i.name, "type": i.type_slug} for i in device.interfaces
+                    {
+                        "name": i.name,
+                        "type": i.type_slug,
+                        "enabled": i.enabled,
+                        "mtu": i.mtu,
+                        "mac_address": i.mac_address,
+                        "description": i.description,
+                        "speed_kbps": i.speed_kbps,
+                        "ip_addresses": list(i.ip_addresses),
+                    }
+                    for i in device.interfaces
                 ],
                 "modules": [
                     {"bay": m.bay_name, "model": m.model, "serial": m.serial}
@@ -364,6 +408,54 @@ def scan_payload(result: ScanResult) -> dict:
             for ap in result.access_points
         ],
     }
+
+
+def scan_result_from_payload(payload: dict, host: str = "") -> ScanResult:
+    """Rebuild a ScanResult from a stored preview.
+
+    Used when the device cannot be reached at apply time. The operator approved
+    this exact reading; applying it is better than making them start over
+    because a switch happened to be rebooting.
+    """
+    devices = []
+    for entry in payload.get("devices", []):
+        devices.append(DeviceRecord(
+            name=entry.get("name", ""),
+            serial=entry.get("serial", ""),
+            model=entry.get("model", ""),
+            manufacturer=entry.get("manufacturer", ""),
+            platform=entry.get("platform", ""),
+            software_version=entry.get("software_version", ""),
+            vc_position=entry.get("vc_position"),
+            vc_is_master=bool(entry.get("is_master")),
+            interfaces=[
+                InterfaceRecord(
+                    name=i.get("name", ""),
+                    type_slug=i.get("type", "other"),
+                    enabled=i.get("enabled", True),
+                    mtu=i.get("mtu"),
+                    mac_address=i.get("mac_address", ""),
+                    description=i.get("description", ""),
+                    speed_kbps=i.get("speed_kbps"),
+                    ip_addresses=list(i.get("ip_addresses") or []),
+                )
+                for i in entry.get("interfaces", [])
+            ],
+            modules=[
+                ModuleRecord(
+                    bay_name=m.get("bay", ""),
+                    model=m.get("model", ""),
+                    serial=m.get("serial", ""),
+                    manufacturer=m.get("manufacturer", entry.get("manufacturer", "")),
+                )
+                for m in entry.get("modules", [])
+            ],
+        ))
+    result = ScanResult(host=host, sys_name=payload.get("sys_name", ""), devices=devices)
+    if len([d for d in devices if d.vc_position is not None]) > 1:
+        primary = result.primary
+        result.virtual_chassis_name = primary.name if primary else ""
+    return result
 
 
 def _describe(result: ScanResult) -> str:

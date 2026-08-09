@@ -622,3 +622,81 @@ class TestDefaultRegionFallback:
         approved = approve(netbox, entry["id"], override_site=lab["site"]["id"])
         assert approved["status"] == "approved"
         assert approved["override_site"]["id"] == lab["site"]["id"]
+
+
+class TestTheReviewedReadingIsSufficient:
+    """What is stored at review has to be enough to apply from.
+
+    Apply normally re-reads the device, which is more correct — but a switch
+    that happens to be rebooting must not force somebody to start over. That
+    only works if the stored preview kept the addresses, MACs and speeds, not
+    just a summary.
+    """
+
+    def test_the_preview_keeps_what_a_sync_needs(self, netbox, lab):
+        entry = submit(netbox, "192.0.2.91")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-c9300-stack"), syncer, jobs)
+
+        stored = refresh(netbox, entry["id"])["discovered"]
+        interfaces = stored["devices"][0]["interfaces"]
+        assert interfaces, "no interfaces were stored"
+        first = interfaces[0]
+        for field in ("name", "type", "mac_address", "mtu", "speed_kbps",
+                      "description", "enabled", "ip_addresses"):
+            assert field in first, "%s is missing from the stored preview" % field
+
+        # The management address in particular — losing it would mean an
+        # applied-from-preview device had no IP at all.
+        addresses = [ip for d in stored["devices"] for i in d["interfaces"]
+                     for ip in (i.get("ip_addresses") or [])]
+        assert "10.10.1.5/24" in addresses
+
+    def test_apply_falls_back_to_the_reviewed_reading_when_unreachable(self, netbox, lab):
+        from snmpinv.snmp import SnmpTimeoutError
+
+        entry = submit(netbox, "192.0.2.92")
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+        approve(netbox, entry["id"])
+
+        class Unreachable:
+            def collect(self, host):
+                raise SnmpTimeoutError("%s: no response" % host)
+
+        apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
+                      if j["id"] == entry["id"]]
+        counts = onboarding.run_jobs(netbox, Unreachable(), syncer, apply_jobs)
+        assert counts.get("applied") == 1, (
+            "an approved request should still apply from the reviewed reading"
+        )
+
+        final = refresh(netbox, entry["id"])
+        assert final["status"] == "applied"
+        device = netbox.get("/dcim/devices/%s/" % final["device"]["id"])
+        assert device["serial"] == "FOC1934X0AB"
+        # And it was built properly, not as a stub.
+        interfaces = netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
+        assert len(interfaces) == 4
+        assert any(i["name"] == "Vlan1" for i in interfaces)
+
+    def test_a_request_with_no_stored_scan_still_fails_honestly(self, netbox, lab):
+        """The fallback must not turn an unscanned request into a device."""
+        from snmpinv.snmp import SnmpTimeoutError
+
+        entry = submit(netbox, "192.0.2.93")
+
+        class Unreachable:
+            def collect(self, host):
+                raise SnmpTimeoutError("%s: no response" % host)
+
+        job = {"id": entry["id"], "address": "192.0.2.93", "action": "apply",
+               "site": lab["site"]["id"], "site_name": "", "override_name": "",
+               "role": "", "tenant": None, "tenant_name": ""}
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        counts = onboarding.run_jobs(netbox, Unreachable(), syncer, [job])
+        assert counts.get("unreachable") == 1
+        after = refresh(netbox, entry["id"])
+        assert "no stored scan to fall back on" in after["error"]

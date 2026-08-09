@@ -358,10 +358,20 @@ API client.
 
 Two behaviours worth knowing:
 
-- **Apply re-reads the device.** A preview can be hours old by the time someone
-  looks at it, and the device is right there to ask. If the serial or model has
-  changed since the review, the request goes *back* to review rather than
-  applying — the person approved a specific box and this is no longer that box.
+- **What the scan found is stored in full**, on the request itself
+  (`discovered`) — every interface with its address, MAC, MTU, speed and
+  description, every module with its serial. About 5 KB for a 48-port stack.
+  The review page shows only counts and the member breakdown, but the rest is
+  kept so the stored reading is enough to build the device from.
+- **Apply re-reads the device**, because a preview can be hours old and the
+  device is right there to ask. If the serial or model has changed since the
+  review, the request goes *back* to review rather than applying — the person
+  approved a specific box and this is no longer that box.
+- **If the device is unreachable at apply time, the reviewed reading is used
+  instead**, and the poller says so in its log. Somebody already approved that
+  exact reading; making them start over because a switch was rebooting would be
+  worse. A request that was never successfully scanned still fails honestly —
+  there is nothing to fall back to.
 - **Pollers register themselves.** The first check-in creates the poller record.
   The UI shows when each last checked in, so a request that has not moved is
   visibly waiting on a poller rather than mysteriously stuck.
