@@ -75,7 +75,12 @@ def lab(netbox):
         """
         existing = netbox.first(path, lookup or {})
         if existing is not None:
-            fixup = {k: v for k, v in payload.items() if k in ("region", "parent", "tags")}
+            # Re-assert the fields the assertions depend on. On a shared lab
+            # instance the object may already exist pointing somewhere else —
+            # a prefix scoped to a different site, say — and adopting it as-is
+            # would fail the test for a reason unrelated to the code.
+            fixup = {k: v for k, v in payload.items()
+                     if k in ("region", "parent", "tags", "scope_type", "scope_id")}
             if fixup:
                 netbox.update(path, existing["id"], fixup)
                 existing = netbox.first(path, lookup or {})
@@ -165,8 +170,25 @@ def _teardown(netbox: NetBox) -> None:
                       (o.get("slug") or "").startswith(SLUG_PREFIX)
 
     test_sites = [s for s in netbox.all("/dcim/sites/") if named(s)]
+    test_site_ids = {s["id"] for s in test_sites}
 
-    # Devices first — this also takes their interfaces, module bays and modules.
+    # Detach virtual-chassis masters first. A device that is a VC's master
+    # cannot be deleted while it holds that role, so skipping this leaves the
+    # master behind, the site delete then fails with it still attached, and the
+    # next run finds it by serial and adopts it at the wrong site.
+    for vc in netbox.all("/dcim/virtual-chassis/"):
+        master = vc.get("master") or {}
+        if (master.get("id") and
+                any(m.get("id") == master["id"]
+                    for m in netbox.all("/dcim/devices/", {"virtual_chassis_id": vc["id"]})
+                    if (m.get("site") or {}).get("id") in test_site_ids)):
+            try:
+                session.patch(f"{netbox.base}dcim/virtual-chassis/{vc['id']}/",
+                              json={"master": None}, timeout=30)
+            except requests.RequestException:
+                pass
+
+    # Devices next — this also takes their interfaces, module bays and modules.
     for site in test_sites:
         for device in netbox.all("/dcim/devices/", {"site_id": site["id"]}):
             delete("/dcim/devices/", device["id"])
@@ -359,6 +381,33 @@ class TestFullScanAndSync:
         would double them if the lookup-before-create were missing."""
         macs = netbox.all("/dcim/mac-addresses/", {"mac_address": "AC:F2:C5:01:01:01"})
         assert len(macs) == 1
+
+    def test_a_relocated_device_is_moved_not_left_behind(self, netbox, lab, synced):
+        """A device found by serial at another site follows its address.
+
+        Serial matching is site-independent, so without this a unit that was
+        re-racked stays at its old site forever — and a stack picks up members
+        at the new site while the known one stays behind, leaving a virtual
+        chassis spanning two sites.
+        """
+        device = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
+        netbox.update("/dcim/devices/", device["id"],
+                      {"site": lab["site_reclaimed"]["id"]})
+        assert (netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
+                ["site"]["id"]) == lab["site_reclaimed"]["id"]
+
+        with EmulatedDevice(fixture_path("cisco-c9300-stack"), port=BASE_PORT + 2) as emulated:
+            result = build_scan_result(Collector([LAB_CREDENTIAL], timeout=3)
+                                       .collect(emulated.address))
+            Syncer(netbox, SyncOptions(device_role=f"{SLUG_PREFIX}network")).sync(
+                result, synced["site_id"], scanned_address="10.10.1.5")
+
+        moved = netbox.first("/dcim/devices/", {"serial": "FOC2530L0AB"})
+        assert moved["site"]["id"] == synced["site_id"]
+        # And the whole chassis is at one site again.
+        vc = netbox.first("/dcim/virtual-chassis/", {"name": "bld-a-core-01"})
+        members = netbox.all("/dcim/devices/", {"virtual_chassis_id": vc["id"]})
+        assert {(m.get("site") or {}).get("id") for m in members} == {synced["site_id"]}
 
     def test_rescan_created_nothing(self, synced):
         """The headline property: identical input, no second copy of anything."""

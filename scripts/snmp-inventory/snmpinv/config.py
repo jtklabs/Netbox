@@ -101,6 +101,7 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             sync_access_points=section.getboolean("sync_access_points", True),
             set_primary_ip=section.getboolean("set_primary_ip", True),
             manage_software_version=section.getboolean("manage_software_version", True),
+            move_devices_between_sites=section.getboolean("move_devices_between_sites", True),
         )
 
     if parser.has_section("snmp"):

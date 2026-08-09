@@ -38,6 +38,19 @@ log = logging.getLogger(__name__)
 # interface-heavy endpoints without risking a timeout on a big instance.
 PAGE_SIZE = 250
 
+# Marks an object that only exists because we are in dry-run.
+PLACEHOLDER_KEY = "_snmpinv_dry_run"
+
+
+def _references_placeholder(params: dict | None) -> bool:
+    """True if a query filters on the id of a dry-run placeholder object."""
+    for value in (params or {}).values():
+        if isinstance(value, int) and not isinstance(value, bool) and value < 0:
+            return True
+        if isinstance(value, str) and value.lstrip("-").isdigit() and int(value) < 0:
+            return True
+    return False
+
 
 class NetBoxError(Exception):
     """A NetBox request failed in a way the caller cannot paper over."""
@@ -67,6 +80,10 @@ class NetBox:
         self.session.verify = verify_ssl
         self.created: dict[str, int] = {}
         self.updated: dict[str, int] = {}
+        # Dry-run stand-ins get descending negative ids. Real NetBox ids are
+        # always positive, so a negative id anywhere downstream is
+        # unambiguously an object this run only pretended to create.
+        self._next_placeholder_id = -1
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -92,6 +109,11 @@ class NetBox:
         raise NetBoxError(f"{method} {url} failed: {last_error}")
 
     def get(self, path: str, params: dict | None = None) -> dict:
+        if _references_placeholder(params):
+            # Filtering on the id of an object that was never created would be
+            # a 400 from NetBox ("Select a valid choice"), and the answer is
+            # knowable without asking: nothing can reference it yet.
+            return {"count": 0, "results": [], "next": None, "previous": None}
         response = self._request("GET", path, params=params)
         if not response.ok:
             raise NetBoxError(f"GET {path} {params or ''} -> {response.status_code}: {response.text[:400]}")
@@ -125,12 +147,25 @@ class NetBox:
     # --- writes -------------------------------------------------------------
 
     def create(self, path: str, payload: dict, label: str = "") -> dict | None:
-        """POST, honouring dry-run. Returns None when nothing was written."""
+        """POST, honouring dry-run.
+
+        In dry-run this returns a placeholder object rather than None. That
+        matters: without an id to reference, every child of a would-be-created
+        object is abandoned, and a dry run of a fresh NetBox reports only the
+        handful of top-level objects while silently dropping every device,
+        interface and address underneath them — which reads as "the scan found
+        nothing" rather than "nothing exists yet". Placeholders let the whole
+        chain be reported.
+        """
         what = label or path
         if self.dry_run:
             log.info("[dry-run] would create %s: %s", what, _brief(payload))
             self.created[path] = self.created.get(path, 0) + 1
-            return None
+            placeholder = dict(payload)
+            placeholder["id"] = self._next_placeholder_id
+            placeholder[PLACEHOLDER_KEY] = True
+            self._next_placeholder_id -= 1
+            return placeholder
         response = self._request("POST", path, json=payload)
         if response.status_code not in (200, 201):
             raise NetBoxError(f"POST {path} -> {response.status_code}: {response.text[:400]}")
@@ -141,6 +176,10 @@ class NetBox:
     def update(self, path: str, object_id: int, payload: dict, label: str = "") -> dict | None:
         what = label or f"{path}{object_id}"
         if self.dry_run:
+            # An update to something this run only pretended to create is noise:
+            # the create already reported those fields.
+            if object_id is not None and object_id < 0:
+                return None
             log.info("[dry-run] would update %s: %s", what, _brief(payload))
             self.updated[path] = self.updated.get(path, 0) + 1
             return None
@@ -152,13 +191,7 @@ class NetBox:
         return response.json()
 
     def ensure(self, path: str, lookup: dict, payload: dict, label: str = "") -> dict | None:
-        """Return the existing object matching `lookup`, else create it.
-
-        In dry-run a missing object yields None, and callers must cope with
-        that — an object that was never created has no id to reference. Doing it
-        this way keeps dry-run honest: it reports exactly the chain of objects a
-        real run would have had to create.
-        """
+        """Return the existing object matching `lookup`, else create it."""
         existing = self.first(path, lookup)
         if existing is not None:
             return existing

@@ -58,6 +58,13 @@ class SyncOptions:
     sync_access_points: bool = True
     set_primary_ip: bool = True
     manage_software_version: bool = True
+    # Move a device to the site the scan says it is at, when NetBox disagrees.
+    # On by default: the scanned site is itself NetBox-derived — it comes from
+    # the site the containing prefix is scoped to — so a mismatch usually means
+    # the device was physically relocated and IPAM was updated but the device
+    # record was not. Leaving it also allows a virtual chassis to end up split
+    # across two sites, which is never right.
+    move_devices_between_sites: bool = True
 
 
 class Syncer:
@@ -141,6 +148,7 @@ class Syncer:
 
         if existing is not None:
             self._log_model_correction(existing, device_type, record)
+            self._apply_site_move(existing, site_id, desired, record)
             return self._patch_device(existing, desired, record)
 
         if device_type is None:
@@ -197,6 +205,32 @@ class Syncer:
         return self.netbox.ensure_fields(
             "/dcim/devices/", existing, desired, label=f"device {record.name}"
         )
+
+    def _apply_site_move(self, existing: dict, site_id: int, desired: dict,
+                         record: DeviceRecord) -> None:
+        """Move a device whose NetBox site disagrees with the scan.
+
+        A device is matched by serial first, and a serial is site-independent —
+        so a unit that was racked somewhere else is found and then quietly left
+        at its old site. For a stack that is worse than untidy: the members
+        scanned for the first time land at the new site while the one already in
+        NetBox stays behind, and the virtual chassis ends up spanning two sites.
+        """
+        current = existing.get("site") or {}
+        if not current or current.get("id") == site_id:
+            return
+        if not self.options.move_devices_between_sites:
+            log.warning(
+                "%s is at site %r in NetBox but was scanned from a %s address — "
+                "left where it is (move_devices_between_sites is off)",
+                record.name, current.get("name"), "different site",
+            )
+            return
+        log.warning(
+            "%s moved from site %r to the site its address belongs to",
+            record.name, current.get("name"),
+        )
+        desired["site"] = site_id
 
     def _log_model_correction(self, existing: dict, device_type: dict | None,
                               record: DeviceRecord) -> None:
