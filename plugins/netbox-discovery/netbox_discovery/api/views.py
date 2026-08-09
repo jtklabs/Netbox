@@ -89,7 +89,7 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                 OnboardingRequest.objects
                 .select_for_update(of=('self',), skip_locked=True)
                 .filter(poller=poller)
-                .select_related('site', 'override_site', 'role')
+                .select_related('site', 'override_site', 'role', 'tenant')
                 .order_by('created')
             )
             for entry in queryset[: limit * 4]:
@@ -109,6 +109,11 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                     'site_name': site.name if site else '',
                     'override_name': entry.override_name,
                     'role': entry.role.slug if entry.role else '',
+                    # Carried so the created device is filed against the right
+                    # company — the tenant is why this address was resolvable
+                    # at all when the space overlaps.
+                    'tenant': entry.tenant_id,
+                    'tenant_name': entry.tenant.name if entry.tenant else '',
                 })
                 if len(jobs) >= limit:
                     break
@@ -129,7 +134,7 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
 
 class OnboardingRequestViewSet(NetBoxModelViewSet):
     queryset = OnboardingRequest.objects.select_related(
-        'site', 'override_site', 'prefix', 'poller', 'role', 'device'
+        'site', 'override_site', 'prefix', 'poller', 'role', 'device', 'tenant', 'vrf'
     ).prefetch_related('tags')
     serializer_class = OnboardingRequestSerializer
     filterset_class = filtersets.OnboardingRequestFilterSet

@@ -38,12 +38,12 @@ def approve(entry, user=None, override_name=None, override_site=None, role=None)
         raise TransitionError(
             'There is nothing to approve — no device was reported for this address.'
         )
-    if entry.target_site is None:
-        raise TransitionError(
-            'This request has no site, so there is nowhere to create the device. '
-            'Set a site override first.'
-        )
 
+    # Overrides are applied before the site is checked, because supplying a
+    # site override in the same call is exactly how a request that has no site
+    # gets approved — an address that fell back to the default region arrives
+    # with nowhere to go, and the reviewer supplies it here.
+    #
     # None means "leave as it is"; an empty string means "clear it". The
     # difference matters for a PATCH-shaped API call that omits a field.
     if override_name is not None:
@@ -52,6 +52,12 @@ def approve(entry, user=None, override_name=None, override_site=None, role=None)
         entry.override_site = override_site
     if role is not None:
         entry.role = role
+
+    if entry.target_site is None:
+        raise TransitionError(
+            'This request has no site, so there is nowhere to create the device. '
+            'Approve it again with a site override.'
+        )
 
     entry.status = OnboardingStatusChoices.STATUS_APPROVED
     entry.reviewed_at = timezone.now()

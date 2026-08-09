@@ -58,6 +58,11 @@ class DiscoveryConfig(PluginConfig):
         # Tag slug prefix that assigns sites and regions to pollers. Must match
         # the scanner's; changing one without the other breaks the mapping.
         'poller_tag_prefix': 'poller-',
+        # Region that catches addresses no prefix claims. Its poller-<name> tag
+        # names the poller that scans them; the site is chosen at review, since
+        # an unplaceable address has none. Empty disables the fallback and
+        # unmatched addresses are refused instead.
+        'default_region': 'us',
     }
 
 

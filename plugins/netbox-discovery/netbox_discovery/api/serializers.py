@@ -1,6 +1,7 @@
 from dcim.api.serializers import DeviceSerializer, DeviceRoleSerializer, SiteSerializer
 from dcim.models import DeviceRole, Site
-from ipam.api.serializers import PrefixSerializer
+from ipam.api.serializers import PrefixSerializer, VRFSerializer
+from tenancy.api.serializers import TenantSerializer
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -22,12 +23,13 @@ class DiscoveryPollerSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name='plugins-api:netbox_discovery-api:discoverypoller-detail'
     )
+    tenant = TenantSerializer(nested=True, required=False, allow_null=True)
     is_stale = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = DiscoveryPoller
         fields = (
-            'url', 'id', 'display', 'name', 'last_seen_at', 'version',
+            'url', 'id', 'display', 'name', 'tenant', 'last_seen_at', 'version',
             'last_scan_summary', 'is_stale',
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )
@@ -43,13 +45,16 @@ class OnboardingRequestSerializer(NetBoxModelSerializer):
     prefix = PrefixSerializer(nested=True, read_only=True)
     poller = DiscoveryPollerSerializer(nested=True, read_only=True)
     role = DeviceRoleSerializer(nested=True, required=False, allow_null=True)
+    tenant = TenantSerializer(nested=True, required=False, allow_null=True)
+    vrf = VRFSerializer(nested=True, required=False, allow_null=True)
     device = DeviceSerializer(nested=True, read_only=True)
 
     class Meta:
         model = OnboardingRequest
         fields = (
             'url', 'id', 'display', 'address', 'status', 'site', 'override_site',
-            'override_name', 'role', 'prefix', 'poller', 'discovered', 'error',
+            'override_name', 'role', 'tenant', 'vrf', 'used_default_region',
+            'prefix', 'poller', 'discovered', 'error',
             'device', 'requested_by', 'claimed_at', 'scanned_at', 'reviewed_at',
             'reviewed_by', 'applied_at',
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
@@ -58,6 +63,7 @@ class OnboardingRequestSerializer(NetBoxModelSerializer):
         read_only_fields = (
             'status', 'site', 'prefix', 'poller', 'discovered', 'error', 'device',
             'claimed_at', 'scanned_at', 'reviewed_at', 'applied_at',
+            'used_default_region',
         )
 
 
@@ -194,3 +200,5 @@ class JobSerializer(serializers.Serializer):
     site_name = serializers.CharField(allow_blank=True)
     override_name = serializers.CharField(allow_blank=True)
     role = serializers.CharField(allow_blank=True)
+    tenant = serializers.IntegerField(allow_null=True)
+    tenant_name = serializers.CharField(allow_blank=True)

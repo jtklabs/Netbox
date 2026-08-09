@@ -10,6 +10,7 @@ class OnboardingRequestTable(NetBoxTable):
     address = tables.Column(linkify=True, verbose_name='IP address')
     status = columns.ChoiceFieldColumn()
     site = tables.Column(linkify=True)
+    tenant = tables.Column(linkify=True)
     poller = tables.Column(linkify=True)
     device = tables.Column(linkify=True, verbose_name='Created device')
     # The column that answers "why has nothing happened?" without opening the
@@ -28,18 +29,19 @@ class OnboardingRequestTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = OnboardingRequest
         fields = (
-            'pk', 'id', 'address', 'status', 'waiting_on', 'site', 'poller',
+            'pk', 'id', 'address', 'status', 'waiting_on', 'site', 'tenant', 'poller',
             'discovered_model', 'discovered_serial', 'device', 'requested_by',
             'created', 'scanned_at', 'applied_at', 'description', 'tags',
         )
         default_columns = (
-            'address', 'status', 'waiting_on', 'site', 'poller',
+            'address', 'status', 'waiting_on', 'site', 'tenant', 'poller',
             'discovered_model', 'device',
         )
 
 
 class DiscoveryPollerTable(NetBoxTable):
     name = tables.Column(linkify=True)
+    tenant = tables.Column(linkify=True)
     last_seen_at = columns.DateTimeColumn(verbose_name='Last check-in')
     is_stale = columns.BooleanColumn(verbose_name='Stale')
     open_requests = tables.Column(
@@ -50,7 +52,7 @@ class DiscoveryPollerTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DiscoveryPoller
         fields = (
-            'pk', 'id', 'name', 'last_seen_at', 'is_stale', 'version',
+            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'is_stale', 'version',
             'last_scan_summary', 'open_requests', 'description', 'tags',
         )
         default_columns = ('name', 'last_seen_at', 'is_stale', 'version', 'last_scan_summary')

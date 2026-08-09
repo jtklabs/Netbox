@@ -1,4 +1,6 @@
 from dcim.models import DeviceRole, Site
+from ipam.models import VRF
+from tenancy.models import Tenant, TenantGroup
 from django import forms
 from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import (
@@ -32,6 +34,20 @@ class OnboardingRequestForm(NetBoxModelForm):
     from hardware at all.
     """
 
+    tenant_group = DynamicModelChoiceField(
+        queryset=TenantGroup.objects.all(), required=False, label='Tenant group',
+        initial_params={'tenants': '$tenant'},
+        help_text='Narrows the tenant list; not stored',
+    )
+    tenant = DynamicModelChoiceField(
+        queryset=Tenant.objects.all(), required=False,
+        query_params={'group_id': '$tenant_group'},
+        help_text='Only needed when the address exists in more than one tenant',
+    )
+    vrf = DynamicModelChoiceField(
+        queryset=VRF.objects.all(), required=False, label='VRF',
+        help_text='Only needed when the address exists in more than one VRF',
+    )
     override_site = DynamicModelChoiceField(
         queryset=Site.objects.all(), required=False, label='Site',
         help_text='Leave blank to use the site of the prefix containing the address',
@@ -43,6 +59,10 @@ class OnboardingRequestForm(NetBoxModelForm):
 
     fieldsets = (
         FieldSet('address', name='Device'),
+        # Second, not first: most addresses resolve without any of this, and
+        # asking for a tenant up front would make the common case feel harder
+        # than it is. The form says which to set when it actually needs one.
+        FieldSet('tenant_group', 'tenant', 'vrf', name='Which network (if ambiguous)'),
         FieldSet('override_name', 'override_site', 'role', 'description',
                  name='Optional overrides'),
         FieldSet('tags', name='Tags'),
@@ -50,26 +70,36 @@ class OnboardingRequestForm(NetBoxModelForm):
 
     class Meta:
         model = OnboardingRequest
-        fields = ('address', 'override_name', 'override_site', 'role', 'description', 'tags')
+        fields = ('address', 'tenant', 'vrf', 'override_name', 'override_site',
+                  'role', 'description', 'tags')
         labels = {'override_name': 'Device name'}
         help_texts = {
             'address': 'The management IP. Everything else is discovered.',
             'override_name': "Leave blank to use the device's own hostname",
         }
 
-    def clean_address(self):
+    def clean(self):
         """Resolve the address while the user is still looking at the form.
 
         Deferring this to the poller would mean the request is accepted, sits
         in a queue, and quietly never runs — the operator finding out much
         later, with nothing to tell them the prefix was missing. Failing here
         costs them one correction now.
+
+        The error lands on `tenant` rather than `address` when the address is
+        fine but ambiguous, because the tenant field is the one to fill in.
         """
-        address = self.cleaned_data['address']
-        resolution = resolve(address)
+        cleaned = super().clean()
+        address = cleaned.get('address')
+        if not address:
+            return cleaned
+        resolution = resolve(address, tenant=cleaned.get('tenant'),
+                             vrf=cleaned.get('vrf'))
         if resolution.problem:
-            raise forms.ValidationError(resolution.problem)
-        return resolution.address
+            field = 'tenant' if resolution.candidates else 'address'
+            raise forms.ValidationError({field: resolution.problem})
+        cleaned['address'] = resolution.address
+        return cleaned
 
 
 class OnboardingReviewForm(forms.Form):
@@ -99,6 +129,9 @@ class OnboardingRequestFilterForm(NetBoxModelFilterSetForm):
     site_id = DynamicModelChoiceField(
         queryset=Site.objects.all(), required=False, label='Site'
     )
+    tenant_id = DynamicModelChoiceField(
+        queryset=Tenant.objects.all(), required=False, label='Tenant'
+    )
     tag = TagFilterField(model)
 
 
@@ -109,6 +142,10 @@ class OnboardingRequestImportForm(NetBoxModelImportForm):
     enough, because everything else is derived.
     """
 
+    tenant = CSVModelChoiceField(
+        queryset=Tenant.objects.all(), to_field_name='name', required=False,
+        help_text='Needed only when the address is ambiguous across tenants',
+    )
     override_site = CSVModelChoiceField(
         queryset=Site.objects.all(), to_field_name='name', required=False,
         help_text='Optional; derived from the prefix when omitted',
@@ -120,18 +157,25 @@ class OnboardingRequestImportForm(NetBoxModelImportForm):
 
     class Meta:
         model = OnboardingRequest
-        fields = ('address', 'override_name', 'override_site', 'role', 'description')
+        fields = ('address', 'tenant', 'vrf', 'override_name', 'override_site',
+                  'role', 'description')
 
 
 class DiscoveryPollerForm(NetBoxModelForm):
+    tenant = DynamicModelChoiceField(
+        queryset=Tenant.objects.all(), required=False,
+        help_text='Optional. Not how work is routed — a guard, so a request for '
+                  'another tenant arriving here is flagged rather than scanned',
+    )
+
     fieldsets = (
-        FieldSet('name', 'description', name='Poller'),
+        FieldSet('name', 'tenant', 'description', name='Poller'),
         FieldSet('tags', name='Tags'),
     )
 
     class Meta:
         model = DiscoveryPoller
-        fields = ('name', 'description', 'comments', 'tags')
+        fields = ('name', 'tenant', 'description', 'comments', 'tags')
         help_texts = {
             'name': 'Must match the poller-&lt;name&gt; tag used on its sites and regions',
         }

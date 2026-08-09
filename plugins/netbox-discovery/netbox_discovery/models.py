@@ -44,6 +44,13 @@ class DiscoveryPoller(PrimaryModel):
         max_length=200, blank=True,
         help_text='What the poller reported doing at its last check-in',
     )
+    # Not how work is routed — that follows from the prefix's site — but a
+    # useful guard: a request for another tenant arriving at this poller almost
+    # certainly means a site is tagged for the wrong one.
+    tenant = models.ForeignKey(
+        to='tenancy.Tenant', on_delete=models.SET_NULL, blank=True, null=True,
+        related_name='+', help_text='Whose network this poller sits in, if only one',
+    )
 
     clone_fields = ()
 
@@ -143,6 +150,23 @@ class OnboardingRequest(PrimaryModel):
         to='netbox_discovery.DiscoveryPoller', on_delete=models.SET_NULL,
         blank=True, null=True, related_name='requests',
     )
+    # Part of the key, not decoration. Address space overlaps across companies
+    # we have bought, so the same address can sit in two prefixes and only the
+    # tenant says which device is meant.
+    tenant = models.ForeignKey(
+        to='tenancy.Tenant', on_delete=models.PROTECT, blank=True, null=True,
+        related_name='+',
+        help_text='Required only when the address is ambiguous across tenants',
+    )
+    vrf = models.ForeignKey(
+        to='ipam.VRF', on_delete=models.PROTECT, blank=True, null=True,
+        related_name='+', help_text='Narrows the address to one routing table',
+    )
+    used_default_region = models.BooleanField(
+        default=False,
+        help_text='No prefix matched; the poller came from the default region '
+                  'and a site must be chosen before this can be applied',
+    )
 
     # --- What the operator may override before approving. Everything else the
     # scan reports is taken as read; these three are the ones a human is
@@ -223,13 +247,19 @@ class OnboardingRequest(PrimaryModel):
                 raise ValidationError({'address': 'Enter an IP address.'})
             return
 
-        resolution = resolve(self.address)
+        resolution = resolve(self.address, tenant=self.tenant, vrf=self.vrf)
         self.address = resolution.address
         # Partial results are kept, so the detail page can show how far the
         # chain got before it broke rather than just saying "no".
         self.prefix = resolution.prefix
+        self.used_default_region = resolution.used_default_region
         if resolution.site is not None:
             self.site = resolution.site
+        # A prefix that carries a tenant tells us the owner even when the
+        # person did not; inheriting it means the created device is filed
+        # against the right company without anyone typing it.
+        if self.tenant is None and resolution.tenant is not None:
+            self.tenant = resolution.tenant
 
         if not resolution.ok:
             # A form submission is rejected outright so the person fixes it
@@ -266,6 +296,15 @@ class OnboardingRequest(PrimaryModel):
         return self.override_site or self.site
 
     @property
+    def needs_a_site(self):
+        """True when nothing can be applied until someone picks a site.
+
+        Happens when no prefix matched and the default region supplied the
+        poller: we can scan the device, but nothing tells us where it lives.
+        """
+        return self.target_site is None
+
+    @property
     def is_open(self):
         return self.status not in OnboardingStatusChoices.TERMINAL
 
@@ -297,6 +336,8 @@ class OnboardingRequest(PrimaryModel):
         if self.status == OnboardingStatusChoices.STATUS_SCANNING:
             return 'Scan in progress' if not self.claim_expired else 'Scan stalled, will retry'
         if self.status == OnboardingStatusChoices.STATUS_REVIEW:
+            if self.needs_a_site:
+                return 'You — no prefix matched, so pick a site'
             return 'You — review what was found'
         if self.status == OnboardingStatusChoices.STATUS_APPROVED:
             if self.poller is None:

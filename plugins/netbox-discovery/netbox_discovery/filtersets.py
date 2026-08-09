@@ -11,7 +11,7 @@ __all__ = ('DiscoveryPollerFilterSet', 'OnboardingRequestFilterSet')
 class DiscoveryPollerFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = DiscoveryPoller
-        fields = ('id', 'name', 'version')
+        fields = ('id', 'name', 'version', 'tenant_id')
 
     def search(self, queryset, name, value):
         if not value.strip():
@@ -39,7 +39,8 @@ class OnboardingRequestFilterSet(NetBoxModelFilterSet):
 
     class Meta:
         model = OnboardingRequest
-        fields = ('id', 'address', 'status', 'site_id', 'device_id')
+        fields = ('id', 'address', 'status', 'site_id', 'device_id',
+                  'tenant_id', 'vrf_id', 'used_default_region')
 
     def search(self, queryset, name, value):
         if not value.strip():

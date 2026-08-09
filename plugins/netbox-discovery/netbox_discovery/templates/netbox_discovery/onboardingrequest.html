@@ -30,6 +30,8 @@
         <div class="card-body">
           <table class="table table-hover attr-table">
             <tr><th>Containing prefix</th><td>{{ object.prefix|linkify|placeholder }}</td></tr>
+            <tr><th>Tenant</th><td>{{ object.tenant|linkify|placeholder }}</td></tr>
+            {% if object.vrf %}<tr><th>VRF</th><td>{{ object.vrf|linkify }}</td></tr>{% endif %}
             <tr><th>Site</th><td>{{ object.site|linkify|placeholder }}</td></tr>
             {% if object.override_site %}
               <tr><th>Site override</th><td>{{ object.override_site|linkify }}</td></tr>
@@ -52,10 +54,20 @@
                 {% endif %}
               </td></tr>
           </table>
+          {% if object.used_default_region %}
+            <p class="text-warning mb-2">
+              <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+              No prefix in IPAM contains this address, so the poller came from the
+              default region. It can still be scanned, but <strong>a site has to be
+              chosen below before it can be applied</strong>.
+            </p>
+          {% endif %}
           <p class="text-muted small mb-0">
             The address is placed by the most specific prefix containing it; that
             prefix's site, or the nearest region above it, carries the
-            <code>poller-&lt;name&gt;</code> tag that decides who scans it.
+            <code>poller-&lt;name&gt;</code> tag that decides who scans it. Where
+            address space overlaps between tenants, the tenant is part of that
+            key — without it the same address matches more than one prefix.
           </p>
         </div>
       </div>
@@ -130,7 +142,15 @@
               Nothing has been written to DCIM yet. Applying hands the request back
               to poller <strong>{{ object.poller.name }}</strong>, which re-reads the
               device and creates it on its next check-in.
+              {% if object.tenant %}It will be filed against
+                <strong>{{ object.tenant }}</strong>.{% endif %}
             </p>
+            {% if object.needs_a_site %}
+              <p class="text-warning">
+                <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+                This request has no site — set one below, or it cannot be applied.
+              </p>
+            {% endif %}
             <form action="{% url 'plugins:netbox_discovery:onboardingrequest_approve' pk=object.pk %}" method="post">
               {% csrf_token %}
               {% render_form review_form %}
