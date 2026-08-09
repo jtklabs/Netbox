@@ -4,12 +4,14 @@ from netbox.filtersets import NetBoxModelFilterSet
 
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
+    DiscoveryIssue,
     DiscoveryPoller,
     HardwareReplacement,
     OnboardingRequest,
 )
 
 __all__ = (
+    'DiscoveryIssueFilterSet',
     'DiscoveryPollerFilterSet',
     'HardwareReplacementFilterSet',
     'OnboardingRequestFilterSet',
@@ -84,4 +86,20 @@ class HardwareReplacementFilterSet(NetBoxModelFilterSet):
             | Q(new_serial__icontains=value)
             | Q(model_name__icontains=value)
             | Q(description__icontains=value)
+        )
+
+
+class DiscoveryIssueFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = DiscoveryIssue
+        fields = ('id', 'kind', 'status', 'address', 'serial', 'device_id')
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(address__icontains=value)
+            | Q(serial__icontains=value)
+            | Q(reported_name__icontains=value)
+            | Q(detail__icontains=value)
         )

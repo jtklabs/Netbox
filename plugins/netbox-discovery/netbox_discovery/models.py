@@ -8,12 +8,19 @@ from django.utils import timezone
 from netbox.models import PrimaryModel
 
 from netbox_discovery.choices import (
+    IssueKindChoices,
+    IssueStatusChoices,
     OnboardingStatusChoices,
     ReplacementKindChoices,
 )
 from netbox_discovery.utils import plugin_setting
 
-__all__ = ('DiscoveryPoller', 'HardwareReplacement', 'OnboardingRequest')
+__all__ = (
+    'DiscoveryIssue',
+    'DiscoveryPoller',
+    'HardwareReplacement',
+    'OnboardingRequest',
+)
 
 
 class DiscoveryPoller(PrimaryModel):
@@ -483,3 +490,92 @@ class HardwareReplacement(PrimaryModel):
 
     def get_kind_color(self):
         return ReplacementKindChoices.colors.get(self.kind)
+
+
+class DiscoveryIssue(PrimaryModel):
+    """Something a scan found that a person has to settle.
+
+    The scanner's job is to record what devices say about themselves. When two
+    of them say something that cannot both be true, it must not pick a winner —
+    it stops, leaves the existing record alone, and says so here.
+
+    The case this was built for: a device reporting a serial that NetBox
+    already holds against a different device. Matching on serial is what makes
+    a re-IP'd or renamed box resolve to its existing record, and it is also
+    what lets one device's data be written straight over another's when a
+    serial is duplicated or mistyped. That overwrite is silent and destroys the
+    record it lands on, so it is refused and raised here instead.
+    """
+
+    kind = models.CharField(
+        max_length=30, choices=IssueKindChoices,
+        default=IssueKindChoices.KIND_DUPLICATE_SERIAL,
+    )
+    status = models.CharField(
+        max_length=20, choices=IssueStatusChoices,
+        default=IssueStatusChoices.STATUS_OPEN,
+    )
+    address = models.CharField(
+        max_length=64, blank=True, verbose_name='Scanned address',
+        help_text='The address being scanned when this came up',
+    )
+    device = models.ForeignKey(
+        to='dcim.Device', on_delete=models.CASCADE, blank=True, null=True,
+        related_name='discovery_issues',
+        help_text='The existing record the scan collided with',
+    )
+    serial = models.CharField(max_length=100, blank=True)
+    reported_name = models.CharField(
+        max_length=100, blank=True,
+        help_text='The hostname the scanned device gave for itself',
+    )
+    detail = models.TextField(
+        help_text='What the poller could not decide, in words',
+    )
+    detected_at = models.DateTimeField()
+    last_seen_at = models.DateTimeField(
+        blank=True, null=True,
+        help_text='When a scan last hit this same problem',
+    )
+    poller = models.ForeignKey(
+        to='netbox_discovery.DiscoveryPoller', on_delete=models.SET_NULL,
+        blank=True, null=True, related_name='+',
+    )
+
+    clone_fields = ('kind',)
+
+    class Meta:
+        ordering = ('-detected_at',)
+        verbose_name = 'discovery issue'
+        verbose_name_plural = 'discovery issues'
+        indexes = (
+            models.Index(fields=('status',)),
+            models.Index(fields=('serial',)),
+        )
+        constraints = (
+            # One open issue per address and serial. A sweep every six hours
+            # would otherwise file the same complaint four times a day until
+            # somebody dealt with it, and burying the list is how it stops
+            # being read.
+            models.UniqueConstraint(
+                fields=('address', 'serial', 'kind'),
+                condition=models.Q(status='open'),
+                name='netbox_discovery_unique_open_issue',
+            ),
+        )
+
+    def __str__(self):
+        return '%s: %s' % (self.get_kind_display(), self.address or self.serial)
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:discoveryissue', args=[self.pk])
+
+    def get_kind_color(self):
+        return IssueKindChoices.colors.get(self.kind)
+
+    def get_status_color(self):
+        return IssueStatusChoices.colors.get(self.status)
+
+    @property
+    def is_open(self):
+        return self.status == IssueStatusChoices.STATUS_OPEN

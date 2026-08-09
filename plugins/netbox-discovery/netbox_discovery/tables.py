@@ -2,12 +2,14 @@ import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 
 from netbox_discovery.models import (
+    DiscoveryIssue,
     DiscoveryPoller,
     HardwareReplacement,
     OnboardingRequest,
 )
 
 __all__ = (
+    'DiscoveryIssueTable',
     'DiscoveryPollerTable',
     'HardwareReplacementTable',
     'OnboardingRequestTable',
@@ -85,4 +87,24 @@ class HardwareReplacementTable(NetBoxTable):
         default_columns = (
             'detected_at', 'kind', 'device', 'module_bay',
             'old_serial', 'new_serial', 'model_name',
+        )
+
+
+class DiscoveryIssueTable(NetBoxTable):
+    address = tables.Column(linkify=True, verbose_name='Scanned address')
+    kind = columns.ChoiceFieldColumn()
+    status = columns.ChoiceFieldColumn()
+    device = tables.Column(linkify=True, verbose_name='Collided with')
+    detected_at = columns.DateTimeColumn()
+    tags = columns.TagColumn(url_name='plugins:netbox_discovery:discoveryissue_list')
+
+    class Meta(NetBoxTable.Meta):
+        model = DiscoveryIssue
+        fields = (
+            'pk', 'id', 'detected_at', 'last_seen_at', 'status', 'kind', 'address',
+            'reported_name', 'serial', 'device', 'detail', 'poller', 'tags',
+        )
+        default_columns = (
+            'detected_at', 'status', 'kind', 'address', 'reported_name',
+            'serial', 'device',
         )

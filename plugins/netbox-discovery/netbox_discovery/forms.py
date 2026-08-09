@@ -11,7 +11,7 @@ from utilities.forms.fields import (
 from utilities.forms.rendering import FieldSet
 
 from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import DiscoveryIssue, DiscoveryPoller, OnboardingRequest
 from netbox_discovery.resolution import resolve
 
 __all__ = (
@@ -22,6 +22,7 @@ __all__ = (
     'OnboardingManualEntryForm',
     'DiscoveryPollerForm',
     'DiscoveryPollerFilterForm',
+    'DiscoveryIssueForm',
 )
 
 
@@ -232,3 +233,15 @@ class OnboardingManualEntryForm(forms.Form):
         required=False,
         help_text='Running version, if known',
     )
+
+
+class DiscoveryIssueForm(NetBoxModelForm):
+    """Only the fields a person settles. The observed ones stay as recorded."""
+
+    class Meta:
+        model = DiscoveryIssue
+        fields = ('status', 'description', 'comments', 'tags')
+        help_texts = {
+            'status': 'Resolved once the duplicate is sorted out; Ignored if it '
+                      'is expected and should stop being raised',
+        }

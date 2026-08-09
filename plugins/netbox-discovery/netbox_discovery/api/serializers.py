@@ -7,6 +7,7 @@ from rest_framework import serializers
 
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
+    DiscoveryIssue,
     DiscoveryPoller,
     HardwareReplacement,
     OnboardingRequest,
@@ -22,6 +23,7 @@ __all__ = (
     'RejectSerializer',
     'HardwareReplacementSerializer',
     'ManualEntrySerializer',
+    'DiscoveryIssueSerializer',
 )
 
 
@@ -254,3 +256,22 @@ class HardwareReplacementSerializer(NetBoxModelSerializer):
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )
         brief_fields = ('url', 'id', 'display', 'old_serial', 'new_serial')
+
+
+class DiscoveryIssueSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name='plugins-api:netbox_discovery-api:discoveryissue-detail'
+    )
+    device = DeviceSerializer(nested=True, required=False, allow_null=True)
+    poller = DiscoveryPollerSerializer(nested=True, required=False, allow_null=True)
+    detected_at = serializers.DateTimeField(required=False)
+
+    class Meta:
+        model = DiscoveryIssue
+        fields = (
+            'url', 'id', 'display', 'kind', 'status', 'address', 'device',
+            'serial', 'reported_name', 'detail', 'detected_at', 'last_seen_at',
+            'poller',
+            'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
+        )
+        brief_fields = ('url', 'id', 'display', 'kind', 'status', 'address')

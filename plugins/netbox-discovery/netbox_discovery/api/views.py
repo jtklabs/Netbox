@@ -24,6 +24,7 @@ from netbox_discovery.api.serializers import (
     ApproveSerializer,
     DiscoveryPollerSerializer,
     JobSerializer,
+    DiscoveryIssueSerializer,
     HardwareReplacementSerializer,
     ManualEntrySerializer,
     OnboardingRequestSerializer,
@@ -34,6 +35,7 @@ from netbox_discovery.api.serializers import (
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.utils import plugin_setting
 from netbox_discovery.models import (
+    DiscoveryIssue,
     DiscoveryPoller,
     HardwareReplacement,
     OnboardingRequest,
@@ -329,3 +331,11 @@ class HardwareReplacementViewSet(NetBoxModelViewSet):
     ).prefetch_related('tags')
     serializer_class = HardwareReplacementSerializer
     filterset_class = filtersets.HardwareReplacementFilterSet
+
+
+class DiscoveryIssueViewSet(NetBoxModelViewSet):
+    """Things a scan could not decide. Writable: pollers raise them."""
+
+    queryset = DiscoveryIssue.objects.select_related('device', 'poller').prefetch_related('tags')
+    serializer_class = DiscoveryIssueSerializer
+    filterset_class = filtersets.DiscoveryIssueFilterSet

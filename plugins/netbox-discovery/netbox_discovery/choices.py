@@ -56,3 +56,33 @@ class ReplacementKindChoices(ChoiceSet):
         (KIND_CHASSIS, 'Chassis', 'orange'),
         (KIND_MODULE, 'Module', 'blue'),
     ]
+
+
+class IssueKindChoices(ChoiceSet):
+    """What a poller noticed that a person should settle."""
+
+    key = 'DiscoveryIssue.kind'
+
+    KIND_DUPLICATE_SERIAL = 'duplicate-serial'
+    KIND_NO_MODEL = 'no-model'
+    KIND_OTHER = 'other'
+
+    CHOICES = [
+        (KIND_DUPLICATE_SERIAL, 'Serial on another device', 'red'),
+        (KIND_NO_MODEL, 'No model reported', 'orange'),
+        (KIND_OTHER, 'Other', 'gray'),
+    ]
+
+
+class IssueStatusChoices(ChoiceSet):
+    key = 'DiscoveryIssue.status'
+
+    STATUS_OPEN = 'open'
+    STATUS_RESOLVED = 'resolved'
+    STATUS_IGNORED = 'ignored'
+
+    CHOICES = [
+        (STATUS_OPEN, 'Open', 'red'),
+        (STATUS_RESOLVED, 'Resolved', 'green'),
+        (STATUS_IGNORED, 'Ignored', 'gray'),
+    ]

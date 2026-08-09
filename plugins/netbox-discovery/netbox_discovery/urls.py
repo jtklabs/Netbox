@@ -3,6 +3,7 @@ from netbox.views.generic import ObjectChangeLogView
 
 from netbox_discovery import views
 from netbox_discovery.models import (
+    DiscoveryIssue,
     DiscoveryPoller,
     HardwareReplacement,
     OnboardingRequest,
@@ -59,4 +60,15 @@ urlpatterns = [
          name='hardwarereplacement_delete'),
     path('replacements/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='hardwarereplacement_changelog', kwargs={'model': HardwareReplacement}),
+
+    path('issues/', views.DiscoveryIssueListView.as_view(), name='discoveryissue_list'),
+    path('issues/delete/', views.DiscoveryIssueBulkDeleteView.as_view(),
+         name='discoveryissue_bulk_delete'),
+    path('issues/<int:pk>/', views.DiscoveryIssueView.as_view(), name='discoveryissue'),
+    path('issues/<int:pk>/edit/', views.DiscoveryIssueEditView.as_view(),
+         name='discoveryissue_edit'),
+    path('issues/<int:pk>/delete/', views.DiscoveryIssueDeleteView.as_view(),
+         name='discoveryissue_delete'),
+    path('issues/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='discoveryissue_changelog', kwargs={'model': DiscoveryIssue}),
 ]

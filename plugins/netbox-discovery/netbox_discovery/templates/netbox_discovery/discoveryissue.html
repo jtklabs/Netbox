@@ -1,0 +1,49 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Issue</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Status</th>
+              <td>{% badge object.get_status_display bg_color=object.get_status_color %}</td></tr>
+            <tr><th>Kind</th>
+              <td>{% badge object.get_kind_display bg_color=object.get_kind_color %}</td></tr>
+            <tr><th>First seen</th><td>{{ object.detected_at }}</td></tr>
+            <tr><th>Last seen</th><td>{{ object.last_seen_at|placeholder }}</td></tr>
+            <tr><th>Found by</th><td>{{ object.poller|linkify|placeholder }}</td></tr>
+          </table>
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card border-danger">
+        <h5 class="card-header text-danger">What could not be decided</h5>
+        <div class="card-body">
+          <p>{{ object.detail }}</p>
+          <table class="table table-hover attr-table">
+            <tr><th>Scanned address</th><td><code>{{ object.address|placeholder }}</code></td></tr>
+            <tr><th>Name it reported</th><td>{{ object.reported_name|placeholder }}</td></tr>
+            <tr><th>Serial</th><td><code>{{ object.serial|placeholder }}</code></td></tr>
+            <tr><th>Existing record</th><td>{{ object.device|linkify|placeholder }}</td></tr>
+          </table>
+          <p class="text-muted small mb-0">
+            Nothing in DCIM was changed. The scanner will keep refusing this
+            device until the two serials are sorted out — mark the issue
+            <em>Ignored</em> if the duplicate is expected and should stop being
+            raised.
+          </p>
+        </div>
+      </div>
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}

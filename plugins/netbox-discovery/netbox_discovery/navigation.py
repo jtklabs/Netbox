@@ -37,11 +37,17 @@ replacements = PluginMenuItem(
     permissions=['netbox_discovery.view_hardwarereplacement'],
 )
 
+issues = PluginMenuItem(
+    link='plugins:netbox_discovery:discoveryissue_list',
+    link_text='Issues',
+    permissions=['netbox_discovery.view_discoveryissue'],
+)
+
 menu = PluginMenu(
     label='Discovery',
     groups=(
         ('Onboarding', (onboarding, pollers)),
-        ('Changes', (replacements,)),
+        ('Changes', (replacements, issues)),
     ),
     icon_class='mdi mdi-radar',
 )
