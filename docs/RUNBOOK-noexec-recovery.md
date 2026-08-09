@@ -11,6 +11,13 @@ failed to create task for container: ... permission denied
 The daemon runs, images pull, `docker ps` works — only *starting* containers
 fails, and nothing in the error names the cause.
 
+## First: is it actually noexec?
+
+Confirm before acting, because an identical error has a second cause. If
+`findmnt -T /var/lib/docker` shows no `noexec`, skip to **"Same error, wrong
+Docker"** at the end of this runbook — that variant is about which Docker
+packages the host runs, not about mounts.
+
 ## Cause
 
 Container filesystems live under Docker's data root (`/var/lib/docker` by
@@ -90,3 +97,51 @@ Put `DOCKER_DATA_ROOT` (or the finished `daemon.json`) into the provisioning
 source of truth. A hand-fixed box stays fixed only until the next
 provisioning run or the next freshly built host — identical to the Apache
 config lesson in FIRST-BOOT.
+
+## Same error, wrong Docker
+
+Identical symptom, unrelated cause, and the one that actually bit this
+deployment: a host running **Ubuntu's `docker.io`** stack rather than
+**`docker-ce`** from Docker's repository could not start any container on a
+`6.17-aws` kernel — every create-task failed `fork/exec /proc/self/fd/N:
+permission denied` — while the same packages worked on 6.8. Filesystems,
+sysctls, AppArmor, IMA, EDR and `daemon.json` were all clean and identical to
+a working host.
+
+Tell the two apart in one command on the failing host and on a host that
+works:
+
+```bash
+dpkg -l | grep -E '^ii\s+(docker|containerd|runc)' | awk '{print $2, $3}'
+```
+
+`docker.io` + `runc` + `docker-compose` is Ubuntu's archive family;
+`docker-ce` + `docker-ce-cli` + `containerd.io` + `docker-compose-plugin` is
+Docker's. **Prod runs docker-ce**, so every host should. Converge a mismatched
+host by re-running the prep script, which now removes `docker.io` and installs
+docker-ce:
+
+```bash
+sudo ./scripts/prepare-docker-host.sh
+```
+
+Images and containers under `/var/lib/docker` survive the swap — docker-ce
+reads the same data root. Re-run the collector's `install.sh` (or
+`systemctl restart netbox-compose` on the NetBox host) afterwards.
+
+### A warning, learned the hard way
+
+Do **not** run `aa-enforce runc` while diagnosing. Ubuntu's runc profile is
+declared `flags=(unconfined)` and exists only to give runc a name instead of
+the label "unconfined"; `aa-complain`/`aa-enforce` rewrite the profile file
+and strip that flag, leaving a profile whose only permission is `userns`.
+runc then cannot load libseccomp at all and fails with
+`error while loading shared libraries: libseccomp.so.2: ... Permission
+denied` — a second, self-inflicted failure on top of the one being chased.
+Recover with:
+
+```bash
+sudo sed -i 's|^\(profile runc /usr/sbin/runc\)[^{]*{|\1 flags=(unconfined) {|' /etc/apparmor.d/runc
+sudo apparmor_parser -r /etc/apparmor.d/runc
+runc --version
+```

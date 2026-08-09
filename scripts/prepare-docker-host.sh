@@ -89,13 +89,37 @@ if [ -n "${DOCKER_DATA_ROOT:-}" ]; then log "docker data root: $DOCKER_DATA_ROOT
 
 # --- 2. Install Docker Engine + Compose v2 -----------------------------------
 if [ "$FAMILY" = debian ]; then
-  # Ubuntu's own archive: docker.io is current enough and needs no third-party
-  # repo, and docker-compose-v2 is the same Compose plugin the bootstrap gate
-  # requires. (The EOL v1 `docker-compose` binary cannot parse this repo's
-  # compose files — deploy/bootstrap.sh refuses it explicitly.)
+  # Docker's own repository, NOT Ubuntu's docker.io — deliberately, and the
+  # reason is not preference. The prod NetBox host runs docker-ce; a collector
+  # built on Ubuntu's docker.io stack could not start a single container on a
+  # 6.17-aws kernel, failing every create-task with "fork/exec
+  # /proc/self/fd/N: permission denied" while the identical stack worked on
+  # 6.8. Chasing that cost an evening. Whatever the kernel does next, hosts
+  # that run the same packages fail the same way, and that is worth more than
+  # avoiding a third-party repo.
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
-  apt-get install -y -q docker.io docker-compose-v2 docker-buildx python3 sudo
+  apt-get install -y -q ca-certificates curl gnupg python3 sudo
+  # Ubuntu's docker.io family conflicts with docker-ce; remove it if a previous
+  # run (or this script's earlier version) installed it. Containers and images
+  # under /var/lib/docker are left alone — docker-ce reads the same data root.
+  if dpkg -l 2>/dev/null | grep -qE '^ii\s+docker\.io'; then
+    log "removing Ubuntu's docker.io stack in favour of docker-ce"
+    systemctl stop docker docker.socket containerd 2>/dev/null || true
+    apt-get remove -y -q docker.io docker-compose docker-buildx runc containerd || true
+  fi
+  install -m 0755 -d /etc/apt/keyrings
+  if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  fi
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -q
+  apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
 else
   # RHEL 9 ships podman, not Docker; Docker Engine comes from Docker's own
   # repository. podman-docker (a shim that fakes /usr/bin/docker) conflicts
