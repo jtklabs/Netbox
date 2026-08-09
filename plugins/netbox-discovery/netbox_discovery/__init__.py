@@ -63,6 +63,12 @@ class DiscoveryConfig(PluginConfig):
         # an unplaceable address has none. Empty disables the fallback and
         # unmatched addresses are refused instead.
         'default_region': 'us',
+        # 'exceptions' applies a clean scan straight away and holds only the
+        # cases in review.py — no model, no site, a serial already on another
+        # device, or a failed scan. 'always' sends every device to review.
+        # Reviewing everything sounds safer and is not: it teaches people to
+        # click Apply without reading.
+        'review_policy': 'exceptions',
     }
 
 

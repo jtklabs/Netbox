@@ -34,6 +34,8 @@ urlpatterns = [
          name='onboardingrequest_reject'),
     path('onboarding/<int:pk>/retry/', views.OnboardingRetryView.as_view(),
          name='onboardingrequest_retry'),
+    path('onboarding/<int:pk>/manual/', views.OnboardingManualEntryView.as_view(),
+         name='onboardingrequest_manual'),
 
     path('pollers/', views.DiscoveryPollerListView.as_view(), name='discoverypoller_list'),
     path('pollers/add/', views.DiscoveryPollerEditView.as_view(), name='discoverypoller_add'),

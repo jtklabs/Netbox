@@ -32,6 +32,7 @@ __all__ = (
     'OnboardingApproveView',
     'OnboardingRejectView',
     'OnboardingRetryView',
+    'OnboardingManualEntryView',
     'DiscoveryPollerListView',
     'DiscoveryPollerView',
     'DiscoveryPollerEditView',
@@ -72,6 +73,14 @@ class OnboardingRequestView(ObjectView):
                 OnboardingStatusChoices.STATUS_FAILED,
                 OnboardingStatusChoices.STATUS_UNRESOLVED,
             ),
+            # Offered exactly where it is the answer: the scan failed, so
+            # nothing else is going to fill these in.
+            'can_enter_manually': instance.status == OnboardingStatusChoices.STATUS_FAILED,
+            'manual_form': forms.OnboardingManualEntryForm(initial={
+                'name': instance.override_name or instance.address,
+                'override_site': instance.override_site,
+                'role': instance.role,
+            }),
         }
 
 
@@ -191,6 +200,33 @@ class OnboardingRetryView(_ReviewActionView):
         messages.success(
             request, 'Queued again for poller %s.'
             % (entry.poller.name if entry.poller else '—')
+        )
+        return redirect(entry.get_absolute_url())
+
+
+class OnboardingManualEntryView(_ReviewActionView):
+    """Take hardware details by hand for a device SNMP cannot reach."""
+
+    def post(self, request, pk):
+        entry = self.get_object(pk)
+        if not request.user.has_perm(self.permission_required):
+            return self.deny(request, entry, 'You do not have permission to do that.')
+
+        form = forms.OnboardingManualEntryForm(request.POST)
+        if not form.is_valid():
+            return self.deny(
+                request, entry,
+                'Check the details: %s' % form.errors.as_text().replace('\n', ' '),
+            )
+        try:
+            actions.enter_manually(entry, user=request.user, **form.cleaned_data)
+        except actions.TransitionError as exc:
+            return self.deny(request, entry, str(exc))
+
+        messages.success(
+            request,
+            'Recorded by hand. Poller %s will create it on its next check-in.'
+            % (entry.poller.name if entry.poller else '—'),
         )
         return redirect(entry.get_absolute_url())
 

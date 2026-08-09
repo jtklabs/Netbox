@@ -87,12 +87,19 @@
       {% if object.discovered_devices %}
         <div class="card">
           <h5 class="card-header">
-            What the poller found
+            {% if object.manually_entered %}Entered by hand{% else %}What the poller found{% endif %}
             {% if object.scanned_at %}
               <span class="text-muted small float-end">{{ object.scanned_at }}</span>
             {% endif %}
           </h5>
           <div class="card-body">
+            {% if object.manually_entered %}
+              <p class="text-warning">
+                <i class="mdi mdi-pencil" aria-hidden="true"></i>
+                These details were typed in, not observed — the device could not
+                be scanned.
+              </p>
+            {% endif %}
             <table class="table table-hover attr-table">
               <tr><th>Name</th><td>{{ object.discovered_name|placeholder }}</td></tr>
               <tr><th>Manufacturer</th><td>{{ object.discovered_manufacturer|placeholder }}</td></tr>
@@ -163,6 +170,28 @@
                   <i class="mdi mdi-close" aria-hidden="true"></i> Reject
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if can_enter_manually %}
+        <div class="card border-warning">
+          <h5 class="card-header">Enter the details by hand</h5>
+          <div class="card-body">
+            <p class="text-muted">
+              The scan did not work. If this device has no SNMP — or is never
+              going to answer it — describe it here instead and it will be
+              created the same way a scanned one is. What you type is marked as
+              entered by hand, so nobody later mistakes it for something the
+              device reported.
+            </p>
+            <form action="{% url 'plugins:netbox_discovery:onboardingrequest_manual' pk=object.pk %}" method="post">
+              {% csrf_token %}
+              {% render_form manual_form %}
+              <button type="submit" class="btn btn-warning mt-3">
+                <i class="mdi mdi-pencil" aria-hidden="true"></i> Record and create
+              </button>
             </form>
           </div>
         </div>

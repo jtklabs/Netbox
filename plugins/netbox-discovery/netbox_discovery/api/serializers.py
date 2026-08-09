@@ -21,6 +21,7 @@ __all__ = (
     'ApproveSerializer',
     'RejectSerializer',
     'HardwareReplacementSerializer',
+    'ManualEntrySerializer',
 )
 
 
@@ -59,6 +60,7 @@ class OnboardingRequestSerializer(NetBoxModelSerializer):
         fields = (
             'url', 'id', 'display', 'address', 'status', 'site', 'override_site',
             'override_name', 'role', 'tenant', 'vrf', 'used_default_region',
+            'manually_entered',
             'prefix', 'poller', 'discovered', 'error',
             'device', 'requested_by', 'claimed_at', 'scanned_at', 'reviewed_at',
             'reviewed_by', 'applied_at',
@@ -68,7 +70,7 @@ class OnboardingRequestSerializer(NetBoxModelSerializer):
         read_only_fields = (
             'status', 'site', 'prefix', 'poller', 'discovered', 'error', 'device',
             'claimed_at', 'scanned_at', 'reviewed_at', 'applied_at',
-            'used_default_region',
+            'used_default_region', 'manually_entered',
         )
 
 
@@ -192,6 +194,28 @@ class RejectSerializer(serializers.Serializer):
     reason = serializers.CharField(
         required=False, allow_blank=True, default='',
         help_text='Shown on the request so the decision is not a mystery later',
+    )
+
+
+class ManualEntrySerializer(serializers.Serializer):
+    """Hardware details for a device SNMP cannot reach.
+
+    The same fields the form asks for. Manufacturer and platform are taken by
+    name so a caller does not need to look up primary keys for something it
+    probably knows as a string.
+    """
+
+    name = serializers.CharField()
+    manufacturer = serializers.CharField()
+    model = serializers.CharField()
+    serial = serializers.CharField(required=False, allow_blank=True, default='')
+    platform = serializers.CharField(required=False, allow_blank=True, default='')
+    software_version = serializers.CharField(required=False, allow_blank=True, default='')
+    role = serializers.PrimaryKeyRelatedField(
+        queryset=DeviceRole.objects.all(), required=False, allow_null=True
+    )
+    override_site = serializers.PrimaryKeyRelatedField(
+        queryset=Site.objects.all(), required=False, allow_null=True
     )
 
 

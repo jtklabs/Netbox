@@ -1,4 +1,4 @@
-from dcim.models import DeviceRole, Site
+from dcim.models import DeviceRole, Manufacturer, Platform, Site
 from ipam.models import VRF
 from tenancy.models import Tenant, TenantGroup
 from django import forms
@@ -19,6 +19,7 @@ __all__ = (
     'OnboardingRequestFilterForm',
     'OnboardingRequestImportForm',
     'OnboardingReviewForm',
+    'OnboardingManualEntryForm',
     'DiscoveryPollerForm',
     'DiscoveryPollerFilterForm',
 )
@@ -184,3 +185,50 @@ class DiscoveryPollerForm(NetBoxModelForm):
 class DiscoveryPollerFilterForm(NetBoxModelFilterSetForm):
     model = DiscoveryPoller
     tag = TagFilterField(model)
+
+
+class OnboardingManualEntryForm(forms.Form):
+    """Describe a device SNMP cannot tell us about.
+
+    Plenty of gear has no SNMP, has it disabled, or sits behind something that
+    will not pass it — and it still belongs in the inventory. This is the way
+    in for those, using the same request, the same review and the same apply as
+    a scanned device, so there is one path into DCIM rather than two.
+
+    What is typed here is marked as entered by hand wherever it is shown. A
+    hand-typed serial and an observed one are not equally trustworthy and
+    should never look alike.
+    """
+
+    name = forms.CharField(
+        label='Device name',
+        help_text='What this device should be called in NetBox',
+    )
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        help_text='Created if it does not exist yet',
+    )
+    model = forms.CharField(
+        label='Model',
+        help_text='Exactly as the vendor writes it, e.g. C9300-48P',
+    )
+    serial = forms.CharField(
+        required=False,
+        help_text='Strongly recommended — support contracts are matched on it',
+    )
+    platform = DynamicModelChoiceField(
+        queryset=Platform.objects.all(), required=False,
+        help_text='Operating system, if known',
+    )
+    role = DynamicModelChoiceField(
+        queryset=DeviceRole.objects.all(), required=False,
+        help_text="Blank uses the poller's default role",
+    )
+    override_site = DynamicModelChoiceField(
+        queryset=Site.objects.all(), required=False, label='Site',
+        help_text='Only needed if no prefix placed the address',
+    )
+    software_version = forms.CharField(
+        required=False,
+        help_text='Running version, if known',
+    )

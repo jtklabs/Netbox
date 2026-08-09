@@ -18,19 +18,21 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from dcim.models import Device
-from netbox_discovery import actions, filtersets
+from netbox_discovery import actions, filtersets, review
 from netbox_discovery.api.serializers import (
     ApplyResultSerializer,
     ApproveSerializer,
     DiscoveryPollerSerializer,
     JobSerializer,
     HardwareReplacementSerializer,
+    ManualEntrySerializer,
     OnboardingRequestSerializer,
     PollerCheckInSerializer,
     RejectSerializer,
     ScanResultSerializer,
 )
 from netbox_discovery.choices import OnboardingStatusChoices
+from netbox_discovery.utils import plugin_setting
 from netbox_discovery.models import (
     DiscoveryPoller,
     HardwareReplacement,
@@ -214,6 +216,28 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
             OnboardingRequestSerializer(entry, context={'request': request}).data
         )
 
+    @action(detail=True, methods=['post'], url_path='manual')
+    def manual(self, request, pk=None):
+        """Record hardware details by hand when SNMP is not an option.
+
+        Some gear has no SNMP, has it turned off, or sits behind something that
+        will not pass it, and it still belongs in the inventory. This goes
+        through the same request, review and apply as a scanned device.
+        """
+        entry = self.get_object()
+        if not request.user.has_perm('netbox_discovery.change_onboardingrequest'):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ManualEntrySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            actions.enter_manually(entry, user=request.user, **serializer.validated_data)
+        except actions.TransitionError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(
+            OnboardingRequestSerializer(entry, context={'request': request}).data
+        )
+
     @action(detail=True, methods=['post'])
     def scanned(self, request, pk=None):
         """A poller reporting what it found. Writes nothing to DCIM.
@@ -240,8 +264,18 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
                 'devices': result['devices'],
                 'access_points': result['access_points'],
             }
-            entry.error = ''
-            entry.status = OnboardingStatusChoices.STATUS_REVIEW
+            needs_review, reason = review.evaluate(entry, entry.discovered)
+            if plugin_setting('review_policy') == 'always':
+                needs_review, reason = True, reason
+            entry.error = reason
+            entry.status = (
+                OnboardingStatusChoices.STATUS_REVIEW if needs_review
+                else OnboardingStatusChoices.STATUS_APPROVED
+            )
+            if not needs_review:
+                # Nobody has to click, so nobody is recorded as having done so;
+                # the changelog and the poller's log carry the provenance.
+                entry.reviewed_at = timezone.now()
         else:
             entry.error = result['error']
             entry.status = OnboardingStatusChoices.STATUS_FAILED

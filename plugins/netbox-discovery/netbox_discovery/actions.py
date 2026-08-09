@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from netbox_discovery.choices import OnboardingStatusChoices
 
-__all__ = ('TransitionError', 'approve', 'reject', 'retry')
+__all__ = ('TransitionError', 'approve', 'enter_manually', 'reject', 'retry')
 
 
 class TransitionError(Exception):
@@ -107,4 +107,66 @@ def retry(entry):
     entry.save()
     if entry.status == OnboardingStatusChoices.STATUS_UNRESOLVED:
         raise TransitionError(entry.error)
+    return entry
+
+
+def enter_manually(entry, user=None, *, name, manufacturer, model, serial='',
+                   platform='', role=None, override_site=None,
+                   software_version=''):
+    """Record hardware details a scan could not obtain, and approve them.
+
+    Built into the same `discovered` shape a poller reports, so everything
+    downstream is unchanged: the same review page renders it, the same apply
+    creates it, and the poller's existing "device unreachable, use the reading
+    that was approved" path does the work. One route into DCIM, not two.
+
+    Goes straight to approved. Somebody has just typed these details in while
+    looking at the request; asking them to then approve their own typing is
+    ceremony, not a control.
+    """
+    if entry.status in OnboardingStatusChoices.TERMINAL:
+        raise TransitionError(
+            'This request is finished (%s); create a new one instead.'
+            % entry.get_status_display()
+        )
+    if not (model or '').strip():
+        raise TransitionError('A model is required — it is what the device type is.')
+
+    if override_site is not None:
+        entry.override_site = override_site
+    if role is not None:
+        entry.role = role
+    if entry.target_site is None:
+        raise TransitionError(
+            'This request has no site, so there is nowhere to create the device. '
+            'Choose one.'
+        )
+
+    entry.discovered = {
+        'sys_name': name,
+        'sys_descr': '',
+        'credential': '',
+        'devices': [{
+            'name': name,
+            'model': model.strip(),
+            'serial': (serial or '').strip(),
+            'manufacturer': str(manufacturer),
+            'platform': str(platform) if platform else '',
+            'software_version': (software_version or '').strip(),
+            'is_master': True,
+            'vc_position': None,
+            # No interfaces: nothing observed them, and inventing them would be
+            # worse than leaving the device with none.
+            'interfaces': [],
+            'modules': [],
+        }],
+        'access_points': [],
+    }
+    entry.manually_entered = True
+    entry.override_name = name
+    entry.error = ''
+    entry.status = OnboardingStatusChoices.STATUS_APPROVED
+    entry.reviewed_at = timezone.now()
+    entry.reviewed_by = user
+    entry.save()
     return entry

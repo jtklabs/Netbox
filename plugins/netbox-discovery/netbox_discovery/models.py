@@ -165,6 +165,11 @@ class OnboardingRequest(PrimaryModel):
         to='ipam.VRF', on_delete=models.PROTECT, blank=True, null=True,
         related_name='+', help_text='Narrows the address to one routing table',
     )
+    manually_entered = models.BooleanField(
+        default=False,
+        help_text='The hardware details were typed in rather than observed, '
+                  'because the device could not be scanned',
+    )
     used_default_region = models.BooleanField(
         default=False,
         help_text='No prefix matched; the poller came from the default region '
