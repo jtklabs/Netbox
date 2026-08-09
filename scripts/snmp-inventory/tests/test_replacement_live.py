@@ -62,6 +62,17 @@ def site(netbox):
     for row in netbox.all(REPLACEMENTS):
         if (row.get("new_serial") or "").startswith("SWAP"):
             delete(REPLACEMENTS, row["id"])
+    for row in netbox.all("/plugins/discovery/issues/"):
+        if (row.get("serial") or "").startswith("SWAP"):
+            delete("/plugins/discovery/issues/", row["id"])
+    for extra in netbox.all("/dcim/sites/"):
+        if (extra.get("slug") or "").startswith(SLUG) and extra["id"] != site["id"]:
+            for device in netbox.all("/dcim/devices/", {"site_id": extra["id"]}):
+                delete("/dcim/devices/", device["id"])
+            delete("/dcim/sites/", extra["id"])
+    for ip in netbox.all("/ipam/ip-addresses/"):
+        if str(ip.get("address", "")).startswith("10.90."):
+            delete("/ipam/ip-addresses/", ip["id"])
     for device in netbox.all("/dcim/devices/", {"site_id": site["id"]}):
         delete("/dcim/devices/", device["id"])
     for vc in netbox.all("/dcim/virtual-chassis/"):
@@ -192,3 +203,94 @@ class TestModuleSwap:
         assert rows[0]["replaced_device"] is None, (
             "a module swap keeps no separate device record — that is why the row exists"
         )
+
+
+ISSUES = "/plugins/discovery/issues/"
+
+
+class TestDuplicateSerialIsRefused:
+    """One device's record must never be written over by a different box.
+
+    Matching on serial is what makes a renamed or re-addressed device resolve
+    to the record it already has. It is also what would let a duplicated or
+    mistyped serial pull a scan onto the wrong record and overwrite it. The
+    scanner cannot tell which device is "right", so it refuses and says so.
+    """
+
+    def other_site(self, netbox):
+        return netbox.first("/dcim/sites/", {"slug": SLUG + "dc2"}) or netbox.create(
+            "/dcim/sites/", {"name": PREFIX + "DC2", "slug": SLUG + "dc2"}
+        )
+
+    def test_a_different_box_with_the_same_serial_changes_nothing(self, netbox, site):
+        syncer(netbox).sync(scan_with("SWAP-EEEE-0005", name="dup-original"),
+                            site["id"], scanned_address="10.90.0.1")
+        original = netbox.first("/dcim/devices/", {"serial": "SWAP-EEEE-0005"})
+        assert original["site"]["id"] == site["id"]
+
+        # A different device, different name, different address, same serial.
+        elsewhere = self.other_site(netbox)
+        syncer(netbox).sync(scan_with("SWAP-EEEE-0005", name="dup-impostor"),
+                            elsewhere["id"], scanned_address="10.90.9.9")
+
+        after = netbox.get("/dcim/devices/%s/" % original["id"])
+        assert after["name"] == "dup-original", "the existing record was renamed"
+        assert after["site"]["id"] == site["id"], "the existing record was moved"
+        assert netbox.count("/dcim/devices/", {"serial": "SWAP-EEEE-0005"}) == 1, (
+            "no second device should have been created either"
+        )
+
+    def test_it_is_raised_where_someone_will_see_it(self, netbox, site):
+        issues = netbox.all(ISSUES, {"serial": "SWAP-EEEE-0005"})
+        assert len(issues) == 1, "the collision should be on the issues list"
+        issue = issues[0]
+        assert _value(issue["status"]) == "open"
+        assert _value(issue["kind"]) == "duplicate-serial"
+        assert issue["address"] == "10.90.9.9"
+        assert issue["reported_name"] == "dup-impostor"
+        assert "already on" in issue["detail"]
+        assert issue["device"]["display"].startswith("dup-original")
+
+    def test_repeated_sweeps_do_not_pile_up_duplicates(self, netbox, site):
+        """The sweep runs four times a day; one complaint is enough."""
+        elsewhere = self.other_site(netbox)
+        for _ in range(3):
+            syncer(netbox).sync(scan_with("SWAP-EEEE-0005", name="dup-impostor"),
+                                elsewhere["id"], scanned_address="10.90.9.9")
+        assert netbox.count(ISSUES, {"serial": "SWAP-EEEE-0005"}) == 1
+
+    def test_a_rename_is_not_a_conflict(self, netbox, site):
+        """Same address, new hostname — the box was renamed, which is normal."""
+        syncer(netbox).sync(scan_with("SWAP-FFFF-0006", name="rename-before"),
+                            site["id"], scanned_address="10.90.1.1")
+        device = netbox.first("/dcim/devices/", {"serial": "SWAP-FFFF-0006"})
+        netbox.update("/dcim/devices/", device["id"], {"primary_ip4": None})
+        # Give it the address the scan comes from, as a real device would have.
+        ip = netbox.create("/ipam/ip-addresses/", {"address": "10.90.1.1/24"})
+        iface = netbox.first("/dcim/interfaces/", {"device_id": device["id"]})
+        netbox.update("/ipam/ip-addresses/", ip["id"],
+                      {"assigned_object_type": "dcim.interface",
+                       "assigned_object_id": iface["id"]})
+        netbox.update("/dcim/devices/", device["id"], {"primary_ip4": ip["id"]})
+
+        before = netbox.count(ISSUES, {"serial": "SWAP-FFFF-0006"})
+        syncer(netbox).sync(scan_with("SWAP-FFFF-0006", name="rename-after"),
+                            site["id"], scanned_address="10.90.1.1")
+        assert netbox.count(ISSUES, {"serial": "SWAP-FFFF-0006"}) == before, (
+            "a rename at the same address must not be raised as a conflict"
+        )
+
+    def test_a_re_address_is_not_a_conflict(self, netbox, site):
+        """New address, same hostname — the box was re-IP'd, also normal."""
+        syncer(netbox).sync(scan_with("SWAP-GGGG-0007", name="readdress-me"),
+                            site["id"], scanned_address="10.90.2.1")
+        before = netbox.count(ISSUES, {"serial": "SWAP-GGGG-0007"})
+        syncer(netbox).sync(scan_with("SWAP-GGGG-0007", name="readdress-me"),
+                            site["id"], scanned_address="10.90.2.99")
+        assert netbox.count(ISSUES, {"serial": "SWAP-GGGG-0007"}) == before, (
+            "a re-addressed device with the same name must not be raised"
+        )
+
+
+def _value(field):
+    return field.get("value") if isinstance(field, dict) else field

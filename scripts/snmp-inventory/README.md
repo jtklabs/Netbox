@@ -505,6 +505,33 @@ times a day reasonable.
 Use a separate lock from the onboarding job so a long sweep never blocks
 onboarding; they are independent and can overlap safely.
 
+### When a serial is already on another device
+
+Devices are matched by serial first, which is what makes a renamed or
+re-addressed box resolve to the record it already has. It is also what would
+let a duplicated or mistyped serial pull a scan onto the *wrong* record and
+overwrite it — silently, since nothing about that looks like an error.
+
+So the scan is refused instead. Nothing in DCIM is touched, and the collision
+is raised as a **Discovery Issue** with both sides of it: the address scanned,
+the name it reported, the serial, and the record it collided with.
+
+Telling a genuine conflict from a normal change comes down to what else agrees:
+
+| Serial matches, and… | Read as | Action |
+|---|---|---|
+| same name | re-addressed box | sync normally |
+| same address | renamed box | sync normally |
+| neither matches | two devices, one serial | **refused and raised** |
+
+One open issue per address and serial — the sweep runs four times a day and
+would otherwise file the same complaint until somebody dealt with it. Mark an
+issue *Ignored* if the duplicate is expected and should stop being raised.
+
+Onboarding applies the same rule earlier: a scan whose serial is already in
+NetBox stops for review rather than creating a second device for hardware that
+already exists.
+
 ### When a serial changes
 
 A rescan finding a different serial under a name we already knew means the

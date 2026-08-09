@@ -74,6 +74,7 @@ RETIRED_DEVICE_STATUS = "inventory"
 RETIRED_TAG = "replaced"
 
 REPLACEMENT_ENDPOINT = "/plugins/discovery/hardware-replacements/"
+ISSUE_ENDPOINT = "/plugins/discovery/issues/"
 
 
 @dataclass
@@ -109,6 +110,7 @@ class Syncer:
         self._custom_field_ready = False
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
+        self._issues_ok: bool | None = None
         # Chassis swaps are detected before the replacement device exists, so
         # the audit row waits here until it has something to point at.
         self._pending_replacements: list[dict] = []
@@ -149,7 +151,8 @@ class Syncer:
 
         created: list[tuple[DeviceRecord, dict]] = []
         for record in result.devices:
-            device = self._ensure_device(record, site_id, virtual_chassis, tenant_id)
+            device = self._ensure_device(record, site_id, virtual_chassis, tenant_id,
+                                         scanned_address=scanned_address)
             if device is not None:
                 created.append((record, device))
 
@@ -173,7 +176,8 @@ class Syncer:
 
     def _ensure_device(self, record: DeviceRecord, site_id: int,
                        virtual_chassis: dict | None,
-                       tenant_id: int | None = None) -> dict | None:
+                       tenant_id: int | None = None,
+                       scanned_address: str = "") -> dict | None:
         manufacturer = self._ensure_manufacturer(record.manufacturer)
         device_type = self._ensure_device_type(manufacturer, record.model)
         role = self._ensure_role(
@@ -182,6 +186,14 @@ class Syncer:
         platform = self._ensure_platform(record.platform, manufacturer)
 
         existing = self._find_device(record, site_id)
+
+        conflict = self._serial_belongs_to_another_device(existing, record, scanned_address)
+        if conflict:
+            # Refusing is the whole point. Matching on serial is what makes a
+            # re-IP'd box resolve to its existing record, and it is also what
+            # would let this scan write straight over a different device.
+            self._raise_issue(existing, record, scanned_address, conflict)
+            return None
 
         desired: dict = {}
         if record.serial:
@@ -239,6 +251,89 @@ class Syncer:
                                      label=f"device {record.name}")
         self._flush_pending_replacements(record, created)
         return created
+
+    def _serial_belongs_to_another_device(self, existing: dict | None,
+                                          record: DeviceRecord,
+                                          scanned_address: str) -> str:
+        """Is this serial already held against a *different* box?
+
+        Serial matching is deliberate and mostly right: it is what makes a
+        device that was renamed, re-addressed or moved resolve to the record it
+        already has. The dangerous case is when two devices carry one serial —
+        a mistyped entry, a vendor reusing one, or two records that were always
+        the same box. Then the match is wrong and syncing would overwrite a
+        record belonging to something else, silently.
+
+        Telling the two apart comes down to what else agrees. A rename keeps
+        the address; a re-address keeps the name. When *neither* matches, there
+        is no evidence these are the same device beyond a serial that is by
+        assumption suspect, so it is refused.
+        """
+        if existing is None or not record.serial:
+            return ""
+        stored_serial = (existing.get("serial") or "").strip()
+        if stored_serial.lower() != record.serial.strip().lower():
+            # Matched by name, not serial — that is the replacement path.
+            return ""
+
+        stored_name = (existing.get("name") or "").strip().lower()
+        reported_name = record.name.strip().lower()
+        if stored_name and reported_name and stored_name == reported_name:
+            return ""
+
+        primary = (existing.get("primary_ip4") or existing.get("primary_ip") or {})
+        primary_address = (primary.get("address") or "").split("/")[0]
+        if scanned_address and primary_address and scanned_address == primary_address:
+            # Same address, different name: the box was renamed. Fine.
+            return ""
+
+        return (
+            "Serial %s is already on %s%s, which reports a different name and a "
+            "different address. Either two devices have been given one serial, or "
+            "one of them is wrong. Nothing was changed."
+            % (
+                record.serial,
+                existing.get("name") or "device %s" % existing.get("id"),
+                " (%s)" % primary_address if primary_address else "",
+            )
+        )
+
+    def _raise_issue(self, existing: dict | None, record: DeviceRecord,
+                     scanned_address: str, detail: str) -> None:
+        """Record something a person has to settle, where they will see it."""
+        log.error("%s: %s", scanned_address or record.name, detail)
+        if not self._issues_available():
+            return
+        payload = {
+            "kind": "duplicate-serial",
+            "status": "open",
+            "address": scanned_address or "",
+            "serial": record.serial,
+            "reported_name": record.name,
+            "detail": detail,
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if existing is not None and existing.get("id", 0) > 0:
+            payload["device"] = existing["id"]
+        try:
+            self.netbox.create(ISSUE_ENDPOINT, payload, label="discovery issue")
+        except NetBoxError as exc:
+            # A duplicate open issue is the expected collision — the sweep runs
+            # four times a day and this one is already on the list.
+            if "unique" in str(exc).lower() or "already exists" in str(exc).lower():
+                log.debug("issue already open for %s", scanned_address)
+            else:
+                log.error("could not record the issue: %s", exc)
+
+    def _issues_available(self) -> bool:
+        if self._issues_ok is None:
+            self._issues_ok = self.netbox.endpoint_available(ISSUE_ENDPOINT)
+            if not self._issues_ok:
+                log.warning(
+                    "the Discovery plugin is not installed, so this could only be "
+                    "logged, not raised where anyone will see it"
+                )
+        return self._issues_ok
 
     def _handle_serial_change(self, existing: dict, record: DeviceRecord,
                               site_id: int) -> dict | None:
@@ -835,7 +930,7 @@ class Syncer:
         """
         for record in result.access_points:
             self._ensure_device(record, site_id, virtual_chassis=None,
-                                tenant_id=tenant_id)
+                                tenant_id=tenant_id, scanned_address="")
 
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
