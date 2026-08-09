@@ -189,10 +189,16 @@ class TestResolution:
 
 
 @pytest.fixture(scope="module")
-def flow(netbox, lab):
-    """One request carried through the whole flow by the tests below, in order."""
+def flow(netbox, lab, us_region):
+    """One request carried through the staged flow by the tests below, in order.
+
+    Deliberately an address no prefix claims. Under the exceptions policy a
+    clean scan applies itself, so the scan -> review -> approve -> apply
+    sequence only happens for a request that genuinely needs a person — and
+    "no site" is the commonest such case.
+    """
     return {
-        "request": submit(netbox),
+        "request": submit(netbox, "198.19.66.5"),
         "collector": ReplayCollector(),
         "syncer": Syncer(netbox, SyncOptions(device_role=SLUG + "network")),
     }
@@ -205,7 +211,7 @@ class TestOnboardingFlow:
         mine = [j for j in jobs if j["id"] == flow["request"]["id"]]
         assert mine, "the poller was not offered its own request"
         assert mine[0]["action"] == "scan"
-        assert mine[0]["address"] == TEST_ADDRESS
+        assert mine[0]["address"] == "198.19.66.5"
         flow["jobs"] = mine
 
     def test_another_poller_is_offered_nothing(self, netbox, flow):
@@ -234,8 +240,9 @@ class TestOnboardingFlow:
         jobs = onboarding.check_in(netbox, POLLER)
         assert [j for j in jobs if j["id"] == flow["request"]["id"]] == []
 
-    def test_approval_turns_it_into_an_apply_job(self, netbox, flow):
-        approve(netbox, flow["request"]["id"])
+    def test_approval_turns_it_into_an_apply_job(self, netbox, lab, flow):
+        # No prefix placed this address, so a site has to be supplied here.
+        approve(netbox, flow["request"]["id"], override_site=lab["site"]["id"])
         jobs = onboarding.check_in(netbox, POLLER)
         mine = [j for j in jobs if j["id"] == flow["request"]["id"]]
         assert mine and mine[0]["action"] == "apply"
@@ -346,7 +353,13 @@ class TestWorkflowOverApi:
     tests are what keeps that true.
     """
 
-    def test_add_review_approve_end_to_end(self, netbox, lab):
+    def test_add_and_scan_end_to_end(self, netbox, lab):
+        """The clean path over the API: add an address, and it becomes a device.
+
+        Under the exceptions policy a scan with nothing questionable about it
+        does not stop for a person, so there is no approve step here — that is
+        covered below, on a request that genuinely needs one.
+        """
         entry = submit(netbox, "192.0.2.80")
         assert entry["status"] == "pending"
 
@@ -354,45 +367,38 @@ class TestWorkflowOverApi:
         assert jobs and jobs[0]["action"] == "scan"
 
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
-        onboarding.run_jobs(netbox, ReplayCollector("arista-7050sx"), syncer, jobs)
-
-        # Review: the preview is readable over the API, which is what a caller
-        # would decide on.
-        after = refresh(netbox, entry["id"])
-        assert after["status"] == "review"
-        assert after["discovered"]["devices"][0]["model"] == "DCS-7050SX-72Q"
-
-        approved = approve(netbox, entry["id"])
-        assert approved["status"] == "approved"
-        assert approved["reviewed_by"] is not None
-
-        apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
-                      if j["id"] == entry["id"]]
-        assert apply_jobs and apply_jobs[0]["action"] == "apply"
-        counts = onboarding.run_jobs(
-            netbox, ReplayCollector("arista-7050sx"), syncer, apply_jobs
-        )
+        counts = onboarding.run_jobs(netbox, ReplayCollector("arista-7050sx"),
+                                     syncer, jobs)
         assert counts.get("applied") == 1
 
         final = refresh(netbox, entry["id"])
         assert final["status"] == "applied"
+        assert final["discovered"]["devices"][0]["model"] == "DCS-7050SX-72Q"
         device = netbox.get("/dcim/devices/%s/" % final["device"]["id"])
         assert device["serial"] == "JPE17240001"
 
-    def test_approve_can_override_name_and_site(self, netbox, lab):
-        entry = submit(netbox, "192.0.2.81")
+    def test_approve_can_override_name_and_site(self, netbox, lab, us_region):
+        """Approving with overrides, on a request that really does need review.
+
+        An address no prefix claims has no site, so it stops for a person — and
+        the person supplies both the site and the name in the approve call.
+        """
+        entry = submit(netbox, "198.19.77.10")
+        assert entry["used_default_region"] is True
         jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
-        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+        onboarding.run_jobs(netbox, ReplayCollector("checkpoint-gaia"), syncer, jobs)
+        assert refresh(netbox, entry["id"])["status"] == "review"
 
-        approved = approve(netbox, entry["id"], override_name="renamed-by-api")
+        approved = approve(netbox, entry["id"], override_name="renamed-by-api",
+                           override_site=lab["site"]["id"])
         assert approved["status"] == "approved"
         assert approved["override_name"] == "renamed-by-api"
 
         apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
                       if j["id"] == entry["id"]]
         assert apply_jobs[0]["override_name"] == "renamed-by-api"
-        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, apply_jobs)
+        onboarding.run_jobs(netbox, ReplayCollector("checkpoint-gaia"), syncer, apply_jobs)
 
         final = refresh(netbox, entry["id"])
         assert final["status"] == "applied"
@@ -410,11 +416,12 @@ class TestWorkflowOverApi:
         assert "awaiting review" in str(exc.value)
         assert refresh(netbox, entry["id"])["status"] == "pending"
 
-    def test_reject_over_api_records_the_reason(self, netbox, lab):
-        entry = submit(netbox, "192.0.2.83")
+    def test_reject_over_api_records_the_reason(self, netbox, lab, us_region):
+        entry = submit(netbox, "198.19.77.11")
         jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
-        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+        onboarding.run_jobs(netbox, ReplayCollector("infoblox-nios"), syncer, jobs)
+        assert refresh(netbox, entry["id"])["status"] == "review"
 
         rejected = reject(netbox, entry["id"], reason="decommissioned, do not onboard")
         assert rejected["status"] == "rejected"
@@ -572,12 +579,9 @@ class TestOverlappingAddressSpace:
         jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
         assert jobs and jobs[0]["tenant"] == overlapping["beta"]["id"]
 
+        # A clean scan applies itself, so there is no approve step here.
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
-        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
-        approve(netbox, entry["id"])
-        apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
-                      if j["id"] == entry["id"]]
-        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, apply_jobs)
+        onboarding.run_jobs(netbox, ReplayCollector("fortigate-600e"), syncer, jobs)
 
         final = refresh(netbox, entry["id"])
         assert final["status"] == "applied"
@@ -653,14 +657,17 @@ class TestTheReviewedReadingIsSufficient:
                      for ip in (i.get("ip_addresses") or [])]
         assert "10.10.1.5/24" in addresses
 
-    def test_apply_falls_back_to_the_reviewed_reading_when_unreachable(self, netbox, lab):
+    def test_apply_falls_back_to_the_reviewed_reading_when_unreachable(
+            self, netbox, lab, us_region):
         from snmpinv.snmp import SnmpTimeoutError
 
-        entry = submit(netbox, "192.0.2.92")
+        # An address with no prefix, so it stops for review and there is a real
+        # gap between the reading and the apply.
+        entry = submit(netbox, "198.19.66.6")
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
         jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
         onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
-        approve(netbox, entry["id"])
+        approve(netbox, entry["id"], override_site=lab["site"]["id"])
 
         class Unreachable:
             def collect(self, host):
@@ -700,3 +707,148 @@ class TestTheReviewedReadingIsSufficient:
         assert counts.get("unreachable") == 1
         after = refresh(netbox, entry["id"])
         assert "no stored scan to fall back on" in after["error"]
+
+
+class TestReviewOnlyOnExceptions:
+    """A clean scan should not need a person; a questionable one should.
+
+    Reviewing everything sounds safer and is not — it teaches people to click
+    Apply without reading, which is worse than not asking.
+    """
+
+    def test_a_clean_scan_applies_itself(self, netbox, lab):
+        entry = submit(netbox, "192.0.2.101")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        counts = onboarding.run_jobs(netbox, ReplayCollector("f5-bigip"), syncer, jobs)
+
+        assert counts.get("applied") == 1, "a clean scan should not stop at review"
+        after = refresh(netbox, entry["id"])
+        assert after["status"] == "applied"
+        assert after["device"], "the device should exist already"
+        device = netbox.get("/dcim/devices/%s/" % after["device"]["id"])
+        assert device["serial"] == "f5-chs-01234567"
+
+    def test_it_took_one_check_in_not_two(self, netbox, lab):
+        """Applying happens in the same run as the scan, using the reading
+        already in hand — no second walk, no waiting for the next tick."""
+        entry = submit(netbox, "192.0.2.102")
+        collector = ReplayCollector("palo-pa3220")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        onboarding.run_jobs(
+            netbox, collector, Syncer(netbox, SyncOptions(device_role=SLUG + "network")),
+            jobs,
+        )
+        assert refresh(netbox, entry["id"])["status"] == "applied"
+        assert len(collector.calls) == 1, (
+            "the device should have been walked once, not once to scan and again to apply"
+        )
+
+    def test_a_device_with_no_model_still_waits_for_a_person(self, netbox, lab):
+        class NoModel:
+            def collect(self, host):
+                facts = collect_fixture("cisco-2960x", host=host)
+                for entity in facts.entities:
+                    entity.model = ""
+                facts.vendor_model = ""
+                return facts
+
+        entry = submit(netbox, "192.0.2.103")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        onboarding.run_jobs(netbox, NoModel(),
+                            Syncer(netbox, SyncOptions(device_role=SLUG + "network")), jobs)
+
+        after = refresh(netbox, entry["id"])
+        assert after["status"] == "review"
+        assert "did not report a model" in after["error"]
+
+    def test_a_serial_already_in_netbox_waits_for_a_person(self, netbox, lab):
+        """Two addresses reaching the same box, or a mistyped serial. Either
+        way creating a second device for existing hardware is how an inventory
+        stops being trusted."""
+        first = submit(netbox, "192.0.2.104")
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == first["id"]]
+        onboarding.run_jobs(netbox, ReplayCollector("juniper-ex4300"), syncer, jobs)
+        assert refresh(netbox, first["id"])["status"] == "applied"
+
+        # The same physical box turns up again on another address.
+        second = submit(netbox, "192.0.2.105")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == second["id"]]
+        onboarding.run_jobs(netbox, ReplayCollector("juniper-ex4300"), syncer, jobs)
+
+        after = refresh(netbox, second["id"])
+        assert after["status"] == "review"
+        assert "already on" in after["error"]
+        assert "PE3714AF0123" in after["error"]
+
+
+class TestManualEntry:
+    """Devices SNMP cannot reach still belong in the inventory."""
+
+    def test_a_failed_scan_can_be_completed_by_hand(self, netbox, lab):
+        from snmpinv.snmp import SnmpTimeoutError
+
+        class NoSnmp:
+            def collect(self, host):
+                raise SnmpTimeoutError("%s: no response" % host)
+
+        entry = submit(netbox, "192.0.2.110")
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        onboarding.run_jobs(netbox, NoSnmp(), syncer, jobs)
+        assert refresh(netbox, entry["id"])["status"] == "failed"
+
+        manufacturer = netbox.first("/dcim/manufacturers/", {"slug": "cisco"}) or \
+            netbox.create("/dcim/manufacturers/", {"name": "Cisco", "slug": "cisco"})
+        recorded = netbox.post_raw(
+            "%s%s/manual/" % (REQUESTS, entry["id"]),
+            {
+                "name": "no-snmp-switch-01",
+                "manufacturer": manufacturer["name"],
+                "model": "WS-C2960-24TT-L",
+                "serial": "HANDTYPED0001",
+                "software_version": "12.2(55)SE",
+            },
+            label="manual entry",
+        )
+        assert recorded["status"] == "approved"
+        assert recorded["manually_entered"] is True
+
+        # It is created by the same apply path — the device is unreachable, so
+        # the poller falls back to what was recorded.
+        apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
+                      if j["id"] == entry["id"]]
+        assert apply_jobs and apply_jobs[0]["action"] == "apply"
+        counts = onboarding.run_jobs(netbox, NoSnmp(), syncer, apply_jobs)
+        assert counts.get("applied") == 1
+
+        final = refresh(netbox, entry["id"])
+        assert final["status"] == "applied"
+        device = netbox.get("/dcim/devices/%s/" % final["device"]["id"])
+        assert device["name"] == "no-snmp-switch-01"
+        assert device["serial"] == "HANDTYPED0001"
+        assert device["device_type"]["model"] == "WS-C2960-24TT-L"
+        assert device["site"]["name"] == PREFIX + "DC1"
+
+    def test_hand_entered_data_stays_marked_as_such(self, netbox, lab):
+        """A typed serial and an observed one must never look alike."""
+        rows = netbox.all(REQUESTS, {"address": "192.0.2.110"})
+        assert rows and rows[0]["manually_entered"] is True
+
+    def test_a_model_is_required(self, netbox, lab):
+        from snmpinv.snmp import SnmpTimeoutError
+
+        class NoSnmp:
+            def collect(self, host):
+                raise SnmpTimeoutError("nope")
+
+        entry = submit(netbox, "192.0.2.111")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        onboarding.run_jobs(netbox, NoSnmp(), None, jobs)
+
+        with pytest.raises(NetBoxError) as exc:
+            netbox.post_raw("%s%s/manual/" % (REQUESTS, entry["id"]),
+                            {"name": "x", "manufacturer": "Cisco", "model": ""},
+                            label="manual entry")
+        assert "400" in str(exc.value)

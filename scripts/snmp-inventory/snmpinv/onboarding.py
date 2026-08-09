@@ -117,7 +117,7 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
         request_id = job.get("id")
         try:
             if action == "scan":
-                return _do_scan(netbox, collector, request_id,
+                return _do_scan(netbox, collector, syncer, request_id,
                                 job.get("address", ""), dry_run)
             if action == "apply":
                 return _do_apply(netbox, collector, syncer, job, dry_run)
@@ -140,7 +140,7 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
     return counts
 
 
-def _do_scan(netbox: NetBox, collector: Collector, request_id: int,
+def _do_scan(netbox: NetBox, collector: Collector, syncer: Syncer, request_id: int,
              address: str, dry_run: bool) -> str:
     """Walk a device and report what is there, writing nothing."""
     log.info("onboarding %s: scanning", address)
@@ -173,9 +173,21 @@ def _do_scan(netbox: NetBox, collector: Collector, request_id: int,
     if dry_run:
         log.info("[dry-run] would report %s as %s", address, _describe(result))
         return "scanned"
-    netbox.post_raw(f"{REQUEST_ENDPOINT}{request_id}/scanned/", payload,
-                    label=f"scan result for {address}")
-    log.info("onboarding %s: reported %s — awaiting review", address, _describe(result))
+
+    reported = netbox.post_raw(f"{REQUEST_ENDPOINT}{request_id}/scanned/", payload,
+                               label=f"scan result for {address}")
+
+    # The server decides whether this one needs a person. A clean scan comes
+    # back already approved, and applying it here — with the reading still in
+    # hand — saves a whole check-in cycle and a second walk of the device.
+    status = (reported or {}).get("status")
+    if status == "approved":
+        log.info("onboarding %s: %s — nothing to query, applying now",
+                 address, _describe(result))
+        return _apply_result(netbox, syncer, reported, result, address, dry_run)
+
+    log.info("onboarding %s: reported %s — held for review (%s)",
+             address, _describe(result), (reported or {}).get("error") or "policy")
     return "scanned"
 
 
@@ -244,16 +256,46 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
                  " for tenant %s" % job["tenant_name"] if job.get("tenant_name") else "")
         return "applied"
 
+    return _write_and_report(netbox, syncer, request_id, address, result, site_id,
+                             job.get("tenant"))
+
+
+def _apply_result(netbox: NetBox, syncer: Syncer, request: dict,
+                  result: ScanResult, address: str, dry_run: bool) -> str:
+    """Create the device straight from a scan the server has just approved.
+
+    The reading is already in hand, so this needs neither a second walk of the
+    device nor another check-in — the clean path is scan, apply, done.
+    """
+    site = request.get("site") or {}
+    override = request.get("override_site") or {}
+    site_id = override.get("id") or site.get("id")
+    if site_id is None:
+        _report_apply_failure(netbox, request["id"], dry_run,
+                              "The request has no site, so there is nowhere to "
+                              "create the device.")
+        return "no-site"
+    if dry_run:
+        return "applied"
+    _apply_overrides(result, {"override_name": request.get("override_name") or ""})
+    tenant = (request.get("tenant") or {}).get("id")
+    return _write_and_report(netbox, syncer, request["id"], address, result,
+                             site_id, tenant)
+
+
+def _write_and_report(netbox: NetBox, syncer: Syncer, request_id: int, address: str,
+                      result: ScanResult, site_id: int, tenant_id) -> str:
+    """The write half of an apply, shared by both routes into it."""
     # Serialised: creating the shared taxonomy (manufacturer, device type,
     # platform, role) races otherwise, and the syncer's batched state is not
     # thread safe.
     with _write_lock:
-        syncer.sync(result, site_id, scanned_address=address,
-                    tenant_id=job.get("tenant"))
+        syncer.sync(result, site_id, scanned_address=address, tenant_id=tenant_id)
         syncer.flush_software_reports()
         device = _find_created_device(netbox, result, site_id)
+
     if device is None:
-        _report_apply_failure(netbox, request_id, dry_run,
+        _report_apply_failure(netbox, request_id, False,
                               "The sync ran but the device could not be found "
                               "afterwards. Check the poller log.")
         return "apply-failed"

@@ -241,11 +241,49 @@ service.
 Then:
 
 1. The poller picks the job up on its next check-in and scans the device.
-2. It reports what it found — model, serial, version, stack members — and
-   **writes nothing**. The request waits in *Awaiting review*.
-3. Someone looks at it, optionally overrides the name, site or role, and
-   applies.
-4. The poller creates the device on its next check-in.
+2. If nothing about the result is questionable, it is **applied there and
+   then** — the poller already has the reading, so no second walk and no second
+   check-in. Enter an IP, come back to a device.
+3. Otherwise it stops in *Awaiting review* with the reason, and waits for a
+   person. They can override the name, site or role, then apply.
+
+### What counts as questionable
+
+Review is spent only where it buys something. Reviewing everything sounds safer
+and is not — it teaches people to click Apply without reading, which is worse
+than not asking.
+
+| Held for review | Why |
+|---|---|
+| No model reported | There is no device type to create, and inventing one is the habit this tool exists to break |
+| No site | Nothing placed the address, so there is nowhere to put the device |
+| Serial already on another device | Either the box was onboarded twice, or a serial is wrong. Both need a person |
+| Hardware changed since review | The approval was for a specific box and this is no longer it |
+| Scan failed | Nothing was learned — see manual entry below |
+
+Set `review_policy` to `always` in the plugin config to go back to reviewing
+every device.
+
+### Devices SNMP cannot reach
+
+Plenty of gear has no SNMP, has it switched off, or sits behind something that
+will not pass it — and it still belongs in the inventory. When a scan fails,
+the request offers **Enter the details by hand**: name, manufacturer, model,
+serial, platform, role. That builds the same record shape a poller would have
+reported, so the same apply creates it — one route into DCIM, not two.
+
+Hand-entered requests are flagged `manually_entered` and labelled as such
+wherever they are shown. A typed serial and an observed one are not equally
+trustworthy and should never look alike.
+
+Also available over the API:
+
+```bash
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/manual/" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "core-sw-09", "manufacturer": "Cisco",
+       "model": "WS-C2960-24TT-L", "serial": "FOC1234ABCD"}'
+```
 
 ### Overlapping address space
 
