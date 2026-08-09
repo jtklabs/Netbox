@@ -26,10 +26,14 @@ services:
       DIODE_CERT_FILE: ${DIODE_CERT_FILE:-}
       # Custom worker packages, if this collector runs any (see worker-example/).
       INSTALL_WORKERS_PATH: ${INSTALL_WORKERS_PATH:-}
-      PIP_CACHE_DIR: /opt/orb/pip-cache
+      # NOT under /opt/orb: that path is the bundle, bind-mounted read-only
+      # just below. Docker must create a mountpoint for this volume, and it
+      # cannot mkdir inside a read-only mount — the container then fails every
+      # start with `mkdir .../merged/opt/orb/pip-cache: read-only file system`.
+      PIP_CACHE_DIR: /opt/pip-cache
     volumes:
       - ./:/opt/orb/:ro
-      - orb-pip-cache:/opt/orb/pip-cache
+      - orb-pip-cache:/opt/pip-cache
     command: run -c /opt/orb/agent.yaml
 
 volumes:
