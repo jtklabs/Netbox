@@ -3,9 +3,17 @@ from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 
 from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 
-__all__ = ('DiscoveryPollerFilterSet', 'OnboardingRequestFilterSet')
+__all__ = (
+    'DiscoveryPollerFilterSet',
+    'HardwareReplacementFilterSet',
+    'OnboardingRequestFilterSet',
+)
 
 
 class DiscoveryPollerFilterSet(NetBoxModelFilterSet):
@@ -58,4 +66,22 @@ class OnboardingRequestFilterSet(NetBoxModelFilterSet):
         lookup = queryset.filter(status__in=OnboardingStatusChoices.NEEDS_ATTENTION)
         return lookup if value else queryset.exclude(
             status__in=OnboardingStatusChoices.NEEDS_ATTENTION
+        )
+
+
+class HardwareReplacementFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = HardwareReplacement
+        fields = ('id', 'kind', 'device_id', 'old_serial', 'new_serial', 'module_bay')
+
+    def search(self, queryset, name, value):
+        """Searching by serial is the point — that is how a support contract or
+        a quote is traced back to the box it was for."""
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(old_serial__icontains=value)
+            | Q(new_serial__icontains=value)
+            | Q(model_name__icontains=value)
+            | Q(description__icontains=value)
         )

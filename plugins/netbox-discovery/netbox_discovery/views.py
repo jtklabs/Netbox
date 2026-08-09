@@ -15,7 +15,11 @@ from utilities.views import register_model_view
 
 from netbox_discovery import actions, filtersets, forms, tables
 from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 from netbox_discovery.resolution import sites_for_poller
 
 __all__ = (
@@ -33,6 +37,10 @@ __all__ = (
     'DiscoveryPollerEditView',
     'DiscoveryPollerDeleteView',
     'DiscoveryPollerBulkDeleteView',
+    'HardwareReplacementListView',
+    'HardwareReplacementView',
+    'HardwareReplacementDeleteView',
+    'HardwareReplacementBulkDeleteView',
 )
 
 
@@ -231,3 +239,30 @@ class DiscoveryPollerBulkDeleteView(BulkDeleteView):
     queryset = DiscoveryPoller.objects.all()
     filterset = filtersets.DiscoveryPollerFilterSet
     table = tables.DiscoveryPollerTable
+
+
+@register_model_view(HardwareReplacement, name='list')
+class HardwareReplacementListView(ObjectListView):
+    queryset = HardwareReplacement.objects.select_related(
+        'device', 'replaced_device', 'poller'
+    )
+    table = tables.HardwareReplacementTable
+    filterset = filtersets.HardwareReplacementFilterSet
+
+
+@register_model_view(HardwareReplacement)
+class HardwareReplacementView(ObjectView):
+    queryset = HardwareReplacement.objects.select_related(
+        'device', 'replaced_device', 'poller'
+    )
+
+
+@register_model_view(HardwareReplacement, 'delete')
+class HardwareReplacementDeleteView(ObjectDeleteView):
+    queryset = HardwareReplacement.objects.all()
+
+
+class HardwareReplacementBulkDeleteView(BulkDeleteView):
+    queryset = HardwareReplacement.objects.select_related('device')
+    filterset = filtersets.HardwareReplacementFilterSet
+    table = tables.HardwareReplacementTable

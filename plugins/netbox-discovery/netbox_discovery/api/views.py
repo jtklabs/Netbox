@@ -24,13 +24,18 @@ from netbox_discovery.api.serializers import (
     ApproveSerializer,
     DiscoveryPollerSerializer,
     JobSerializer,
+    HardwareReplacementSerializer,
     OnboardingRequestSerializer,
     PollerCheckInSerializer,
     RejectSerializer,
     ScanResultSerializer,
 )
 from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 
 
 class DiscoveryPollerViewSet(NetBoxModelViewSet):
@@ -277,3 +282,16 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
         return Response(
             OnboardingRequestSerializer(entry, context={'request': request}).data
         )
+
+
+class HardwareReplacementViewSet(NetBoxModelViewSet):
+    """Every serial that changed under a name we already knew.
+
+    Writable: the poller creates these when a rescan finds different metal.
+    """
+
+    queryset = HardwareReplacement.objects.select_related(
+        'device', 'replaced_device', 'poller'
+    ).prefetch_related('tags')
+    serializer_class = HardwareReplacementSerializer
+    filterset_class = filtersets.HardwareReplacementFilterSet

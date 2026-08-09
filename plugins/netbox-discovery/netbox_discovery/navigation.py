@@ -28,8 +28,20 @@ pollers = PluginMenuItem(
     permissions=['netbox_discovery.view_discoverypoller'],
 )
 
+# Serial changes are their own thing, not an onboarding concern: they come out
+# of the routine rescan, and the people who care are the ones reconciling
+# support contracts.
+replacements = PluginMenuItem(
+    link='plugins:netbox_discovery:hardwarereplacement_list',
+    link_text='Hardware Replacements',
+    permissions=['netbox_discovery.view_hardwarereplacement'],
+)
+
 menu = PluginMenu(
     label='Discovery',
-    groups=(('Onboarding', (onboarding, pollers)),),
+    groups=(
+        ('Onboarding', (onboarding, pollers)),
+        ('Changes', (replacements,)),
+    ),
     icon_class='mdi mdi-radar',
 )

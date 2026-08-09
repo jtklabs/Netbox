@@ -42,3 +42,17 @@ class OnboardingStatusChoices(ChoiceSet):
     # A request in one of these is waiting on us, not on anybody else, and is
     # what the "needs attention" count on the dashboard is drawn from.
     NEEDS_ATTENTION = (STATUS_REVIEW, STATUS_FAILED, STATUS_UNRESOLVED)
+
+
+class ReplacementKindChoices(ChoiceSet):
+    """What was swapped out."""
+
+    key = 'HardwareReplacement.kind'
+
+    KIND_CHASSIS = 'chassis'
+    KIND_MODULE = 'module'
+
+    CHOICES = [
+        (KIND_CHASSIS, 'Chassis', 'orange'),
+        (KIND_MODULE, 'Module', 'blue'),
+    ]

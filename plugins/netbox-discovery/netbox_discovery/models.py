@@ -7,10 +7,13 @@ from django.urls import reverse
 from django.utils import timezone
 from netbox.models import PrimaryModel
 
-from netbox_discovery.choices import OnboardingStatusChoices
+from netbox_discovery.choices import (
+    OnboardingStatusChoices,
+    ReplacementKindChoices,
+)
 from netbox_discovery.utils import plugin_setting
 
-__all__ = ('DiscoveryPoller', 'OnboardingRequest')
+__all__ = ('DiscoveryPoller', 'HardwareReplacement', 'OnboardingRequest')
 
 
 class DiscoveryPoller(PrimaryModel):
@@ -402,3 +405,76 @@ class OnboardingRequest(PrimaryModel):
     @property
     def access_point_count(self):
         return len(self.discovered.get('access_points', [])) if self.discovered else 0
+
+
+class HardwareReplacement(PrimaryModel):
+    """A serial number that changed under a name we already knew.
+
+    A rescan finding a different serial at the same place means the metal was
+    swapped — an RMA, a spare pulled off the shelf, a line card replaced. The
+    inventory has to follow the new unit, but the old serial must not simply be
+    overwritten: serials are what support contracts and quotes are matched on,
+    so losing one silently means losing the thread on a box that may still be
+    under contract, or still sitting in a rack somewhere.
+
+    NetBox's changelog does record the old value, but only as a diff on one
+    object at one moment. This is the queryable version: every swap, with both
+    serials, ready to be reported on.
+
+    For a chassis the old Device record is kept as well, retired rather than
+    deleted, and `replaced_device` points at it. For a module it cannot be —
+    Module.module_bay is not nullable, so the old row has nowhere to live once
+    the new part is in the bay — and this record is the only surviving trace.
+    That asymmetry is the reason this model exists at all.
+    """
+
+    kind = models.CharField(
+        max_length=20, choices=ReplacementKindChoices,
+        default=ReplacementKindChoices.KIND_CHASSIS,
+    )
+    device = models.ForeignKey(
+        to='dcim.Device', on_delete=models.CASCADE,
+        related_name='hardware_replacements',
+        help_text='The device as it stands now, carrying the new serial',
+    )
+    replaced_device = models.ForeignKey(
+        to='dcim.Device', on_delete=models.SET_NULL, blank=True, null=True,
+        related_name='+',
+        help_text='The retired record for the unit that was removed, for a chassis swap',
+    )
+    module_bay = models.CharField(
+        max_length=100, blank=True,
+        help_text='Which bay, for a module swap',
+    )
+    old_serial = models.CharField(max_length=100)
+    new_serial = models.CharField(max_length=100)
+    model_name = models.CharField(
+        max_length=100, blank=True, verbose_name='Model',
+        help_text='The hardware model reported at the time of the swap',
+    )
+    detected_at = models.DateTimeField()
+    poller = models.ForeignKey(
+        to='netbox_discovery.DiscoveryPoller', on_delete=models.SET_NULL,
+        blank=True, null=True, related_name='+',
+    )
+
+    clone_fields = ()
+
+    class Meta:
+        ordering = ('-detected_at',)
+        verbose_name = 'hardware replacement'
+        verbose_name_plural = 'hardware replacements'
+        indexes = (
+            models.Index(fields=('old_serial',)),
+            models.Index(fields=('new_serial',)),
+            models.Index(fields=('-detected_at',)),
+        )
+
+    def __str__(self):
+        return '%s: %s -> %s' % (self.device, self.old_serial or '?', self.new_serial or '?')
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:hardwarereplacement', args=[self.pk])
+
+    def get_kind_color(self):
+        return ReplacementKindChoices.colors.get(self.kind)

@@ -1,0 +1,56 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Replacement</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Detected</th><td>{{ object.detected_at }}</td></tr>
+            <tr><th>Kind</th>
+              <td>{% badge object.get_kind_display bg_color=object.get_kind_color %}</td></tr>
+            <tr><th>Device</th><td>{{ object.device|linkify }}</td></tr>
+            {% if object.module_bay %}
+              <tr><th>Module bay</th><td>{{ object.module_bay }}</td></tr>
+            {% endif %}
+            <tr><th>Model</th><td>{{ object.model_name|placeholder }}</td></tr>
+            <tr><th>Found by</th><td>{{ object.poller|linkify|placeholder }}</td></tr>
+          </table>
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Serials</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Removed</th><td><code>{{ object.old_serial|placeholder }}</code></td></tr>
+            <tr><th>Fitted</th><td><code>{{ object.new_serial|placeholder }}</code></td></tr>
+          </table>
+          {% if object.replaced_device %}
+            <p class="mb-0">
+              The unit that came out is kept as
+              {{ object.replaced_device|linkify }}, retired rather than deleted,
+              so anything matched on its serial — a support contract, a quote —
+              still resolves.
+            </p>
+          {% elif object.kind == 'module' %}
+            <p class="text-muted mb-0">
+              A module cannot be kept once its bay is refilled — NetBox requires
+              a module to be in a bay — so this record is the only trace of the
+              serial that was removed.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}

@@ -6,7 +6,11 @@ from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
 from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 
 __all__ = (
     'DiscoveryPollerSerializer',
@@ -16,6 +20,7 @@ __all__ = (
     'ApplyResultSerializer',
     'ApproveSerializer',
     'RejectSerializer',
+    'HardwareReplacementSerializer',
 )
 
 
@@ -202,3 +207,26 @@ class JobSerializer(serializers.Serializer):
     role = serializers.CharField(allow_blank=True)
     tenant = serializers.IntegerField(allow_null=True)
     tenant_name = serializers.CharField(allow_blank=True)
+
+
+class HardwareReplacementSerializer(NetBoxModelSerializer):
+    # Writable, not read-only: the poller creates these. Marked read-only they
+    # are silently dropped from a POST and the create fails on a null device,
+    # which is a confusing way to find out.
+    url = serializers.HyperlinkedIdentityField(
+        view_name='plugins-api:netbox_discovery-api:hardwarereplacement-detail'
+    )
+    device = DeviceSerializer(nested=True)
+    replaced_device = DeviceSerializer(nested=True, required=False, allow_null=True)
+    poller = DiscoveryPollerSerializer(nested=True, required=False, allow_null=True)
+    detected_at = serializers.DateTimeField(required=False)
+
+    class Meta:
+        model = HardwareReplacement
+        fields = (
+            'url', 'id', 'display', 'kind', 'device', 'replaced_device',
+            'module_bay', 'old_serial', 'new_serial', 'model_name',
+            'detected_at', 'poller',
+            'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
+        )
+        brief_fields = ('url', 'id', 'display', 'old_serial', 'new_serial')

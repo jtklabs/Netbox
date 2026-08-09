@@ -1,9 +1,17 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 
-__all__ = ('DiscoveryPollerTable', 'OnboardingRequestTable')
+__all__ = (
+    'DiscoveryPollerTable',
+    'HardwareReplacementTable',
+    'OnboardingRequestTable',
+)
 
 
 class OnboardingRequestTable(NetBoxTable):
@@ -56,3 +64,25 @@ class DiscoveryPollerTable(NetBoxTable):
             'last_scan_summary', 'open_requests', 'description', 'tags',
         )
         default_columns = ('name', 'last_seen_at', 'is_stale', 'version', 'last_scan_summary')
+
+
+class HardwareReplacementTable(NetBoxTable):
+    device = tables.Column(linkify=True)
+    kind = columns.ChoiceFieldColumn()
+    old_serial = tables.Column(verbose_name='Serial removed')
+    new_serial = tables.Column(verbose_name='Serial fitted')
+    replaced_device = tables.Column(linkify=True, verbose_name='Retired record')
+    detected_at = columns.DateTimeColumn()
+    tags = columns.TagColumn(url_name='plugins:netbox_discovery:hardwarereplacement_list')
+
+    class Meta(NetBoxTable.Meta):
+        model = HardwareReplacement
+        fields = (
+            'pk', 'id', 'detected_at', 'kind', 'device', 'module_bay',
+            'old_serial', 'new_serial', 'model_name', 'replaced_device',
+            'poller', 'description', 'tags',
+        )
+        default_columns = (
+            'detected_at', 'kind', 'device', 'module_bay',
+            'old_serial', 'new_serial', 'model_name',
+        )

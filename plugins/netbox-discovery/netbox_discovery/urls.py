@@ -2,7 +2,11 @@ from django.urls import path
 from netbox.views.generic import ObjectChangeLogView
 
 from netbox_discovery import views
-from netbox_discovery.models import DiscoveryPoller, OnboardingRequest
+from netbox_discovery.models import (
+    DiscoveryPoller,
+    HardwareReplacement,
+    OnboardingRequest,
+)
 
 # Route names must match the lowercased model class name — NetBox's generic
 # views and get_absolute_url() both derive the name that way, and a mismatch
@@ -42,4 +46,15 @@ urlpatterns = [
          name='discoverypoller_delete'),
     path('pollers/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='discoverypoller_changelog', kwargs={'model': DiscoveryPoller}),
+
+    path('replacements/', views.HardwareReplacementListView.as_view(),
+         name='hardwarereplacement_list'),
+    path('replacements/delete/', views.HardwareReplacementBulkDeleteView.as_view(),
+         name='hardwarereplacement_bulk_delete'),
+    path('replacements/<int:pk>/', views.HardwareReplacementView.as_view(),
+         name='hardwarereplacement'),
+    path('replacements/<int:pk>/delete/', views.HardwareReplacementDeleteView.as_view(),
+         name='hardwarereplacement_delete'),
+    path('replacements/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='hardwarereplacement_changelog', kwargs={'model': HardwareReplacement}),
 ]
