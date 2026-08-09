@@ -2,7 +2,9 @@
 
 NetBox merges `schema` into its root Query as extra base classes
 (`*registry['plugins']['graphql_schemas']` in netbox/graphql/schema.py), so it
-must be a LIST — the registration helper calls `.extend()` on it.
+must be a LIST — the registration helper calls `.extend()` on it. The plugin
+config points at this module's `schema` attribute directly; see the comment on
+`QuotesConfig.graphql_schema` for why the explicit path matters.
 """
 
 import strawberry
