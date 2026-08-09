@@ -8,6 +8,7 @@ from os import environ
 PLUGINS = [
     "netbox_quotes",
     "netbox_refresh",
+    "netbox_discovery",
 ]
 
 PLUGINS_CONFIG = {

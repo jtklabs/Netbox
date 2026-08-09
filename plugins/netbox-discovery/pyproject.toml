@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-discovery"
+version = "0.1.0"
+description = "Onboard devices by IP address, discovered by remote SNMP pollers"
+authors = [{ name = "Nova Team" }]
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["netbox_discovery*"]
+
+[tool.setuptools.package-data]
+netbox_discovery = ["templates/**/*.html"]

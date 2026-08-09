@@ -1,0 +1,89 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Poller</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Name</th><td>{{ object.name }}</td></tr>
+            <tr><th>Tag</th><td><code>{{ object.tag_slug }}</code></td></tr>
+            <tr><th>Last check-in</th>
+              <td>
+                {% if object.last_seen_at %}
+                  {{ object.last_seen_at }}
+                  <span class="{% if object.is_stale %}text-danger{% else %}text-success{% endif %} ms-1">
+                    ({{ object.last_seen_at|timesince }} ago)
+                  </span>
+                {% else %}
+                  <span class="text-danger">Never</span>
+                {% endif %}
+              </td></tr>
+            <tr><th>Scanner version</th><td>{{ object.version|placeholder }}</td></tr>
+            <tr><th>Last run</th><td>{{ object.last_scan_summary|placeholder }}</td></tr>
+          </table>
+          {% if object.is_stale %}
+            <p class="text-danger mb-0">
+              <i class="mdi mdi-alert-circle-outline" aria-hidden="true"></i>
+              This poller has not checked in recently. Requests assigned to it will
+              sit in the queue until it runs again.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Sites it covers</h5>
+        <div class="card-body">
+          {% if sites %}
+            <p class="text-muted small">
+              Worked out from the <code>{{ object.tag_slug }}</code> tag on each site,
+              or on the nearest region above it — the same rule the scanner uses, so
+              this is what it will actually scan.
+            </p>
+            <ul class="list-unstyled mb-0">
+              {% for site in sites %}<li>{{ site|linkify }}</li>{% endfor %}
+            </ul>
+          {% else %}
+            <p class="text-muted mb-0">
+              No sites carry the <code>{{ object.tag_slug }}</code> tag, directly or
+              through a region. This poller has nothing to do until one does.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h5 class="card-header">Open requests</h5>
+        <div class="card-body">
+          {% if open_requests %}
+            <table class="table table-sm">
+              <thead><tr><th>Address</th><th>Status</th><th>Site</th></tr></thead>
+              <tbody>
+                {% for entry in open_requests %}
+                  <tr>
+                    <td>{{ entry|linkify }}</td>
+                    <td>{% badge entry.get_status_display bg_color=entry.get_status_color %}</td>
+                    <td>{{ entry.site|linkify|placeholder }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p class="text-muted mb-0">Nothing outstanding.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,173 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+{% load form_helpers %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Request</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>IP address</th><td><code>{{ object.address }}</code></td></tr>
+            <tr><th>Status</th>
+              <td>{% badge object.get_status_display bg_color=object.get_status_color %}</td></tr>
+            {% if object.waiting_on %}
+              <tr><th>Waiting on</th><td>{{ object.waiting_on }}</td></tr>
+            {% endif %}
+            <tr><th>Requested by</th><td>{{ object.requested_by|placeholder }}</td></tr>
+            <tr><th>Requested</th><td>{{ object.created }}</td></tr>
+            {% if object.device %}
+              <tr><th>Device</th><td>{{ object.device|linkify }}</td></tr>
+            {% endif %}
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h5 class="card-header">How this address was placed</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Containing prefix</th><td>{{ object.prefix|linkify|placeholder }}</td></tr>
+            <tr><th>Site</th><td>{{ object.site|linkify|placeholder }}</td></tr>
+            {% if object.override_site %}
+              <tr><th>Site override</th><td>{{ object.override_site|linkify }}</td></tr>
+            {% endif %}
+            <tr><th>Poller</th>
+              <td>
+                {{ object.poller|linkify|placeholder }}
+                {% if object.poller %}
+                  {% if object.poller.is_stale %}
+                    <span class="text-danger ms-1">
+                      <i class="mdi mdi-alert-circle-outline" aria-hidden="true"></i>
+                      has not checked in
+                    </span>
+                  {% else %}
+                    <span class="text-success ms-1">
+                      <i class="mdi mdi-check-circle-outline" aria-hidden="true"></i>
+                      last seen {{ object.poller.last_seen_at|timesince }} ago
+                    </span>
+                  {% endif %}
+                {% endif %}
+              </td></tr>
+          </table>
+          <p class="text-muted small mb-0">
+            The address is placed by the most specific prefix containing it; that
+            prefix's site, or the nearest region above it, carries the
+            <code>poller-&lt;name&gt;</code> tag that decides who scans it.
+          </p>
+        </div>
+      </div>
+
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      {% if object.error %}
+        <div class="card border-danger">
+          <h5 class="card-header text-danger">Problem</h5>
+          <div class="card-body"><p class="mb-0">{{ object.error }}</p></div>
+        </div>
+      {% endif %}
+
+      {% if object.discovered_devices %}
+        <div class="card">
+          <h5 class="card-header">
+            What the poller found
+            {% if object.scanned_at %}
+              <span class="text-muted small float-end">{{ object.scanned_at }}</span>
+            {% endif %}
+          </h5>
+          <div class="card-body">
+            <table class="table table-hover attr-table">
+              <tr><th>Name</th><td>{{ object.discovered_name|placeholder }}</td></tr>
+              <tr><th>Manufacturer</th><td>{{ object.discovered_manufacturer|placeholder }}</td></tr>
+              <tr><th>Model</th><td><strong>{{ object.discovered_model|placeholder }}</strong></td></tr>
+              <tr><th>Serial</th><td><code>{{ object.discovered_serial|placeholder }}</code></td></tr>
+              <tr><th>Platform</th><td>{{ object.discovered_platform|placeholder }}</td></tr>
+              <tr><th>Software</th><td>{{ object.discovered_version|placeholder }}</td></tr>
+              <tr><th>Interfaces</th><td>{{ object.interface_count }}</td></tr>
+              {% if object.module_count %}
+                <tr><th>Modules</th><td>{{ object.module_count }}</td></tr>
+              {% endif %}
+              {% if object.access_point_count %}
+                <tr><th>Access points</th><td>{{ object.access_point_count }}</td></tr>
+              {% endif %}
+            </table>
+
+            {% if object.is_stack %}
+              <h6 class="mt-3">Stack — {{ object.discovered_devices|length }} members</h6>
+              <p class="text-muted small">
+                Each member becomes its own device with its own serial and model,
+                joined in one virtual chassis.
+              </p>
+              <table class="table table-sm">
+                <thead><tr><th>Pos</th><th>Name</th><th>Model</th><th>Serial</th></tr></thead>
+                <tbody>
+                  {% for member in object.discovered_devices %}
+                    <tr>
+                      <td>{{ member.vc_position|placeholder }}{% if member.is_master %}
+                        <span class="badge text-bg-blue ms-1">master</span>{% endif %}</td>
+                      <td>{{ member.name }}</td>
+                      <td>{{ member.model|placeholder }}</td>
+                      <td><code>{{ member.serial|placeholder }}</code></td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+
+      {% if can_review %}
+        <div class="card border-primary">
+          <h5 class="card-header">Apply</h5>
+          <div class="card-body">
+            <p class="text-muted">
+              Nothing has been written to DCIM yet. Applying hands the request back
+              to poller <strong>{{ object.poller.name }}</strong>, which re-reads the
+              device and creates it on its next check-in.
+            </p>
+            <form action="{% url 'plugins:netbox_discovery:onboardingrequest_approve' pk=object.pk %}" method="post">
+              {% csrf_token %}
+              {% render_form review_form %}
+              <div class="d-flex gap-2 mt-3">
+                <button type="submit" class="btn btn-primary">
+                  <i class="mdi mdi-check" aria-hidden="true"></i> Apply
+                </button>
+                <button type="submit" class="btn btn-outline-danger"
+                        formaction="{% url 'plugins:netbox_discovery:onboardingrequest_reject' pk=object.pk %}">
+                  <i class="mdi mdi-close" aria-hidden="true"></i> Reject
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if can_retry %}
+        <div class="card">
+          <h5 class="card-header">Try again</h5>
+          <div class="card-body">
+            <p class="text-muted">
+              Fix what the problem above describes — usually a missing prefix or an
+              untagged site — then queue this address again without re-typing it.
+            </p>
+            <form action="{% url 'plugins:netbox_discovery:onboardingrequest_retry' pk=object.pk %}" method="post">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-outline-primary">
+                <i class="mdi mdi-refresh" aria-hidden="true"></i> Queue again
+              </button>
+            </form>
+          </div>
+        </div>
+      {% endif %}
+
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}
