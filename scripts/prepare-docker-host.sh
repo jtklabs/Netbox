@@ -100,13 +100,27 @@ if [ "$FAMILY" = debian ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
   apt-get install -y -q ca-certificates curl gnupg python3 sudo
-  # Ubuntu's docker.io family conflicts with docker-ce; remove it if a previous
-  # run (or this script's earlier version) installed it. Containers and images
-  # under /var/lib/docker are left alone — docker-ce reads the same data root.
-  if dpkg -l 2>/dev/null | grep -qE '^ii\s+docker\.io'; then
-    log "removing Ubuntu's docker.io stack in favour of docker-ce"
+  # Ubuntu's docker packages conflict with docker-ce at the FILE level: both
+  # ship /usr/libexec/docker/cli-plugins/docker-{compose,buildx}, so dpkg
+  # aborts with "trying to overwrite ... which is also in package". Gate on
+  # each package individually rather than on docker.io alone — an earlier
+  # version of THIS script installed docker-compose-v2 and docker-buildx, and
+  # either one collides on its own even with docker.io already gone.
+  # Containers and images under the data root survive; docker-ce reads it.
+  conflicting=""
+  for pkg in docker.io docker-compose docker-compose-v2 docker-buildx runc containerd; do
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed'; then
+      conflicting="$conflicting $pkg"
+    fi
+  done
+  if [ -n "$conflicting" ]; then
+    log "removing Ubuntu's docker packages in favour of docker-ce:$conflicting"
     systemctl stop docker docker.socket containerd 2>/dev/null || true
-    apt-get remove -y -q docker.io docker-compose docker-buildx runc containerd || true
+    apt-get remove -y -q $conflicting || true
+    # A previously aborted install leaves dpkg half-configured, and the next
+    # install fails on that rather than on anything real. Clear it first.
+    dpkg --configure -a >/dev/null 2>&1 || true
+    apt-get -f install -y -q >/dev/null 2>&1 || true
   fi
   install -m 0755 -d /etc/apt/keyrings
   if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
