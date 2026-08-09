@@ -194,7 +194,9 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
         log.info("check-in: nothing waiting")
         return 0
 
-    counts = onboarding.run_jobs(netbox, collector, syncer, jobs, dry_run=args.dry_run)
+    counts = onboarding.run_jobs(netbox, collector, syncer, jobs,
+                                 dry_run=args.dry_run,
+                                 workers=config.snmp.workers)
     summary = ", ".join("%d %s" % (n, name) for name, n in sorted(counts.items()))
     log.info("onboarding done in %.1fs — %s; NetBox: %s",
              time.time() - started, summary or "nothing done", netbox.summary())

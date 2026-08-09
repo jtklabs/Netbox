@@ -401,6 +401,25 @@ it would create or change, and writes nothing.
 
 Useful flags:
 
+### Concurrency
+
+Both the sweep and the onboarding queue scan `workers` devices at a time
+(default 8, in `[snmp]`). The walks are subprocesses waiting on the network, so
+this scales close to linearly — measured against 8 emulated devices:
+
+| workers | elapsed |
+|---|---|
+| 1 | 4.99s |
+| 4 | 1.28s |
+| 8 | 0.69s |
+
+NetBox writes are serialised behind a lock in both paths. That is deliberate:
+the walks are the slow part, and two devices being written at once would race
+to create the same manufacturer or device type, one of them losing to a 400.
+
+Raise `workers` for a big site. The limit is the poller's file descriptors and
+how much SNMP the devices will tolerate at once, not CPU.
+
 | Flag | Effect |
 |---|---|
 | `--host ADDR` | scan one address instead of asking NetBox (repeatable) |

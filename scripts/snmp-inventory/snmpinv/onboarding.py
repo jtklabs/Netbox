@@ -25,7 +25,9 @@ person approved a specific box and this is no longer that box.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import threading
 
 from .collect import Collector
 from .model import ScanResult, build_scan_result
@@ -34,6 +36,12 @@ from .snmp import SnmpAuthError, SnmpError, SnmpTimeoutError
 from .sync import Syncer
 
 log = logging.getLogger(__name__)
+
+# NetBox writes during an apply are serialised. The SNMP walks are the slow
+# part and parallelise happily, but two applies running at once would race to
+# create the same manufacturer or device type and one would lose to a 400.
+# Same reasoning, and the same shape, as the sweep in snmp_inventory.py.
+_write_lock = threading.Lock()
 
 CHECK_IN_ENDPOINT = "/plugins/discovery/pollers/check-in/"
 REQUEST_ENDPOINT = "/plugins/discovery/onboarding-requests/"
@@ -79,30 +87,50 @@ def check_in(netbox: NetBox, poller_name: str, version: str = "",
 
 
 def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
-             jobs: list[dict], dry_run: bool = False) -> dict:
-    """Do each job and report its outcome back. Returns a count per outcome."""
+             jobs: list[dict], dry_run: bool = False, workers: int = 8) -> dict:
+    """Do each job and report its outcome back. Returns a count per outcome.
+
+    Jobs run concurrently. A check-in can hand back a batch — a bulk CSV import
+    of a floor's worth of switches arrives as one — and each job is dominated
+    by waiting on a device that may take seconds to answer or the better part
+    of a minute to time out. Doing them one at a time would make a batch of
+    twenty take as long as the sum of its slowest members.
+
+    The concurrency is over the SNMP work only; NetBox writes during an apply
+    are serialised, as they are in the sweep.
+    """
     counts: dict[str, int] = {}
+    tally_lock = threading.Lock()
 
     def tally(key):
-        counts[key] = counts.get(key, 0) + 1
+        with tally_lock:
+            counts[key] = counts.get(key, 0) + 1
 
-    for job in jobs:
+    def run_one(job):
         action = job.get("action")
-        address = job.get("address", "")
         request_id = job.get("id")
         try:
             if action == "scan":
-                tally(_do_scan(netbox, collector, request_id, address, dry_run))
-            elif action == "apply":
-                tally(_do_apply(netbox, collector, syncer, job, dry_run))
-            else:
-                log.warning("request %s: unknown job action %r", request_id, action)
-                tally("skipped")
+                return _do_scan(netbox, collector, request_id,
+                                job.get("address", ""), dry_run)
+            if action == "apply":
+                return _do_apply(netbox, collector, syncer, job, dry_run)
+            log.warning("request %s: unknown job action %r", request_id, action)
+            return "skipped"
         except NetBoxError as exc:
             # The scan itself may have succeeded; only the reporting failed.
             # Leave the request as it is so the next check-in retries it.
             log.error("request %s: could not report back: %s", request_id, exc)
-            tally("report-failed")
+            return "report-failed"
+
+    if len(jobs) == 1 or workers <= 1:
+        # Not worth a pool, and keeps the single-job case easy to follow in a log.
+        tally(run_one(jobs[0]) if jobs else "skipped")
+        return counts
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+        for outcome in pool.map(run_one, jobs):
+            tally(outcome)
     return counts
 
 
@@ -196,11 +224,14 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
                  " for tenant %s" % job["tenant_name"] if job.get("tenant_name") else "")
         return "applied"
 
-    syncer.sync(result, site_id, scanned_address=address,
-                tenant_id=job.get("tenant"))
-    syncer.flush_software_reports()
-
-    device = _find_created_device(netbox, result, site_id)
+    # Serialised: creating the shared taxonomy (manufacturer, device type,
+    # platform, role) races otherwise, and the syncer's batched state is not
+    # thread safe.
+    with _write_lock:
+        syncer.sync(result, site_id, scanned_address=address,
+                    tenant_id=job.get("tenant"))
+        syncer.flush_software_reports()
+        device = _find_created_device(netbox, result, site_id)
     if device is None:
         _report_apply_failure(netbox, request_id, dry_run,
                               "The sync ran but the device could not be found "
