@@ -45,6 +45,14 @@ class OnboardingUnavailable(Exception):
 
 
 def plugin_available(netbox: NetBox) -> bool:
+    """Probe for the plugin. Only used to explain a failure, never before one.
+
+    Deliberately not called on the happy path. This runs from cron every minute
+    or two on every poller, and almost every run has nothing to do — so the
+    idle cost should be the single check-in request and nothing else. Probing
+    first would triple that for no benefit, since a missing plugin shows up
+    perfectly well as a 404 on the check-in itself.
+    """
     return (
         netbox.plugin_installed(PLUGIN_NAME)
         and netbox.endpoint_available(REQUEST_ENDPOINT)
@@ -184,10 +192,12 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
     _apply_overrides(result, job)
 
     if dry_run:
-        log.info("[dry-run] would create %s at site %s", _describe(result), site_id)
+        log.info("[dry-run] would create %s at site %s%s", _describe(result), site_id,
+                 " for tenant %s" % job["tenant_name"] if job.get("tenant_name") else "")
         return "applied"
 
-    syncer.sync(result, site_id, scanned_address=address)
+    syncer.sync(result, site_id, scanned_address=address,
+                tenant_id=job.get("tenant"))
     syncer.flush_software_reports()
 
     device = _find_created_device(netbox, result, site_id)

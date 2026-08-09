@@ -167,15 +167,12 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
     sitting in NetBox waiting for it. The full sweep is the slow nightly job;
     this is the responsive one.
     """
-    if not onboarding.plugin_available(netbox):
-        log.error(
-            "the Discovery plugin is not installed on %s, so there is no "
-            "onboarding queue to work", config.netbox.url
-        )
-        return 2
-
     started = time.time()
     try:
+        # Straight to the check-in. This runs from cron every minute or two on
+        # every poller and nearly always has nothing to do, so the idle cost is
+        # deliberately one request — probing for the plugin first would triple
+        # it to diagnose a problem that almost never exists.
         jobs = onboarding.check_in(
             netbox, config.poller_name,
             version=__version__,
@@ -184,6 +181,12 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
             limit=args.limit or 25,
         )
     except NetBoxError as exc:
+        if not onboarding.plugin_available(netbox):
+            log.error(
+                "the Discovery plugin is not installed on %s, so there is no "
+                "onboarding queue to work", config.netbox.url
+            )
+            return 2
         log.error("check-in failed: %s", exc)
         return 1
 

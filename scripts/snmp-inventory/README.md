@@ -247,12 +247,69 @@ Then:
    applies.
 4. The poller creates the device on its next check-in.
 
-Run the queue on a short timer, separately from the nightly sweep — somebody is
-sitting in NetBox waiting for it:
+### Overlapping address space
+
+Address space repeats across companies that have been acquired: two prefixes of
+`10.10.1.0/24` can and do coexist, because NetBox does not enforce uniqueness in
+the global table. A containment lookup returns both, so an address alone is not
+always a key.
+
+The onboarding form therefore takes an optional **tenant** (with a tenant-group
+picker to make the list usable) and an optional **VRF**. Neither is asked for up
+front in the normal case — most addresses resolve without them.
+
+The rule is: **if the candidate prefixes span more than one tenant and nobody
+said which, the request is refused and the candidates are listed.** Guessing is
+the one thing that must not happen; picking wrong files an acquired company's
+switch under your site, or hands it to a poller with no route to it.
 
 ```
-*/2 * * * *  cd /opt/snmp-inventory && ./snmp_inventory.py --config snmp-inventory.conf --onboard --quiet
+This address is inside prefixes belonging to 2 different tenants, so there is
+no way to tell which device it is. Choose a tenant. Candidates:
+  10.10.1.0/24 (tenant Company A, VRF global, site Boston DC1);
+  10.10.1.0/24 (tenant Company B, VRF global, site CompanyB HQ)
 ```
+
+Where one tenant owns all the candidates, the most specific wins as usual and
+nobody types anything. The resolved tenant is inherited from the prefix and
+**stamped onto the created device and its IP**, so ownership carries through
+rather than being used for routing and then thrown away.
+
+Note that a tenant *group* is not enough on its own: if two acquired companies
+sit in the same group and both use `10.10.1.0/24`, the group does not
+distinguish them. The group only filters the tenant list.
+
+Pollers can carry a tenant too, but it is not how work is routed — that still
+follows from the prefix's site. It is a guard: a request for another tenant
+arriving at a poller almost certainly means a site is tagged for the wrong one.
+
+### When no prefix matches
+
+An address in no prefix has no site, but it is still worth looking at. The
+`default_region` plugin setting (default `us`) names a region whose
+`poller-<name>` tag supplies a fallback poller, so the scan goes ahead and the
+request arrives in review marked *no prefix matched*. **A site must be chosen
+before it can be applied** — the approve path refuses without one — so nothing
+lands in the wrong place. Set `default_region` to `""` to switch the fallback
+off and have unmatched addresses refused instead.
+
+### Running the queue
+
+Run it on a short timer, separately from the nightly sweep — somebody is sitting
+in NetBox waiting for it. Every minute is reasonable:
+
+```
+* * * * * flock -n /var/lock/snmpinv-onboard.lock /opt/snmp-inventory/snmp_inventory.py --config /opt/snmp-inventory/snmp-inventory.conf --onboard --quiet
+```
+
+`flock -n` matters at that cadence: a scan of a slow device takes longer than a
+minute, and without it the runs pile up. Nothing is scanned twice either way —
+check-in claims work under a row lock — but processes would accumulate.
+
+An idle check-in is **one API request** returning `{"jobs": []}`, and it writes
+no changelog entry, so a fleet of pollers polling every minute costs very
+little. A systemd timer works as well and needs no lock, since systemd will not
+start a second copy of a unit already running.
 
 `--onboard` replaces the sweep for that run; it does not scan anything else.
 

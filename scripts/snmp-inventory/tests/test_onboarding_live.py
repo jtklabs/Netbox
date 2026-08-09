@@ -109,7 +109,7 @@ def _teardown(netbox):
             pass
 
     for entry in netbox.all(REQUESTS):
-        if str(entry.get("address", "")).startswith("192.0.2."):
+        if str(entry.get("address", "")).startswith(("192.0.2.", "198.18.", "198.19.")):
             delete(REQUESTS, entry["id"])
 
     sites = [s for s in netbox.all("/dcim/sites/")
@@ -124,7 +124,7 @@ def _teardown(netbox):
         if str(ip.get("address", "")).startswith(("192.0.2.", "10.10.1.")):
             delete("/ipam/ip-addresses/", ip["id"])
     for pfx in netbox.all("/ipam/prefixes/"):
-        if pfx.get("prefix") == TEST_PREFIX:
+        if pfx.get("prefix") in (TEST_PREFIX, "198.18.0.0/24"):
             delete("/ipam/prefixes/", pfx["id"])
     for site in sites:
         delete("/dcim/sites/", site["id"])
@@ -134,6 +134,15 @@ def _teardown(netbox):
     for poller in netbox.all("/plugins/discovery/pollers/"):
         if poller.get("name") == POLLER:
             delete("/plugins/discovery/pollers/", poller["id"])
+    for vrf in netbox.all("/ipam/vrfs/"):
+        if (vrf.get("name") or "").startswith(PREFIX):
+            delete("/ipam/vrfs/", vrf["id"])
+    for tenant in netbox.all("/tenancy/tenants/"):
+        if (tenant.get("slug") or "").startswith(SLUG):
+            delete("/tenancy/tenants/", tenant["id"])
+    for group in netbox.all("/tenancy/tenant-groups/"):
+        if (group.get("slug") or "").startswith(SLUG):
+            delete("/tenancy/tenant-groups/", group["id"])
     for tag in netbox.all("/extras/tags/"):
         if tag.get("slug") == OUR_TAG:
             delete("/extras/tags/", tag["id"])
@@ -435,3 +444,181 @@ class TestWorkflowOverApi:
         assert retried["error"] == ""
         assert [j for j in onboarding.check_in(netbox, POLLER)
                 if j["id"] == entry["id"]], "a retried request should be offered again"
+
+
+@pytest.fixture(scope="module")
+def overlapping(netbox, lab):
+    """The same prefix twice, owned by two different tenants."""
+    def make(path, lookup, payload):
+        found = netbox.first(path, lookup)
+        return found if found else netbox.create(path, payload)
+
+    group = make("/tenancy/tenant-groups/", {"slug": SLUG + "acq"},
+                 {"name": PREFIX + "Acquisitions", "slug": SLUG + "acq"})
+    alpha = make("/tenancy/tenants/", {"slug": SLUG + "alpha"},
+                 {"name": PREFIX + "Alpha", "slug": SLUG + "alpha", "group": group["id"]})
+    beta = make("/tenancy/tenants/", {"slug": SLUG + "beta"},
+                {"name": PREFIX + "Beta", "slug": SLUG + "beta", "group": group["id"]})
+    site_a = make("/dcim/sites/", {"slug": SLUG + "alpha-hq"},
+                  {"name": PREFIX + "Alpha HQ", "slug": SLUG + "alpha-hq",
+                   "tags": [{"slug": OUR_TAG}]})
+    site_b = make("/dcim/sites/", {"slug": SLUG + "beta-hq"},
+                  {"name": PREFIX + "Beta HQ", "slug": SLUG + "beta-hq",
+                   "tags": [{"slug": OUR_TAG}]})
+    # Overlapping space lives in VRFs, not in the global table: with
+    # ENFORCE_GLOBAL_UNIQUE on (the NetBox default) the second identical
+    # prefix in the global table is refused outright, whatever its tenant.
+    vrf_a = make("/ipam/vrfs/", {"name": PREFIX + "ALPHA"},
+                 {"name": PREFIX + "ALPHA", "tenant": alpha["id"]})
+    vrf_b = make("/ipam/vrfs/", {"name": PREFIX + "BETA"},
+                 {"name": PREFIX + "BETA", "tenant": beta["id"]})
+    if netbox.count("/ipam/prefixes/", {"prefix": "198.18.0.0/24"}) < 2:
+        netbox.create("/ipam/prefixes/",
+                      {"prefix": "198.18.0.0/24", "tenant": alpha["id"],
+                       "vrf": vrf_a["id"],
+                       "scope_type": "dcim.site", "scope_id": site_a["id"]})
+        netbox.create("/ipam/prefixes/",
+                      {"prefix": "198.18.0.0/24", "tenant": beta["id"],
+                       "vrf": vrf_b["id"],
+                       "scope_type": "dcim.site", "scope_id": site_b["id"]})
+    return {"alpha": alpha, "beta": beta, "group": group,
+            "site_a": site_a, "site_b": site_b,
+            "vrf_a": vrf_a, "vrf_b": vrf_b}
+
+
+@pytest.fixture(scope="module")
+def us_region(netbox, lab):
+    """The configured default region, tagged for our poller."""
+    region = netbox.first("/dcim/regions/", {"slug": "us"})
+    if region is None:
+        region = netbox.create("/dcim/regions/",
+                               {"name": "US", "slug": "us", "tags": [{"slug": OUR_TAG}]})
+    else:
+        netbox.update("/dcim/regions/", region["id"], {"tags": [{"slug": OUR_TAG}]})
+    return region
+
+
+class TestOverlappingAddressSpace:
+    """Duplicate space across acquired companies.
+
+    NetBox does not enforce prefix uniqueness in the global table, so the same
+    /24 can exist twice with different tenants and a containment lookup returns
+    both. Choosing by mask length alone would be a coin toss that files an
+    acquired company's switch under our site.
+    """
+
+    def test_the_global_table_refuses_a_duplicate(self, netbox, overlapping):
+        """Tenant is not a namespace — this is the constraint that forces VRFs.
+
+        With ENFORCE_GLOBAL_UNIQUE on (NetBox's default) the same prefix cannot
+        sit in the global table twice however its tenants differ, so overlapping
+        space between acquired companies has to be held in separate VRFs.
+
+        Uses a prefix of its own: duplicate detection is scoped per VRF, so a
+        global entry would not collide with the VRF-scoped ones above and would
+        instead quietly make every other address here ambiguous.
+        """
+        first = netbox.create("/ipam/prefixes/",
+                              {"prefix": "198.18.9.0/24",
+                               "tenant": overlapping["alpha"]["id"]})
+        try:
+            with pytest.raises(NetBoxError) as exc:
+                netbox.create("/ipam/prefixes/",
+                              {"prefix": "198.18.9.0/24",
+                               "tenant": overlapping["beta"]["id"]})
+            assert "Duplicate prefix found in global table" in str(exc.value)
+        finally:
+            netbox.session.delete(
+                "%sipam/prefixes/%s/" % (netbox.base, first["id"]), timeout=30
+            )
+
+    def test_the_same_prefix_exists_twice_across_vrfs(self, netbox, overlapping):
+        assert netbox.count("/ipam/prefixes/", {"prefix": "198.18.0.0/24"}) == 2
+
+    def test_ambiguous_address_is_refused_not_guessed(self, netbox, overlapping):
+        with pytest.raises(NetBoxError) as exc:
+            submit(netbox, "198.18.0.10")
+        message = str(exc.value)
+        assert "different owners" in message
+        assert PREFIX + "Alpha" in message and PREFIX + "Beta" in message
+
+    def test_tenant_resolves_it_to_the_right_site(self, netbox, overlapping):
+        entry = netbox.create(REQUESTS, {"address": "198.18.0.11",
+                                         "tenant": overlapping["alpha"]["id"]})
+        assert entry["status"] == "pending"
+        assert entry["site"]["name"] == PREFIX + "Alpha HQ"
+        assert entry["tenant"]["name"] == PREFIX + "Alpha"
+
+    def test_the_other_tenant_gets_the_other_site(self, netbox, overlapping):
+        entry = netbox.create(REQUESTS, {"address": "198.18.0.12",
+                                         "tenant": overlapping["beta"]["id"]})
+        assert entry["site"]["name"] == PREFIX + "Beta HQ", (
+            "the same address under a different tenant must land at a different site"
+        )
+
+    def test_vrf_alone_also_disambiguates(self, netbox, overlapping):
+        """VRF is the mechanism NetBox actually provides for this, so it has to
+        work on its own — not everyone labels tenants."""
+        entry = netbox.create(REQUESTS, {"address": "198.18.0.14",
+                                         "vrf": overlapping["vrf_b"]["id"]})
+        assert entry["site"]["name"] == PREFIX + "Beta HQ"
+        # And the tenant is inherited from the prefix, so ownership still lands.
+        assert entry["tenant"]["name"] == PREFIX + "Beta"
+
+    def test_tenant_is_stamped_onto_the_created_device(self, netbox, overlapping):
+        """Ownership has to survive onboarding, not just route it."""
+        entry = netbox.create(REQUESTS, {"address": "198.18.0.13",
+                                         "tenant": overlapping["beta"]["id"]})
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        assert jobs and jobs[0]["tenant"] == overlapping["beta"]["id"]
+
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+        approve(netbox, entry["id"])
+        apply_jobs = [j for j in onboarding.check_in(netbox, POLLER)
+                      if j["id"] == entry["id"]]
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, apply_jobs)
+
+        final = refresh(netbox, entry["id"])
+        assert final["status"] == "applied"
+        device = netbox.get("/dcim/devices/%s/" % final["device"]["id"])
+        assert (device.get("tenant") or {}).get("name") == PREFIX + "Beta"
+
+
+class TestDefaultRegionFallback:
+    """An address no prefix claims still gets scanned, but cannot be applied
+    until somebody says where it lives."""
+
+    def test_unmatched_address_falls_back_to_the_default_region(self, netbox, us_region):
+        entry = submit(netbox, "198.19.55.5")
+        assert entry["status"] == "pending"
+        assert entry["used_default_region"] is True
+        assert (entry["poller"] or {}).get("name") == POLLER
+        assert entry["site"] is None, "there is no prefix, so there is no site"
+
+    def test_it_can_be_scanned_but_not_applied_without_a_site(self, netbox, us_region):
+        entry = submit(netbox, "198.19.55.6")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        assert jobs and jobs[0]["action"] == "scan"
+        assert jobs[0]["site"] is None
+
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+        assert refresh(netbox, entry["id"])["status"] == "review"
+
+        # Approving without a site must be refused — that is what stops a
+        # fallback device landing somewhere arbitrary.
+        with pytest.raises(NetBoxError) as exc:
+            approve(netbox, entry["id"])
+        assert "409" in str(exc.value)
+        assert "no site" in str(exc.value).lower()
+
+    def test_approving_with_a_site_override_works(self, netbox, lab, us_region):
+        entry = submit(netbox, "198.19.55.7")
+        jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
+        syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
+        onboarding.run_jobs(netbox, ReplayCollector("cisco-2960x"), syncer, jobs)
+
+        approved = approve(netbox, entry["id"], override_site=lab["site"]["id"])
+        assert approved["status"] == "approved"
+        assert approved["override_site"]["id"] == lab["site"]["id"]

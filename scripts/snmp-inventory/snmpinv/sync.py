@@ -98,8 +98,15 @@ class Syncer:
 
     # --- entry point --------------------------------------------------------
 
-    def sync(self, result: ScanResult, site_id: int | None, scanned_address: str = "") -> None:
-        """Write one scanned host — a single device or a whole stack."""
+    def sync(self, result: ScanResult, site_id: int | None, scanned_address: str = "",
+             tenant_id: int | None = None) -> None:
+        """Write one scanned host — a single device or a whole stack.
+
+        `tenant_id` files the result against the company that owns it. It
+        matters most where address space overlaps between us and companies we
+        have bought: the tenant is what made the address resolvable in the
+        first place, and dropping it here would leave the device unattributed.
+        """
         if not result.devices:
             log.warning("%s: nothing to sync (device reported no chassis)", result.host)
             return
@@ -121,7 +128,7 @@ class Syncer:
 
         created: list[tuple[DeviceRecord, dict]] = []
         for record in result.devices:
-            device = self._ensure_device(record, site_id, virtual_chassis)
+            device = self._ensure_device(record, site_id, virtual_chassis, tenant_id)
             if device is not None:
                 created.append((record, device))
 
@@ -134,17 +141,18 @@ class Syncer:
             if self.options.sync_modules:
                 self._sync_modules(device, record)
             if self.options.sync_interfaces:
-                self._sync_interfaces(device, record, scanned_address)
+                self._sync_interfaces(device, record, scanned_address, tenant_id)
             if self.options.manage_software_version:
                 self._queue_software_report(device, record, result)
 
         if self.options.sync_access_points and result.access_points:
-            self._sync_access_points(result, site_id)
+            self._sync_access_points(result, site_id, tenant_id)
 
     # --- devices ------------------------------------------------------------
 
     def _ensure_device(self, record: DeviceRecord, site_id: int,
-                       virtual_chassis: dict | None) -> dict | None:
+                       virtual_chassis: dict | None,
+                       tenant_id: int | None = None) -> dict | None:
         manufacturer = self._ensure_manufacturer(record.manufacturer)
         device_type = self._ensure_device_type(manufacturer, record.model)
         role = self._ensure_role(
@@ -157,6 +165,8 @@ class Syncer:
         desired: dict = {}
         if record.serial:
             desired["serial"] = record.serial
+        if tenant_id:
+            desired["tenant"] = tenant_id
         if device_type:
             desired["device_type"] = device_type["id"]
         if platform:
@@ -479,7 +489,7 @@ class Syncer:
     # --- interfaces and addresses -------------------------------------------
 
     def _sync_interfaces(self, device: dict | None, record: DeviceRecord,
-                         scanned_address: str) -> None:
+                         scanned_address: str, tenant_id: int | None = None) -> None:
         if device is None or not record.interfaces:
             return
 
@@ -496,7 +506,8 @@ class Syncer:
                 self._ensure_mac(netbox_interface, interface.mac_address)
             if self.options.sync_ips:
                 for cidr in interface.ip_addresses:
-                    self._ensure_ip(device, netbox_interface, cidr, scanned_address)
+                    self._ensure_ip(device, netbox_interface, cidr, scanned_address,
+                                    tenant_id)
 
     def _ensure_interface(self, device: dict, interface: InterfaceRecord,
                           existing_by_name: dict) -> dict | None:
@@ -561,7 +572,7 @@ class Syncer:
             )
 
     def _ensure_ip(self, device: dict, interface: dict | None, cidr: str,
-                   scanned_address: str) -> None:
+                   scanned_address: str, tenant_id: int | None = None) -> None:
         if interface is None:
             return
         existing = self.netbox.first(
@@ -592,14 +603,15 @@ class Syncer:
                 )
                 return
             else:
+                payload = {
+                    "address": cidr,
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object_id": interface["id"],
+                }
+                if tenant_id:
+                    payload["tenant"] = tenant_id
                 existing = self.netbox.create(
-                    "/ipam/ip-addresses/",
-                    {
-                        "address": cidr,
-                        "assigned_object_type": "dcim.interface",
-                        "assigned_object_id": interface["id"],
-                    },
-                    label=f"ip {cidr}",
+                    "/ipam/ip-addresses/", payload, label=f"ip {cidr}"
                 )
 
         if (self.options.set_primary_ip and existing is not None and scanned_address
@@ -623,7 +635,8 @@ class Syncer:
 
     # --- access points ------------------------------------------------------
 
-    def _sync_access_points(self, result: ScanResult, site_id: int) -> None:
+    def _sync_access_points(self, result: ScanResult, site_id: int,
+                            tenant_id: int | None = None) -> None:
         """Create a Device for each AP the controller reported.
 
         APs are inventoried from their controller because they are rarely
@@ -631,7 +644,8 @@ class Syncer:
         often live on management networks the poller has no route to.
         """
         for record in result.access_points:
-            self._ensure_device(record, site_id, virtual_chassis=None)
+            self._ensure_device(record, site_id, virtual_chassis=None,
+                                tenant_id=tenant_id)
 
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
