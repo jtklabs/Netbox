@@ -386,11 +386,21 @@ class Syncer:
             return
         report = {
             "device": device["id"],
+            # Raw, exactly as the device reported it. Never normalised, padded
+            # or zero-filled here: comparing versions is the plugin's job, and
+            # pre-massaging the string would mean a parsing bug on this side
+            # could not be corrected later without a full rescan.
             "version": record.software_version,
             "source": LIFECYCLE_SOURCE_SNMP,
         }
         if record.platform:
             report["platform"] = record.platform
+        facts_time = result.facts.collected_at if result.facts else None
+        if facts_time is not None:
+            # When the device was walked, not when this batch is sent. A fleet
+            # sweep takes time and may be pushed later still; without this the
+            # plugin stamps receipt time and a stale reading renders as fresh.
+            report["collected_at"] = facts_time.isoformat()
         # The verbatim string the version was read out of, so a version that
         # looks wrong can be traced to what the device actually said rather
         # than argued about.

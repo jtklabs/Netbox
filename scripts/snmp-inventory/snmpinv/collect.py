@@ -15,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from . import mibs, vendors
 from .snmp import (
@@ -139,6 +140,11 @@ class DeviceFacts:
 
     host: str
     credential_name: str = ""
+    # When the device was actually walked, not when the result was written.
+    # A scan of a large fleet takes a while and its results may be pushed later
+    # still, so stamping at collection is what makes a stale reading legible as
+    # stale rather than looking as fresh as the run that reported it.
+    collected_at: datetime | None = None
     sys_descr: str = ""
     sys_object_id: str = ""
     sys_name: str = ""
@@ -219,7 +225,11 @@ class Collector:
 
     def _collect_with(self, session: CredentialSession, host: str, credential: Credential,
                       system: list[VarBind]) -> DeviceFacts:
-        facts = DeviceFacts(host=host, credential_name=credential.name)
+        facts = DeviceFacts(
+            host=host,
+            credential_name=credential.name,
+            collected_at=datetime.now(timezone.utc),
+        )
         _apply_system_group(facts, system)
 
         facts.profile = vendors.profile_for_sysobjectid(facts.sys_object_id)

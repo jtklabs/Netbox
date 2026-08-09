@@ -300,6 +300,36 @@ class TestInterfaceTypeMapping:
         assert mibs.netbox_interface_type(999, 1000, "Weird0") == "other"
 
 
+class TestSoftwareVersionIsRaw:
+    """Versions are passed on exactly as reported.
+
+    The Lifecycle plugin owns version comparison, so anything normalised here
+    would be a parsing decision baked in at the wrong layer — and one that
+    could not be corrected later without rescanning the fleet.
+    """
+
+    def test_fortinet_build_metadata_is_not_stripped(self):
+        version = scan("fortigate-600e").primary.software_version
+        assert version == "v7.2.8,build1639,240110 (GA)"
+
+    def test_cisco_version_is_not_zero_padded(self):
+        assert scan("cisco-c9300-stack").primary.software_version == "17.03.04a"
+
+    def test_junos_service_release_suffix_kept(self):
+        assert scan("juniper-ex4300").primary.software_version == "21.4R3-S4.9"
+
+    def test_collection_is_timestamped(self):
+        """collected_at stamps when the device was walked, so a stale reading
+        is legible as stale rather than as fresh as the run that reported it."""
+        from datetime import datetime, timezone
+
+        facts = collect_fixture("arista-7050sx")
+        assert facts.collected_at is not None
+        assert facts.collected_at.tzinfo is not None, "must be timezone-aware"
+        age = (datetime.now(timezone.utc) - facts.collected_at).total_seconds()
+        assert 0 <= age < 60
+
+
 class TestIpDecoding:
     def test_ipv4_prefix_length_comes_from_the_row_pointer(self):
         facts = collect_fixture("cisco-c9300-stack")
