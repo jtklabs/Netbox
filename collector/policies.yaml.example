@@ -1,6 +1,14 @@
 # What this collector scans. Copy to policies.yaml and edit.
 #
-# Schedules are cron expressions; omit `schedule` to run once per agent start.
+# Schedules are cron expressions. A policy WITH a schedule does NOT run when the
+# agent starts — it waits for the next cron match, so restarting the agent
+# changes nothing until then. Omit (or comment out) `schedule` and the policy
+# runs once per agent start instead.
+#
+# Bringing a new collector up, that ordering matters: comment out the schedules
+# below so the first ./install.sh scans immediately and you can confirm data
+# reaches NetBox, then restore them for steady-state cadence.
+#
 # STAGGER the minute across sites — nothing throttles simultaneous arrivals at
 # Diode, and the reconciler's NetBox rate limit is shared by the whole fleet.
 #

@@ -66,6 +66,16 @@ policies = (doc.get('orb') or {}).get('policies') or {}
 if not policies:
     sys.exit('no policies found after rendering — is policies.yaml empty?')
 print('  agent config parses, %d backend policy group(s)' % len(policies))
+total = scheduled = 0
+for backend, group in policies.items():
+    if not isinstance(group, dict):
+        continue
+    for name, pol in group.items():
+        total += 1
+        cfg = (pol or {}).get('config') or {}
+        if cfg.get('schedule'):
+            scheduled += 1
+open('.schedule-state', 'w').write('%d %d\n' % (total, scheduled))  # newline: read returns 1 at EOF without it
 " || fail "rendered agent.yaml is invalid — check policies.yaml indentation"
 
 # --- 3. connectivity to Diode ----------------------------------------------
@@ -95,6 +105,22 @@ if [ "$check_only" = true ]; then
 fi
 
 # --- 4. run -----------------------------------------------------------------
+# A scheduled policy does NOT run at agent start, so "restart to rescan" is
+# actively wrong when every policy carries a schedule — which is exactly what
+# the shipped example does. Counting with grep got this wrong: the example
+# carries commented-out `schedule:` lines in its illustrative blocks, which
+# read as "unscheduled policies exist". Use the parsed YAML instead, which
+# knows the difference between a policy and a comment.
+read -r total sched < .schedule-state 2>/dev/null || { total=0; sched=0; }
+rm -f .schedule-state
+if [ "$total" -gt 0 ] && [ "$sched" -eq "$total" ]; then
+  rescan_hint="  NOTE: every policy is scheduled, so restarting the agent will NOT scan —
+        it waits for the next cron match. To scan immediately, comment out the
+        schedule: lines in policies.yaml and re-run ./install.sh."
+else
+  rescan_hint="  rescan:   docker compose restart orb-agent   (unscheduled policies run at start)"
+fi
+
 echo '==> starting the collector'
 docker compose up -d
 # up -d cannot notice a changed bind-mounted file, so restart explicitly when
@@ -110,9 +136,8 @@ cat <<EOF
 Collector "$COLLECTOR_NAME" started.
 
   logs:     docker compose logs -f orb-agent
-  rescan:   docker compose restart orb-agent   (policies without a schedule
-                                                run once per agent start)
   stop:     docker compose down
+$rescan_hint
 
 Discovered data appears in NetBox tagged with agent_name "$COLLECTOR_NAME".
 EOF
