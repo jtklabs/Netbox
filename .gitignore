@@ -2,13 +2,6 @@
 # only the .example templates are committed.
 .env
 env/*.env
-discovery/oauth2/client/client-credentials.json
-# Remote collector: real config is per-box and holds device credentials
-collector/collector.env
-collector/policies.yaml
-collector/workers.txt
-collector/agent.yaml
-collector/ca.pem
 # Dev TLS material for the reverse proxy
 compose/dev-tls/
 # F5 image push tool — real creds/inventory stay local, only .example is committed
@@ -23,8 +16,6 @@ scripts/f5-image-push/*.ucs
 *.pyc
 __pycache__/
 .DS_Store
-# Collector bundles contain live credentials
-dist/
 # SNMP inventory scanner — real config, credentials and inventory stay local
 scripts/snmp-inventory/snmp-inventory.conf
 scripts/snmp-inventory/snmp-credentials.conf

@@ -258,6 +258,18 @@ These were verified 2026-07-28 against current repos/docs; they're the sharp edg
 - **Superuser bootstrap (dev)**: `SKIP_SUPERUSER=false` + `SUPERUSER_NAME/EMAIL/PASSWORD` (+ `SUPERUSER_API_TOKEN`); no default credentials in current images.
 - **NetBox 4.6+ note for the future bump**: v2 API tokens require `API_TOKEN_PEPPER_1` env/secret — without it token creation fails; netbox-docker 5.0.0+ images are the 4.6-era line (Granian server since 4.0.0; container user is `netbox`).
 - **Postgres floor**: NetBox 4.6 requires PG 14+ (14 deprecated); 4.7 will require 15+. Valkey 9.1 ships as two services (queue DB 0 w/ AOF, cache DB 1).
+- **D12 — Diode + orb-agent dropped (2026-08-09).** Gate 3 shipped self-hosted
+  Diode 2.1.0 + orb-agent 2.11.0 + netbox_diode_plugin, and it worked: real
+  hardware was discovered and applied. It is removed anyway. The stack is 13
+  services whose only job is moving data into NetBox; the OSS reconciler
+  auto-applies (the review queue is the commercial tier); and its device-model
+  derivation is a lookup table compiled into a Go binary, so Arista and Aruba
+  arrive with the manufacturer glued into the model and cannot be corrected in
+  NetBox — the next scan recreates the bad type. Everything downstream of
+  discovery here is ours, so discovery becomes ours too: an SNMPv3 poller
+  writing directly to the NetBox REST API, reading models and serials from
+  ENTITY-MIB rather than guessing. The removed tree stays in git history.
+
 - **netbox-contract**: dropped 2026-07-29 (D9). Historical spike note: it worked on 4.6.5 but its invoice API required an explicit `"template": false` in POST bodies.
 - **Plugin dev gotchas learned**: NetBox blocks `makemigrations` unless `DEVELOPER=true` is set; two plugins must not define identically-named model classes (users.Owner reverse accessors clash — hence QuoteVendor); generate plugin migrations by bind-mounting the repo package over the installed site-packages copy in a `docker compose run`.
 - **Discovery stack**: orb-agent = Apache-2.0, container `netboxlabs/orb-agent`, YAML policies, backends: `network_discovery` (Nmap), `device_discovery` (NAPALM), `snmp_discovery`, `gnmi_discovery` (beta). Diode = ingester/reconciler/auth containers + `netboxlabs-diode-netbox-plugin` (NLUL 1.0 source-available license — free for internal self-hosted use; flag only if procurement demands strict OSI). Compose quickstart exists. Diode requires NetBox ≥ 4.2.3; latest plugin targets ≥ 4.6.

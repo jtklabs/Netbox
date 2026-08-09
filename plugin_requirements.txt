@@ -1,1 +1,2 @@
-netboxlabs-diode-netbox-plugin==1.14.1
+# No PyPI plugins today — our own plugins are installed from plugins/
+# by Dockerfile-Plugins. Add third-party pins here when needed.

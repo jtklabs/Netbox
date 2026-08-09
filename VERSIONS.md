@@ -10,7 +10,7 @@
 | ~~netbox-lifecycle~~ | removed 2026-07-31 | — | Third-party EoL plugin, superseded by netbox-refresh. Tables dropped with `migrate netbox_lifecycle zero` before removal. |
 | Postgres (dev) | **16-alpine** | 2026-07-29 | Aligned to prod RDS (PostgreSQL 16.13). |
 | Valkey | 9.1-alpine | 2026-07-28 | Queue (DB 0, AOF) + cache (DB 1). |
-| Diode services | 2.1.0 (`DIODE_TAG`) | 2026-07-29 | ingester/reconciler/auth. Compose adapted from netboxlabs/diode `release` branch (`diode-server/docker/`); `nginx.conf` + `bootstrap-clients.sh` vendored verbatim into `discovery/`. |
-| netboxlabs-diode-netbox-plugin | 1.14.1 | 2026-07-29 | Plugin `netbox_diode_plugin`; latest on PyPI. Its compatibility table maps NetBox >= 4.6.0 to plugin >= 1.12.0, so 4.6.7 is covered. |
-| orb-agent | 2.11.0 | 2026-07-29 | Backends in use: device_discovery (NAPALM), snmp_discovery. |
-| Diode support images | hydra v26.2.0, nginx 1.27-alpine, postgres 16-alpine, redis-stack latest | 2026-07-29 | Per upstream compose (nginx pinned by us; redis-stack unpinned upstream). |
+
+| ~~netboxlabs-diode-netbox-plugin~~ | removed 2026-08-09 | — | Dropped with the Diode stack (D12). Its one table, `netbox_diode_plugin_setting`, is dropped with `migrate netbox_diode_plugin zero` **while the plugin is still installed** — once the image no longer ships it, the app is unknown and the table can only be dropped by hand. |
+
+*Diode + orb-agent were removed 2026-08-09 (see PROJECT_PLAN.md D12). Discovery is being rebuilt in-house; the pins above are gone from the tree but remain in git history if they are ever needed again.*

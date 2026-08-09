@@ -4,7 +4,7 @@
 # want it) the SSO header handoff are exercised every day, so prod holds no
 # surprises. Enable by appending to COMPOSE_FILE in .env:
 #
-#   COMPOSE_FILE=docker-compose.yml:compose/dev.yml:compose/discovery.yml:compose/dev-proxy.yml
+#   COMPOSE_FILE=docker-compose.yml:compose/dev.yml:compose/dev-proxy.yml
 #
 # Then:  ./scripts/dev-tls-cert.sh <hostname>   (once, generates the cert)
 #        docker compose up -d

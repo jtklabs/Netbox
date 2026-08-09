@@ -47,7 +47,7 @@ for p in / /opt /srv; do findmnt -no TARGET,OPTIONS -T $p; done
 df -h /opt
 ```
 
-Any candidate **without** `noexec` works. Space: ~10–20 GB for a collector,
+Any candidate **without** `noexec` works. Space: ~10–20 GB for a poller,
 ~30–50 GB for the NetBox host (its heavy data is in RDS/S3, but images add
 up). If nothing has the headroom, *add* storage — a new EBS volume or LV
 mounted exec-permitted at the data-root path. New disk, new mount, existing
@@ -57,14 +57,14 @@ storage untouched; also the CIS-preferred shape (the Docker benchmark wants
 ## Recovery steps
 
 Everything durable survives: installed packages, the CGNAT `daemon.json`
-settings, and the application files (`/opt/netbox-collector` or
+settings, and the application files (
 `/opt/netbox`). Only the contents of the dead data root are abandoned — and
 they were never usable anyway.
 
 ```bash
 # 1. clear the failed stack while the old root is still active
 #    (removes stuck "Created" containers; harmless if it errors)
-cd /opt/netbox-collector && sudo docker compose down --remove-orphans || true
+cd /opt/netbox && sudo docker compose down --remove-orphans || true
 
 # 2. re-run the SAME prepare script with the relocation — idempotent:
 #    packages and CGNAT keys are detected as already-correct, data-root is
@@ -79,12 +79,8 @@ sudo docker ps -a          # empty — the new root starts blank; correct, not a
 sudo rm -rf /var/lib/docker
 
 # 5. re-pull and start
-#    collector box:
-cd /opt/netbox-collector && sudo ./install.sh
-sudo docker compose logs -f orb-agent
-#    NetBox host instead:
-#      sudo systemctl restart netbox-compose     (expect the longer first boot
-#      while images rebuild/pull into the new root)
+sudo systemctl restart netbox-compose     # expect a longer first boot while
+                                          # images rebuild/pull into the new root
 ```
 
 A side benefit of the blank root: no stale-network cleanup exists. The CGNAT
@@ -126,8 +122,7 @@ sudo ./scripts/prepare-docker-host.sh
 ```
 
 Images and containers under `/var/lib/docker` survive the swap — docker-ce
-reads the same data root. Re-run the collector's `install.sh` (or
-`systemctl restart netbox-compose` on the NetBox host) afterwards.
+reads the same data root. `systemctl restart netbox-compose` afterwards.
 
 ### A warning, learned the hard way
 

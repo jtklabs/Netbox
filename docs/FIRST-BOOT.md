@@ -25,7 +25,7 @@ are only two locations, and the split is the whole point of the design:
 | Path | What it is | Survives a redeploy? |
 |---|---|---|
 | `/opt/netbox` | This git repo: compose files, plugins, scripts. Ships with the AMI. | **No** — replaced with each new AMI, and that is fine, it is just code. |
-| `/mnt/data_disk/netbox-secrets/` | The files you write by hand: env files and Diode credentials. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
+| `/mnt/data_disk/netbox-secrets/` | The files you write by hand: the env files. Lives on the **persistent data disk**. | **Yes** — the disk detaches from the old instance and attaches to the new one. |
 
 The data-disk mount point is `/mnt/data_disk` throughout. If it ever moves, set
 it once rather than editing paths everywhere:
@@ -45,7 +45,7 @@ repo out — if yours is elsewhere, set `REPO_DIR` when running bootstrap.
 **The containers do not read from the data disk directly.** On every boot
 `deploy/bootstrap.sh` connects the two: it symlinks the env files from the data
 disk into `/opt/netbox/env/`, and copies `client-credentials.json` into
-`/opt/netbox/discovery/oauth2/client/`. Docker Compose then reads everything
+Docker Compose then reads everything
 from the repo paths as normal. (That one file is copied rather than symlinked
 because its directory is bind-mounted into a container, and a symlink inside a
 bind mount resolves against the *container's* filesystem, where that path does
@@ -134,25 +134,6 @@ BIND_ADDRESS=0.0.0.0
 # (scripts/prod-build.sh), or by bootstrap at first boot as a fallback.
 EOF
 ```
-
-Running discovery on this host (required before any remote collector can push
-to it)? Do not assemble it by hand — three OAuth secrets must agree between
-`.env` and `client-credentials.json`, and a mismatch surfaces later as opaque
-auth failures between the Diode components. One command does all of it with a
-single source of truth, idempotently:
-
-```bash
-sudo ./scripts/enable-discovery-prod.sh
-```
-
-(appends the discovery block with fresh secrets, adds `:compose/discovery.yml`
-to COMPOSE_FILE, generates a matching `client-credentials.json`, adds the
-compose-internal name `netbox` to ALLOWED_HOSTS, and verifies the files
-agree). Then `sudo systemctl restart netbox-compose`, run
-`sudo docker compose up -d diode-auth-bootstrap` once more (idempotent — the
-hydra client registration can race hydra's first boot), open the Diode port
-(8090, plaintext gRPC) to collector IPs only, and mint collectors with
-`scripts/deploy-collector.sh`.
 
 Lock the secrets down — everything above was written with the default umask:
 
@@ -268,6 +249,21 @@ each other's. The fix is shipped in `prod.env.example` (`CSRF_COOKIE_NAME` /
 and force-recreate. Signature if you want proof first: hard-refresh a NetBox
 page and the POST works immediately, then fails again after visiting the other
 application.
+
+### Removing a plugin: drop its tables BEFORE the image stops shipping it
+
+`manage.py migrate <plugin_app> zero` is the clean way to drop a plugin's
+tables, and it only works while the plugin is **still installed**. Rebuild the
+image first and the app label is unknown — `CommandError: No installed app with
+label '<plugin>'` — leaving orphaned tables that can then only be removed by
+hand:
+
+```bash
+docker compose exec postgres psql -U netbox -d netbox -c \
+  "DROP TABLE IF EXISTS <plugin>_<table>; DELETE FROM django_migrations WHERE app = '<plugin>';"
+```
+
+So the order is: drop the tables, *then* pull, rebuild and restart.
 
 ### SSO prompts, but no account is created
 

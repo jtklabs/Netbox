@@ -42,7 +42,7 @@ Add these to .env, then bring the proxy up:
   DEV_HOSTNAME=$host
   DEV_PROXY_PORT=$port
   CSRF_TRUSTED_ORIGINS=https://$host:$port
-  COMPOSE_FILE=docker-compose.yml:compose/dev.yml:compose/discovery.yml:compose/dev-proxy.yml
+  COMPOSE_FILE=docker-compose.yml:compose/dev.yml:compose/dev-proxy.yml
 
   docker compose up -d
 

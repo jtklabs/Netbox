@@ -36,7 +36,7 @@ PY
 echo '==> preparing env files'
 bash scripts/init-dev-env.sh
 
-base_chain='docker-compose.yml:compose/dev.yml:compose/discovery.yml'
+base_chain='docker-compose.yml:compose/dev.yml'
 
 if [ "$host" = "--local" ]; then
   echo '==> configuring for local access only'

@@ -67,13 +67,11 @@ fi
 
 # --- 2. Link secrets from the data disk into the repo ----------------------
 # FIRST-BOOT (one time, manual): create $SECRETS_DIR containing
-#   .env                 — COMPOSE_FILE=docker-compose.yml:compose/prod.yml[:compose/discovery.yml],
-#                          VERSION, diode/discovery block, DISCOVERY_* creds
+#   .env                 — COMPOSE_FILE=docker-compose.yml:compose/prod.yml, VERSION
 #   netbox.env           — prod copy of env/netbox.env: fresh SECRET_KEY,
 #                          API_TOKEN_PEPPER_1, REDIS_* passwords (SECRET_KEY must
 #                          never change between redeploys)
 #   prod.env             — from env/prod.env.example: RDS, S3, SSO settings
-#   client-credentials.json  — diode OAuth clients (if discovery runs here)
 required=(".env" "netbox.env" "prod.env")
 for f in "${required[@]}"; do
   if [ ! -f "$SECRETS_DIR/$f" ]; then
@@ -104,31 +102,38 @@ for pair in "redis.env:REDIS_PASSWORD" "redis-cache.env:REDIS_CACHE_PASSWORD"; d
   ln -sf "$SECRETS_DIR/$f" "$REPO_DIR/env/$f"
 done
 
-# client-credentials.json is different: its DIRECTORY is bind-mounted into the
-# diode containers, and a symlink inside a bind mount is resolved against the
-# CONTAINER's filesystem, where the data disk path does not exist — it just sees
-# a dangling link and reports "no such file". So copy it, every boot, so edits
-# on the data disk still propagate.
-if [ -f "$SECRETS_DIR/client-credentials.json" ]; then
-  mkdir -p "$REPO_DIR/discovery/oauth2/client"
-  dest="$REPO_DIR/discovery/oauth2/client/client-credentials.json"
-  # Remove first: if an earlier version of this script left a symlink here,
-  # `cp` sees source and destination as the same file and silently does
-  # nothing, leaving the broken link in place.
-  rm -f "$dest"
-  cp "$SECRETS_DIR/client-credentials.json" "$dest"
-fi
 log "secrets linked from $SECRETS_DIR"
 
-# Bind-mounted config must be readable by non-root container users (diode-auth
-# is uid 100, NetBox uid 999). Secrets created by the operator under a strict
-# umask would otherwise fail with "permission denied" inside the container.
-for p in "$REPO_DIR/configuration" "$REPO_DIR/discovery/oauth2" \
-         "$REPO_DIR/discovery/nginx" "$REPO_DIR/discovery/agent.yaml" \
-         "$SECRETS_DIR/client-credentials.json"; do
+# Bind-mounted config must be readable by the non-root container user (NetBox
+# runs as uid 999). Secrets created by the operator under a strict umask would
+# otherwise fail with "permission denied" inside the container.
+for p in "$REPO_DIR/configuration"; do
   [ -e "$p" ] || continue
   chmod -R a+rX "$p" 2>/dev/null || true
 done
+
+# --- 2a. Every file named in COMPOSE_FILE must exist -------------------------
+# COMPOSE_FILE lives in the data-disk .env, which `git pull` never touches, so
+# it can name an overlay this repo no longer ships — exactly what happened when
+# the Diode discovery stack was removed and prod's .env still ended in
+# ":compose/discovery.yml". Compose's own error for that names the missing path
+# but not the reason, at the point where every service fails at once. Say it
+# here instead, before anything is started.
+compose_chain=$(grep '^COMPOSE_FILE=' "$SECRETS_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+if [ -n "$compose_chain" ]; then
+  missing_files=""
+  # shellcheck disable=SC2001
+  for f in $(echo "$compose_chain" | tr ':' ' '); do
+    [ -f "$REPO_DIR/$f" ] || missing_files="$missing_files $f"
+  done
+  if [ -n "$missing_files" ]; then
+    log "FATAL: COMPOSE_FILE in $SECRETS_DIR/.env names files this repo does"
+    log "       not contain:$missing_files"
+    log "       That file is on the data disk, so a git pull cannot fix it."
+    log "       Edit COMPOSE_FILE there to drop the missing entries."
+    exit 1
+  fi
+fi
 
 # --- 2b. Catch settings placed in the wrong file ----------------------------
 # Compose substitutes ${...} from the project .env only; env_file entries are

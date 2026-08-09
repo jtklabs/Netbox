@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepare a fresh Ubuntu 24 or RHEL 9 host to run this repo's Docker stacks
-# (a remote collector, a test deployment, or the NetBox AMI bake itself):
+# (a test deployment, a discovery poller, or the NetBox AMI bake itself):
 # installs Docker Engine + Compose v2 and pins ALL Docker networking into the
 # CGNAT range (100.64.0.0/10, RFC 6598).
 #
@@ -90,7 +90,7 @@ if [ -n "${DOCKER_DATA_ROOT:-}" ]; then log "docker data root: $DOCKER_DATA_ROOT
 # --- 2. Install Docker Engine + Compose v2 -----------------------------------
 if [ "$FAMILY" = debian ]; then
   # Docker's own repository, NOT Ubuntu's docker.io — deliberately, and the
-  # reason is not preference. The prod NetBox host runs docker-ce; a collector
+  # reason is not preference. The prod NetBox host runs docker-ce; a host
   # built on Ubuntu's docker.io stack could not start a single container on a
   # 6.17-aws kernel, failing every create-task with "fork/exec
   # /proc/self/fd/N: permission denied" while the identical stack worked on

@@ -82,10 +82,6 @@ Two things worth knowing:
   and Docker Desktop. On Linux you can narrow `BIND_ADDRESS` in `.env` to a
   single interface address afterwards and it is respected.
 
-Exposing the stack also exposes the Diode ingest port, which is plaintext gRPC.
-See [collector/README.md](collector/README.md) before exposing Diode beyond a
-trusted network.
-
 ## Prod image
 
 ```bash
@@ -96,16 +92,14 @@ Builds the production image and verifies every plugin loads inside it, so a brok
 plugin fails at bake time rather than during a redeploy. This is the step to add to
 the monthly AMI bake — see [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md).
 
-NetBox UI: dev also runs the discovery stack (Diode + orb-agent — see [discovery/README.md](discovery/README.md)).
 
 ## Layout
 
 - `docker-compose.yml`, `configuration/`, `env/*.example` — imported from netbox-docker at the tag in [VERSIONS.md](VERSIONS.md) (deviation: the postgres service lives in `compose/dev.yml`; prod uses RDS)
-- `compose/` — env overlays: `dev.yml`, `prod.yml`, `discovery.yml`, `dev-proxy.yml` (HTTPS proxy serving dev at `/netbox`, the prod path)
+- `compose/` — env overlays: `dev.yml`, `prod.yml`, `dev-proxy.yml` (HTTPS proxy serving dev at `/netbox`, the prod path)
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin; `Dockerfile-Plugins` builds the image with it + PyPI plugins
 - `plugins/netbox-refresh/` — our hardware-lifecycle plugin: EoL dates on device/module types, replacement model links, replacement cost, Cisco EoX sync (`manage.py sync_cisco_eol`) and the refresh cost report at **Hardware Lifecycle › Refresh Report**
 - `apache/netbox.conf` — include for the **existing** Apache/Mellon server (a separate host): protects `/netbox`, strips spoofed identity headers, proxies over the private network + static mapping
-- `collector/` — remote collector kit: drop it on a box at a remote site and it discovers locally, pushing outbound to the central Diode. Includes a custom-Python worker skeleton. Build and push one (or a whole fleet) with `scripts/deploy-collector.sh`; see [collector/README.md](collector/README.md)
 - `deploy/` + `docs/RUNBOOK-*.md` — 30-day AMI redeploy automation and procedures (incl. `RUNBOOK-noexec-recovery.md` for hardened hosts where containers die at create-task with "permission denied")
 - `scripts/prepare-docker-host.sh` — turn a fresh Ubuntu 24 / RHEL 9 box into a Docker host for these stacks: engine + Compose v2, **all Docker networking pinned to CGNAT** (100.64.0.0/10 — the 172.17/12 defaults collide with our networks)
 - `testing/sso-idp/` — throwaway SAML IdP + real mod_auth_mellon SP for rehearsing the prod SSO config against a real round trip; see its README

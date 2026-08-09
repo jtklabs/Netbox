@@ -54,8 +54,7 @@ instance, start it. RDS was never touched.
 
 - Sessions survive because `SECRET_KEY` lives on the data disk and never
   changes. Users see at most the cutover window.
-- In-flight background jobs (RQ) are lost at cutover; discovery re-runs on
-  next agent start, housekeeping self-heals. Schedule the swap in a quiet
-  window.
+- In-flight background jobs (RQ) are lost at cutover; housekeeping
+  self-heals. Schedule the swap in a quiet window.
 - First boot after a NetBox version bump runs migrations — expect the health
   gate to take several extra minutes that one time.

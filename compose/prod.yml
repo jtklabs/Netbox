@@ -1,6 +1,5 @@
 # Production overlay (Ubuntu 24 EC2, behind the host Apache at
 # netbox.example.com/netbox). Chain: docker-compose.yml:compose/prod.yml
-# (+ compose/discovery.yml if the agent runs on this host).
 #
 # - DB is RDS: no postgres service here (it lives in compose/dev.yml only);
 #   DB_* / DB_SSLMODE come from env/prod.env.
