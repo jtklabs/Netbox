@@ -23,6 +23,9 @@ Usage
     ./snmp_inventory.py --config snmp-inventory.conf --host 10.0.10.5
     ./snmp_inventory.py --config snmp-inventory.conf --list-targets
 
+    # Ask one device what it is. Needs no NetBox, no config beyond credentials.
+    ./snmp_inventory.py --credentials snmp-credentials.conf --probe 10.0.10.5
+
 Start with --dry-run. It performs the full scan and prints every object it
 would create or change without writing anything.
 """
@@ -41,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from snmpinv import config as config_module
 from snmpinv import onboarding
+from snmpinv import probe as probe_module
 from snmpinv import __version__
 from snmpinv.collect import Collector, DeviceFacts
 from snmpinv.model import ScanResult, build_scan_result
@@ -60,6 +64,9 @@ _write_lock = threading.Lock()
 def main(argv=None) -> int:
     args = parse_args(argv)
     configure_logging(args.verbose, args.quiet)
+
+    if args.probe:
+        return run_probe(args)
 
     try:
         config = config_module.load(args.config, args.credentials)
@@ -157,6 +164,35 @@ def main(argv=None) -> int:
         elapsed, scanned, failed, netbox.summary(),
     )
     return 0 if scanned else 1
+
+
+def run_probe(args) -> int:
+    """Scan addresses and print what they said. No NetBox anywhere in this path.
+
+    Deliberately separate from the rest of main(): the point of a probe is that
+    it works when nothing else is set up yet — no token, no tags, no prefixes,
+    possibly no config file — so it must not be reachable only after all of
+    that has been validated.
+    """
+    try:
+        config = config_module.load_for_probe(args.config, args.credentials)
+    except (OSError, ValueError) as exc:
+        log.error("%s", exc)
+        return 2
+
+    collector = Collector(
+        config.credentials,
+        timeout=config.snmp.timeout,
+        retries=config.snmp.retries,
+        use_bulk=config.snmp.use_bulk,
+    )
+    worst = 0
+    for address in args.probe:
+        code = probe_module.probe(
+            collector, address, as_json=args.json, save_walk=args.save_walk
+        )
+        worst = max(worst, code)
+    return worst
 
 
 def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
@@ -338,6 +374,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="site to file --host results under, when it cannot be derived")
     parser.add_argument("--list-targets", action="store_true",
                         help="print the selected targets and exit")
+    parser.add_argument("--probe", action="append", default=[], metavar="ADDRESS",
+                        help="scan an address and print everything it reports, "
+                             "without touching NetBox (repeatable)")
+    parser.add_argument("--json", action="store_true",
+                        help="with --probe, emit the findings as JSON")
+    parser.add_argument("--save-walk", default="", metavar="FILE",
+                        help="with --probe, also save the raw walk as a test fixture")
     parser.add_argument("--onboard", action="store_true",
                         help="work the Discovery plugin's onboarding queue instead "
                              "of sweeping; run this on a short timer")

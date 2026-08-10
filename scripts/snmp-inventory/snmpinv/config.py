@@ -67,6 +67,30 @@ class Config:
             raise ValueError("; ".join(problems))
 
 
+def load_for_probe(config_path: str, credentials_path: str = "") -> Config:
+    """Config for a probe, which needs credentials and nothing else.
+
+    A probe never talks to NetBox, so it must not demand a URL or a token.
+    That matters on a jump box you have SSH'd into to ask one device what it
+    is — there may be no poller config there at all, just a credentials file.
+    """
+    import os
+
+    if os.path.exists(config_path):
+        config = load(config_path, credentials_path)
+    elif credentials_path:
+        config = Config()
+        config.credentials = load_credentials(credentials_path)
+    else:
+        raise FileNotFoundError(
+            "no config at %s — pass --credentials pointing at an SNMPv3 "
+            "credentials file, which is all a probe needs" % config_path
+        )
+    if not config.credentials:
+        raise ValueError("no SNMPv3 credential sets were loaded")
+    return config
+
+
 def load(config_path: str, credentials_path: str = "") -> Config:
     """Read the main config, then the credentials file it points at."""
     parser = configparser.ConfigParser()

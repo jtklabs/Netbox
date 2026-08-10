@@ -414,6 +414,49 @@ Two behaviours worth knowing:
   The UI shows when each last checked in, so a request that has not moved is
   visibly waiting on a poller rather than mysteriously stuck.
 
+## Asking one device what it is
+
+Before pointing this at a fleet — or when a model comes back wrong — probe a
+single address. It needs **no NetBox**: no URL, no token, no tags, no prefixes.
+A credentials file is the only input.
+
+```bash
+./snmp_inventory.py --credentials snmp-credentials.conf --probe 10.10.1.5
+```
+
+It prints what the device said and what that would become, side by side:
+
+```
+SYSTEM          name, description, uptime, sysObjectID (as a vendor, never a model)
+IDENTIFICATION  vendor profile, manufacturer, platform, software version
+CHASSIS         every entPhysicalTable chassis row: model, serial, hw/sw rev
+STACK           CISCO-STACKWISE-MIB members, roles and states, decoded
+MODULES         bay, model, serial
+INTERFACES      name, the NetBox type it would get, speed, MTU, MAC, alias, addresses
+ACCESS POINTS   for a wireless controller, everything it terminates
+WHAT THIS WOULD BECOME IN NETBOX
+                the devices, virtual chassis and modules that would be created
+```
+
+That last section is the point. A model arriving wrong is nearly always
+ENTITY-MIB being empty rather than the modelling being confused, and having
+both in one view says which immediately. A device that reports no model is
+called out as `NO MODEL — this device would be skipped` rather than quietly
+producing nothing.
+
+Two extras:
+
+```bash
+--json                    the same findings as structured data, for piping
+--save-walk FILE          also capture the raw walk as a test fixture
+```
+
+`--save-walk` writes the recorded-walk format the emulator and the parsing
+tests read, captured with whichever credential set actually worked. Drop it in
+`tests/fixtures/` and the whole suite runs against your hardware instead of my
+synthetic devices — which is the single best thing you can do to make these
+tests mean something for your fleet.
+
 ## Importing your existing address list
 
 `import_ips.py` takes a CSV. `address` is the only required column:

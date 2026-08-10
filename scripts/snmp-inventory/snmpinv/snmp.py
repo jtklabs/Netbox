@@ -221,7 +221,7 @@ class CredentialSession:
         env["MIBS"] = ""
         return env
 
-    def _run(self, tool: str, host: str, oid: str) -> str:
+    def _run(self, tool: str, host: str, oid: str, numeric_timeticks: bool = True) -> str:
         if self._dir is None:
             raise RuntimeError("CredentialSession must be used as a context manager")
         binary = shutil.which(tool)
@@ -230,7 +230,12 @@ class CredentialSession:
                 f"{tool} not found — install net-snmp "
                 "(apt install snmp / yum install net-snmp-utils)"
             )
-        argv = [binary, "-On", "-Oe", "-Ot", "-t", str(self.timeout), "-r", str(self.retries)]
+        argv = [binary, "-On", "-Oe", "-t", str(self.timeout), "-r", str(self.retries)]
+        if numeric_timeticks:
+            # -Ot prints timeticks as a bare integer, which is easier to parse.
+            # It also strips the `Timeticks:` type tag, so it is turned off when
+            # capturing a fixture — there the point is fidelity, not convenience.
+            argv.insert(3, "-Ot")
         if tool == "snmpbulkwalk":
             # net-snmp's application-specific -C options take their value
             # attached, not as a separate argument: "-Cr25", never "-Cr 25".
@@ -269,6 +274,19 @@ class CredentialSession:
                 # Falling back costs one extra round trip and rescues the walk.
                 pass
         return parse_varbinds(self._run("snmpwalk", host, oid))
+
+    def walk_raw(self, host: str, oid: str) -> str:
+        """Walk a subtree and return net-snmp's output unparsed.
+
+        For capturing a device as a test fixture: the recorded-walk format is
+        literally what these tools print, so the useful thing is the text
+        before anything has interpreted it.
+        """
+        try:
+            tool = "snmpbulkwalk" if self.use_bulk else "snmpwalk"
+            return self._run(tool, host, oid, numeric_timeticks=False)
+        except SnmpError:
+            return self._run("snmpwalk", host, oid, numeric_timeticks=False)
 
     def get(self, host: str, oids: list[str]) -> dict[str, VarBind]:
         """Fetch scalars. Missing instances are simply absent from the result."""
