@@ -77,6 +77,14 @@ _IGNORED_STDERR_PATTERNS = (
     "Created directory:",
 )
 
+# Repetition counts tried, in order, when a device will not answer a GETBULK at
+# the configured size. Rungs rather than a halving search because each one costs
+# a full timeout, so the ladder is deliberately short: from the default of 25
+# the worst case is three extra timeouts before GETNEXT, once per device, and
+# the result is then cached across runs. 10 is chosen to fit a typical table's
+# reply inside a 1500-byte path; 4 to survive a badly fragmented tunnel.
+BULK_LADDER = (10, 4)
+
 # A walk that returns these for the very first OID means the agent has nothing
 # in that subtree — normal, not an error.
 _EMPTY_SUBTREE_PATTERNS = (
@@ -270,8 +278,12 @@ class CredentialSession:
         return proc.stdout
 
     def walk(self, host: str, oid: str) -> list[VarBind]:
-        """Walk a subtree. Returns [] when the agent has nothing there."""
-        if self.use_bulk:
+        """Walk a subtree. Returns [] when the agent has nothing there.
+
+        A GETBULK that goes unanswered is stepped down rather than abandoned —
+        see _step_down for why, and for why it is not simply left off.
+        """
+        while self.use_bulk:
             try:
                 return parse_varbinds(self._run("snmpbulkwalk", host, oid))
             except (SnmpAuthError, SnmpInvocationError, SnmpToolMissing):
@@ -279,35 +291,60 @@ class CredentialSession:
             except SnmpTimeoutError:
                 if not self.answered:
                     # Nothing has ever come back from this host, so this is
-                    # silence, not a GETBULK problem. Retrying with GETNEXT
-                    # would just wait out a second full timeout.
+                    # silence, not a GETBULK problem. Retrying at any size
+                    # would just wait out another full timeout.
                     raise
-                # The host answers GETs but not this GETBULK. That is the
-                # classic oversized-response failure: one GETBULK asks for
-                # max_repetitions varbinds at once, and once the reply passes
-                # the path MTU it is fragmented — which plenty of firewalls and
-                # device CPUs drop outright. Nothing comes back and it looks
-                # exactly like an unreachable host.
-                #
-                # It is not a property of the model, which is what makes it
-                # confusing to chase: two identical switches differ if one has
-                # longer interface descriptions or more sysORTable rows.
-                #
-                # GETNEXT fetches one varbind per packet, so it cannot trip
-                # over this. Latch it off for the rest of the session rather
-                # than paying the timeout again on every remaining subtree.
-                log.warning(
-                    "%s did not answer a GETBULK at %s but does answer GETs — "
-                    "falling back to GETNEXT for this device (slower, but its "
-                    "replies fit in a packet). Set use_bulk = false to skip "
-                    "this wait.", host, oid,
-                )
-                self.use_bulk = False
+                self._step_down(host, oid)
             except SnmpError:
                 # Some older agents answer GETNEXT fine but reject GETBULK
                 # outright. Falling back costs one round trip and rescues it.
-                pass
+                break
         return parse_varbinds(self._run("snmpwalk", host, oid))
+
+    def _step_down(self, host: str, oid: str) -> None:
+        """Ask for fewer varbinds per request, or give up on GETBULK entirely.
+
+        The host answers GETs but not this GETBULK, which is the classic
+        oversized-reply failure: one GETBULK returns max_repetitions varbinds
+        in a single packet, and once that passes the path MTU it is fragmented
+        — which plenty of firewalls and device CPUs drop outright. Nothing
+        comes back and it looks exactly like an unreachable host.
+
+        It is not a property of the model, which is what makes it confusing to
+        chase: two identical switches differ if one has longer interface
+        descriptions or more sysORTable rows.
+
+        Stepping down beats dropping straight to GETNEXT because the amount by
+        which a device overshoots varies. Something that cannot manage 25 will
+        usually manage 10, which is still ten times fewer round trips than
+        GETNEXT — and on a 48-port stack that difference is most of the scan.
+
+        Whatever it settles on is latched for the rest of the session, so the
+        cost is paid once per device rather than once per table.
+        """
+        for rung in BULK_LADDER:
+            if rung < self.max_repetitions:
+                log.warning(
+                    "%s did not answer a GETBULK of %d at %s but does answer "
+                    "GETs — its replies are too big for the path. Retrying at "
+                    "%d for this device.",
+                    host, self.max_repetitions, oid, rung,
+                )
+                self.max_repetitions = rung
+                return
+        log.warning(
+            "%s answers no GETBULK even at %d — falling back to GETNEXT for "
+            "this device (one varbind per packet, so it always fits).",
+            host, self.max_repetitions,
+        )
+        self.use_bulk = False
+
+    def settled_repetitions(self) -> int:
+        """What this session ended up using, for caching across runs.
+
+        Zero means GETBULK was abandoned altogether.
+        """
+        return self.max_repetitions if self.use_bulk else 0
 
     def walk_raw(self, host: str, oid: str) -> str:
         """Walk a subtree and return net-snmp's output unparsed.

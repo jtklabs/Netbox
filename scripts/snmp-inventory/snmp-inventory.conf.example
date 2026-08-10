@@ -60,9 +60,20 @@ manage_software_version = true
 # Per-request timeout in seconds and how many times to retry a request.
 timeout = 5
 retries = 1
-# GETBULK is much faster on big interface tables. Devices that mishandle it
-# fall back to GETNEXT automatically, so leave this on unless you have a reason.
+# GETBULK is much faster on big interface tables. Leave this on: a device that
+# cannot answer a request this large is stepped down automatically (25 -> 10 ->
+# 4 -> GETNEXT) until it answers, so the setting below is a ceiling rather than
+# a demand.
 use_bulk = true
 max_repetitions = 25
+# Where to remember the limit each device settled on. Finding it costs one
+# timeout per step down, which is fine once and wasteful every six hours, so it
+# is written here and reused. Deleting this file is always safe — it costs one
+# slow scan. The poller's service account must be able to write the directory;
+# set it somewhere else, or blank to disable, if that is awkward.
+bulk_state_file = /var/lib/snmp-inventory/getbulk-limits.json
+# Re-measure after this long, so a device stops being scanned pessimistically
+# once somebody raises an MTU or fixes a firewall.
+bulk_state_ttl_days = 7
 # How many devices to scan at once.
 workers = 8

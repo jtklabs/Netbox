@@ -353,6 +353,7 @@ class TestIpDecoding:
 import pytest
 
 from snmpinv.snmp import (
+    BULK_LADDER,
     Credential,
     CredentialSession,
     SnmpAuthError,
@@ -387,14 +388,17 @@ def _bulk_times_out(tool):
 
 
 class TestGetbulkFallback:
-    def test_a_host_that_has_answered_falls_back_to_getnext(self):
+    def test_a_host_that_answers_no_getbulk_at_all_ends_on_getnext(self):
+        """Every rung of the ladder is tried before giving up on GETBULK.
+        Which rung a device lands on is covered in test_bulkstate.py."""
         session, calls = _session(_bulk_times_out)
         session.answered = True          # a GET already came back
 
         binds = session.walk("192.0.2.1", "1.3.6.1.2.1.1")
 
         assert [b.value for b in binds] == ["sw1"]
-        assert calls == ["snmpbulkwalk", "snmpwalk"]
+        assert calls[-1] == "snmpwalk"
+        assert calls.count("snmpbulkwalk") == len(BULK_LADDER) + 1
 
     def test_a_silent_host_is_not_probed_twice(self):
         """The reason the fallback is conditional: a dead host must not cost
@@ -407,17 +411,18 @@ class TestGetbulkFallback:
         assert calls == ["snmpbulkwalk"]
 
     def test_the_fallback_latches_for_the_rest_of_the_session(self):
-        """Otherwise every remaining subtree pays the GETBULK timeout again —
-        on a device with a dozen tables that is minutes of pure waiting."""
+        """Otherwise every remaining subtree pays the whole ladder again — on a
+        device with a dozen tables that is minutes of pure waiting."""
         session, calls = _session(_bulk_times_out)
         session.answered = True
 
         session.walk("192.0.2.1", "1.3.6.1.2.1.1")
+        calls.clear()
         session.walk("192.0.2.1", "1.3.6.1.2.1.2")
         session.walk("192.0.2.1", "1.3.6.1.2.1.4")
 
         assert session.use_bulk is False
-        assert calls == ["snmpbulkwalk", "snmpwalk", "snmpwalk", "snmpwalk"]
+        assert calls == ["snmpwalk", "snmpwalk"]
 
     def test_an_auth_failure_never_falls_back(self):
         """Retrying with GETNEXT would fail identically and waste a round trip."""
@@ -482,6 +487,9 @@ class TestGetBeforeWalk:
 
             def get(self, host, oids):
                 return {}
+
+            def settled_repetitions(self):
+                return 25
 
         from snmpinv import collect as collect_module
         from snmpinv.snmp import parse_varbinds

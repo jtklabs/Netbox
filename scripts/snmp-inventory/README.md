@@ -753,20 +753,59 @@ The giveaway is that it **is not model-specific**. It depends on how much data
 the device has, so two identical switches differ if one has longer interface
 descriptions or more `sysORTable` rows.
 
-The scanner detects this by itself. Before any walk it sends a single GET,
+The scanner handles this by itself. Before any walk it sends a single GET,
 which is one small packet each way and so cannot fail for size reasons. If that
-GET is answered but a later GETBULK is not, it says so and drops to GETNEXT for
-that device:
+GET is answered but a GETBULK is not, the request size is **stepped down** until
+the device answers:
 
 ```
-WARNING 10.10.1.5 did not answer a GETBULK at 1.3.6.1.2.1.2 but does answer
-GETs — falling back to GETNEXT for this device (slower, but its replies fit in
-a packet). Set use_bulk = false to skip this wait.
+25  ->  10  ->  4  ->  GETNEXT
 ```
 
-That costs one timeout per affected device, once — the fallback then latches
-for the rest of that device's scan. To skip even that, use `--no-bulk`, or set
-`use_bulk = false` under `[snmp]` to make it fleet-wide.
+```
+WARNING 10.10.1.5 did not answer a GETBULK of 25 at 1.3.6.1.2.1.2 but does
+answer GETs — its replies are too big for the path. Retrying at 10 for this
+device.
+```
+
+Stepping down rather than dropping straight to GETNEXT matters because devices
+overshoot by different amounts. Something that cannot manage 25 will usually
+manage 10, which is still ten times fewer round trips than GETNEXT — on a
+48-port stack that difference is most of the scan.
+
+Whatever it settles on latches for the rest of that device's scan, so the cost
+is one timeout per step, once per device, not once per table.
+
+### It only pays that once
+
+The limit each device settled on is written to `bulk_state_file`
+(`/var/lib/snmp-inventory/getbulk-limits.json` by default) and reused on the
+next run, so a six-hourly rescan does not rediscover it every time. A device
+that manages the full size is deliberately *not* recorded — that keeps the file
+to the exceptions, and means raising `max_repetitions` later actually reaches
+the devices that were always fine.
+
+```json
+{
+  "10.10.1.5":  { "max_repetitions": 10, "measured_at": 1786000000.0 },
+  "10.10.9.200": { "max_repetitions": 0,  "measured_at": 1786000042.0 }
+}
+```
+
+`0` means the device answered no GETBULK at all and goes straight to GETNEXT —
+which, being cached, now costs no timeout at all.
+
+Entries expire after `bulk_state_ttl_days` (7) so a device stops being scanned
+pessimistically once somebody raises an MTU or fixes a firewall; the next scan
+after that re-measures and either confirms the limit or lifts it.
+
+The file is a pure cache. Deleting it costs one slow scan and nothing else, a
+corrupt or unwritable one is logged and ignored rather than failing the run,
+and it is written atomically so a killed poller cannot leave a half-written
+file behind. `--no-bulk-cache` ignores it for one run.
+
+To skip the discovery entirely, `--no-bulk`, or `use_bulk = false` under
+`[snmp]` to make it fleet-wide.
 
 If the **first GET** times out too, it really is silence: wrong address, an
 ACL, SNMP not enabled, or a firewall. Credentials being wrong looks different

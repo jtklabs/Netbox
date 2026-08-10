@@ -46,6 +46,7 @@ from snmpinv import config as config_module
 from snmpinv import onboarding
 from snmpinv import probe as probe_module
 from snmpinv import __version__
+from snmpinv.bulkstate import BulkState
 from snmpinv.collect import Collector, DeviceFacts
 from snmpinv.model import ScanResult, build_scan_result
 from snmpinv.netbox import NetBox, NetBoxError
@@ -93,11 +94,14 @@ def main(argv=None) -> int:
         dry_run=args.dry_run,
     )
 
+    bulk_state = _bulk_state(config, args)
     collector = Collector(
         config.credentials,
         timeout=config.snmp.timeout,
         retries=config.snmp.retries,
         use_bulk=config.snmp.use_bulk and not args.no_bulk,
+        max_repetitions=config.snmp.max_repetitions,
+        bulk_state=bulk_state,
     )
     syncer = Syncer(netbox, config.sync)
 
@@ -154,6 +158,10 @@ def main(argv=None) -> int:
                 log.error("%s: writing to NetBox failed: %s", target.address, exc)
                 failed += 1
 
+    # Whatever GETBULK limits this run discovered, so the next one starts
+    # already knowing them instead of paying the timeouts again.
+    bulk_state.save()
+
     if not args.collect_only:
         # One call for the whole fleet rather than one per device.
         syncer.flush_software_reports()
@@ -164,6 +172,22 @@ def main(argv=None) -> int:
         elapsed, scanned, failed, netbox.summary(),
     )
     return 0 if scanned else 1
+
+
+def _bulk_state(config, args) -> BulkState:
+    """Open the per-device GETBULK limit cache named by the config.
+
+    Disabled by --no-bulk-cache, and by --no-bulk: with GETBULK off there is
+    no limit to discover, so writing one down would only record a value that
+    reflects the flag rather than the device.
+    """
+    if args.no_bulk_cache or args.no_bulk or not config.snmp.bulk_state_file:
+        return BulkState()
+    state = BulkState(config.snmp.bulk_state_file,
+                      ttl_days=config.snmp.bulk_state_ttl_days)
+    if len(state):
+        log.debug("%d device(s) have a remembered GETBULK limit", len(state))
+    return state
 
 
 def run_probe(args) -> int:
@@ -180,11 +204,14 @@ def run_probe(args) -> int:
         log.error("%s", exc)
         return 2
 
+    bulk_state = _bulk_state(config, args)
     collector = Collector(
         config.credentials,
         timeout=config.snmp.timeout,
         retries=config.snmp.retries,
         use_bulk=config.snmp.use_bulk and not args.no_bulk,
+        max_repetitions=config.snmp.max_repetitions,
+        bulk_state=bulk_state,
     )
     worst = 0
     for address in args.probe:
@@ -192,6 +219,7 @@ def run_probe(args) -> int:
             collector, address, as_json=args.json, save_walk=args.save_walk
         )
         worst = max(worst, code)
+    bulk_state.save()
     return worst
 
 
@@ -396,6 +424,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "is too big to survive the path; the scanner "
                              "detects that and falls back on its own, and this "
                              "skips the wait")
+    parser.add_argument("--no-bulk-cache", action="store_true",
+                        help="do not read or write the remembered per-device "
+                             "GETBULK limits; rediscover them this run")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="warnings and errors only")
     return parser.parse_args(argv)

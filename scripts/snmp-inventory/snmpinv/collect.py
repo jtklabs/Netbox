@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import mibs, vendors
+from .bulkstate import GETNEXT_ONLY, BulkState
 from .snmp import (
     Credential,
     CredentialSession,
@@ -176,12 +177,26 @@ class DeviceFacts:
         return None
 
 
+class _CredentialRejected(Exception):
+    """This credential set was refused; try the next one.
+
+    Internal to Collector.collect. A plain exception rather than a return
+    value so the scan-with-one-credential path can be its own function and
+    still let collect() own the loop.
+    """
+
+    def __init__(self, cause: SnmpError):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 class Collector:
     """Walks one host with the first credential set that authenticates."""
 
     def __init__(self, credentials: list[Credential], timeout: int = 5, retries: int = 1,
                  use_bulk: bool = True, collect_interfaces: bool = True,
-                 collect_ips: bool = True):
+                 collect_ips: bool = True, max_repetitions: int = 25,
+                 bulk_state: BulkState | None = None):
         if not credentials:
             raise ValueError("at least one SNMPv3 credential set is required")
         self.credentials = credentials
@@ -190,6 +205,23 @@ class Collector:
         self.use_bulk = use_bulk
         self.collect_interfaces = collect_interfaces
         self.collect_ips = collect_ips
+        self.max_repetitions = max_repetitions
+        # Devices that cannot answer a full-size GETBULK are remembered, so the
+        # timeouts that discover the limit are paid once rather than every run.
+        self.bulk_state = bulk_state if bulk_state is not None else BulkState()
+
+    def _session_for(self, credential: Credential, host: str) -> CredentialSession:
+        """Open a session already tuned to what this host managed last time."""
+        limit = self.bulk_state.limit_for(host, self.max_repetitions)
+        return CredentialSession(
+            credential,
+            timeout=self.timeout,
+            retries=self.retries,
+            # A remembered GETNEXT_ONLY skips straight past GETBULK, which is
+            # the whole point: no timeout is paid to rediscover it.
+            use_bulk=self.use_bulk and limit != GETNEXT_ONLY,
+            max_repetitions=limit or self.max_repetitions,
+        )
 
     def collect(self, host: str) -> DeviceFacts:
         """Walk `host`, trying each credential set in order.
@@ -199,43 +231,50 @@ class Collector:
         """
         last_auth_error: SnmpError | None = None
         for credential in self.credentials:
-            session = CredentialSession(
-                credential, timeout=self.timeout, retries=self.retries, use_bulk=self.use_bulk
-            )
+            session = self._session_for(credential, host)
             with session:
                 try:
-                    # A single GET before any walk. It is one small packet each
-                    # way, so unlike a GETBULK it cannot fail because a reply
-                    # was too big to survive the path — which means a timeout
-                    # here really does mean the host is silent, and a timeout
-                    # on a later walk really does mean GETBULK is the problem.
-                    # It also rejects a wrong credential set after one packet
-                    # rather than after a whole walk.
-                    session.probe(host)
-                except SnmpAuthError as exc:
-                    # Wrong user or passphrase for this device — the next set
-                    # may be the right one.
-                    log.debug("%s rejected credential set %r: %s", host, credential.name, exc)
-                    last_auth_error = exc
+                    return self._try_credential(session, host, credential)
+                except _CredentialRejected as exc:
+                    last_auth_error = exc.cause
                     continue
-                except SnmpTimeoutError:
-                    # Silence, not rejection. More credentials will not help and
-                    # each one costs another full timeout.
-                    raise
-
-                try:
-                    system = session.walk(host, mibs.SYSTEM_GROUP)
-                except SnmpAuthError as exc:
-                    log.debug("%s rejected credential set %r: %s", host, credential.name, exc)
-                    last_auth_error = exc
-                    continue
-                if not system:
-                    last_auth_error = SnmpAuthError(f"{host}: empty system group")
-                    continue
-                log.info("%s authenticated with credential set %r", host, credential.name)
-                return self._collect_with(session, host, credential, system)
+                finally:
+                    # Outside every failure path on purpose. Whatever GETBULK
+                    # size this device settled on was measured at the cost of a
+                    # timeout per step, and that measurement is just as true
+                    # when the scan then failed for some other reason — which
+                    # is exactly when it is most worth not paying twice.
+                    if session.answered:
+                        self.bulk_state.remember(
+                            host, session.settled_repetitions(), self.max_repetitions
+                        )
 
         raise last_auth_error or SnmpAuthError(f"{host}: no credential set was accepted")
+
+    def _try_credential(self, session: CredentialSession, host: str,
+                        credential: Credential) -> DeviceFacts:
+        """Scan `host` with one credential set, or say it was not accepted."""
+        try:
+            # A single GET before any walk. It is one small packet each way, so
+            # unlike a GETBULK it cannot fail because a reply was too big to
+            # survive the path — which means a timeout here really does mean
+            # the host is silent, and a timeout on a later walk really does
+            # mean GETBULK is the problem. It also rejects a wrong credential
+            # set after one packet rather than after a whole walk.
+            session.probe(host)
+            system = session.walk(host, mibs.SYSTEM_GROUP)
+        except SnmpAuthError as exc:
+            # Wrong user or passphrase for this device — the next set may be
+            # the right one.
+            log.debug("%s rejected credential set %r: %s", host, credential.name, exc)
+            raise _CredentialRejected(exc) from exc
+        # A timeout is deliberately not caught: it is silence rather than
+        # rejection, and trying more credentials just multiplies the wait.
+
+        if not system:
+            raise _CredentialRejected(SnmpAuthError(f"{host}: empty system group"))
+        log.info("%s authenticated with credential set %r", host, credential.name)
+        return self._collect_with(session, host, credential, system)
 
     def _collect_with(self, session: CredentialSession, host: str, credential: Credential,
                       system: list[VarBind]) -> DeviceFacts:

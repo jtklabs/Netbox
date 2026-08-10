@@ -42,6 +42,11 @@ class SnmpConfig:
     use_bulk: bool = True
     max_repetitions: int = 25
     workers: int = 8
+    # Where to remember which devices cannot answer a full-size GETBULK.
+    # Blank disables it, and the only cost of that is rediscovering the limit
+    # — several timeouts on the affected devices — on every single run.
+    bulk_state_file: str = "/var/lib/snmp-inventory/getbulk-limits.json"
+    bulk_state_ttl_days: int = 7
 
 
 @dataclass
@@ -151,6 +156,9 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             use_bulk=section.getboolean("use_bulk", True),
             max_repetitions=section.getint("max_repetitions", 25),
             workers=section.getint("workers", 8),
+            bulk_state_file=section.get(
+                "bulk_state_file", "/var/lib/snmp-inventory/getbulk-limits.json"),
+            bulk_state_ttl_days=section.getint("bulk_state_ttl_days", 7),
         )
 
     path = credentials_path or (
