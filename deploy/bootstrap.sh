@@ -199,10 +199,19 @@ else
     docker compose build
   fi
 fi
+# --remove-orphans because dropping a service from the compose files does not
+# remove the container it already created. When the Diode discovery stack went
+# away its containers stayed behind, and every deploy afterwards left them
+# sitting in `docker ps` looking like the stack still ships Diode. Safe here
+# only because step 2a has already proved every file in COMPOSE_FILE exists —
+# with a truncated chain this flag would delete the services in the missing
+# files. It cannot reach containers from a *different* compose project; those
+# have to be removed by hand.
+#
 # Not fatal: netbox-worker waits on netbox's healthcheck, so compose can report
 # a dependency failure during a first boot that is progressing normally. The
 # health gate below is the real verdict and gives a far better diagnostic.
-docker compose up -d || log "compose reported a dependency not ready — continuing to the health gate"
+docker compose up -d --remove-orphans || log "compose reported a dependency not ready — continuing to the health gate"
 
 # Probe the address the stack is actually published on. Apache is on another
 # host, so prod binds to this instance's private address — loopback would not
