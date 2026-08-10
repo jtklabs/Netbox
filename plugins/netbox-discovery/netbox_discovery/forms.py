@@ -91,7 +91,13 @@ class OnboardingRequestForm(NetBoxModelForm):
         The error lands on `tenant` rather than `address` when the address is
         fine but ambiguous, because the tenant field is the one to fill in.
         """
-        cleaned = super().clean()
+        # `or self.cleaned_data` because NetBox's CheckLastUpdatedMixin.clean()
+        # bare-returns when the instance has no pk, and NetBoxModelForm passes
+        # that straight through — so super().clean() is None on every *add*,
+        # and only on adds. Django allows clean() to return None (it means
+        # "cleaned_data is unchanged"), so the caller has to fall back to
+        # self.cleaned_data rather than trusting the return value.
+        cleaned = super().clean() or self.cleaned_data
         address = cleaned.get('address')
         if not address:
             return cleaned
