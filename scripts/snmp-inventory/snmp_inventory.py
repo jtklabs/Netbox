@@ -97,7 +97,7 @@ def main(argv=None) -> int:
         config.credentials,
         timeout=config.snmp.timeout,
         retries=config.snmp.retries,
-        use_bulk=config.snmp.use_bulk,
+        use_bulk=config.snmp.use_bulk and not args.no_bulk,
     )
     syncer = Syncer(netbox, config.sync)
 
@@ -184,7 +184,7 @@ def run_probe(args) -> int:
         config.credentials,
         timeout=config.snmp.timeout,
         retries=config.snmp.retries,
-        use_bulk=config.snmp.use_bulk,
+        use_bulk=config.snmp.use_bulk and not args.no_bulk,
     )
     worst = 0
     for address in args.probe:
@@ -390,6 +390,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="only scan IPAM addresses, skipping rescans of known devices")
     parser.add_argument("--limit", type=int, default=0,
                         help="scan at most this many targets")
+    parser.add_argument("--no-bulk", action="store_true",
+                        help="use GETNEXT instead of GETBULK. Slower, but some "
+                             "devices never answer a GETBULK because the reply "
+                             "is too big to survive the path; the scanner "
+                             "detects that and falls back on its own, and this "
+                             "skips the wait")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="warnings and errors only")
     return parser.parse_args(argv)

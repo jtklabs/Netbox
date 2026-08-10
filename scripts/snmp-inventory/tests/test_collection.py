@@ -339,3 +339,192 @@ class TestIpDecoding:
         # /24 is encoded only in the last sub-identifier of ipAddressPrefix.
         assert entry.prefix_length == 24
         assert entry.cidr() == "10.10.1.5/24"
+
+
+# --- GETBULK fallback -------------------------------------------------------
+#
+# A device that answers GETs but never answers a GETBULK is a real and
+# confusing failure: the reply to one GETBULK carries max_repetitions varbinds
+# at once, and once it passes the path MTU it is fragmented and something in
+# between drops it. Nothing comes back, so it looks exactly like an unreachable
+# host — and because it depends on how much data the device has rather than
+# what it is, two identical models can behave differently.
+
+import pytest
+
+from snmpinv.snmp import (
+    Credential,
+    CredentialSession,
+    SnmpAuthError,
+    SnmpTimeoutError,
+    VarBind,
+    parse_varbinds,
+)
+
+_ONE_BIND = ".1.3.6.1.2.1.1.5.0 = STRING: sw1\n"
+
+
+def _session(behaviour):
+    """A session whose net-snmp calls are scripted. Records the tools used."""
+    session = CredentialSession(
+        Credential(name="t", security_name="u", auth_passphrase="a", priv_passphrase="b"),
+        timeout=1, retries=0,
+    )
+    calls = []
+
+    def fake_run(tool, host, oid, numeric_timeticks=True):
+        calls.append(tool)
+        return behaviour(tool)
+
+    session._run = fake_run
+    return session, calls
+
+
+def _bulk_times_out(tool):
+    if tool == "snmpbulkwalk":
+        raise SnmpTimeoutError("host: no response")
+    return _ONE_BIND
+
+
+class TestGetbulkFallback:
+    def test_a_host_that_has_answered_falls_back_to_getnext(self):
+        session, calls = _session(_bulk_times_out)
+        session.answered = True          # a GET already came back
+
+        binds = session.walk("192.0.2.1", "1.3.6.1.2.1.1")
+
+        assert [b.value for b in binds] == ["sw1"]
+        assert calls == ["snmpbulkwalk", "snmpwalk"]
+
+    def test_a_silent_host_is_not_probed_twice(self):
+        """The reason the fallback is conditional: a dead host must not cost
+        two full timeouts on every subtree."""
+        session, calls = _session(_bulk_times_out)
+        session.answered = False
+
+        with pytest.raises(SnmpTimeoutError):
+            session.walk("192.0.2.1", "1.3.6.1.2.1.1")
+        assert calls == ["snmpbulkwalk"]
+
+    def test_the_fallback_latches_for_the_rest_of_the_session(self):
+        """Otherwise every remaining subtree pays the GETBULK timeout again —
+        on a device with a dozen tables that is minutes of pure waiting."""
+        session, calls = _session(_bulk_times_out)
+        session.answered = True
+
+        session.walk("192.0.2.1", "1.3.6.1.2.1.1")
+        session.walk("192.0.2.1", "1.3.6.1.2.1.2")
+        session.walk("192.0.2.1", "1.3.6.1.2.1.4")
+
+        assert session.use_bulk is False
+        assert calls == ["snmpbulkwalk", "snmpwalk", "snmpwalk", "snmpwalk"]
+
+    def test_an_auth_failure_never_falls_back(self):
+        """Retrying with GETNEXT would fail identically and waste a round trip."""
+        def auth_fails(tool):
+            raise SnmpAuthError("host: Authentication failure")
+
+        session, calls = _session(auth_fails)
+        session.answered = True
+
+        with pytest.raises(SnmpAuthError):
+            session.walk("192.0.2.1", "1.3.6.1.2.1.1")
+        assert calls == ["snmpbulkwalk"]
+
+    def test_a_successful_get_marks_the_host_as_answering(self):
+        session, _ = _session(lambda tool: _ONE_BIND)
+        assert session.answered is False
+        session._run = lambda *a, **k: _ONE_BIND
+        # get() builds its own argv, so drive it through the public path with a
+        # stubbed subprocess instead.
+        import subprocess as sp
+
+        class Done:
+            returncode, stdout, stderr = 0, _ONE_BIND, ""
+
+        original, sp.run = sp.run, lambda *a, **k: Done()
+        try:
+            session._dir = "/tmp"
+            session.get("192.0.2.1", ["1.3.6.1.2.1.1.2.0"])
+        finally:
+            sp.run = original
+        assert session.answered is True
+
+
+class TestGetBeforeWalk:
+    """The collector must establish the host answers *before* it walks."""
+
+    def test_a_get_precedes_the_first_walk(self, monkeypatch):
+        order = []
+
+        class FakeSession:
+            def __init__(self, *a, **k):
+                self.answered = False
+                self.use_bulk = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def probe(self, host):
+                order.append("get")
+                self.answered = True
+                return True
+
+            def walk(self, host, oid):
+                order.append("walk")
+                return parse_varbinds(
+                    ".1.3.6.1.2.1.1.5.0 = STRING: sw1\n"
+                    ".1.3.6.1.2.1.1.2.0 = OID: .1.3.6.1.4.1.9.1.2494\n"
+                )
+
+            def get(self, host, oids):
+                return {}
+
+        from snmpinv import collect as collect_module
+        from snmpinv.snmp import parse_varbinds
+
+        monkeypatch.setattr(collect_module, "CredentialSession", FakeSession)
+        collector = collect_module.Collector(
+            [Credential(name="t", security_name="u", auth_passphrase="a")]
+        )
+        facts = collector.collect("192.0.2.1")
+
+        assert order[0] == "get", "a walk was attempted before any GET"
+        assert facts.sys_name == "sw1"
+
+    def test_a_silent_host_never_reaches_a_walk(self, monkeypatch):
+        """So it costs one small timeout, not one per credential set per table."""
+        attempted = []
+
+        class SilentSession:
+            def __init__(self, *a, **k):
+                self.answered = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def probe(self, host):
+                attempted.append("get")
+                raise SnmpTimeoutError("192.0.2.1: no response")
+
+            def walk(self, host, oid):
+                attempted.append("walk")
+                return []
+
+        from snmpinv import collect as collect_module
+
+        monkeypatch.setattr(collect_module, "CredentialSession", SilentSession)
+        collector = collect_module.Collector([
+            Credential(name="one", security_name="u", auth_passphrase="a"),
+            Credential(name="two", security_name="v", auth_passphrase="b"),
+        ])
+        with pytest.raises(SnmpTimeoutError):
+            collector.collect("192.0.2.1")
+        # One GET total: not one per credential set.
+        assert attempted == ["get"]

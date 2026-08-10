@@ -204,7 +204,14 @@ class Collector:
             )
             with session:
                 try:
-                    system = session.walk(host, mibs.SYSTEM_GROUP)
+                    # A single GET before any walk. It is one small packet each
+                    # way, so unlike a GETBULK it cannot fail because a reply
+                    # was too big to survive the path — which means a timeout
+                    # here really does mean the host is silent, and a timeout
+                    # on a later walk really does mean GETBULK is the problem.
+                    # It also rejects a wrong credential set after one packet
+                    # rather than after a whole walk.
+                    session.probe(host)
                 except SnmpAuthError as exc:
                     # Wrong user or passphrase for this device — the next set
                     # may be the right one.
@@ -215,6 +222,13 @@ class Collector:
                     # Silence, not rejection. More credentials will not help and
                     # each one costs another full timeout.
                     raise
+
+                try:
+                    system = session.walk(host, mibs.SYSTEM_GROUP)
+                except SnmpAuthError as exc:
+                    log.debug("%s rejected credential set %r: %s", host, credential.name, exc)
+                    last_auth_error = exc
+                    continue
                 if not system:
                     last_auth_error = SnmpAuthError(f"{host}: empty system group")
                     continue

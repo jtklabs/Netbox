@@ -21,12 +21,15 @@ would mean guessing, which is the habit this whole tool exists to break.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
 
 # net-snmp exit statuses and messages are not stable enough to branch on, so we
 # classify by matching the text it prints. These are the messages net-snmp 5.x
@@ -187,6 +190,10 @@ class CredentialSession:
         self.retries = retries
         self.use_bulk = use_bulk
         self.max_repetitions = max_repetitions
+        # Set once anything at all comes back from the host. It is what lets a
+        # GETBULK that goes unanswered be told apart from a host that is simply
+        # not there — see walk().
+        self.answered = False
         self._dir: str | None = None
 
     def __enter__(self) -> CredentialSession:
@@ -267,11 +274,38 @@ class CredentialSession:
         if self.use_bulk:
             try:
                 return parse_varbinds(self._run("snmpbulkwalk", host, oid))
-            except (SnmpAuthError, SnmpTimeoutError, SnmpInvocationError, SnmpToolMissing):
+            except (SnmpAuthError, SnmpInvocationError, SnmpToolMissing):
                 raise
+            except SnmpTimeoutError:
+                if not self.answered:
+                    # Nothing has ever come back from this host, so this is
+                    # silence, not a GETBULK problem. Retrying with GETNEXT
+                    # would just wait out a second full timeout.
+                    raise
+                # The host answers GETs but not this GETBULK. That is the
+                # classic oversized-response failure: one GETBULK asks for
+                # max_repetitions varbinds at once, and once the reply passes
+                # the path MTU it is fragmented — which plenty of firewalls and
+                # device CPUs drop outright. Nothing comes back and it looks
+                # exactly like an unreachable host.
+                #
+                # It is not a property of the model, which is what makes it
+                # confusing to chase: two identical switches differ if one has
+                # longer interface descriptions or more sysORTable rows.
+                #
+                # GETNEXT fetches one varbind per packet, so it cannot trip
+                # over this. Latch it off for the rest of the session rather
+                # than paying the timeout again on every remaining subtree.
+                log.warning(
+                    "%s did not answer a GETBULK at %s but does answer GETs — "
+                    "falling back to GETNEXT for this device (slower, but its "
+                    "replies fit in a packet). Set use_bulk = false to skip "
+                    "this wait.", host, oid,
+                )
+                self.use_bulk = False
             except SnmpError:
-                # Some older agents answer GETNEXT fine but mishandle GETBULK.
-                # Falling back costs one extra round trip and rescues the walk.
+                # Some older agents answer GETNEXT fine but reject GETBULK
+                # outright. Falling back costs one round trip and rescues it.
                 pass
         return parse_varbinds(self._run("snmpwalk", host, oid))
 
@@ -306,10 +340,20 @@ class CredentialSession:
         # routine when probing several vendors' scalars, so only genuine
         # transport/auth failures are escalated.
         _raise_for_message(_meaningful(proc.stdout, proc.stderr), host)
+        # Getting here means the agent replied. Record that even if it replied
+        # "no such object": what matters later is that packets come back at all.
+        self.answered = True
         return {bind.oid: bind for bind in parse_varbinds(proc.stdout)}
 
     def probe(self, host: str) -> bool:
-        """Cheapest possible check that these credentials work on this host."""
+        """Cheapest possible check that these credentials work on this host.
+
+        One GET of sysObjectID: a single small request and a single small
+        reply, so it cannot fail for size reasons the way a GETBULK can. Doing
+        this before any walk is what separates "silent" from "dislikes
+        GETBULK", and it rejects a wrong credential set after one packet
+        instead of a full walk.
+        """
         binds = self.get(host, ["1.3.6.1.2.1.1.2.0"])
         return bool(binds)
 

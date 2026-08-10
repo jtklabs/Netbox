@@ -738,6 +738,45 @@ were silently ignored everywhere. The emulator caught three more, including
 `-Cr 25` being rejected by net-snmp (the value must be attached: `-Cr25`), which
 had been breaking every bulk walk.
 
+## "No response" from a device you can poll by hand
+
+Almost always **GETBULK**, not credentials and not reachability.
+
+A walk uses `snmpbulkwalk`, which asks for `max_repetitions` (25) varbinds in
+one request. The reply carries all of them at once, and once it exceeds the
+path MTU it gets fragmented — which plenty of firewalls, and some device CPUs,
+drop outright. Nothing comes back, so it looks identical to an unreachable
+host. When you poll by hand you almost certainly use `snmpwalk`, which is
+GETNEXT: one varbind per packet, small replies, never trips over this.
+
+The giveaway is that it **is not model-specific**. It depends on how much data
+the device has, so two identical switches differ if one has longer interface
+descriptions or more `sysORTable` rows.
+
+The scanner detects this by itself. Before any walk it sends a single GET,
+which is one small packet each way and so cannot fail for size reasons. If that
+GET is answered but a later GETBULK is not, it says so and drops to GETNEXT for
+that device:
+
+```
+WARNING 10.10.1.5 did not answer a GETBULK at 1.3.6.1.2.1.2 but does answer
+GETs — falling back to GETNEXT for this device (slower, but its replies fit in
+a packet). Set use_bulk = false to skip this wait.
+```
+
+That costs one timeout per affected device, once — the fallback then latches
+for the rest of that device's scan. To skip even that, use `--no-bulk`, or set
+`use_bulk = false` under `[snmp]` to make it fleet-wide.
+
+If the **first GET** times out too, it really is silence: wrong address, an
+ACL, SNMP not enabled, or a firewall. Credentials being wrong looks different
+again — the device answers and rejects you, which is reported as an
+authentication failure, and the next credential set is tried.
+
+A slow device is worth ruling out separately: the defaults are `timeout = 5`
+and `retries = 1`, i.e. two attempts, where `snmpwalk` by hand defaults to six.
+Raise `retries` under `[snmp]` if a device is merely lossy rather than large.
+
 ## Notes and gotchas
 
 Full detail in [docs/API-NOTES.md](docs/API-NOTES.md). The ones most likely to
