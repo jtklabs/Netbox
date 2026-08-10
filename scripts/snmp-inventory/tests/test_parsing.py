@@ -139,3 +139,49 @@ def test_credential_session_writes_private_config(tmp_path):
         assert os.path.expanduser("~/.snmp") not in env["SNMPCONFPATH"]
         assert "a-secret" in open(config_path).read()
     assert not os.path.exists(config_dir)
+
+
+class TestPassphrasesArePlainText:
+    """A passphrase is a literal. The config layer must not reinterpret it.
+
+    Every one of these is a character somebody's password policy will insist
+    on, and each used to fail differently: `%` crashed the loader outright,
+    and a quoted value silently became a passphrase with quotes in it.
+    """
+
+    def _load(self, tmp_path, auth, priv):
+        from snmpinv import config as config_module
+
+        path = tmp_path / "creds.conf"
+        path.write_text(
+            "[credential:awkward]\n"
+            "security_name = netops\n"
+            f"auth_passphrase = {auth}\n"
+            f"priv_passphrase = {priv}\n"
+        )
+        return config_module.load_credentials(str(path))[0]
+
+    def test_percent_does_not_crash_the_loader(self, tmp_path):
+        cred = self._load(tmp_path, "Str0ng%Pass", "50%%sure")
+        assert cred.auth_passphrase == "Str0ng%Pass"
+        assert cred.priv_passphrase == "50%%sure"
+
+    def test_hash_and_dollar_survive(self, tmp_path):
+        """`#` only starts a comment at the start of a line, not mid-value."""
+        cred = self._load(tmp_path, "a#b$c", "d${e}f")
+        assert cred.auth_passphrase == "a#b$c"
+        assert cred.priv_passphrase == "d${e}f"
+
+    def test_quotes_are_kept_because_they_are_part_of_the_value(self, tmp_path):
+        """Documenting the trap rather than papering over it.
+
+        Stripping quotes here would make a passphrase that genuinely starts
+        and ends with one impossible to express. The README says do not quote.
+        """
+        cred = self._load(tmp_path, '"quoted"', "plain")
+        assert cred.auth_passphrase == '"quoted"'
+
+    def test_trailing_whitespace_is_not_kept(self, tmp_path):
+        """configparser strips it, and a passphrase cannot end in a space here."""
+        cred = self._load(tmp_path, "trailing   ", "plain")
+        assert cred.auth_passphrase == "trailing"

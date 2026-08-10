@@ -91,10 +91,23 @@ def load_for_probe(config_path: str, credentials_path: str = "") -> Config:
     return config
 
 
+def _parser() -> configparser.ConfigParser:
+    """A parser that treats values as literal text.
+
+    interpolation=None because configparser's default reads `%` as the start of
+    a substitution, so a passphrase like `Str0ng%Pass` raises
+    InterpolationSyntaxError — a confusing crash a long way from the real
+    cause. Nothing here wants substitution: every value is a literal, and a
+    passphrase most of all.
+    """
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str  # keep key case; net-snmp option names are case-sensitive
+    return parser
+
+
 def load(config_path: str, credentials_path: str = "") -> Config:
     """Read the main config, then the credentials file it points at."""
-    parser = configparser.ConfigParser()
-    parser.optionxform = str  # keep key case; net-snmp option names are case-sensitive
+    parser = _parser()
     if not parser.read(config_path):
         raise FileNotFoundError(f"config file not found: {config_path}")
 
@@ -161,8 +174,7 @@ def load_credentials(path: str) -> list[Credential]:
         raise FileNotFoundError(f"credentials file not found: {path}")
     _warn_if_world_readable(path)
 
-    parser = configparser.ConfigParser()
-    parser.optionxform = str
+    parser = _parser()
     parser.read(path)
     credentials = _credentials_from_parser(parser)
     if not credentials:

@@ -206,6 +206,16 @@ The security level is derived from which passphrases you set — both gives
 `authPriv`, auth alone gives `authNoPriv`. Set `security_level` explicitly only
 to override that. `context` is available for VRF-aware platforms.
 
+**Do not quote passphrases.** Everything after the `=` is taken literally, so
+`auth_passphrase = "hunter2"` sets the passphrase to `"hunter2"` with the quotes
+in it. `%`, `#`, `$` and spaces inside a passphrase are all fine unquoted; the
+only thing you cannot express is a trailing space, which gets stripped.
+
+If the device answers but rejects you, that surfaces as an authentication
+failure and the next credential set is tried. A **timeout** means nothing came
+back at all — the address, an ACL, or SNMP not being enabled, not the
+passphrase. `--probe` is the quickest way to tell those apart.
+
 **Passphrases never reach the command line.** Anything in `argv` is world
 readable through `ps` for as long as the process runs. Each credential set is
 written to a private `snmp.conf` (mode 0600, in a 0700 temp directory) and
