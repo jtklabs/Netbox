@@ -8,6 +8,7 @@ from dcim.models import (
     Site,
 )
 from django import forms
+from django.contrib.contenttypes.models import ContentType
 from netbox.forms import (
     NetBoxModelBulkEditForm,
     NetBoxModelFilterSetForm,
@@ -167,6 +168,14 @@ class ModelLifecycleFilterForm(NetBoxModelFilterSetForm):
     tag = TagFilterField(model)
 
 
+# Accepted in an uploaded CSV, in order. US format first because that is what
+# comes out of a spreadsheet here; ISO second because it is unambiguous and any
+# CSV written before this still has to load. Day-first is deliberately absent:
+# 03/04/2026 would parse silently as a different date under it, and a silently
+# wrong end-of-support date is worse than a rejected row.
+CSV_DATE_INPUT_FORMATS = ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d')
+
+
 class ModelLifecycleImportForm(NetBoxModelImportForm):
     device_type = CSVModelChoiceField(
         queryset=DeviceType.objects.all(), to_field_name='model', required=False,
@@ -184,6 +193,34 @@ class ModelLifecycleImportForm(NetBoxModelImportForm):
     )
     source = CSVChoiceField(choices=LifecycleSourceChoices, required=False)
 
+    def __init__(self, *args, headers=None, **kwargs):
+        super().__init__(*args, headers=headers, **kwargs)
+        # Keep only the columns the sheet actually has. NetBox's `headers`
+        # sets to_field_name and nothing else, so every form field stays live
+        # whether or not the CSV mentions it — which has two consequences,
+        # both wrong for this form.
+        #
+        # A sheet without a `currency` column failed on "This field is
+        # required", though the model has a default; and on an update, a field
+        # with no column arrived empty and construct_instance would write that
+        # emptiness over a value already recorded. A revised bulletin carrying
+        # one date would have wiped the other seven.
+        #
+        # Dropping the field keeps it out of cleaned_data, which is what
+        # construct_instance checks, so the stored value stands.
+        if self.headers:
+            for name in [f for f in self.fields if f not in self.headers]:
+                del self.fields[name]
+
+    # Declared explicitly so every lifecycle date takes a US-formatted value.
+    # Generated from DATE_FIELDS rather than typed out eight times, so a field
+    # added there cannot quietly go back to ISO-only.
+    locals().update({
+        name: forms.DateField(required=False, input_formats=CSV_DATE_INPUT_FORMATS)
+        for name in DATE_FIELDS
+    })
+    cost_updated = forms.DateField(required=False, input_formats=CSV_DATE_INPUT_FORMATS)
+
     class Meta:
         model = ModelLifecycle
         fields = ('device_type', 'module_type') + DATE_FIELDS + (
@@ -197,6 +234,31 @@ class ModelLifecycleImportForm(NetBoxModelImportForm):
         target = self.cleaned_data.get('device_type') or self.cleaned_data.get('module_type')
         if target is None:
             raise forms.ValidationError('Provide either device_type or module_type.')
+
+        # Update the record this model already has rather than refusing the
+        # row. A lifecycle record is unique per hardware model, so importing a
+        # spreadsheet that mentions anything already loaded used to fail the
+        # whole upload on "This hardware model already has a lifecycle record"
+        # -- which makes a vendor's EoX bulletin, where most rows are dates
+        # that have merely been revised, impossible to load without first
+        # weeding out by hand every model already present.
+        #
+        # Switching self.instance here is what makes it an update: _post_clean
+        # runs after this and builds onto whatever instance is set, so the save
+        # becomes an UPDATE and the unique check excludes the row itself.
+        #
+        # Only columns present in the CSV are touched -- see __init__, which
+        # is what makes that true. A sheet carrying just end_of_support
+        # revises that and leaves the other dates, the cost and the bulletin
+        # alone, which is what a revision usually is.
+        if not self.instance.pk:
+            existing = ModelLifecycle.objects.filter(
+                assigned_object_type=ContentType.objects.get_for_model(target),
+                assigned_object_id=target.pk,
+            ).first()
+            if existing is not None:
+                self.instance = existing
+
         self.instance.assigned_object = target
 
 
