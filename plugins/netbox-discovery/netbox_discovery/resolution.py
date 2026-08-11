@@ -128,6 +128,22 @@ def poller_for_region(region: Region | None) -> str:
     return ''
 
 
+def normalise_poller_name(name: str) -> str:
+    """`poller-checkmk-us` and `checkmk-us` both mean the poller `checkmk-us`.
+
+    A poller is named by the bare part of its tag, and that is the name
+    requests get filed under. Operators reasonably configure the poller with
+    the whole tag instead, and the scanner's own site sweep accepts either
+    form — so accepting only one here means a poller can resolve its sites
+    perfectly, check in happily, and still never be handed any work.
+    """
+    name = (name or '').strip()
+    prefix = plugin_setting('poller_tag_prefix')
+    if prefix and name.lower().startswith(prefix.lower()):
+        return name[len(prefix):]
+    return name
+
+
 def _poller_from_tags(tags) -> str:
     prefix = plugin_setting('poller_tag_prefix')
     for tag in tags:

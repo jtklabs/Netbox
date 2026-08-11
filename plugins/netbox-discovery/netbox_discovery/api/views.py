@@ -33,6 +33,7 @@ from netbox_discovery.api.serializers import (
     ScanResultSerializer,
 )
 from netbox_discovery.choices import OnboardingStatusChoices
+from netbox_discovery.resolution import normalise_poller_name
 from netbox_discovery.utils import plugin_setting
 from netbox_discovery.models import (
     DiscoveryIssue,
@@ -70,7 +71,16 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        poller, _created = DiscoveryPoller.objects.get_or_create(name=data['name'])
+        # A poller is named by the bare part of its tag: `poller-checkmk-us`
+        # on a site means a poller called `checkmk-us`, which is the name
+        # resolve_target() files its requests under. Without normalising,
+        # configuring the poller as `poller-checkmk-us` creates a *second*
+        # poller row holding no requests, and check-in reports nothing to do
+        # forever while the work sits under the other name — silent, and the
+        # site sweep keeps working throughout, which makes it very hard to see.
+        poller, _created = DiscoveryPoller.objects.get_or_create(
+            name=normalise_poller_name(data['name'])
+        )
         poller.touch(version=data['version'], summary=data['summary'])
 
         jobs = self._take_work(poller, claim=data['claim'], limit=data['limit'])
