@@ -632,9 +632,9 @@ class TestThePolledAddressBecomesThePrimaryIP:
         from snmpinv.model import DeviceRecord, ScanResult
         from snmpinv.sync import Syncer, SyncOptions
 
-        site = netbox.create("/dcim/sites/", {
-            "name": self.SITE, "slug": self.SITE,
-        }, label="site")
+        # ensure, not create: the rescan test calls this twice.
+        site = netbox.ensure("/dcim/sites/", {"slug": self.SITE},
+                             {"name": self.SITE, "slug": self.SITE}, label="site")
         record = DeviceRecord(
             name=self.NAME, model="DCS-7050SX-72Q", serial="PRIMARY01",
             manufacturer="Arista Networks",
@@ -682,9 +682,9 @@ class TestThePolledAddressBecomesThePrimaryIP:
         finally:
             self._cleanup(netbox)
 
-    def test_no_management_interface_leaves_it_unset_rather_than_guessing(self, netbox):
-        """Attaching the address to an arbitrary data port would be a
-        fabrication; the log says why instead."""
+    def test_it_is_set_even_with_no_management_interface(self, netbox):
+        """The rule is flat: the primary IP is the address it was onboarded
+        with. A device of nothing but data ports is not an exception."""
         from snmpinv.model import InterfaceRecord
 
         self._cleanup(netbox)
@@ -693,6 +693,49 @@ class TestThePolledAddressBecomesThePrimaryIP:
                 InterfaceRecord(name="Ethernet1", type_slug="10gbase-x-sfpp"),
                 InterfaceRecord(name="Ethernet2", type_slug="10gbase-x-sfpp"),
             ])
-            assert not (device.get("primary_ip4") or {}).get("address")
+            primary = (device.get("primary_ip4") or {}).get("address")
+            assert primary == "10.30.0.11/32", (
+                f"the polled address did not become the primary IP (got {primary})"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_it_does_not_claim_a_real_port_carries_the_address(self, netbox):
+        """Ethernet1 does not have this address. Saying it does would be a
+        false statement about real hardware, so a labelled virtual interface
+        holds it instead."""
+        from snmpinv.model import InterfaceRecord
+        from snmpinv.sync import PRIMARY_IP_INTERFACE_NAME
+
+        self._cleanup(netbox)
+        try:
+            device = self._sync(netbox, [
+                InterfaceRecord(name="Ethernet1", type_slug="10gbase-x-sfpp"),
+            ])
+            primary_id = (device.get("primary_ip4") or {}).get("id")
+            ip = netbox.get(f"/ipam/ip-addresses/{primary_id}/")
+            holder = (ip.get("assigned_object") or {}).get("name")
+            assert holder == PRIMARY_IP_INTERFACE_NAME, (
+                f"the address was hung on {holder!r}, which the device never "
+                f"said carried it"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_a_rescan_reuses_the_holding_interface(self, netbox):
+        """Otherwise every six-hourly run leaves another one behind."""
+        from snmpinv.model import InterfaceRecord
+        from snmpinv.sync import PRIMARY_IP_INTERFACE_NAME
+
+        self._cleanup(netbox)
+        try:
+            interfaces = [InterfaceRecord(name="Ethernet1", type_slug="10gbase-x-sfpp")]
+            self._sync(netbox, interfaces)
+            device = self._sync(netbox, interfaces)
+            holders = [
+                i for i in netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
+                if i["name"] == PRIMARY_IP_INTERFACE_NAME
+            ]
+            assert len(holders) == 1, f"{len(holders)} holding interfaces after a rescan"
         finally:
             self._cleanup(netbox)

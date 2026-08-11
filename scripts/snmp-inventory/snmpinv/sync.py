@@ -34,6 +34,12 @@ from .netbox import NetBox, NetBoxError
 
 log = logging.getLogger(__name__)
 
+# Name of the virtual interface created to hold a polled address that the
+# device itself never reported on any interface. A constant rather than a
+# setting: it has to be found again on the next scan, and an operator changing
+# it between runs would leave orphans behind.
+PRIMARY_IP_INTERFACE_NAME = "mgmt-discovered"
+
 SOFTWARE_VERSION_FIELD = "software_version"
 
 # NetBox has no native per-device software version field, so the version needs
@@ -821,26 +827,31 @@ class Syncer:
 
     def _ensure_primary_ip(self, device: dict, scanned_address: str,
                            tenant_id: int | None = None) -> None:
-        """Make the address we polled the primary IP, even if unreported.
+        """Make the address we polled the primary IP. Always.
 
-        The address we scanned is the one an operator will reach this device
-        on, so it is the one that belongs in the primary field — that is the
-        whole reason the scan targeted it.
+        The rule is flat: the primary IP is the address the device was
+        onboarded with. That is the address an operator reaches it on and the
+        one the scan targeted, so there is nothing to infer about *which*
+        address belongs in the field.
 
-        It is normally set as a side effect of syncing the interface that
-        reports it. Plenty of platforms never report it: an Arista's
-        Management1 sits in a separate VRF that the default ipAddressTable
-        does not expose, and several appliances list no addresses at all. On
-        those the device came out with the field empty, which reads as "this
-        platform cannot tell us" when in fact we knew the answer before we
-        started.
+        What does need deciding is where to hang it, because NetBox refuses a
+        primary that is not assigned to one of the device's interfaces. In
+        order of how much is actually known:
 
-        NetBox will not accept a primary that is not assigned to one of the
-        device's interfaces, so the address has to be placed somewhere. It goes
-        on the management interface if the device has one — that is where an
-        address the device answers SNMP on actually lives — and the inference
-        is logged, because it is an inference. If there is no such interface
-        the reason is logged rather than the field being left quietly blank.
+          1. the device reported it on an interface — handled during the
+             interface sync, and it keeps the real mask;
+          2. an address object already sits on one of this device's
+             interfaces — no inference, and again the recorded mask stands;
+          3. a management-named interface exists — a decent guess at where a
+             management address lives, but only a guess;
+          4. nothing fits, so a virtual interface is created to hold it.
+
+        Step 4 exists because the alternative was leaving the field blank, and
+        the rule says otherwise. It creates an interface rather than attaching
+        the address to whichever data port happened to come first: claiming
+        Ethernet1 carries an address it does not carry is a false statement
+        about real hardware, where a virtual interface labelled as holding the
+        polled address is at worst an extra row that says exactly what it is.
         """
         if device.get("id", 0) < 0:
             # A dry-run placeholder. Negative ids exist only in this process,
@@ -854,53 +865,89 @@ class Syncer:
         # and the dict we were handed predates that.
         fresh = self.netbox.get(f"/dcim/devices/{device['id']}/")
         if (fresh.get("primary_ip4") or {}).get("id"):
-            return          # an interface reported it; nothing to infer
+            return          # step 1: the device reported it
 
         interfaces = self.netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
-        if not interfaces:
-            log.warning(
-                "%s has no interfaces, so %s cannot be set as its primary IP",
-                device.get("name"), scanned_address,
-            )
-            return
 
-        # An existing address object already on this device wins outright: no
-        # inference needed, and it keeps the mask somebody else recorded.
+        # Step 2. An existing address object already on this device wins
+        # outright: nothing is inferred and the recorded mask is preserved.
+        # Queried without a mask, which matches this host at whatever prefix
+        # length it was recorded with. That matters twice over: NetBox's
+        # duplicate rule is on the host address rather than the CIDR, so
+        # creating <addr>/32 beside an existing <addr>/24 is refused as a
+        # duplicate -- and a lookup by CIDR would never have found the /24 to
+        # know that.
+        candidates = self.netbox.all("/ipam/ip-addresses/", {"address": scanned_address})
+
         by_id = {iface["id"] for iface in interfaces}
-        for candidate in self.netbox.all("/ipam/ip-addresses/",
-                                         {"address": scanned_address}):
-            assigned = candidate.get("assigned_object_id")
-            if assigned in by_id:
-                self._set_primary_ip(fresh, candidate)
-                return
+        mine = next((c for c in candidates
+                     if c.get("assigned_object_id") in by_id), None)
+        if mine is not None:
+            self._set_primary_ip(fresh, mine)
+            return
 
         chosen = next(
             (i for i in interfaces
              if (i.get("name") or "").lower() in self.MANAGEMENT_INTERFACE_NAMES),
             None,
         )
-        if chosen is None:
-            log.warning(
-                "%s did not report %s on any interface and has no management "
-                "interface to attach it to, so it has no primary IP",
-                device.get("name"), scanned_address,
+        if chosen is not None:
+            # Step 3.
+            log.info(
+                "%s did not report %s on any interface — recording it on %s",
+                device.get("name"), scanned_address, chosen.get("name"),
             )
-            return
+        else:
+            # Step 4.
+            chosen = self._ensure_holding_interface(fresh, scanned_address)
+            if chosen is None:
+                return
 
-        # /32: the device never told us the mask, and inventing one would put a
-        # wrong prefix into IPAM. A host route is the honest form of "the
-        # device answers here".
-        cidr = f"{scanned_address}/32"
-        log.info(
-            "%s did not report %s on any interface — recording it on %s, "
-            "which is where a management address lives on this platform",
-            device.get("name"), scanned_address, chosen.get("name"),
-        )
+        # An address already in IPAM keeps the mask somebody recorded for it;
+        # only a genuinely new one becomes a /32, because the device never told
+        # us its mask and inventing one would put a wrong prefix into IPAM.
+        # Handing the existing CIDR to _ensure_ip also reuses its rules: adopt
+        # an unassigned address, refuse to steal one belonging to another
+        # device.
+        cidr = candidates[0]["address"] if candidates else f"{scanned_address}/32"
         try:
             self._ensure_ip(fresh, chosen, cidr, scanned_address, tenant_id)
         except NetBoxError as exc:
             log.warning("could not record %s on %s: %s",
-                        cidr, chosen.get("name"), exc)
+                        scanned_address, chosen.get("name"), exc)
+
+    def _ensure_holding_interface(self, device: dict, scanned_address: str) -> dict | None:
+        """A virtual interface to hang the polled address on.
+
+        Named and described so nobody mistakes it for something the device
+        reported. Idempotent: rescans find it rather than making another.
+        """
+        existing = self.netbox.first("/dcim/interfaces/", {
+            "device_id": device["id"], "name": PRIMARY_IP_INTERFACE_NAME,
+        })
+        if existing is not None:
+            return existing
+        log.info(
+            "%s did not report %s and has no management interface — creating "
+            "%s to hold it, so the address it was onboarded with is still its "
+            "primary IP", device.get("name"), scanned_address,
+            PRIMARY_IP_INTERFACE_NAME,
+        )
+        try:
+            return self.netbox.create("/dcim/interfaces/", {
+                "device": device["id"],
+                "name": PRIMARY_IP_INTERFACE_NAME,
+                "type": "virtual",
+                "description": (
+                    "Holds the address this device was discovered on. Created "
+                    "by the SNMP inventory because the device reported no "
+                    "interface carrying it."
+                ),
+            }, label=f"interface {PRIMARY_IP_INTERFACE_NAME} on {device.get('name')}")
+        except NetBoxError as exc:
+            log.warning("could not create %s on %s: %s",
+                        PRIMARY_IP_INTERFACE_NAME, device.get("name"), exc)
+            return None
 
     def _ensure_interface(self, device: dict, interface: InterfaceRecord,
                           existing_by_name: dict) -> dict | None:

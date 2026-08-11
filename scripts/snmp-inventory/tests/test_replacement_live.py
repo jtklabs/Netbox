@@ -266,7 +266,12 @@ class TestDuplicateSerialIsRefused:
         device = netbox.first("/dcim/devices/", {"serial": "SWAP-FFFF-0006"})
         netbox.update("/dcim/devices/", device["id"], {"primary_ip4": None})
         # Give it the address the scan comes from, as a real device would have.
-        ip = netbox.create("/ipam/ip-addresses/", {"address": "10.90.1.1/24"})
+        # The sync has already recorded that address — it is the one the device
+        # was polled on, and that is now always kept as the primary IP — so
+        # adopt it rather than creating a second object NetBox would refuse as
+        # a duplicate.
+        ip = (netbox.first("/ipam/ip-addresses/", {"address": "10.90.1.1"})
+              or netbox.create("/ipam/ip-addresses/", {"address": "10.90.1.1/24"}))
         iface = netbox.first("/dcim/interfaces/", {"device_id": device["id"]})
         netbox.update("/ipam/ip-addresses/", ip["id"],
                       {"assigned_object_type": "dcim.interface",

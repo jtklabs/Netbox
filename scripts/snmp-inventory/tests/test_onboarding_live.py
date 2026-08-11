@@ -686,7 +686,13 @@ class TestTheReviewedReadingIsSufficient:
         assert device["serial"] == "FOC1934X0AB"
         # And it was built properly, not as a stub.
         interfaces = netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
-        assert len(interfaces) == 4
+        # Everything the reading described is present. There may be one more:
+        # the device never reported the address it was polled on, so a holding
+        # interface was created to keep that address as its primary IP.
+        from snmpinv.sync import PRIMARY_IP_INTERFACE_NAME
+
+        reported = [i for i in interfaces if i["name"] != PRIMARY_IP_INTERFACE_NAME]
+        assert len(reported) == 4
         assert any(i["name"] == "Vlan1" for i in interfaces)
 
     def test_a_request_with_no_stored_scan_still_fails_honestly(self, netbox, lab):
