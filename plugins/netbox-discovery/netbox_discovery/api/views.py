@@ -10,6 +10,8 @@ Pollers pull. They are at remote sites behind outbound-only firewalls, so
 nothing here ever initiates a connection to them.
 """
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 from netbox.api.viewsets import NetBoxModelViewSet
@@ -41,6 +43,8 @@ from netbox_discovery.models import (
     HardwareReplacement,
     OnboardingRequest,
 )
+
+logger = logging.getLogger('netbox_discovery.api')
 
 
 class DiscoveryPollerViewSet(NetBoxModelViewSet):
@@ -111,7 +115,17 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                 .select_related('site', 'override_site', 'role', 'tenant')
                 .order_by('created')
             )
-            for entry in queryset[: limit * 4]:
+            # The window must be wider than `limit` because _action_for
+            # rejects entries — mostly requests already in flight elsewhere.
+            # It was limit * 4, which holds until the front of the queue is
+            # mostly in flight: the window then yields nothing, the poller
+            # reads an empty batch as "queue drained", and everything behind
+            # it waits for those claims to expire. Ordering is by `created`,
+            # so the oldest stuck requests are exactly the ones that shadow.
+            window = max(limit * 20, 500)
+            examined = 0
+            for entry in queryset[:window]:
+                examined += 1
                 action_name = self._action_for(entry)
                 if action_name is None:
                     continue
@@ -142,6 +156,17 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                 })
                 if len(jobs) >= limit:
                     break
+            else:
+                if examined >= window and len(jobs) < limit:
+                    # Not silent: the poller stops when a batch comes back
+                    # empty, so a window that ran out without filling is the
+                    # one condition under which work can be left sitting.
+                    logger.warning(
+                        'poller %s: examined %d requests without filling a '
+                        'batch of %d — the queue is long and mostly in '
+                        'flight; work may be waiting behind it',
+                        poller.name, examined, limit,
+                    )
         return jobs
 
     @staticmethod
