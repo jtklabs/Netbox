@@ -739,3 +739,92 @@ class TestThePolledAddressBecomesThePrimaryIP:
             assert len(holders) == 1, f"{len(holders)} holding interfaces after a rescan"
         finally:
             self._cleanup(netbox)
+
+
+class TestALongModuleBayNameIsAccepted:
+    """entPhysicalName is not bounded by NetBox's 64 characters.
+
+    A Nexus line card or an F5 blade can describe its own slot in a sentence,
+    and the POST then failed on the whole module rather than on the name — so
+    the device came out with no modules at all and nothing said why.
+    """
+
+    NAME = "snmpinv-longbay-sw"
+    SITE = "snmpinv-longbay-site"
+    # A real shape: long shared prefix, the identifying part at the end.
+    # Deliberately past 64 characters before the distinguishing suffix — an
+    # earlier version of this was 60 and every assertion passed without the
+    # code under test ever running.
+    PREFIX = ("Chassis 1 Slot 3 Transceiver Module Assembly Cage Sub-Assembly "
+              "Position ")
+
+    def _cleanup(self, netbox):
+        for path, lookup in (
+            ("/dcim/devices/", {"name": self.NAME}),
+            ("/dcim/sites/", {"slug": self.SITE}),
+        ):
+            existing = netbox.first(path, lookup)
+            if existing:
+                netbox._request("DELETE", f"{path}{existing['id']}/")
+
+    def _sync(self, netbox, bay_names):
+        from snmpinv.model import DeviceRecord, ModuleRecord, ScanResult
+        from snmpinv.sync import Syncer, SyncOptions
+
+        site = netbox.ensure("/dcim/sites/", {"slug": self.SITE},
+                             {"name": self.SITE, "slug": self.SITE}, label="site")
+        record = DeviceRecord(name=self.NAME, model="N9K-C93180YC-EX",
+                              serial="LONGBAY01", manufacturer="Cisco")
+        record.modules = [
+            ModuleRecord(bay_name=n, model="N9K-M12PQ", serial=f"MOD{i}",
+                         manufacturer="Cisco")
+            for i, n in enumerate(bay_names)
+        ]
+        Syncer(netbox, SyncOptions()).sync(
+            ScanResult(host="192.0.2.60", devices=[record]), site["id"])
+        device = netbox.first("/dcim/devices/", {"name": self.NAME})
+        return netbox.all("/dcim/module-bays/", {"device_id": device["id"]})
+
+    def test_the_fixture_is_actually_too_long(self):
+        """Guards the rest of this class: at 64 or under, nothing is exercised."""
+        assert len(self.PREFIX + "A") > 64
+
+    def test_the_module_is_created_rather_than_rejected(self, netbox):
+        self._cleanup(netbox)
+        try:
+            bays = self._sync(netbox, [self.PREFIX + "A"])
+            assert len(bays) == 1, "the long bay name lost the module entirely"
+            assert len(bays[0]["name"]) <= 64
+        finally:
+            self._cleanup(netbox)
+
+    def test_bays_sharing_a_long_prefix_stay_distinct(self, netbox):
+        """Truncating from the right would make these one bay, and the last
+        module written would be the only one kept."""
+        self._cleanup(netbox)
+        try:
+            bays = self._sync(netbox, [self.PREFIX + c for c in ("A", "B", "C")])
+            names = {b["name"] for b in bays}
+            assert len(names) == 3, f"bays collapsed onto each other: {names}"
+        finally:
+            self._cleanup(netbox)
+
+    def test_the_full_name_is_kept_in_the_description(self, netbox):
+        """It is what the device called the slot, and how somebody matches the
+        row against `show inventory`."""
+        self._cleanup(netbox)
+        try:
+            full = self.PREFIX + "A"
+            bays = self._sync(netbox, [full])
+            assert bays[0]["description"] == full
+        finally:
+            self._cleanup(netbox)
+
+    def test_a_short_name_is_left_exactly_as_reported(self, netbox):
+        self._cleanup(netbox)
+        try:
+            bays = self._sync(netbox, ["Switch 1 Uplink Module"])
+            assert bays[0]["name"] == "Switch 1 Uplink Module"
+            assert not bays[0]["description"]
+        finally:
+            self._cleanup(netbox)

@@ -40,6 +40,26 @@ log = logging.getLogger(__name__)
 # it between runs would leave orphans behind.
 PRIMARY_IP_INTERFACE_NAME = "mgmt-discovered"
 
+# NetBox's limits, which entPhysicalName cheerfully exceeds. A Nexus line card
+# or an F5 blade can describe its own slot in a sentence, and the POST then
+# fails on the whole module rather than on the name.
+MODULE_BAY_NAME_LENGTH = 64
+MODULE_BAY_DESCRIPTION_LENGTH = 200
+
+
+def _fit(name: str, limit: int) -> str:
+    """Shorten a device-supplied name to something NetBox will accept.
+
+    The tail is kept rather than the head. These names are overwhelmingly a
+    long common prefix — "Chassis 1 Slot 3 Transceiver ..." — with the part
+    that identifies the slot at the end, so truncating from the right produces
+    a set of bays that are all the same string and collapse onto one another.
+    An ellipsis marks it as shortened; the full text goes in the description.
+    """
+    if len(name) <= limit:
+        return name
+    return "…" + name[-(limit - 1):]
+
 SOFTWARE_VERSION_FIELD = "software_version"
 
 # NetBox has no native per-device software version field, so the version needs
@@ -722,11 +742,18 @@ class Syncer:
             module_type = self._ensure_module_type(manufacturer, module.model)
             if module_type is None:
                 continue
+            bay_name = _fit(module.bay_name, MODULE_BAY_NAME_LENGTH)
+            payload = {"device": device["id"], "name": bay_name}
+            if bay_name != module.bay_name:
+                # The full name is worth keeping — it is what the device
+                # called the slot, and it is how somebody matches this row
+                # against the output of `show inventory`.
+                payload["description"] = module.bay_name[:MODULE_BAY_DESCRIPTION_LENGTH]
             bay = self.netbox.ensure(
                 "/dcim/module-bays/",
-                {"device_id": device["id"], "name": module.bay_name},
-                {"device": device["id"], "name": module.bay_name},
-                label=f"module bay {module.bay_name} on {record.name}",
+                {"device_id": device["id"], "name": bay_name},
+                payload,
+                label=f"module bay {bay_name} on {record.name}",
             )
             if bay is None:
                 continue
@@ -738,7 +765,7 @@ class Syncer:
                 self._note_module_replacement(device, existing, module, record)
                 self.netbox.ensure_fields(
                     "/dcim/modules/", existing, desired,
-                    label=f"module in {module.bay_name} on {record.name}",
+                    label=f"module in {bay_name} on {record.name}",
                 )
                 continue
             self.netbox.create(
