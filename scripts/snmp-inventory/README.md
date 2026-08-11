@@ -361,6 +361,19 @@ start a second copy of a unit already running.
 
 `--onboard` replaces the sweep for that run; it does not scan anything else.
 
+**The two are separate queues, and this catches people out.** A request added
+through the onboarding form is an `OnboardingRequest`, not an IPAM address, so
+a plain sweep will never see it however correctly its site and poller resolved
+— you need `--onboard`. Conversely `--onboard` only works the queue and ignores
+your tagged sites entirely. Symptom of using the wrong one: the sweep logs
+`poller poller-x owns 1 of N sites` and then finds nothing.
+
+The poller's **name** must match too, and it is the *bare* form: a site tagged
+`poller-checkmk-us` files its requests under a poller called `checkmk-us`.
+Either form is accepted — check-in strips a leading `poller-` — but the Pollers
+page is the place to confirm it: two rows differing only by that prefix means
+an older poller registered under the wrong one and is holding no work.
+
 ### The same workflow over the API
 
 Everything the form and the buttons do is available over REST, so onboarding

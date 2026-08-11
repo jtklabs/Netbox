@@ -56,6 +56,40 @@ class NetBoxError(Exception):
     """A NetBox request failed in a way the caller cannot paper over."""
 
 
+_warned_about_tls = False
+
+
+def _quieten_tls_warnings() -> None:
+    """Say "TLS verification is off" once, instead of on every request.
+
+    urllib3 raises InsecureRequestWarning per request, and a sweep makes
+    hundreds — which buries the scan's actual output and trains people to stop
+    reading it. The risk it describes is real but it is a property of the
+    configuration, not of any one request, so it belongs in the log once at
+    startup where somebody might act on it.
+
+    Deliberately still said, and at WARNING. Silencing it completely would
+    make an insecure poller look identical to a secure one.
+    """
+    global _warned_about_tls
+    if _warned_about_tls:
+        return
+    _warned_about_tls = True
+    log.warning(
+        "TLS certificate verification is disabled for NetBox (verify_ssl = false) "
+        "— the connection is encrypted but unauthenticated, so the API token "
+        "travels to whatever answers on that address"
+    )
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except (ImportError, AttributeError):
+        # urllib3 vendored differently, or too old to expose that exception.
+        # Nothing to suppress and nothing worth failing a scan over.
+        pass
+
+
 class NetBox:
     def __init__(self, url: str, token: str, verify_ssl: bool = True, timeout: int = 30,
                  dry_run: bool = False, retries: int = 3):
@@ -78,6 +112,8 @@ class NetBox:
             "Content-Type": "application/json",
         })
         self.session.verify = verify_ssl
+        if not verify_ssl:
+            _quieten_tls_warnings()
         self.created: dict[str, int] = {}
         self.updated: dict[str, int] = {}
         # Dry-run stand-ins get descending negative ids. Real NetBox ids are
