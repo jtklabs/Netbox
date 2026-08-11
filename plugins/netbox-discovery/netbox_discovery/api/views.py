@@ -243,6 +243,19 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
         )
 
     @action(detail=True, methods=['post'])
+    def recheck(self, request, pk=None):
+        """Re-resolve against IPAM, keeping the scan already reported."""
+        entry = self.get_object()
+        if not request.user.has_perm('netbox_discovery.change_onboardingrequest'):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            actions.recheck(entry, user=request.user)
+        except actions.TransitionError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(OnboardingRequestSerializer(
+            entry, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'])
     def retry(self, request, pk=None):
         """Queue a failed or unresolvable request again, re-running resolution.
 

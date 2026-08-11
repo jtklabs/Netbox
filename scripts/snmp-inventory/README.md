@@ -374,6 +374,40 @@ Either form is accepted — check-in strips a leading `poller-` — but the Poll
 page is the place to confirm it: two rows differing only by that prefix means
 an older poller registered under the wrong one and is holding no work.
 
+### When a request stops because a prefix was missing
+
+The common one. An address falls outside every prefix, the default region
+still supplies a poller so the device is scanned anyway, and it stops for
+review saying there is nowhere to create it. You create the prefix — now what?
+
+**Re-check IPAM**, on the request's detail page. It re-runs resolution and
+keeps the scan, because the device answered perfectly well and only IPAM was
+missing. If nothing else about the reading needs a decision it goes straight to
+approved, and the next check-in creates the device.
+
+The other two buttons are for different problems, and picking the wrong one
+costs you the scan:
+
+| button | when | the scan |
+|---|---|---|
+| **Re-check IPAM** | IPAM was wrong, the device was fine | kept |
+| **Scan again** | the device's reading is wrong or stale | discarded, re-walked |
+| **Try again** | it never got scanned — failed or unresolved | n/a |
+
+Do **not** reach for `--host` to fix this. That runs the sweep, which writes
+the device straight into DCIM and never touches the queue, so the request stays
+in review for ever and you end up with a device nobody's onboarding record
+points at. If you have already done it, Re-check IPAM still resolves the
+request — applying is idempotent by serial, so the poller adopts the device
+that is already there rather than making a second one.
+
+All three are on the API too:
+
+```bash
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/recheck/" -H "$AUTH"
+curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/retry/"   -H "$AUTH"
+```
+
 ### The same workflow over the API
 
 Everything the form and the buttons do is available over REST, so onboarding

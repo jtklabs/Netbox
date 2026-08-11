@@ -15,7 +15,8 @@ from django.utils import timezone
 
 from netbox_discovery.choices import OnboardingStatusChoices
 
-__all__ = ('TransitionError', 'approve', 'enter_manually', 'reject', 'retry')
+__all__ = ('TransitionError', 'approve', 'enter_manually', 'recheck', 'reject',
+           'retry')
 
 
 class TransitionError(Exception):
@@ -117,6 +118,63 @@ def retry(entry):
     entry.save()
     if entry.status == OnboardingStatusChoices.STATUS_UNRESOLVED:
         raise TransitionError(entry.error)
+    return entry
+
+
+def recheck(entry, user=None):
+    """Re-resolve against IPAM, keeping the scan that has already happened.
+
+    The common shape of this: an address falls outside every prefix, the
+    default region supplies a poller so it still gets scanned, and it stops
+    for review because there is nowhere to create the device. Somebody then
+    creates the prefix — and there was no way to say "look again". Retry would
+    have done the resolution, but by throwing away a perfectly good scan and
+    waiting for a poller to walk the device a second time, which for a device
+    that answered fine is pure delay.
+
+    So this re-runs resolution only. If that supplies what was missing, the
+    request is re-judged by the same rules a fresh scan is judged by: if
+    nothing else about it needs a person, it goes straight to approved and the
+    next check-in applies it. If something does, it stays in review with the
+    current reason rather than the stale one.
+    """
+    from netbox_discovery import review
+
+    if entry.status in OnboardingStatusChoices.TERMINAL:
+        raise TransitionError(
+            'This request is finished (%s); create a new one instead.'
+            % entry.get_status_display()
+        )
+    if not entry.discovered:
+        raise TransitionError(
+            'Nothing has been scanned for this request yet, so there is no '
+            'reading to re-judge. Use Try again to queue it.'
+        )
+
+    entry.error = ''
+    entry.resolve_target()
+    if entry.status == OnboardingStatusChoices.STATUS_UNRESOLVED:
+        # resolve_target marks an address it cannot place as unresolved, which
+        # is right for one that has never been scanned and wrong here: this
+        # one has a reading, and demoting it would lose that it is a request
+        # awaiting a decision. Keep it in review, wearing the reason
+        # resolution just gave for why it still cannot be placed.
+        reason = entry.error
+        entry.status = OnboardingStatusChoices.STATUS_REVIEW
+        entry.save()
+        raise TransitionError(reason)
+
+    needs_review, reason = review.evaluate(entry, entry.discovered)
+    if needs_review:
+        entry.status = OnboardingStatusChoices.STATUS_REVIEW
+        entry.error = reason
+        entry.save()
+        raise TransitionError(reason)
+
+    entry.status = OnboardingStatusChoices.STATUS_APPROVED
+    entry.reviewed_at = timezone.now()
+    entry.reviewed_by = user
+    entry.save()
     return entry
 
 

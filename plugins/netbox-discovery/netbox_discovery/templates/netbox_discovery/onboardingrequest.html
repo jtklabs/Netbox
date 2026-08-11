@@ -197,6 +197,28 @@
         </div>
       {% endif %}
 
+      {% if can_recheck %}
+        <div class="card">
+          <h5 class="card-header">Re-check IPAM</h5>
+          <div class="card-body">
+            <p class="text-muted">
+              If this stopped because no prefix placed the address — and you have
+              since created one, or tagged the site — look again without
+              re-scanning. The device already answered; only IPAM was missing.
+              <strong>The findings above are kept.</strong> If nothing else needs
+              a decision the request is approved, and the next poller check-in
+              creates it.
+            </p>
+            <form action="{% url 'plugins:netbox_discovery:onboardingrequest_recheck' pk=object.pk %}" method="post">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-outline-success">
+                <i class="mdi mdi-map-search" aria-hidden="true"></i> Re-check IPAM
+              </button>
+            </form>
+          </div>
+        </div>
+      {% endif %}
+
       {% if can_retry %}
         <div class="card">
           <h5 class="card-header">

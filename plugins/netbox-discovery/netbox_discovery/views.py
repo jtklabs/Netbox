@@ -75,6 +75,13 @@ class OnboardingRequestView(ObjectView):
                 'role': instance.role,
             }),
             'can_review': instance.status == OnboardingStatusChoices.STATUS_REVIEW,
+            # Offered where it is the answer: a reading exists, and what
+            # stopped it was IPAM rather than the device. Re-resolving keeps
+            # the scan; a rescan would throw away a reading that was fine.
+            'can_recheck': (
+                instance.status == OnboardingStatusChoices.STATUS_REVIEW
+                and bool(instance.discovered)
+            ),
             # Includes review, where it means "scan it again": IPAM is often
             # corrected *after* a scan ran, and the findings on screen are
             # then against the wrong site. The action is the same one
@@ -195,6 +202,25 @@ class OnboardingRejectView(_ReviewActionView):
         except actions.TransitionError as exc:
             return self.deny(request, entry, str(exc))
         messages.success(request, 'Rejected. Nothing was written to DCIM.')
+        return redirect(entry.get_absolute_url())
+
+
+class OnboardingRecheckView(_ReviewActionView):
+    """Re-resolve against IPAM without throwing away the scan."""
+
+    def post(self, request, pk):
+        entry = self.get_object(pk)
+        if not request.user.has_perm(self.permission_required):
+            return self.deny(request, entry, 'You do not have permission to do that.')
+        try:
+            actions.recheck(entry, user=request.user)
+        except actions.TransitionError as exc:
+            return self.deny(request, entry, str(exc))
+        messages.success(
+            request,
+            'IPAM re-checked: this now resolves to %s and is approved. The '
+            'next poller check-in will create it.' % entry.target_site,
+        )
         return redirect(entry.get_absolute_url())
 
 
