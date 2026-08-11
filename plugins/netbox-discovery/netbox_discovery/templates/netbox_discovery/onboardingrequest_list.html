@@ -13,7 +13,14 @@
    findings. #}
 
 {% block bulk_buttons %}
-  <div class="btn-list bulk-action-buttons">
+  {# The dropdown sits OUTSIDE .bulk-action-buttons, and that is load-bearing.
+
+     htmx/table.html replaces that element wholesale on every HTMX response —
+     hx-swap-oob="outerHTML:.bulk-action-buttons" — so anything rendered inside
+     it is destroyed by the first quick search, filter or page change, and only
+     NetBox's own buttons come back. Keeping it a sibling leaves the swap a
+     target of exactly the shape it expects and leaves this alone. #}
+  <div class="d-flex flex-wrap gap-2 align-items-start">
     <div class="dropdown">
       <button type="button" class="btn btn-outline-primary dropdown-toggle"
               data-bs-toggle="dropdown" aria-expanded="false">
@@ -45,7 +52,10 @@
       </ul>
     </div>
 
-    {# Edit, delete and the rest, exactly as NetBox renders them. #}
-    {% action_buttons actions model multi=True %}
+    {# Edit, delete and the rest, exactly as NetBox renders them — in their own
+       element, because that is what the out-of-band swap replaces. #}
+    <div class="btn-list bulk-action-buttons">
+      {% action_buttons actions model multi=True %}
+    </div>
   </div>
 {% endblock %}

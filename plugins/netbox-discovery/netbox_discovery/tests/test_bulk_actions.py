@@ -124,3 +124,120 @@ class BulkActionTest(TestCase):
         self.post('onboardingrequest_bulk_recheck', [entry])
         entry.refresh_from_db()
         self.assertEqual(entry.status, C.STATUS_REVIEW)
+
+
+class TheDropdownSurvivesAQuickSearch(BulkActionTest):
+    """htmx/table.html replaces .bulk-action-buttons wholesale on every HTMX
+    response. Anything rendered inside that element is gone after the first
+    quick search — which is exactly when somebody is narrowing a queue down to
+    the rows they want to act on.
+    """
+
+    def list_html(self, **params):
+        return self.client.get(
+            reverse('plugins:netbox_discovery:onboardingrequest_list'),
+            params).content.decode()
+
+    def bulk_action_element(self, html):
+        """The fragment NetBox's out-of-band swap will replace."""
+        start = html.index('class="btn-list bulk-action-buttons"')
+        return html[start:html.index('</div>', start)]
+
+    def test_the_dropdown_is_not_inside_the_swapped_element(self):
+        self.stuck(10)
+        html = self.list_html()
+        self.assertIn('Discovery actions', html)
+        self.assertNotIn('Discovery actions', self.bulk_action_element(html),
+                         'the dropdown is inside the element HTMX replaces')
+
+    def test_a_quick_search_still_offers_it(self):
+        self.stuck(10)
+        html = self.list_html(q='198.51.100.10')
+        self.assertIn('Discovery actions', html)
+
+    def test_the_htmx_partial_does_not_carry_the_dropdown_away(self):
+        """The partial should replace only NetBox's own buttons. If it carried
+        a copy of the dropdown, the two would fight over the same element."""
+        self.stuck(10)
+        response = self.client.get(
+            reverse('plugins:netbox_discovery:onboardingrequest_list'),
+            {'q': '198.51.100.10'}, headers={'HX-Request': 'true'})
+        body = response.content.decode()
+        self.assertIn('hx-swap-oob', body, 'not an HTMX partial at all')
+        self.assertNotIn('Discovery actions', body)
+
+    def test_the_actions_still_work_on_a_filtered_selection(self):
+        """The point of searching first is acting on what you found."""
+        wanted = self.stuck(10)
+        other = self.stuck(99)
+        self.add_prefix()
+        self.post('onboardingrequest_bulk_recheck', [wanted])
+        wanted.refresh_from_db(); other.refresh_from_db()
+        self.assertEqual(wanted.status, C.STATUS_APPROVED)
+        self.assertEqual(other.status, C.STATUS_REVIEW)
+
+
+class ApplyingTheSwapTheWayHtmxDoes(BulkActionTest):
+    """The structural tests above say the dropdown sits outside the swapped
+    element. This performs the swap and checks what is actually left.
+
+    htmx reads hx-swap-oob="outerHTML:.bulk-action-buttons" and replaces the
+    first element matching that selector with the one carrying the attribute.
+    Reproduced here rather than asserted about, because the bug was that the
+    replacement quietly took the dropdown with it.
+    """
+
+    @staticmethod
+    def element_span(html, needle):
+        """(start, end) of the element containing `needle`, honouring nesting."""
+        from html.parser import HTMLParser
+
+        anchor = html.index(needle)
+        start = html.rindex('<div', 0, anchor)
+
+        class Walker(HTMLParser):
+            depth = 0
+            end = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == 'div':
+                    self.depth += 1
+
+            def handle_endtag(self, tag):
+                if tag == 'div':
+                    self.depth -= 1
+                    if self.depth == 0 and self.end is None:
+                        line, col = self.getpos()
+                        self.end = col
+
+        walker = Walker()
+        rest = html[start:]
+        walker.feed(rest)
+        # Fall back to the raw close tag when the fragment is malformed.
+        close = rest.rindex('</div>') + len('</div>')
+        return start, start + close
+
+    def test_the_dropdown_is_still_there_after_the_swap(self):
+        self.stuck(10)
+        url = reverse('plugins:netbox_discovery:onboardingrequest_list')
+        page = self.client.get(url).content.decode()
+        partial = self.client.get(
+            url, {'q': '198.51.100.10'},
+            headers={'HX-Request': 'true'}).content.decode()
+
+        self.assertIn('Discovery actions', page)
+        self.assertIn('hx-swap-oob="outerHTML:.bulk-action-buttons"', partial)
+
+        # The replacement htmx would splice in...
+        rep_start, rep_end = self.element_span(
+            partial, 'hx-swap-oob="outerHTML:.bulk-action-buttons"')
+        replacement = partial[rep_start:rep_end]
+        # ...over the first matching element on the page.
+        old_start, old_end = self.element_span(
+            page, 'class="btn-list bulk-action-buttons"')
+        swapped = page[:old_start] + replacement + page[old_end:]
+
+        self.assertIn('Discovery actions', swapped,
+                      'the out-of-band swap removed the dropdown')
+        self.assertIn('bulk-action-buttons', swapped,
+                      "NetBox's own buttons did not survive either")
