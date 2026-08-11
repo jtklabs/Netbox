@@ -773,6 +773,17 @@ class Syncer:
 
     # --- interfaces and addresses -------------------------------------------
 
+    # Interface names that carry the management address on the platforms this
+    # scanner supports, lowercased. Used only to place an address the device
+    # answered on but did not list — see _ensure_primary_ip.
+    MANAGEMENT_INTERFACE_NAMES = (
+        "management1", "management0", "ma1",            # Arista
+        "gigabitethernet0/0", "fastethernet0",          # Cisco OOB
+        "fxp0", "me0", "vme",                           # Juniper
+        "mgmt", "management", "mgmt0", "mgt",           # F5, Palo Alto, Fortinet
+        "eth0", "eth1",                                 # appliances
+    )
+
     def _sync_interfaces(self, device: dict | None, record: DeviceRecord,
                          scanned_address: str, tenant_id: int | None = None) -> None:
         if device is None or not record.interfaces:
@@ -804,6 +815,92 @@ class Syncer:
                             "%s on %s: %s — skipped, continuing with the device",
                             cidr, interface.name, exc,
                         )
+
+        if self.options.set_primary_ip and scanned_address:
+            self._ensure_primary_ip(device, scanned_address, tenant_id)
+
+    def _ensure_primary_ip(self, device: dict, scanned_address: str,
+                           tenant_id: int | None = None) -> None:
+        """Make the address we polled the primary IP, even if unreported.
+
+        The address we scanned is the one an operator will reach this device
+        on, so it is the one that belongs in the primary field — that is the
+        whole reason the scan targeted it.
+
+        It is normally set as a side effect of syncing the interface that
+        reports it. Plenty of platforms never report it: an Arista's
+        Management1 sits in a separate VRF that the default ipAddressTable
+        does not expose, and several appliances list no addresses at all. On
+        those the device came out with the field empty, which reads as "this
+        platform cannot tell us" when in fact we knew the answer before we
+        started.
+
+        NetBox will not accept a primary that is not assigned to one of the
+        device's interfaces, so the address has to be placed somewhere. It goes
+        on the management interface if the device has one — that is where an
+        address the device answers SNMP on actually lives — and the inference
+        is logged, because it is an inference. If there is no such interface
+        the reason is logged rather than the field being left quietly blank.
+        """
+        if device.get("id", 0) < 0:
+            # A dry-run placeholder. Negative ids exist only in this process,
+            # so reading one back is a guaranteed 404 — and there is nothing
+            # to write either. Say what would happen and stop.
+            log.info("would set %s as the primary IP of %s",
+                     scanned_address, device.get("name"))
+            return
+
+        # Refetched because the interface loop may have set it a moment ago,
+        # and the dict we were handed predates that.
+        fresh = self.netbox.get(f"/dcim/devices/{device['id']}/")
+        if (fresh.get("primary_ip4") or {}).get("id"):
+            return          # an interface reported it; nothing to infer
+
+        interfaces = self.netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
+        if not interfaces:
+            log.warning(
+                "%s has no interfaces, so %s cannot be set as its primary IP",
+                device.get("name"), scanned_address,
+            )
+            return
+
+        # An existing address object already on this device wins outright: no
+        # inference needed, and it keeps the mask somebody else recorded.
+        by_id = {iface["id"] for iface in interfaces}
+        for candidate in self.netbox.all("/ipam/ip-addresses/",
+                                         {"address": scanned_address}):
+            assigned = candidate.get("assigned_object_id")
+            if assigned in by_id:
+                self._set_primary_ip(fresh, candidate)
+                return
+
+        chosen = next(
+            (i for i in interfaces
+             if (i.get("name") or "").lower() in self.MANAGEMENT_INTERFACE_NAMES),
+            None,
+        )
+        if chosen is None:
+            log.warning(
+                "%s did not report %s on any interface and has no management "
+                "interface to attach it to, so it has no primary IP",
+                device.get("name"), scanned_address,
+            )
+            return
+
+        # /32: the device never told us the mask, and inventing one would put a
+        # wrong prefix into IPAM. A host route is the honest form of "the
+        # device answers here".
+        cidr = f"{scanned_address}/32"
+        log.info(
+            "%s did not report %s on any interface — recording it on %s, "
+            "which is where a management address lives on this platform",
+            device.get("name"), scanned_address, chosen.get("name"),
+        )
+        try:
+            self._ensure_ip(fresh, chosen, cidr, scanned_address, tenant_id)
+        except NetBoxError as exc:
+            log.warning("could not record %s on %s: %s",
+                        cidr, chosen.get("name"), exc)
 
     def _ensure_interface(self, device: dict, interface: InterfaceRecord,
                           existing_by_name: dict) -> dict | None:

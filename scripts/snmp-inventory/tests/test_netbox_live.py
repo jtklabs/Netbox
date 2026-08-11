@@ -601,3 +601,98 @@ class TestOneBadAddressDoesNotSinkTheDevice:
             )
         finally:
             self._cleanup(netbox)
+
+
+class TestThePolledAddressBecomesThePrimaryIP:
+    """The address we targeted is the one an operator reaches the box on.
+
+    It is normally set as a side effect of syncing the interface that reports
+    it — but plenty of platforms never report it. An Arista's Management1 is
+    in a VRF the default ipAddressTable does not expose, and several
+    appliances list no addresses at all, so those devices arrived with the
+    field blank as though the platform could not tell us, when we knew the
+    answer before the scan started.
+    """
+
+    NAME = "snmpinv-primary-sw"
+    SITE = "snmpinv-primary-site"
+
+    def _cleanup(self, netbox):
+        for path, lookup in (
+            ("/dcim/devices/", {"name": self.NAME}),
+            ("/dcim/sites/", {"slug": self.SITE}),
+        ):
+            existing = netbox.first(path, lookup)
+            if existing:
+                netbox._request("DELETE", f"{path}{existing['id']}/")
+        for stray in netbox.all("/ipam/ip-addresses/", {"address": "10.30.0.11/32"}):
+            netbox._request("DELETE", f"/ipam/ip-addresses/{stray['id']}/")
+
+    def _sync(self, netbox, interfaces):
+        from snmpinv.model import DeviceRecord, ScanResult
+        from snmpinv.sync import Syncer, SyncOptions
+
+        site = netbox.create("/dcim/sites/", {
+            "name": self.SITE, "slug": self.SITE,
+        }, label="site")
+        record = DeviceRecord(
+            name=self.NAME, model="DCS-7050SX-72Q", serial="PRIMARY01",
+            manufacturer="Arista Networks",
+        )
+        record.interfaces = interfaces
+        Syncer(netbox, SyncOptions()).sync(
+            ScanResult(host="10.30.0.11", devices=[record]),
+            site["id"], scanned_address="10.30.0.11",
+        )
+        device = netbox.first("/dcim/devices/", {"name": self.NAME})
+        return netbox.get(f"/dcim/devices/{device['id']}/")
+
+    def test_it_is_set_when_the_device_never_reported_the_address(self, netbox):
+        """The Arista case: Management1 exists in ifTable, but its address is
+        in a VRF the address table does not show."""
+        from snmpinv.model import InterfaceRecord
+
+        self._cleanup(netbox)
+        try:
+            device = self._sync(netbox, [
+                InterfaceRecord(name="Ethernet1", type_slug="10gbase-x-sfpp"),
+                InterfaceRecord(name="Management1", type_slug="1000base-t"),
+            ])
+            primary = (device.get("primary_ip4") or {}).get("address")
+            assert primary == "10.30.0.11/32", (
+                f"the polled address did not become the primary IP (got {primary})"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_a_reported_address_still_wins_and_keeps_its_mask(self, netbox):
+        """The inference must not override what the device actually said."""
+        from snmpinv.model import InterfaceRecord
+
+        self._cleanup(netbox)
+        try:
+            device = self._sync(netbox, [
+                InterfaceRecord(name="Management1", type_slug="1000base-t",
+                                ip_addresses=["10.30.0.11/24"]),
+            ])
+            primary = (device.get("primary_ip4") or {}).get("address")
+            assert primary == "10.30.0.11/24", (
+                f"the reported mask was lost (got {primary})"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_no_management_interface_leaves_it_unset_rather_than_guessing(self, netbox):
+        """Attaching the address to an arbitrary data port would be a
+        fabrication; the log says why instead."""
+        from snmpinv.model import InterfaceRecord
+
+        self._cleanup(netbox)
+        try:
+            device = self._sync(netbox, [
+                InterfaceRecord(name="Ethernet1", type_slug="10gbase-x-sfpp"),
+                InterfaceRecord(name="Ethernet2", type_slug="10gbase-x-sfpp"),
+            ])
+            assert not (device.get("primary_ip4") or {}).get("address")
+        finally:
+            self._cleanup(netbox)
