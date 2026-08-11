@@ -97,6 +97,18 @@ class DiscoveryPoller(PrimaryModel):
         threshold = timedelta(minutes=plugin_setting('poller_stale_after_minutes'))
         return timezone.now() - self.last_seen_at > threshold
 
+    @property
+    def is_checking_in(self):
+        """The healthy state, stated positively.
+
+        is_stale is the right question for the code — everything that acts on
+        it is asking "should I worry?" — and the wrong one for a column. A
+        boolean column renders false as a red cross, so a poller doing exactly
+        what it should showed a red cross under a heading that said Stale, and
+        read as a fault. The list asks this instead, so green means well.
+        """
+        return not self.is_stale
+
     def get_status_color(self):
         return 'red' if self.is_stale else 'green'
 

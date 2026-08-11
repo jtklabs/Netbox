@@ -53,7 +53,11 @@ class DiscoveryPollerTable(NetBoxTable):
     name = tables.Column(linkify=True)
     tenant = tables.Column(linkify=True)
     last_seen_at = columns.DateTimeColumn(verbose_name='Last check-in')
-    is_stale = columns.BooleanColumn(verbose_name='Stale')
+    # Asked positively: a BooleanColumn draws false as a red cross, so a column
+    # headed "Stale" put a red cross against every healthy poller.
+    is_checking_in = columns.BooleanColumn(
+        verbose_name='Checking in', orderable=False,
+    )
     open_requests = tables.Column(
         accessor='requests__count', orderable=False, verbose_name='Open requests'
     )
@@ -62,10 +66,11 @@ class DiscoveryPollerTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DiscoveryPoller
         fields = (
-            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'is_stale', 'version',
+            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'is_checking_in', 'version',
             'last_scan_summary', 'open_requests', 'description', 'tags',
         )
-        default_columns = ('name', 'last_seen_at', 'is_stale', 'version', 'last_scan_summary')
+        default_columns = ('name', 'last_seen_at', 'is_checking_in', 'version',
+                       'last_scan_summary')
 
 
 class HardwareReplacementTable(NetBoxTable):

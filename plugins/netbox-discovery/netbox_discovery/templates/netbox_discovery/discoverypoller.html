@@ -31,6 +31,12 @@
               This poller has not checked in recently. Requests assigned to it will
               sit in the queue until it runs again.
             </p>
+          {% else %}
+            <p class="text-success mb-0">
+              <i class="mdi mdi-check-circle-outline" aria-hidden="true"></i>
+              This poller is checking in. Requests assigned to it will be picked
+              up on its next run.
+            </p>
           {% endif %}
         </div>
       </div>
