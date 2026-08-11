@@ -5,6 +5,7 @@ from dcim.models import (
     Manufacturer,
     ModuleType,
     Platform,
+    Region,
     Site,
 )
 from django import forms
@@ -302,6 +303,11 @@ class RefreshReportForm(forms.Form):
     before = forms.DateField(required=False, widget=DatePicker(), label='and')
     manufacturer = DynamicModelMultipleChoiceField(
         queryset=Manufacturer.objects.all(), required=False,
+    )
+    region = DynamicModelMultipleChoiceField(
+        queryset=Region.objects.all(), required=False,
+        help_text='Only count installed units in these regions, including any '
+                  'nested inside them',
     )
     site = DynamicModelMultipleChoiceField(
         queryset=Site.objects.all(), required=False,

@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from dcim.models import Device, DeviceType, Module, ModuleType
+from dcim.models import Device, DeviceType, Module, ModuleType, Region, Site
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.db.models import Count
@@ -86,6 +86,35 @@ class ModelLifecycleBulkImportView(BulkImportView):
     model_form = forms.ModelLifecycleImportForm
 
 
+def _sites_in_scope(regions, sites):
+    """The sites a report is scoped to, from either filter or both.
+
+    Regions nest, so selecting EMEA has to mean every site under it and not
+    just the ones parented directly to it — otherwise the report quietly
+    reports on a fraction of the estate and reads as though the rest owns no
+    hardware.
+
+    Given both, the intersection is used: two filters shown together read as
+    narrowing, and a site outside the chosen regions is a contradiction rather
+    than an addition. Returning None means "no scope", which is not the same
+    as an empty list — that would be "no sites at all" and would count nothing.
+    """
+    if not regions and not sites:
+        return None
+    if not regions:
+        return list(sites)
+
+    within = Site.objects.filter(
+        region__in=Region.objects.filter(
+            pk__in=[r.pk for r in regions]
+        ).get_descendants(include_self=True)
+    )
+    if sites:
+        chosen = {s.pk for s in sites}
+        return [s for s in within if s.pk in chosen]
+    return list(within)
+
+
 class RefreshReportView(PermissionRequiredMixin, View):
     """Hardware reaching a lifecycle milestone in a window, with replacement cost.
 
@@ -105,7 +134,7 @@ class RefreshReportView(PermissionRequiredMixin, View):
         after = data.get('after')
         before = data.get('before')
         manufacturers = data.get('manufacturer')
-        sites = data.get('site')
+        sites = _sites_in_scope(data.get('region'), data.get('site'))
 
         # Annotated unconditionally so the report can filter and sort on the
         # effective end-of-life the same way it does a stored column; the
