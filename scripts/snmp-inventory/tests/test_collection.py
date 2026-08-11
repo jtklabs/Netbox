@@ -600,3 +600,34 @@ class TestPrefixLengthsThatCannotBeRight:
             got = self.check(addr, int(length))
             kept = got == int(length)
             assert kept == expected_ok, f"{cidr}: kept={kept}, expected {expected_ok}"
+
+
+class TestAccessPointsGetASoftwareVersion:
+    """APs were the one device class arriving with the field blank.
+
+    The controller's AP table reports no version column, so nothing was ever
+    populated — every AP in the estate landed in NetBox with no software
+    version, which for a wireless fleet is most of the devices.
+    """
+
+    def setup_method(self):
+        self.result = scan("aruba-7010-wlc")
+
+    def test_every_ap_has_one(self):
+        assert self.result.access_points
+        for ap in self.result.access_points:
+            assert ap.software_version, f"{ap.name} has no software version"
+
+    def test_it_is_the_controllers_version(self):
+        """Campus APs run the image the controller pushes, so this is the
+        version they are actually running, not a guess."""
+        controller = self.result.primary.software_version
+        assert controller == "8.10.0.4"
+        assert {ap.software_version for ap in self.result.access_points} == {controller}
+
+    def test_the_aps_keep_their_own_model_and_serial(self):
+        """Inheriting the version must not bleed into anything else."""
+        by_name = {ap.name: ap for ap in self.result.access_points}
+        assert by_name["dal-ap-101"].model == "AP-515"
+        assert by_name["dal-ap-103"].model == "AP-535"
+        assert by_name["dal-ap-101"].serial != self.result.primary.serial

@@ -97,6 +97,33 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
     if facts.vendor_serial:
         _row(w, "Serial (vendor OID)", facts.vendor_serial)
 
+    # Shown whenever something is missing, because "no version" has two very
+    # different causes and the report should say which: either no profile
+    # matched this sysObjectID so nothing was ever asked, or the OIDs were
+    # asked and the device had nothing at them. Only the second is a wrong OID.
+    missing = [
+        label for label, value in (
+            ("software version", facts.software_version),
+            ("model", facts.vendor_model),
+            ("serial", facts.vendor_serial),
+        ) if not value
+    ]
+    if missing and profile is None:
+        w(f"\n  No vendor profile matches this sysObjectID, so no vendor OIDs\n")
+        w(f"  were asked for at all — hence no {', '.join(missing)}.\n")
+        w(f"  The enterprise arc is what selects the profile; send the walk\n")
+        w(f"  (--save-walk) if this platform needs one adding.\n")
+    elif missing and facts.vendor_scalars:
+        w(f"\n  Nothing reported for: {', '.join(missing)}. What was asked:\n")
+        for oid, value in facts.vendor_scalars.items():
+            kind = ("version" if oid in (profile.version_oids or ()) else
+                    "serial" if oid in (profile.serial_oids or ()) else "model")
+            shown = "(no such object on this device)" if value is None else (
+                repr(value) if value else "(empty string)")
+            w(f"    {kind:<8} {oid:<34} {shown}\n")
+        w("  An OID the device does not implement is the usual cause; the walk\n")
+        w("  (--save-walk) is what says where this platform puts it instead.\n")
+
     chassis = facts.chassis_entities()
     _section(w, f"CHASSIS — ENTITY-MIB ({len(chassis)})")
     if chassis:

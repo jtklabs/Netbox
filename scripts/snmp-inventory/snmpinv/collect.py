@@ -162,6 +162,10 @@ class DeviceFacts:
     software_version: str = ""
     vendor_serial: str = ""
     vendor_model: str = ""
+    # Every vendor scalar that was asked for, and what it returned. None means
+    # the device had no such object. Diagnostic only — nothing reads it to
+    # decide anything, it exists so --probe can explain an empty version.
+    vendor_scalars: dict = field(default_factory=dict)
     profile: vendors.VendorProfile | None = None
 
     def chassis_entities(self) -> list[Entity]:
@@ -591,6 +595,13 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
     except SnmpError as exc:
         log.debug("%s: vendor scalars unavailable (%s)", host, exc)
         return
+    # Kept so the probe can show what was asked and what came back. When a
+    # platform reports no version the question is always "was the OID wrong,
+    # or did the device answer nothing?", and only the raw result answers it.
+    facts.vendor_scalars = {
+        oid: (found[oid].value if oid in found else None) for oid in wanted
+    }
+
     for oid in profile.version_oids:
         if oid in found and found[oid].value:
             facts.software_version = found[oid].value

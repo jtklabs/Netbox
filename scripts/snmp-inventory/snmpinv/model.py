@@ -475,6 +475,14 @@ def _build_access_points(facts: DeviceFacts) -> list[DeviceRecord]:
             model=access_point.model,
             manufacturer="Aruba Networks",
             platform="ArubaOS",
+            # Campus APs do not hold their own image: the controller pushes it,
+            # and every AP it terminates runs the version the controller runs.
+            # The AP table reports no version of its own, so inheriting the
+            # controller's is the only way these get one at all, and it is
+            # right except in the minutes mid-upgrade when APs are reloading in
+            # batches. A version that is briefly stale beats a field that is
+            # permanently blank on every AP in the estate.
+            software_version=facts.software_version,
             description=f"AP group {access_point.group}" if access_point.group else "",
             is_access_point=True,
         ))
