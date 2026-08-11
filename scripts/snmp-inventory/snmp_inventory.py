@@ -230,40 +230,79 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
     Run this on a short timer — a couple of minutes — because a person is
     sitting in NetBox waiting for it. The full sweep is the slow nightly job;
     this is the responsive one.
+
+    Keeps checking in until the queue comes back empty. One check-in returns a
+    bounded batch, so that a poller dying mid-run strands only that batch's
+    claims — but stopping after the first batch turned the batch size into a
+    throughput limit: at 25 a batch on a one-minute timer, importing 500
+    devices took twenty minutes of mostly waiting for the next tick. Draining
+    is safe because the work is claimed as it is handed out, so another poller
+    and the next tick of this one both step around what this run already took.
     """
     started = time.time()
-    try:
-        # Straight to the check-in. This runs from cron every minute or two on
-        # every poller and nearly always has nothing to do, so the idle cost is
-        # deliberately one request — probing for the plugin first would triple
-        # it to diagnose a problem that almost never exists.
-        jobs = onboarding.check_in(
-            netbox, config.poller_name,
-            version=__version__,
-            summary=args.summary,
-            claim=not args.dry_run,
-            limit=args.limit or 25,
-        )
-    except NetBoxError as exc:
-        if not onboarding.plugin_available(netbox):
-            log.error(
-                "the Discovery plugin is not installed on %s, so there is no "
-                "onboarding queue to work", config.netbox.url
-            )
-            return 2
-        log.error("check-in failed: %s", exc)
-        return 1
+    counts: dict[str, int] = {}
+    total = 0
+    # An explicit --limit means "do at most this much this run", honoured as a
+    # total rather than per batch. Without it, drain the queue.
+    budget = args.limit or 0
+    batch_size = min(budget, 25) if budget else 25
 
-    if not jobs:
-        log.info("check-in: nothing waiting")
+    while True:
+        try:
+            # Straight to the check-in. This runs from cron every minute or two
+            # on every poller and nearly always has nothing to do, so the idle
+            # cost is deliberately one request — probing for the plugin first
+            # would triple it to diagnose a problem that almost never exists.
+            jobs = onboarding.check_in(
+                netbox, config.poller_name,
+                version=__version__,
+                summary=args.summary,
+                claim=not args.dry_run,
+                limit=batch_size,
+            )
+        except NetBoxError as exc:
+            if not onboarding.plugin_available(netbox):
+                log.error(
+                    "the Discovery plugin is not installed on %s, so there is no "
+                    "onboarding queue to work", config.netbox.url
+                )
+                return 2
+            log.error("check-in failed: %s", exc)
+            # Work already done this run still counts; failing the whole run
+            # would make a transient error look like nothing happened.
+            return 1 if not total else 0
+
+        if not jobs:
+            if not total:
+                log.info("check-in: nothing waiting")
+            break
+
+        # Emptiness ends this, not a short batch. A batch can come back short
+        # while actionable work remains — requests already in flight are
+        # skipped over — so treating "fewer than asked for" as "drained" would
+        # stall the queue behind whatever sat at the front of it.
+        log.info("check-in: %d job(s)", len(jobs))
+        for name, n in onboarding.run_jobs(
+            netbox, collector, syncer, jobs,
+            dry_run=args.dry_run, workers=config.snmp.workers,
+        ).items():
+            counts[name] = counts.get(name, 0) + n
+        total += len(jobs)
+
+        if budget and total >= budget:
+            # Said out loud, because a silent cap reads as an empty queue.
+            log.info("stopping at --limit %d; run again to take the rest", budget)
+            break
+        if budget:
+            batch_size = min(budget - total, 25)
+
+    if not total:
         return 0
 
-    counts = onboarding.run_jobs(netbox, collector, syncer, jobs,
-                                 dry_run=args.dry_run,
-                                 workers=config.snmp.workers)
     summary = ", ".join("%d %s" % (n, name) for name, n in sorted(counts.items()))
-    log.info("onboarding done in %.1fs — %s; NetBox: %s",
-             time.time() - started, summary or "nothing done", netbox.summary())
+    log.info("onboarding done in %.1fs — %d job(s): %s; NetBox: %s",
+             time.time() - started, total, summary or "nothing done",
+             netbox.summary())
     return 0
 
 
