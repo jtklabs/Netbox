@@ -42,11 +42,18 @@ class ModelLifecycleTable(NetBoxTable):
     installed_count = tables.Column(orderable=False, verbose_name='Installed')
     extended_cost = tables.Column(orderable=False, verbose_name='Total cost')
     source = columns.ChoiceFieldColumn()
+    # Not a stored column, so it cannot be ordered on here — the refresh report
+    # annotates the same value in SQL when it needs to sort or filter.
+    effective_end_of_life = columns.DateColumn(
+        orderable=False, verbose_name='End of life',
+        accessor='effective_end_of_life',
+    )
 
     class Meta(NetBoxTable.Meta):
         model = ModelLifecycle
         fields = (
             'pk', 'assigned_object', 'manufacturer', 'part_number', 'status',
+            'effective_end_of_life',
             'announcement_date', 'end_of_sale', 'end_of_sw_maintenance',
             'end_of_security_support', 'end_of_routine_failure_analysis',
             'end_of_service_attach', 'end_of_service_contract_renewal', 'end_of_support',
@@ -55,7 +62,8 @@ class ModelLifecycleTable(NetBoxTable):
             'description',
         )
         default_columns = (
-            'assigned_object', 'part_number', 'status', 'end_of_sale', 'end_of_support',
+            'assigned_object', 'part_number', 'status', 'end_of_sale',
+            'end_of_support', 'effective_end_of_life',
             'replacement', 'replacement_cost', 'installed_count', 'extended_cost',
         )
 

@@ -282,6 +282,11 @@ class RefreshReportForm(forms.Form):
     """Filters for the refresh cost report."""
 
     DATE_FIELD_CHOICES = (
+        # First and default: the one that actually binds a refresh. See
+        # ModelLifecycle.effective_end_of_life — a model can sit under a
+        # support contract for years after its last security fix, and it is
+        # the security date that says when the hardware has to be gone.
+        ('effective_eol', 'End of life (soonest of support / security)'),
         ('end_of_support', 'End of support'),
         ('end_of_sale', 'End of sale'),
         ('end_of_security_support', 'End of security support'),
@@ -290,7 +295,7 @@ class RefreshReportForm(forms.Form):
     )
 
     date_field = forms.ChoiceField(
-        choices=DATE_FIELD_CHOICES, initial='end_of_support', required=False,
+        choices=DATE_FIELD_CHOICES, initial='effective_eol', required=False,
         label='Milestone',
     )
     after = forms.DateField(required=False, widget=DatePicker(), label='Between')

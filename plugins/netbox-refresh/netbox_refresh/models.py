@@ -27,6 +27,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Least
 from django.urls import reverse
 from django.utils import timezone
 from netbox.models import PrimaryModel
@@ -54,6 +55,25 @@ LIFECYCLE_ASSIGNMENT_MODELS = Q(app_label='dcim', model__in=('devicetype', 'modu
 # are wanted: "all IOS-XE runs 17.09.04a" as the broad rule, "but 9500s run
 # 17.12.03" as the override. Resolution order is in compliance.py.
 STANDARD_ASSIGNMENT_MODELS = Q(app_label='dcim', model__in=('devicetype', 'platform'))
+
+
+# The annotation deliberately does not share the property's name. Django
+# assigns an annotation onto each instance it loads, and `effective_end_of_life`
+# is a read-only property, so a same-named annotation raises "property has no
+# setter" the moment a query returns a row -- passing cleanly on an empty one.
+EFFECTIVE_EOL_ALIAS = 'effective_eol'
+
+
+def effective_end_of_life_expression():
+    """The ORM form of ModelLifecycle.effective_end_of_life.
+
+    A property cannot be filtered or sorted on in the database, and the refresh
+    report does both. Postgres's LEAST ignores NULLs — verified against the
+    running instance, because Django's docs note MySQL, Oracle and SQLite
+    return NULL instead, and on those this expression would silently hide every
+    model with only one of the two dates published.
+    """
+    return Least('end_of_security_support', 'end_of_support')
 
 
 class ModelLifecycle(PrimaryModel):
@@ -209,9 +229,28 @@ class ModelLifecycle(PrimaryModel):
         return Decimal(self.replacement_cost) * self.installed_count
 
     @property
+    def effective_end_of_life(self):
+        """The date this model stops being safe to run, for refresh planning.
+
+        The soonest of end-of-security-support and end-of-support, because
+        those are two different kinds of over and the earlier one is what
+        binds. A model can stay under a support contract for years after its
+        last security fix: TAC will still take the call, and the box still
+        cannot be patched. For anything reachable from a network that is the
+        date the hardware has to be gone by, so planning against
+        end-of-support alone quietly schedules a refresh for after the point
+        the estate is already carrying unpatchable devices.
+
+        Either date may be missing — vendors publish them at different times —
+        so whichever is known wins, and None means neither has been published.
+        """
+        published = [d for d in (self.end_of_security_support, self.end_of_support) if d]
+        return min(published) if published else None
+
+    @property
     def status(self):
         today = date.today()
-        if self.end_of_support and self.end_of_support <= today:
+        if self.effective_end_of_life and self.effective_end_of_life <= today:
             return LifecycleStatusChoices.STATUS_END_OF_SUPPORT
         if self.end_of_sale and self.end_of_sale <= today:
             return LifecycleStatusChoices.STATUS_END_OF_SALE

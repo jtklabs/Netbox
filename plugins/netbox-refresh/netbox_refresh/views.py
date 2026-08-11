@@ -19,6 +19,10 @@ from utilities.views import register_model_view
 
 from netbox_refresh import compliance, filtersets, forms, tables
 from netbox_refresh.models import (
+    EFFECTIVE_EOL_ALIAS,
+    effective_end_of_life_expression,
+)
+from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
     SoftwareStandard,
@@ -97,14 +101,19 @@ class RefreshReportView(PermissionRequiredMixin, View):
         form.is_valid()
         data = form.cleaned_data if form.is_bound else {}
 
-        date_field = data.get('date_field') or 'end_of_support'
+        date_field = data.get('date_field') or EFFECTIVE_EOL_ALIAS
         after = data.get('after')
         before = data.get('before')
         manufacturers = data.get('manufacturer')
         sites = data.get('site')
 
+        # Annotated unconditionally so the report can filter and sort on the
+        # effective end-of-life the same way it does a stored column; the
+        # model property cannot be used in a query.
         queryset = ModelLifecycle.objects.prefetch_related(
             'assigned_object_type', 'replacement_device_type', 'replacement_module_type'
+        ).annotate(
+            **{EFFECTIVE_EOL_ALIAS: effective_end_of_life_expression()}
         ).filter(**{'%s__isnull' % date_field: False})
         if after:
             queryset = queryset.filter(**{'%s__gte' % date_field: after})
