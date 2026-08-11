@@ -102,6 +102,16 @@ def retry(entry):
         )
     entry.error = ''
     entry.claimed_at = None
+    # Findings from the previous scan go, because they are the thing being
+    # redone: they were derived against whatever IPAM said at the time, which
+    # is exactly what the retry is correcting. Leaving them would show a stale
+    # reading on the detail page until a poller happened to replace it.
+    #
+    # Hand-entered details are kept. Nobody typed those expecting a button
+    # called "try again" to delete them, and no rescan can reproduce them —
+    # a device that had to be described by hand is one that does not answer.
+    if not entry.manually_entered:
+        entry.discovered = {}
     entry.status = OnboardingStatusChoices.STATUS_PENDING
     entry.resolve_target()
     entry.save()

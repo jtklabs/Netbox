@@ -199,16 +199,29 @@
 
       {% if can_retry %}
         <div class="card">
-          <h5 class="card-header">Try again</h5>
+          <h5 class="card-header">
+            {% if retry_discards_findings %}Scan again{% else %}Try again{% endif %}
+          </h5>
           <div class="card-body">
             <p class="text-muted">
-              Fix what the problem above describes — usually a missing prefix or an
-              untagged site — then queue this address again without re-typing it.
+              {% if retry_discards_findings %}
+                If IPAM changed since this was scanned — a prefix added, a site
+                tagged — the findings above were worked out against the old
+                answer. Scanning again re-resolves the address and puts it back
+                in the queue.
+                <strong>The findings above are discarded</strong>, and the
+                device is walked afresh on the next poller run.
+              {% else %}
+                Fix what the problem above describes — usually a missing prefix or an
+                untagged site — then queue this address again without re-typing it.
+              {% endif %}
             </p>
             <form action="{% url 'plugins:netbox_discovery:onboardingrequest_retry' pk=object.pk %}" method="post">
               {% csrf_token %}
-              <button type="submit" class="btn btn-outline-primary">
-                <i class="mdi mdi-refresh" aria-hidden="true"></i> Queue again
+              <button type="submit"
+                      class="btn {% if retry_discards_findings %}btn-outline-warning{% else %}btn-outline-primary{% endif %}">
+                <i class="mdi mdi-refresh" aria-hidden="true"></i>
+                {% if retry_discards_findings %}Scan again{% else %}Queue again{% endif %}
               </button>
             </form>
           </div>

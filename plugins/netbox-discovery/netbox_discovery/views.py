@@ -75,10 +75,22 @@ class OnboardingRequestView(ObjectView):
                 'role': instance.role,
             }),
             'can_review': instance.status == OnboardingStatusChoices.STATUS_REVIEW,
+            # Includes review, where it means "scan it again": IPAM is often
+            # corrected *after* a scan ran, and the findings on screen are
+            # then against the wrong site. The action is the same one
+            # actions.retry() has always allowed here — the UI was the only
+            # thing refusing, which left the two front doors disagreeing.
             'can_retry': instance.status in (
                 OnboardingStatusChoices.STATUS_FAILED,
                 OnboardingStatusChoices.STATUS_UNRESOLVED,
+                OnboardingStatusChoices.STATUS_REVIEW,
             ),
+            # A request awaiting review already holds findings, so queueing it
+            # again throws them away. Same action, different thing to warn
+            # about, and it must not read like a harmless retry sitting next
+            # to Apply and Reject.
+            'retry_discards_findings':
+                instance.status == OnboardingStatusChoices.STATUS_REVIEW,
             # Offered exactly where it is the answer: the scan failed, so
             # nothing else is going to fill these in.
             'can_enter_manually': instance.status == OnboardingStatusChoices.STATUS_FAILED,
