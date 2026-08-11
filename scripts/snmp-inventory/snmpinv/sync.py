@@ -791,8 +791,19 @@ class Syncer:
                 self._ensure_mac(netbox_interface, interface.mac_address)
             if self.options.sync_ips:
                 for cidr in interface.ip_addresses:
-                    self._ensure_ip(device, netbox_interface, cidr, scanned_address,
-                                    tenant_id)
+                    try:
+                        self._ensure_ip(device, netbox_interface, cidr, scanned_address,
+                                        tenant_id)
+                    except NetBoxError as exc:
+                        # One address NetBox will not take must not cost the
+                        # rest of the device. This used to abort the whole
+                        # sync partway, so every interface after the offending
+                        # one silently went missing and the device looked
+                        # half-scanned for a reason nothing explained.
+                        log.warning(
+                            "%s on %s: %s — skipped, continuing with the device",
+                            cidr, interface.name, exc,
+                        )
 
     def _ensure_interface(self, device: dict, interface: InterfaceRecord,
                           existing_by_name: dict) -> dict | None:

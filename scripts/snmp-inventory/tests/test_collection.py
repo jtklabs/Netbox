@@ -536,3 +536,67 @@ class TestGetBeforeWalk:
             collector.collect("192.0.2.1")
         # One GET total: not one per credential set.
         assert attempted == ["get"]
+
+
+class TestPrefixLengthsThatCannotBeRight:
+    """A device does not configure its own broadcast address on an interface.
+
+    NetBox refuses to assign a network ID or broadcast address to one, so a
+    reported length that makes the address either of those is wrong — usually
+    an ipAddressPrefix RowPointer whose last sub-identifier is not the prefix
+    length. The address is not in doubt; only the mask is.
+    """
+
+    def check(self, address, length):
+        from snmpinv.collect import _usable_prefix_length
+        import ipaddress
+
+        return _usable_prefix_length(ipaddress.ip_address(address), length)
+
+    def test_the_reported_case(self):
+        """169.254.251.255 arriving as /24 is the broadcast of 169.254.251.0."""
+        assert self.check("169.254.251.255", 24) == 32
+
+    def test_a_network_id_is_demoted_too(self):
+        assert self.check("10.0.0.0", 24) == 32
+
+    def test_an_ordinary_host_address_is_untouched(self):
+        assert self.check("10.10.1.5", 24) == 24
+        assert self.check("169.254.251.254", 24) == 24
+
+    def test_a_31_keeps_both_of_its_addresses(self):
+        """RFC 3021: on a /31 there is no network ID or broadcast, and NetBox
+        exempts them — demoting these would corrupt every point-to-point link."""
+        assert self.check("10.0.0.0", 31) == 31
+        assert self.check("10.0.0.1", 31) == 31
+
+    def test_a_32_is_left_alone(self):
+        assert self.check("10.0.0.0", 32) == 32
+
+    def test_v6_uses_the_v6_exemptions(self):
+        assert self.check("2001:db8::", 127) == 127
+        assert self.check("2001:db8::", 128) == 128
+        # A v6 network ID on a real prefix is still not assignable.
+        assert self.check("2001:db8::", 64) == 128
+
+    def test_v6_has_no_broadcast(self):
+        """NetBox only checks broadcast for v4, so nothing should be demoted
+        for looking like one in v6."""
+        assert self.check("2001:db8::ffff:ffff:ffff:ffff", 64) == 64
+
+    def test_it_matches_netboxs_own_rule(self):
+        """Verified against NetBox 4.6.7 ipam/models/ip.py: network ID for both
+        families, broadcast for v4 only, exempting 31/32 and 127/128."""
+        import ipaddress
+
+        for cidr, expected_ok in [
+            ("10.0.0.63/26", False),   # broadcast
+            ("10.0.0.0/26", False),    # network ID
+            ("10.0.0.62/26", True),
+            ("10.0.0.1/31", True),
+            ("10.0.0.5/32", True),
+        ]:
+            addr, length = cidr.split("/")
+            got = self.check(addr, int(length))
+            kept = got == int(length)
+            assert kept == expected_ok, f"{cidr}: kept={kept}, expected {expected_ok}"

@@ -475,6 +475,7 @@ def _walk_ip_address_table(session: CredentialSession, host: str) -> list[Interf
             prefix_length = _prefix_length_from_pointer(pointer.value)
         if prefix_length is None:
             prefix_length = 32 if address.version == 4 else 128
+        prefix_length = _usable_prefix_length(address, prefix_length)
         out.append(InterfaceIP(str(address), prefix_length, if_index))
     return out
 
@@ -507,6 +508,7 @@ def _walk_legacy_ip_addr_table(session: CredentialSession, host: str) -> list[In
                 prefix_length = ipaddress.IPv4Network(f"0.0.0.0/{mask_bind.value}").prefixlen
             except ValueError:
                 pass
+        prefix_length = _usable_prefix_length(address, prefix_length)
         out.append(InterfaceIP(str(address), prefix_length, if_index))
     return out
 
@@ -627,6 +629,45 @@ def _decode_inet_address(row_index: str) -> ipaddress.IPv4Address | ipaddress.IP
     except (ValueError, ipaddress.AddressValueError):
         return None
     return None
+
+
+def _usable_prefix_length(address, prefix_length: int) -> int:
+    """Demote a prefix length that makes its own address unusable.
+
+    NetBox refuses to assign a network ID or a broadcast address to an
+    interface — exempting /31 and /32, and /127 and /128 for v6, where both
+    addresses are legitimate hosts. A device does not configure its own
+    broadcast address on an interface, so when the address and the length
+    disagree it is the length that is wrong: usually an ipAddressPrefix
+    RowPointer whose last sub-identifier is not the prefix length, which is
+    what we read it as. 169.254.251.255 reported as /24 is the common one.
+
+    The address itself came straight off the device and is not in doubt, so it
+    is kept as a host route rather than dropped. Losing the mask is a much
+    smaller error than losing the fact that the device answers there — and
+    dropping it would also mean the primary-IP match silently missed.
+    """
+    host_length = 32 if address.version == 4 else 128
+    if prefix_length in ((31, 32) if address.version == 4 else (127, 128)):
+        return prefix_length
+    try:
+        network = ipaddress.ip_network(f"{address}/{prefix_length}", strict=False)
+    except ValueError:
+        return host_length
+
+    if address == network.network_address:
+        reason = "the network ID of"
+    elif address.version == 4 and address == network.broadcast_address:
+        reason = "the broadcast address of"
+    else:
+        return prefix_length
+
+    log.warning(
+        "%s/%d is %s that prefix, which cannot be assigned to an interface — "
+        "the device's reported prefix length looks wrong, recording it as /%d",
+        address, prefix_length, reason, host_length,
+    )
+    return host_length
 
 
 def _prefix_length_from_pointer(pointer: str) -> int | None:

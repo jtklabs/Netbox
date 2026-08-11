@@ -498,3 +498,106 @@ def _snapshot(netbox: NetBox, site_id: int) -> dict:
         "manufacturers": netbox.count("/dcim/manufacturers/"),
         "platforms": netbox.count("/dcim/platforms/"),
     }
+
+
+class TestOneBadAddressDoesNotSinkTheDevice:
+    """NetBox refuses some addresses outright. That must cost one address.
+
+    Before this, a rejected address raised out of the middle of the interface
+    loop and aborted the sync, so every interface after the offending one was
+    silently never written and the device looked half-scanned with nothing
+    explaining why.
+    """
+
+    NAME = "snmpinv-badip-sw"
+    SITE = "snmpinv-badip-site"
+
+    def _cleanup(self, netbox):
+        """The client has no delete() — the poller never removes anything —
+        so the test reaches through to the request layer for its own tidying."""
+        for path, lookup in (
+            ("/dcim/devices/", {"name": self.NAME}),
+            ("/dcim/sites/", {"slug": self.SITE}),
+        ):
+            existing = netbox.first(path, lookup)
+            if existing:
+                netbox._request("DELETE", f"{path}{existing['id']}/")
+
+    def test_the_rest_of_the_device_is_still_written(self, netbox):
+        from snmpinv.model import DeviceRecord, InterfaceRecord, ScanResult
+        from snmpinv.sync import Syncer, SyncOptions
+
+        self._cleanup(netbox)
+        site = netbox.create("/dcim/sites/", {
+            "name": self.SITE, "slug": self.SITE,
+        }, label="site")
+        try:
+            record = DeviceRecord(
+                name=self.NAME, model="C9300-24P", serial="BADIP0001",
+                manufacturer="Cisco",
+            )
+            # The middle interface carries an address NetBox will not assign:
+            # the broadcast of its own prefix, exactly what a mis-derived
+            # RowPointer produces. The ones either side must survive it.
+            record.interfaces = [
+                InterfaceRecord(name="Gi1/0/1", type_slug="1000base-t"),
+                InterfaceRecord(name="Vlan99", type_slug="virtual",
+                                ip_addresses=["169.254.251.255/24"]),
+                InterfaceRecord(name="Gi1/0/2", type_slug="1000base-t"),
+            ]
+            result = ScanResult(host="192.0.2.50", devices=[record])
+
+            Syncer(netbox, SyncOptions()).sync(result, site["id"])   # must not raise
+
+            device = netbox.first("/dcim/devices/", {"name": self.NAME})
+            assert device is not None, "the device was never created"
+            names = {
+                i["name"] for i in
+                netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
+            }
+            assert {"Gi1/0/1", "Vlan99", "Gi1/0/2"} <= names, (
+                f"interfaces after the bad address went missing: {sorted(names)}"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_the_primary_ip_is_still_set_from_a_later_interface(self, netbox):
+        """The symptom that actually gets noticed.
+
+        The primary IP is set when the scanned address turns up among the
+        device's addresses. If a rejected address aborts the loop first, the
+        real one is never reached and the device silently ends up with no
+        primary — which reads as "this platform does not report a primary IP"
+        rather than as the write having been cut short.
+        """
+        from snmpinv.model import DeviceRecord, InterfaceRecord, ScanResult
+        from snmpinv.sync import Syncer, SyncOptions
+
+        self._cleanup(netbox)
+        site = netbox.create("/dcim/sites/", {
+            "name": self.SITE, "slug": self.SITE,
+        }, label="site")
+        try:
+            record = DeviceRecord(
+                name=self.NAME, model="IB-1420", serial="BADIP0002",
+                manufacturer="Infoblox",
+            )
+            record.interfaces = [
+                InterfaceRecord(name="LAN1", type_slug="1000base-t",
+                                ip_addresses=["169.254.251.255/24"]),
+                InterfaceRecord(name="MGMT", type_slug="1000base-t",
+                                ip_addresses=["10.40.0.50/24"]),
+            ]
+            result = ScanResult(host="10.40.0.50", devices=[record])
+
+            Syncer(netbox, SyncOptions()).sync(
+                result, site["id"], scanned_address="10.40.0.50")
+
+            device = netbox.get(f"/dcim/devices/{netbox.first('/dcim/devices/', {'name': self.NAME})['id']}/")
+            primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+            assert primary.get("address") == "10.40.0.50/24", (
+                f"no primary IP was set (got {primary or None}) — the address "
+                f"on the interface after the rejected one was never reached"
+            )
+        finally:
+            self._cleanup(netbox)
