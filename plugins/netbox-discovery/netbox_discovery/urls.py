@@ -37,6 +37,10 @@ urlpatterns = [
          name='onboardingrequest_retry'),
     path('onboarding/<int:pk>/recheck/', views.OnboardingRecheckView.as_view(),
          name='onboardingrequest_recheck'),
+    path('onboarding/bulk-recheck/', views.OnboardingBulkRecheckView.as_view(),
+         name='onboardingrequest_bulk_recheck'),
+    path('onboarding/bulk-retry/', views.OnboardingBulkRetryView.as_view(),
+         name='onboardingrequest_bulk_retry'),
     path('onboarding/<int:pk>/manual/', views.OnboardingManualEntryView.as_view(),
          name='onboardingrequest_manual'),
 

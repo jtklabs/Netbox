@@ -59,6 +59,9 @@ class OnboardingRequestListView(ObjectListView):
     table = tables.OnboardingRequestTable
     filterset = filtersets.OnboardingRequestFilterSet
     filterset_form = forms.OnboardingRequestFilterForm
+    # Overridden only to add the discovery actions dropdown; everything else
+    # is NetBox's own list template.
+    template_name = 'netbox_discovery/onboardingrequest_list.html'
 
 
 @register_model_view(OnboardingRequest)
@@ -203,6 +206,63 @@ class OnboardingRejectView(_ReviewActionView):
             return self.deny(request, entry, str(exc))
         messages.success(request, 'Rejected. Nothing was written to DCIM.')
         return redirect(entry.get_absolute_url())
+
+
+class _BulkActionView(_ReviewActionView):
+    """Run one of the per-request actions across a selection.
+
+    Each request is attempted on its own and a failure is counted rather than
+    raised: a selection is normally a mix, and half of them being in the wrong
+    state is the ordinary case, not an error. Refusing the lot because one was
+    already applied would make the button useless exactly when it is most
+    wanted — a queue full of things that stopped for different reasons.
+    """
+
+    action = None
+    verb = ''
+
+    def post(self, request):
+        if not request.user.has_perm(self.permission_required):
+            messages.error(request, 'You do not have permission to do that.')
+            return redirect('plugins:netbox_discovery:onboardingrequest_list')
+
+        selected = request.POST.getlist('pk')
+        if not selected:
+            messages.warning(request, 'Nothing was selected.')
+            return redirect('plugins:netbox_discovery:onboardingrequest_list')
+
+        done, skipped = 0, []
+        for entry in OnboardingRequest.objects.filter(pk__in=selected):
+            try:
+                self.action(entry, user=request.user)
+                done += 1
+            except actions.TransitionError as exc:
+                skipped.append('%s: %s' % (entry.address, exc))
+
+        if done:
+            messages.success(request, '%s %d request%s.'
+                             % (self.verb, done, '' if done == 1 else 's'))
+        if skipped:
+            # Named individually rather than counted. "3 were skipped" tells
+            # somebody nothing they can act on; the address and the reason do.
+            shown = skipped[:5]
+            more = len(skipped) - len(shown)
+            messages.warning(
+                request,
+                'Left alone: ' + '; '.join(shown)
+                + (' (and %d more)' % more if more else '')
+            )
+        return redirect('plugins:netbox_discovery:onboardingrequest_list')
+
+
+class OnboardingBulkRecheckView(_BulkActionView):
+    action = staticmethod(actions.recheck)
+    verb = 'Re-checked IPAM for'
+
+
+class OnboardingBulkRetryView(_BulkActionView):
+    action = staticmethod(lambda entry, user=None: actions.retry(entry))
+    verb = 'Queued for scanning'
 
 
 class OnboardingRecheckView(_ReviewActionView):

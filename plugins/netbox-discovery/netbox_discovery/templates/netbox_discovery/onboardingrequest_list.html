@@ -1,0 +1,51 @@
+{% extends 'generic/object_list.html' %}
+{% load buttons %}
+{% load helpers %}
+{% load i18n %}
+
+{# Bulk actions for the onboarding queue.
+
+   A queue is worked in batches — a prefix gets created and thirty addresses
+   become resolvable at once — so the two buttons that exist per request are
+   wanted across a selection far more often than one at a time. They sit in
+   their own dropdown rather than beside Edit and Delete because they are not
+   edits: they move a request through the workflow, and one of them discards
+   findings. #}
+
+{% block bulk_buttons %}
+  <div class="btn-list bulk-action-buttons">
+    <div class="dropdown">
+      <button type="button" class="btn btn-outline-primary dropdown-toggle"
+              data-bs-toggle="dropdown" aria-expanded="false">
+        <i class="mdi mdi-play-box-multiple" aria-hidden="true"></i>
+        {% trans "Discovery actions" %}
+      </button>
+      <ul class="dropdown-menu">
+        <li>
+          <button type="submit" class="dropdown-item"
+                  formaction="{% url 'plugins:netbox_discovery:onboardingrequest_bulk_recheck' %}">
+            <i class="mdi mdi-map-search" aria-hidden="true"></i>
+            {% trans "Re-check IPAM" %}
+            <span class="d-block small text-muted ps-4">
+              {% trans "Resolve again after adding a prefix. Findings are kept." %}
+            </span>
+          </button>
+        </li>
+        <li><hr class="dropdown-divider"></li>
+        <li>
+          <button type="submit" class="dropdown-item"
+                  formaction="{% url 'plugins:netbox_discovery:onboardingrequest_bulk_retry' %}">
+            <i class="mdi mdi-refresh" aria-hidden="true"></i>
+            {% trans "Scan again" %}
+            <span class="d-block small text-muted ps-4">
+              {% trans "Queue for a fresh walk. Existing findings are discarded." %}
+            </span>
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    {# Edit, delete and the rest, exactly as NetBox renders them. #}
+    {% action_buttons actions model multi=True %}
+  </div>
+{% endblock %}
