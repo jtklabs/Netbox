@@ -198,6 +198,13 @@ class OnboardingRequest(PrimaryModel):
     # --- What the operator may override before approving. Everything else the
     # scan reports is taken as read; these three are the ones a human is
     # sometimes better placed to know than the device is.
+    override_model = models.CharField(
+        max_length=100, blank=True, default='',
+        verbose_name='Model override',
+        help_text='Used when the device reports no model of its own. Some '
+                  'platforms publish none at all — a Firepower 2120 among '
+                  'them — and without one there is no device type to create.',
+    )
     override_name = models.CharField(
         max_length=64, blank=True,
         help_text="Use this name instead of the device's own hostname",
@@ -405,6 +412,18 @@ class OnboardingRequest(PrimaryModel):
     @property
     def discovered_name(self):
         return self.override_name or self.primary_discovered.get('name', '')
+
+    @property
+    def effective_model(self):
+        """The model that will be used, whoever supplied it.
+
+        What the device reported wins. A platform that publishes no model at
+        all — a Firepower 2120 among them — leaves the override as the only
+        way the device can be created, since NetBox needs a device type and
+        this scanner will not derive one from sysObjectID.
+        """
+        return (self.primary_discovered.get('model') or '').strip() \
+            or self.override_model.strip()
 
     @property
     def discovered_model(self):

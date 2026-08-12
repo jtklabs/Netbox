@@ -147,6 +147,10 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                     'site': site.pk if site else None,
                     'site_name': site.name if site else '',
                     'override_name': entry.override_name,
+                    # Carried so a model typed at review reaches the
+                    # apply; without it the poller re-reads the scan,
+                    # finds no model again, and creates nothing.
+                    'override_model': entry.override_model,
                     'role': entry.role.slug if entry.role else '',
                     # Carried so the created device is filed against the right
                     # company — the tenant is why this address was resolvable
@@ -215,6 +219,7 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
             actions.approve(
                 entry, user=request.user,
                 override_name=data.get('override_name'),
+                override_model=data.get('override_model'),
                 override_site=data.get('override_site'),
                 role=data.get('role'),
             )

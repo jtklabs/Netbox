@@ -190,6 +190,7 @@ class ApproveSerializer(serializers.Serializer):
         queryset=DeviceRole.objects.all(), required=False, allow_null=True,
         help_text="Device role; the poller's default when omitted",
     )
+    override_model = serializers.CharField(required=False, allow_blank=True)
 
 
 class RejectSerializer(serializers.Serializer):
@@ -230,6 +231,10 @@ class JobSerializer(serializers.Serializer):
     site = serializers.IntegerField(allow_null=True)
     site_name = serializers.CharField(allow_blank=True)
     override_name = serializers.CharField(allow_blank=True)
+    # Declared, or it is silently dropped from the response: _take_work puts it
+    # in the job dict, and a Serializer only emits the fields it knows about.
+    # The poller would then find no model, exactly as if nobody had typed one.
+    override_model = serializers.CharField(allow_blank=True)
     role = serializers.CharField(allow_blank=True)
     tenant = serializers.IntegerField(allow_null=True)
     tenant_name = serializers.CharField(allow_blank=True)

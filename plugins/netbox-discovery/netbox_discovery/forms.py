@@ -117,6 +117,11 @@ class OnboardingReviewForm(forms.Form):
         required=False, label='Device name',
         help_text="Blank uses the name the device reports for itself",
     )
+    override_model = forms.CharField(
+        required=False, label='Model',
+        help_text='Only needed when the scan found no model. Everything else '
+                  'the scan reported is kept.',
+    )
     override_site = DynamicModelChoiceField(
         queryset=Site.objects.all(), required=False, label='Site',
         help_text='Blank uses the site derived from the prefix',

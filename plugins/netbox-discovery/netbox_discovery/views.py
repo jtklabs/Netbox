@@ -74,6 +74,7 @@ class OnboardingRequestView(ObjectView):
         return {
             'review_form': forms.OnboardingReviewForm(initial={
                 'override_name': instance.override_name,
+                'override_model': instance.override_model,
                 'override_site': instance.override_site,
                 'role': instance.role,
             }),
@@ -173,6 +174,7 @@ class OnboardingApproveView(_ReviewActionView):
             actions.approve(
                 entry, user=request.user,
                 override_name=form.cleaned_data['override_name'],
+                override_model=form.cleaned_data['override_model'],
                 override_site=form.cleaned_data['override_site'],
                 role=form.cleaned_data['role'],
             )

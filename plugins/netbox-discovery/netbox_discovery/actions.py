@@ -23,7 +23,8 @@ class TransitionError(Exception):
     """The request is not in a state where this move makes sense."""
 
 
-def approve(entry, user=None, override_name=None, override_site=None, role=None):
+def approve(entry, user=None, override_name=None, override_site=None, role=None,
+            override_model=None):
     """Accept what the scan found; the poller applies it on its next check-in.
 
     Approving writes nothing to DCIM. The poller owns every write, because all
@@ -49,10 +50,24 @@ def approve(entry, user=None, override_name=None, override_site=None, role=None)
     # difference matters for a PATCH-shaped API call that omits a field.
     if override_name is not None:
         entry.override_name = override_name
+    if override_model is not None:
+        entry.override_model = override_model
     if override_site is not None:
         entry.override_site = override_site
     if role is not None:
         entry.role = role
+
+    # Both checks below sit *after* the overrides for the same reason: each is
+    # something the reviewer supplies in the very submission being validated,
+    # so checking first would reject the fix along with the problem.
+    if not entry.effective_model:
+        # Refused here rather than left to the poller, which would create
+        # nothing, report a failure, and by then the person who could have
+        # typed the model has moved on.
+        raise TransitionError(
+            'The scan found no model, so there is no device type to create. '
+            'Approve it again with a model, or enter the details by hand.'
+        )
 
     if entry.target_site is None:
         raise TransitionError(
