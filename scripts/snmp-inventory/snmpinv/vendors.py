@@ -59,6 +59,11 @@ class VendorProfile:
     platform: str = ""
     # Scalar OIDs tried in order; first non-empty answer wins.
     version_oids: tuple[str, ...] = ()
+    # Separate from version_oids because several vendors publish the build
+    # apart from the release, and the pair is what identifies an image: F5's
+    # own ISOs are named BIGIP-<version>-<build>.iso. Joined only when both
+    # come back, so a platform that reports no build reads exactly as before.
+    build_oids: tuple[str, ...] = ()
     serial_oids: tuple[str, ...] = ()
     model_oids: tuple[str, ...] = ()
     # Applied to sysDescr when no version OID answered.
@@ -145,6 +150,11 @@ PROFILES: dict[int, VendorProfile] = {
         manufacturer="F5 Networks",
         platform="F5 TMOS",
         version_oids=("1.3.6.1.4.1.3375.2.1.4.2.0",),      # sysProductVersion
+        # sysProductBuild. The version alone is not enough to identify an
+        # image: 17.1.1.3 ships in more than one build, and the hotfix level
+        # is the half that says which. F5 writes the pair as
+        # <version>-<build>, as in BIGIP-17.1.1.3-0.0.5.iso.
+        build_oids=("1.3.6.1.4.1.3375.2.1.4.3.0",),
         serial_oids=("1.3.6.1.4.1.3375.2.1.3.3.3.0",),     # sysGeneralChassisSerialNum
         model_oids=("1.3.6.1.4.1.3375.2.1.3.5.2.0",),      # sysPlatformInfoMarketingName
         entity_mib_sparse=True,

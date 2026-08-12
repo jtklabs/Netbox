@@ -587,7 +587,8 @@ def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoi
 def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFacts,
                           profile: vendors.VendorProfile) -> None:
     """Fetch the vendor's version/serial/model scalars in one GET."""
-    wanted = list(profile.version_oids) + list(profile.serial_oids) + list(profile.model_oids)
+    wanted = (list(profile.version_oids) + list(profile.build_oids)
+              + list(profile.serial_oids) + list(profile.model_oids))
     if not wanted:
         return
     try:
@@ -606,6 +607,16 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
         if oid in found and found[oid].value:
             facts.software_version = found[oid].value
             break
+    # Appended rather than substituted, and only when the version itself came
+    # back — a build with no version is meaningless on its own, and writing one
+    # into the software version field would read as a version nobody recognises.
+    for oid in profile.build_oids:
+        if facts.software_version and oid in found and found[oid].value:
+            build = found[oid].value.strip()
+            if build and build not in facts.software_version:
+                facts.software_version = f"{facts.software_version}-{build}"
+            break
+
     for oid in profile.serial_oids:
         if oid in found and found[oid].value:
             facts.vendor_serial = found[oid].value

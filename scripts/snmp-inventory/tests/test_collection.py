@@ -203,7 +203,9 @@ class TestApplianceVendors:
         device = scan("f5-bigip").primary
         assert device.model == "BIG-IP i5800"
         assert device.serial == "f5-chs-01234567"
-        assert device.software_version == "17.1.1.3"
+        # Version and build together: 17.1.1.3 ships in more than one build,
+        # so the release alone does not identify the image.
+        assert device.software_version == "17.1.1.3-0.0.5"
 
     def test_checkpoint(self):
         device = scan("checkpoint-gaia").primary
@@ -631,3 +633,76 @@ class TestAccessPointsGetASoftwareVersion:
         assert by_name["dal-ap-101"].model == "AP-515"
         assert by_name["dal-ap-103"].model == "AP-535"
         assert by_name["dal-ap-101"].serial != self.result.primary.serial
+
+
+class TestF5ReportsItsBuildAsWellAsItsVersion:
+    """17.1.1.3 ships in more than one build.
+
+    The version alone does not identify an image — the build is the half that
+    says which hotfix level is running, and it is what a compliance standard
+    has to be written against. F5 writes the pair as <version>-<build>, as in
+    BIGIP-17.1.1.3-0.0.5.iso.
+    """
+
+    def test_the_build_is_included(self):
+        assert scan("f5-bigip").primary.software_version == "17.1.1.3-0.0.5"
+
+    def test_a_device_reporting_no_build_is_unchanged(self):
+        """Every other platform must read exactly as it did before."""
+        from snmpinv.collect import DeviceFacts, _apply_vendor_scalars
+        from snmpinv import vendors
+
+        facts = DeviceFacts(host="10.0.0.1")
+        facts.software_version = "17.1.1.3"
+        profile = vendors.PROFILES[3375]
+
+        class OnlyVersion:
+            def get(self, host, oids):
+                return {profile.version_oids[0]: VarBind(
+                    profile.version_oids[0], "STRING", "17.1.1.3")}
+
+        _apply_vendor_scalars(OnlyVersion(), "10.0.0.1", facts, profile)
+        assert facts.software_version == "17.1.1.3"
+
+    def test_a_build_alone_is_not_a_version(self):
+        """Writing a bare build into the software version field would read as
+        a version nobody recognises."""
+        from snmpinv.collect import DeviceFacts, _apply_vendor_scalars
+        from snmpinv import vendors
+
+        facts = DeviceFacts(host="10.0.0.1")
+        profile = vendors.PROFILES[3375]
+
+        class OnlyBuild:
+            def get(self, host, oids):
+                return {profile.build_oids[0]: VarBind(
+                    profile.build_oids[0], "STRING", "0.0.5")}
+
+        _apply_vendor_scalars(OnlyBuild(), "10.0.0.1", facts, profile)
+        assert facts.software_version == ""
+
+    def test_it_is_not_appended_twice_on_a_rescan(self):
+        """Guards against a build already present in the version string."""
+        from snmpinv.collect import DeviceFacts, _apply_vendor_scalars
+        from snmpinv import vendors
+
+        facts = DeviceFacts(host="10.0.0.1")
+        profile = vendors.PROFILES[3375]
+
+        class Both:
+            def get(self, host, oids):
+                return {
+                    profile.version_oids[0]: VarBind(
+                        profile.version_oids[0], "STRING", "17.1.1.3-0.0.5"),
+                    profile.build_oids[0]: VarBind(
+                        profile.build_oids[0], "STRING", "0.0.5"),
+                }
+
+        _apply_vendor_scalars(Both(), "10.0.0.1", facts, profile)
+        assert facts.software_version == "17.1.1.3-0.0.5"
+
+    def test_the_probe_shows_the_build_oid_it_asked_for(self):
+        """So a wrong OID is visible immediately rather than as a missing
+        build nobody can explain."""
+        facts = collect_fixture("f5-bigip")
+        assert "1.3.6.1.4.1.3375.2.1.4.3.0" in facts.vendor_scalars
