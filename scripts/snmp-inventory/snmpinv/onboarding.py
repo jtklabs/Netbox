@@ -277,7 +277,10 @@ def _apply_result(netbox: NetBox, syncer: Syncer, request: dict,
         return "no-site"
     if dry_run:
         return "applied"
-    _apply_overrides(result, {"override_name": request.get("override_name") or ""})
+    _apply_overrides(result, {
+        "override_name": request.get("override_name") or "",
+        "override_model": request.get("override_model") or "",
+    })
     tenant = (request.get("tenant") or {}).get("id")
     return _write_and_report(netbox, syncer, request["id"], address, result,
                              site_id, tenant)
@@ -369,10 +372,20 @@ def _apply_overrides(result: ScanResult, job: dict) -> None:
     Only the primary: for a stack the members are named from the master, and
     renaming one member out of three would produce an inconsistent chassis.
     """
+    primary = result.primary
+
+    # The model first, and only when the device reported none of its own: it
+    # is what a reviewer supplies for a platform that publishes no model —
+    # a Firepower 2120 among them — and without it there is no device type and
+    # nothing gets created. What the device says still wins, so an override
+    # left on a request cannot quietly override a later scan that reads one.
+    override_model = (job.get("override_model") or "").strip()
+    if override_model and primary is not None and not primary.model:
+        primary.model = override_model
+
     override_name = (job.get("override_name") or "").strip()
     if not override_name:
         return
-    primary = result.primary
     if primary is None:
         return
     old = primary.name

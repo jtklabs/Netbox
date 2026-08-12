@@ -828,3 +828,87 @@ class TestALongModuleBayNameIsAccepted:
             assert not bays[0]["description"]
         finally:
             self._cleanup(netbox)
+
+
+class TestAnExistingDeviceKeepsBeingUpdatedWithoutAModel:
+    """A rescan that cannot read a model must not stall the device.
+
+    Some platforms report no model at all — a Firepower 2120 among them — so
+    once the device exists in NetBox, refusing its updates would freeze its
+    serial, software version, interfaces and addresses at whatever they were
+    when it was first created. The model is needed to *choose* a device type,
+    which is a question only the first write has to answer.
+    """
+
+    NAME = "snmpinv-nomodel-fw"
+    SITE = "snmpinv-nomodel-site"
+
+    def _cleanup(self, netbox):
+        # Includes anything the replacement path renamed, e.g.
+        # "<name> [replaced FPR001]", which a name-exact delete would miss.
+        for device in netbox.all("/dcim/devices/", {"q": self.NAME}):
+            netbox._request("DELETE", f"/dcim/devices/{device['id']}/")
+        existing = netbox.first("/dcim/sites/", {"slug": self.SITE})
+        if existing:
+            netbox._request("DELETE", f"/dcim/sites/{existing['id']}/")
+
+    def _sync(self, netbox, **fields):
+        from snmpinv.model import DeviceRecord, InterfaceRecord, ScanResult
+        from snmpinv.sync import Syncer, SyncOptions
+
+        site = netbox.ensure("/dcim/sites/", {"slug": self.SITE},
+                             {"name": self.SITE, "slug": self.SITE}, label="site")
+        record = DeviceRecord(name=self.NAME, manufacturer="Cisco", **fields)
+        record.interfaces = [InterfaceRecord(name="Ethernet1/1",
+                                             type_slug="1000base-t")]
+        Syncer(netbox, SyncOptions()).sync(
+            ScanResult(host="192.0.2.70", devices=[record]), site["id"])
+        found = netbox.first("/dcim/devices/", {"name": self.NAME})
+        return netbox.get(f"/dcim/devices/{found['id']}/") if found else None
+
+    def test_the_first_scan_still_needs_a_model(self, netbox):
+        """Nothing is invented: with no model there is no device type, and a
+        placeholder would be somebody's cleanup job later."""
+        self._cleanup(netbox)
+        try:
+            assert self._sync(netbox, model="", serial="FPR001") is None
+        finally:
+            self._cleanup(netbox)
+
+    def test_a_later_scan_with_no_model_still_updates_the_device(self, netbox):
+        self._cleanup(netbox)
+        try:
+            first = self._sync(netbox, model="FPR-2120", serial="FPR001",
+                               software_version="7.2.5")
+            assert first is not None
+            type_before = first["device_type"]["id"]
+
+            # The rescan reads no model — the usual case on this platform.
+            # Same serial: a changed one is the hardware-replacement path,
+            # which is a different question and has its own tests.
+            # Platform rather than software version: with the Lifecycle plugin
+            # installed the version is reported to it instead of written to a
+            # custom field, so it is the wrong thing to read here. Platform is
+            # written to the device unconditionally either way.
+            after = self._sync(netbox, model="", serial="FPR001",
+                               platform="Cisco FTD")
+            assert after is not None, "the device stopped being updated"
+            assert after["device_type"]["id"] == type_before, (
+                "the device type changed when no model was reported"
+            )
+            assert (after.get("platform") or {}).get("name") == "Cisco FTD", (
+                "a polled update was not applied to the existing device"
+            )
+        finally:
+            self._cleanup(netbox)
+
+    def test_its_interfaces_are_still_synced(self, netbox):
+        self._cleanup(netbox)
+        try:
+            self._sync(netbox, model="FPR-2120", serial="FPR001")
+            device = self._sync(netbox, model="", serial="FPR001")
+            names = {i["name"] for i in netbox.all(
+                "/dcim/interfaces/", {"device_id": device["id"]})}
+            assert "Ethernet1/1" in names
+        finally:
+            self._cleanup(netbox)
