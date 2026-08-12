@@ -67,6 +67,18 @@ def probe(collector: Collector, address: str, as_json: bool = False,
 # --- human-readable report --------------------------------------------------
 
 
+_ENTITY_CLASSES = {
+    1: "other", 2: "unknown", 3: "chassis", 4: "backplane", 5: "container",
+    6: "powerSupply", 7: "fan", 8: "sensor", 9: "module", 10: "port",
+    11: "stack", 12: "cpu",
+}
+
+
+def _entity_class(value: int) -> str:
+    """entPhysicalClass as its name — the numbers mean nothing at a glance."""
+    return _ENTITY_CLASSES.get(value, str(value))
+
+
 def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
     w = out.write
     w("\n" + "=" * 72 + "\n")
@@ -136,6 +148,28 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
         w("  none — this device does not populate entPhysicalTable.\n")
         w("  That is normal for firewalls and load balancers; the model and\n")
         w("  serial then come from the vendor OIDs above.\n")
+
+    # When no model came back, show the whole entity table raw. The chassis
+    # view above reads entPhysicalModelName (.13) and plenty of platforms leave
+    # it empty while describing themselves perfectly well in entPhysicalDescr
+    # (.2) or entPhysicalName (.7). Printing every row is what turns "no model"
+    # into a specific answer about where this platform keeps it, without
+    # anybody having to guess an OID.
+    if not facts.vendor_model and not any(e.model for e in facts.entities):
+        _section(w, f"ENTITY-MIB, EVERY ROW ({len(facts.entities)})")
+        if not facts.entities:
+            w("  The table is empty, so nothing here describes the hardware.\n")
+            w("  Send the walk (--save-walk) and the model can be taken from\n")
+            w("  wherever this platform does publish it.\n")
+        else:
+            w("  No row carried a model name (.13). What the rows do say:\n\n")
+            w(f"  {'idx':>6}  {'class':<10} {'name':<24} descr\n")
+            for entity in facts.entities:
+                w(f"  {entity.index:>6}  {_entity_class(entity.entity_class):<10} "
+                  f"{(entity.name or '—')[:24]:<24} {(entity.descr or '—')[:60]}\n")
+            w("\n  If the model is visible above but not in the model column,\n")
+            w("  this platform publishes it somewhere this scanner is not yet\n")
+            w("  reading. Send the walk (--save-walk) and it can be.\n")
 
     if facts.stack_members:
         _section(w, f"STACK — CISCO-STACKWISE-MIB ({len(facts.stack_members)})")
