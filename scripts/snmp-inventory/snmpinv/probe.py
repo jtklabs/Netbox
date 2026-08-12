@@ -159,8 +159,13 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
         _section(w, f"ENTITY-MIB, EVERY ROW ({len(facts.entities)})")
         if not facts.entities:
             w("  The table is empty, so nothing here describes the hardware.\n")
-            w("  Send the walk (--save-walk) and the model can be taken from\n")
-            w("  wherever this platform does publish it.\n")
+            w("  If some other OID carries the model, send the walk\n")
+            w("  (--save-walk) and it can be read from there.\n")
+            w("\n  Some platforms publish no model over SNMP at all — Firepower\n")
+            w("  Threat Defense is one, confirmed against real hardware. For\n")
+            w("  those there is nothing to find and nothing to add: onboard the\n")
+            w("  device and type the model at review. Everything else the scan\n")
+            w("  found is kept, and rescans carry on without needing it again.\n")
         else:
             w("  No row carried a model name (.13). What the rows do say:\n\n")
             w(f"  {'idx':>6}  {'class':<10} {'name':<24} descr\n")
@@ -169,7 +174,9 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
                   f"{(entity.name or '—')[:24]:<24} {(entity.descr or '—')[:60]}\n")
             w("\n  If the model is visible above but not in the model column,\n")
             w("  this platform publishes it somewhere this scanner is not yet\n")
-            w("  reading. Send the walk (--save-walk) and it can be.\n")
+            w("  reading. Send the walk (--save-walk) and it can be. If it is\n")
+            w("  not visible anywhere, type the model at review instead —\n")
+            w("  some platforms genuinely do not report one.\n")
 
     if facts.stack_members:
         _section(w, f"STACK — CISCO-STACKWISE-MIB ({len(facts.stack_members)})")

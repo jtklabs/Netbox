@@ -863,6 +863,33 @@ A slow device is worth ruling out separately: the defaults are `timeout = 5`
 and `retries = 1`, i.e. two attempts, where `snmpwalk` by hand defaults to six.
 Raise `retries` under `[snmp]` if a device is merely lossy rather than large.
 
+## A device that reports no model
+
+Some platforms publish no model over SNMP at all. Cisco Firepower Threat
+Defense is the confirmed one — a Firepower 2120 has no `entPhysicalModelName`,
+and the model appears nowhere else in its walk either. NetBox needs a device
+type, and this scanner will not derive one from `sysObjectID`, so there is
+nothing to create the device from.
+
+The request stops at review saying so, and you **type the model there**. Only
+that one field: the serial, software version, interfaces and addresses the scan
+found are all kept, which is the difference between this and entering the
+device by hand.
+
+What the device reports always wins, so an override left on a request cannot
+replace a model a later scan manages to read.
+
+**It is needed once.** Once the device exists, a rescan that reads no model
+keeps the device type it already has and goes on writing everything else — the
+model is only needed to *choose* a device type, which is a question the first
+write answers.
+
+Before assuming a platform is in this category, run `--probe`. When nothing
+produces a model it dumps every `entPhysicalTable` row, which usually shows the
+model sitting in a field this scanner is not yet reading — a one-line fix, and
+better than typing it by hand forever. Firepower is the case where the dump
+genuinely comes up empty.
+
 ## Notes and gotchas
 
 Full detail in [docs/API-NOTES.md](docs/API-NOTES.md). The ones most likely to
