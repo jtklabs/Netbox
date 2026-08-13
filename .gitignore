@@ -16,6 +16,11 @@ scripts/f5-image-push/*.ucs
 # F5 tools (scripts/f5) — credentials and inventory stay local
 scripts/f5/.env
 scripts/f5/devices.csv
+# Config backups: a UCS holds every SSL private key and the user database, and
+# an SCF holds the configuration and password hashes. These never get committed.
+scripts/f5/backups/
+scripts/f5/*.ucs
+scripts/f5/*.scf
 *.pyc
 __pycache__/
 .DS_Store

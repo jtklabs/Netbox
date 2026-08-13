@@ -1,9 +1,12 @@
 # F5 BIG-IP tools
 
-Tools that configure F5 BIG-IP units over iControl REST on the management
-interface — no SSH access to the boxes required. Credentials come from a `.env`
-file in this directory; the standards they apply come from
+Tools that configure and back up F5 BIG-IP units over iControl REST on the
+management interface — no SSH access to the boxes required. Credentials come
+from a `.env` file in this directory; the standards they apply come from
 [`../standards.yaml`](../standards.yaml).
+
+- [`f5_standards.py`](#f5_standardspy--apply-our-standards-to-a-unit) — apply our SNMP/syslog standards to a unit
+- [`f5_backup.py`](#f5_backuppy--back-up-a-unit-to-this-server) — pull a dated UCS + SCF back to this server
 
 (`scripts/f5-image-push/` is a separate, older tool with its own `config.ini`;
 new F5 tooling belongs here.)
@@ -151,6 +154,106 @@ BIG-IP does not ConfigSync system SNMP or syslog settings, so an HA pair needs
 the tool run against *both* members (`--host` twice, or list both in the CSV).
 The tool prints a reminder whenever it changes anything.
 
+## `f5_backup.py` — back up a unit to this server
+
+Pulls two files per unit onto whatever server you run it from — the same box
+that holds the images for `f5-image-push` — over iControl REST, with no SSH and
+nothing to install on the units:
+
+| | what it is | what it is for |
+|---|---|---|
+| **UCS** | the whole unit: configuration, SSL private keys, the user database, the license | restoring onto replacement hardware |
+| **SCF** | the configuration as one flat text file (plus the companion archive of the files it references) | diffing runs against each other, and rebuilding config on a different box |
+
+```bash
+./f5_backup.py --host 10.0.10.11                    # UCS + SCF into backups/
+./f5_backup.py --csv devices.csv --outdir /srv/f5-backups
+./f5_backup.py --csv devices.csv --keep 30          # keep the 30 newest sets
+./f5_backup.py --host 10.0.10.11 --only scf         # config text only
+./f5_backup.py --csv devices.csv --leave-on-unit    # keep the unit's copy too
+```
+
+Each run writes `<unit>-<YYYYmmdd>-<HHMMSS>.<ext>`, so nothing ever overwrites
+anything and the directory listing *is* the history:
+
+```
+backups/
+  bigip-dc1-a-20260813-020001.ucs      # the whole unit
+  bigip-dc1-a-20260813-020001.scf      # the configuration, as text
+  bigip-dc1-a-20260813-020001.tar      # the files that configuration references
+  bigip-dc1-a-20260812-020001.ucs
+  ...
+```
+
+Nightly, keeping a month per unit:
+
+```cron
+0 2 * * *  cd /srv/netbox/scripts/f5 && ./f5_backup.py --csv devices.csv \
+             --outdir /srv/f5-backups --keep 30 >> /var/log/f5-backup.log 2>&1
+```
+
+Behavior:
+
+- **Verified, not just downloaded.** Every file is md5-checked here against
+  `md5sum` on the unit. A file that does not match, or a transfer that dies
+  part-way, is renamed `.corrupt`/`.partial` and the unit's copy is kept: a bad
+  download is never reported as a good one, and never sits in the directory
+  under a name that reads like one.
+- **The unit's copy is deleted once ours is verified.** A dated file per night
+  otherwise fills `/var` on the box, which is its own outage. `--leave-on-unit`
+  keeps it. Nothing is ever deleted from a unit before the local copy verifies.
+- **Retention is opt-in and narrow.** Without `--keep`, nothing here is ever
+  deleted. With it, only files this tool named, only for the unit just backed
+  up, and only after that unit backed up cleanly — a failing unit can never
+  prune the history it failed to add to. Anything else in the directory is
+  untouched.
+- One unreachable unit never stops the fleet, and one artifact failing does not
+  stop the other on that unit — each fails on its own line.
+- Exit codes: `0` everything downloaded and verified, `1` at least one unit or
+  artifact failed, so cron can tell a clean run from one to look at.
+
+### These files are secret material
+
+A UCS contains every SSL private key on the unit and its user database; an SCF
+contains the configuration and password hashes. So:
+
+- the output directory is created `0700` and every file `0600` (an existing
+  directory that is looser gets a warning, not a silent fix);
+- `scripts/f5/backups/`, `*.ucs` and `*.scf` are gitignored;
+- setting `F5_UCS_PASSPHRASE` in `.env` has the units encrypt the archives
+  themselves. Without it the run says so on every start. Store that passphrase
+  somewhere other than next to the backups — a UCS cannot be restored without
+  it.
+
+### What it needs on the unit
+
+The account needs the **Administrator** role, and for the SCF an **advanced
+shell**. Only the UCS has a download endpoint of its own
+(`/mgmt/shared/file-transfer/ucs-downloads/`); an SCF has none, so the tool
+copies it into a directory a file-transfer worker does serve
+(`/var/config/rest/madm`, falling back to `/var/local/ucs`), downloads it from
+there, and deletes the copy — which needs `/mgmt/tm/util/bash`. On a unit where
+that endpoint is refused, the UCS still comes down (unverified, since `md5sum`
+is refused too) and the SCF fails saying why.
+
+Sizes, checksums and the directory listing all go through the same endpoint.
+The listing is why a version that writes a companion `.tar` beside the SCF and
+one that doesn't are both handled: the tool asks the unit what it wrote rather
+than assuming.
+
+### Per-unit, not synced
+
+A UCS is one unit's, including its own certificates and host name — an HA pair
+needs both members backed up (`--host` twice, or both in the CSV), and a UCS is
+not a way to clone one member onto the other.
+
+### Restoring
+
+Out of scope for this tool deliberately — a restore is a decision, not a cron
+job. The files it produces are the ordinary ones: copy a `.ucs` back to
+`/var/local/ucs` and `tmsh load /sys ucs <file>`, or a `.scf` (with its `.tar`
+beside it) to `/var/local/scf` and `tmsh load /sys config file <file>`.
+
 ## Adding another standard, or another tool
 
 A new **standard** goes into `f5_standards.py` as another planner registered in
@@ -163,8 +266,10 @@ say) will need its own shape.
 `f5common.py` holds everything reusable across tools: `.env` loading
 (`load_settings`), the standards file (`load_standards`, `Destination`), inventory
 (`load_devices`, `Device`), the token-authenticated REST client (`F5Client`,
-including `save_config()`), timestamped `log()`, readable failures (`error_text`),
-and address parsing (`normalize_network`, `parse_address_spec`, `covers`).
+including `save_config()`, `run_bash()` for what REST has no endpoint for, and
+`download()` for the ranged file-transfer workers), timestamped `log()`, readable
+failures (`error_text`), local checksums (`md5_of`), and address parsing
+(`normalize_network`, `parse_address_spec`, `covers`).
 
 A new **tool** is a thin CLI over that:
 
