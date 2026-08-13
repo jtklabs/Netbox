@@ -13,6 +13,9 @@ scripts/f5-image-push/ucs-report.csv
 scripts/f5-image-push/ucs-backups/
 scripts/f5-image-push/*.iso
 scripts/f5-image-push/*.ucs
+# F5 tools (scripts/f5) — credentials and inventory stay local
+scripts/f5/.env
+scripts/f5/devices.csv
 *.pyc
 __pycache__/
 .DS_Store

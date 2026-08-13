@@ -1,0 +1,7 @@
+# Copy to devices.csv and list your units. devices.csv is gitignored.
+# Inventory only — credentials and the management port live in .env, never here.
+# host = management IP or DNS name (required); name = display label (optional).
+host,name
+10.0.10.11,bigip-dc1-a
+10.0.10.12,bigip-dc1-b
+lb-edge.example.net,bigip-edge
