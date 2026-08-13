@@ -18,6 +18,10 @@ remove, and what is already compliant.
 `--clean` makes the allow list *exactly* the networks given: anything else on the
 unit is removed. Without it, extra entries are reported and left alone.
 
+127.0.0.0/8 belongs to the standard whether or not you pass it — the unit polls
+its own SNMP over localhost — so it is added when missing and never removed by
+--clean. `--no-localhost` is the deliberate way to drop it.
+
 Endpoints used (all iControl REST over HTTPS on the management interface):
   GET   /mgmt/tm/sys/snmp              read the current allowed-addresses list
   PATCH /mgmt/tm/sys/snmp              write the list back (whole-list replace)
@@ -48,6 +52,11 @@ from f5common import (Device, F5Client, covers, error_text, load_devices, load_s
 
 SNMP = "/mgmt/tm/sys/snmp"
 COMMUNITIES = "/mgmt/tm/sys/snmp/communities"
+
+# BIG-IP ships with exactly this entry, and the unit polls its own SNMP over
+# localhost, so it belongs to the standard: it is added when missing and never
+# removed by --clean. --no-localhost is the deliberate way out.
+LOCALHOST = "127.0.0.0/8"
 
 
 @dataclass
@@ -112,7 +121,7 @@ def _covers_entry(entry, wanted):
     return net is not None and covers(net, wanted)
 
 
-def render_plan(name, plan, clean):
+def render_plan(name, plan, clean, requested):
     log(name, f"allow list now: {', '.join(plan.current) if plan.current else '(empty)'}")
     log(name, f"compliant:      {', '.join(plan.keep) if plan.keep else 'none'}")
     if plan.add:
@@ -121,10 +130,13 @@ def render_plan(name, plan, clean):
         log(name, f"to remove:      {', '.join(plan.extra)}")
         for entry in plan.extra:
             net = parse_address_spec(entry)
-            if net is not None and net.is_loopback:
-                log(name, f"note: removing {entry} closes SNMP over localhost, which the "
-                          f"unit's own internal monitoring uses — pass {entry} as an "
-                          f"argument to keep it")
+            if net is None or not net.is_loopback:
+                continue
+            if any(covers(want, net) for _, want in requested):
+                continue      # a specified network still covers localhost
+            log(name, f"note: removing {entry} closes SNMP over localhost, which the unit's "
+                      f"own internal monitoring uses — {LOCALHOST} is part of the standard "
+                      f"by default, and --no-localhost is what dropped it")
     elif plan.extra:
         log(name, f"extra:          {', '.join(plan.extra)} "
                   f"(left in place — --clean removes these)")
@@ -171,7 +183,7 @@ def snmp_access(client, requested, clean, commit, save):
     """
     name = client.device.name
     plan = build_plan(client.get_json(SNMP).get("allowedAddresses") or [], requested)
-    render_plan(name, plan, clean)
+    render_plan(name, plan, clean, requested)
     removing = plan.extra if clean else []
 
     note = community_check(client, [net for _, net in requested])
@@ -239,8 +251,13 @@ def main():
                         help="unit to check (management IP or DNS name); repeatable")
     target.add_argument("--csv", help="device inventory CSV (host,name) instead of --host")
     argp.add_argument("--clean", action="store_true",
-                      help="make the allow list exactly the networks given — remove every "
-                           "other entry. Without --commit it only reports the removals.")
+                      help="make the allow list exactly the networks given (plus "
+                           f"{LOCALHOST}) — remove every other entry. Without --commit it "
+                           "only reports the removals.")
+    argp.add_argument("--no-localhost", action="store_true",
+                      help=f"leave {LOCALHOST} out of the standard, so --clean removes it. "
+                           "It is included by default because the unit polls its own SNMP "
+                           "over localhost.")
     mode = argp.add_mutually_exclusive_group()
     mode.add_argument("--commit", action="store_true",
                       help="actually write the change (default is report-only)")
@@ -260,6 +277,11 @@ def main():
             sys.exit(f"bad network argument: {exc}")
         if entry[1] not in [net for _, net in requested]:
             requested.append(entry)
+    # Localhost leads the list, the way BIG-IP's own default writes it.
+    localhost = normalize_network(LOCALHOST)
+    implied_localhost = not args.no_localhost and localhost[1] not in [net for _, net in requested]
+    if implied_localhost:
+        requested.insert(0, localhost)
 
     settings = load_settings(args.env_file)
     devices = ([Device(host=host, name=host) for host in args.host] if args.host
@@ -270,6 +292,9 @@ def main():
     workers = max(args.workers or settings.workers, 1)
     print(f"standard: SNMP access — allow {', '.join(text for text, _ in requested)}"
           + (" and nothing else (--clean)" if args.clean else ""))
+    if implied_localhost:
+        print(f"          {LOCALHOST} is in the standard by default, since the unit polls "
+              f"its own SNMP over localhost (--no-localhost opts out)")
     print(f"devices:  {len(devices)} ({', '.join(d.host for d in devices)}), "
           f"as {settings.username}, {min(workers, len(devices))} at a time")
     print("mode:     " + ("COMMIT — changes will be written"

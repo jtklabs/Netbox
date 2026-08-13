@@ -48,19 +48,28 @@ remove, and what is already compliant:
 |---|---|---|
 | specified network missing | added | added |
 | specified network present | left as-is | left as-is |
+| `127.0.0.0/8` | added if missing | kept (part of the standard) |
 | any other entry on the unit | reported as `extra`, left alone | **removed** |
+
+`127.0.0.0/8` is in the standard whether or not you pass it — a BIG-IP polls its
+own SNMP over localhost, and every unit ships with that entry — so it is added
+when missing and never removed by `--clean`. Pass `--no-localhost` to drop it
+deliberately; the run then warns before removing it.
 
 Both modes report the same three-way breakdown, so the plan is legible before
 anything is committed:
 
 ```
+$ ./f5_standards.py 10.1.1.0/24 10.2.0.0/16 --host 10.0.10.11 --clean
+standard: SNMP access — allow 127.0.0.0/8, 10.1.1.0/24, 10.2.0.0/16 and nothing else (--clean)
+          127.0.0.0/8 is in the standard by default, since the unit polls its own
+          SNMP over localhost (--no-localhost opts out)
+mode:     report only, nothing will be written
+
 [bigip-dc1-a] allow list now: 127.0.0.0/8, 10.1.1.0/255.255.255.0, 192.168.50.0/24
-[bigip-dc1-a] compliant:      10.1.1.0/255.255.255.0
+[bigip-dc1-a] compliant:      127.0.0.0/8, 10.1.1.0/255.255.255.0
 [bigip-dc1-a] to add:         10.2.0.0/16
-[bigip-dc1-a] to remove:      127.0.0.0/8, 192.168.50.0/24
-[bigip-dc1-a] note: removing 127.0.0.0/8 closes SNMP over localhost, which the
-              unit's own internal monitoring uses — pass 127.0.0.0/8 as an
-              argument to keep it
+[bigip-dc1-a] to remove:      192.168.50.0/24
 [bigip-dc1-a] not committed (no --commit) — nothing was written
 ```
 
@@ -87,6 +96,9 @@ Behavior:
   unambiguous alternatives rather than being silently widened. At least one
   network is always required, so `--clean` can never empty the list and close
   SNMP completely.
+- A removal that something else still covers is not flagged as dangerous: a unit
+  holding only `127.0.0.1` gets `127.0.0.0/8` added and the narrower entry
+  removed, with no warning, because localhost access is unbroken.
 - One unreachable unit never stops a fleet: it fails on its own line and the run
   continues.
 
