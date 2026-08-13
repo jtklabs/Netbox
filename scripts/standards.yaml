@@ -1,0 +1,36 @@
+# Our network standards, in one platform-neutral file.
+#
+# These values are the same for every device and every platform — the same SNMP
+# pollers, the same syslog collectors — so they are written once, generically,
+# and each platform's tool maps them onto that platform's own config:
+#
+#   scripts/f5/f5_standards.py  ->  BIG-IP  sys snmp / sys syslog
+#
+# This file is meant to be committed: the standard itself belongs in version
+# control, and there are no credentials here (those live in each tool's .env).
+# Replace the placeholder addresses below with the real collectors.
+#
+# Every tool reads this file, reports what it would add, remove and leave alone,
+# and writes nothing without --commit.
+
+# Networks allowed to poll SNMP.
+#   BIG-IP: sys snmp allowed-addresses  (System >> SNMP : Agent : Configuration)
+#
+# 127.0.0.0/8 is included automatically — a BIG-IP polls its own SNMP over
+# localhost — so it does not need to be listed here.
+snmp:
+  allow:
+    - 10.1.1.0/24        # NMS / poller subnet
+    - 10.2.0.0/16        # monitoring VLANs
+
+# Collectors that receive syslog. A bare address means the default port, 514;
+# use the host/port form for anything else.
+#   BIG-IP: sys syslog remote-servers  (System >> Logs : Configuration)
+#
+# BIG-IP's remote-servers send UDP only. A TCP collector needs a raw syslog-ng
+# include, which these tools do not manage, so there is no protocol key yet.
+syslog:
+  destinations:
+    - 10.1.1.50          # primary collector, port 514
+    - host: 10.1.1.51    # secondary collector on a non-default port
+      port: 1514

@@ -14,7 +14,7 @@ import stat
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     import requests
@@ -112,6 +112,135 @@ def load_settings(env_file=None):
         timeout=get_int("F5_TIMEOUT", 60),
         workers=get_int("F5_WORKERS", 5),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Standards file (platform-neutral, shared by every platform's tooling)
+# --------------------------------------------------------------------------- #
+
+DEFAULT_STANDARDS_FILE = os.path.normpath(os.path.join(HERE, os.pardir, "standards.yaml"))
+
+
+@dataclass
+class Destination:
+    """One syslog collector: an address (or hostname) and a port."""
+
+    host: str
+    port: int = 514
+
+    @property
+    def label(self):
+        return f"{self.host}:{self.port}"
+
+    @property
+    def key(self):
+        """What makes two destinations the same collector. The name a device
+        happens to file it under is cosmetic and deliberately not part of this."""
+        try:
+            host = str(ipaddress.ip_address(self.host))
+        except ValueError:
+            host = self.host.strip().lower()
+        return host, self.port
+
+
+@dataclass
+class Standards:
+    """The parsed standards file. One field per standard."""
+
+    path: str
+    snmp_allow: list = field(default_factory=list)      # [(text, ip_network)]
+    syslog: list = field(default_factory=list)          # [Destination]
+
+
+def load_standards(path=None):
+    """Read and validate the platform-neutral standards file.
+
+    It lives here because the F5 tools are its only reader today; when a second
+    platform's tooling arrives, this belongs in a module both can import.
+    """
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("Reading the standards file needs the 'PyYAML' package: "
+                 "pip install -r requirements.txt")
+    path = path or DEFAULT_STANDARDS_FILE
+    if not os.path.isfile(path):
+        sys.exit(f"standards file not found: {path}")
+    with open(path) as fh:
+        try:
+            doc = yaml.safe_load(fh) or {}
+        except yaml.YAMLError as exc:
+            sys.exit(f"{path} is not valid YAML: {exc}")
+    if not isinstance(doc, dict):
+        sys.exit(f"{path} must be a mapping of standard name to settings")
+
+    # A typo'd key would otherwise mean "this standard is not defined", which
+    # reads as compliant and silently enforces nothing.
+    known = {"snmp": {"allow"}, "syslog": {"destinations"}}
+    for key, section in doc.items():
+        if key not in known:
+            print(f"warning: {path}: ignoring unknown standard {key!r} "
+                  f"(known: {', '.join(sorted(known))})", file=sys.stderr)
+            continue
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            sys.exit(f"{path}: {key} must be a mapping, e.g. "
+                     f"{key}: {{{sorted(known[key])[0]}: [...]}}")
+        for sub in section:
+            if sub not in known[key]:
+                print(f"warning: {path}: ignoring unknown key '{key}.{sub}' "
+                      f"(known: {', '.join(f'{key}.{k}' for k in sorted(known[key]))})",
+                      file=sys.stderr)
+
+    standards = Standards(path=path)
+    for text in _as_list(doc.get("snmp") or {}, "allow", path, "snmp"):
+        try:
+            standards.snmp_allow.append(normalize_network(str(text)))
+        except ValueError as exc:
+            sys.exit(f"{path}: snmp.allow: {exc}")
+    for item in _as_list(doc.get("syslog") or {}, "destinations", path, "syslog"):
+        standards.syslog.append(_parse_destination(item, path))
+    return standards
+
+
+def _as_list(section, key, path, label):
+    value = section.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        sys.exit(f"{path}: {label}.{key} must be a list")
+    return value
+
+
+def _parse_destination(item, path):
+    """Accept either the shorthand `- 10.1.1.50` or `- {host: ..., port: ...}`."""
+    where = f"{path}: syslog.destinations"
+    if isinstance(item, dict):
+        unknown = set(item) - {"host", "port"}
+        if unknown:
+            sys.exit(f"{where}: unknown key(s) {', '.join(sorted(unknown))} "
+                     f"— only host and port are supported")
+        host, port = item.get("host"), item.get("port", 514)
+    else:
+        host, port = item, 514
+    if not host or not str(host).strip():
+        sys.exit(f"{where}: every destination needs a host")
+    host = str(host).strip()
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        sys.exit(f"{where}: port for {host} must be a whole number, got {port!r}")
+    if not 1 <= port <= 65535:
+        sys.exit(f"{where}: port for {host} must be between 1 and 65535, got {port}")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        # A hostname is legal — the device resolves it — but a mistyped address
+        # would otherwise sail through as one, so say what was assumed.
+        if any(ch.isdigit() for ch in host.split(".")[-1]):
+            sys.exit(f"{where}: {host!r} is neither a valid IP address nor a hostname")
+    return Destination(host=host, port=port)
 
 
 # --------------------------------------------------------------------------- #
