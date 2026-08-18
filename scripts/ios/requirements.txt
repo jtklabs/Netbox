@@ -1,0 +1,5 @@
+# Classic IOS has no REST API, so this tool speaks SSH. netmiko handles enable
+# mode, terminal paging, config mode and the prompt handling that goes with
+# them — see the README for why that is worth a dependency this repo's usual
+# requests-only diet would not otherwise carry.
+netmiko>=4.3,<5

@@ -11,6 +11,13 @@ id, because the checker knows a hostname and a standard's name — making it loo
 up primary keys first would be two extra round trips per device for nothing.
 """
 
+from dcim.api.serializers import (
+    DeviceRoleSerializer,
+    DeviceSerializer,
+    PlatformSerializer,
+    SiteSerializer,
+)
+from extras.api.serializers import TagSerializer
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -40,6 +47,14 @@ class ConfigStandardSerializer(NetBoxModelSerializer):
     )
     result_count = serializers.IntegerField(read_only=True, required=False)
 
+    # Nested rather than bare primary keys, following netbox_quotes: the portal
+    # renders "which platforms is this standard for" straight off the list, and
+    # a page of integers costs it a lookup per row. Writes still take ids.
+    platforms = PlatformSerializer(nested=True, many=True, required=False)
+    roles = DeviceRoleSerializer(nested=True, many=True, required=False)
+    sites = SiteSerializer(nested=True, many=True, required=False)
+    device_tags = TagSerializer(nested=True, many=True, required=False)
+
     class Meta:
         model = ConfigStandard
         fields = (
@@ -65,6 +80,9 @@ class ConfigComplianceSerializer(NetBoxModelSerializer):
     finding_count = serializers.IntegerField(read_only=True)
     needs_manual_fix = serializers.BooleanField(read_only=True)
     is_stale = serializers.BooleanField(read_only=True)
+
+    device = DeviceSerializer(nested=True)
+    standard = ConfigStandardSerializer(nested=True)
 
     class Meta:
         model = ConfigCompliance
