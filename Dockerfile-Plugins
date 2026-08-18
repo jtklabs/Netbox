@@ -7,10 +7,12 @@ RUN /usr/local/bin/uv pip install -r /opt/netbox/plugin_requirements.txt
 COPY plugins/netbox-quotes /opt/netbox-plugins/netbox-quotes
 COPY plugins/netbox-refresh /opt/netbox-plugins/netbox-refresh
 COPY plugins/netbox-discovery /opt/netbox-plugins/netbox-discovery
+COPY plugins/netbox-compliance /opt/netbox-plugins/netbox-compliance
 RUN /usr/local/bin/uv pip install \
     /opt/netbox-plugins/netbox-quotes \
     /opt/netbox-plugins/netbox-refresh \
-    /opt/netbox-plugins/netbox-discovery
+    /opt/netbox-plugins/netbox-discovery \
+    /opt/netbox-plugins/netbox-compliance
 
 # Bake plugin config into the image so collectstatic picks up plugin static files.
 # At runtime the ./configuration bind mount shadows this copy.

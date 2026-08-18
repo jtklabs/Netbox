@@ -1,0 +1,188 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Result</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Device</th><td>{{ object.device|linkify }}</td></tr>
+            <tr><th>Standard</th><td>{{ object.standard|linkify }}</td></tr>
+            <tr><th>Status</th>
+              <td>{% badge object.get_status_display bg_color=object.get_status_color %}
+                {% if object.exempt and object.result %}
+                  <span class="text-muted ms-1">
+                    (underlying result: {{ object.get_result_display }})
+                  </span>
+                {% endif %}
+              </td></tr>
+            <tr><th>Findings</th><td>{{ object.finding_count }}</td></tr>
+            {% if object.error_message %}
+              <tr><th>Error</th><td class="text-danger">{{ object.error_message }}</td></tr>
+            {% endif %}
+          </table>
+        </div>
+      </div>
+
+      {% if object.needs_manual_fix %}
+        <div class="alert alert-secondary">
+          <i class="mdi mdi-hand-back-right-outline" aria-hidden="true"></i>
+          This standard is audit-only, so no run will fix it.
+          {% if object.standard.remediation_notes %}
+            <div class="mt-2">{{ object.standard.remediation_notes|linebreaksbr }}</div>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Provenance</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Source</th>
+              <td>{% badge object.get_source_display bg_color=object.get_source_color %}</td></tr>
+            <tr><th>Last checked</th><td>{{ object.last_checked|placeholder }}</td></tr>
+            <tr><th>Freshness</th>
+              <td>
+                {% if object.is_stale %}
+                  <span class="text-warning">
+                    <i class="mdi mdi-clock-alert-outline" aria-hidden="true"></i>
+                    Stale — last checked {{ object.age_days }} days ago
+                  </span>
+                {% elif object.age_days is not None %}
+                  Checked {{ object.age_days }} day{{ object.age_days|pluralize }} ago
+                {% else %}
+                  {{ ''|placeholder }}
+                {% endif %}
+              </td></tr>
+            <tr><th>Last remediated</th><td>{{ object.last_remediated|placeholder }}</td></tr>
+          </table>
+        </div>
+      </div>
+      {% include 'inc/panels/custom_fields.html' %}
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+
+  {% if object.missing_entries or object.extra_entries or object.violations %}
+    <div class="row">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">Findings</h5>
+          <div class="card-body">
+            {# Everything below arrives already redacted. Nothing in this plugin #}
+            {# unredacts it, because nothing in this plugin ever had the secret. #}
+            {% if object.missing_entries %}
+              <h6>Missing — the standard requires these and the device does not have them</h6>
+              <ul class="font-monospace">
+                {% for item in object.missing_entries %}<li>{{ item }}</li>{% endfor %}
+              </ul>
+            {% endif %}
+            {% if object.extra_entries %}
+              <h6>Unexpected — present on the device, not named by the standard</h6>
+              <ul class="font-monospace">
+                {% for item in object.extra_entries %}
+                  <li>{{ item.line|default:item.key }}
+                    {% if item.context %}<span class="text-muted">(in {{ item.context }})</span>{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+            {% if object.violations %}
+              <h6>Violations — lines that must not be there</h6>
+              <ul class="font-monospace">
+                {% for item in object.violations %}
+                  <li>{{ item.line }}
+                    {% if item.context %}<span class="text-muted">(in {{ item.context }})</span>{% endif %}
+                    {% if item.line_number %}<span class="text-muted">line {{ item.line_number }}</span>{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if object.observed %}
+    <div class="row">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">
+            Observed configuration
+            <span class="text-muted">(redacted)</span>
+          </h5>
+          <div class="card-body">
+            <pre class="mb-0"><code>{{ object.observed }}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if object.pre_change_config or object.remediation_log %}
+    <div class="row">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">
+            Before the last change
+            {% if object.pre_change_at %}<span class="text-muted">{{ object.pre_change_at }}</span>{% endif %}
+          </h5>
+          <div class="card-body">
+            <p class="text-muted">
+              Captured immediately before configuration was written, as a rollback
+              reference. Only the sections this standard governs, and redacted —
+              a full running-config would put every secret on the device into NetBox.
+              Earlier captures are in the changelog.
+            </p>
+            {% if object.pre_change_config %}
+              <pre><code>{{ object.pre_change_config }}</code></pre>
+            {% endif %}
+            {% if object.remediation_log %}
+              <h6>Commands sent</h6>
+              <pre class="mb-0"><code>{{ object.remediation_log }}</code></pre>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if object.exempt %}
+    <div class="row">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">
+            Exemption
+            {% if object.exemption_expired %}{% badge 'Review overdue' bg_color='yellow' %}{% endif %}
+          </h5>
+          <div class="card-body">
+            <table class="table table-hover attr-table">
+              <tr><th>Reason</th><td>{{ object.exempt_reason|linebreaksbr|placeholder }}</td></tr>
+              <tr><th>Approved by</th><td>{{ object.exempt_approved_by|placeholder }}</td></tr>
+              <tr><th>Approved on</th><td>{{ object.exempt_approved_on|placeholder }}</td></tr>
+              <tr><th>Review by</th>
+                <td>{% if object.exempt_review_by %}
+                      {% if object.exemption_expired %}
+                        <span class="text-warning">{{ object.exempt_review_by }} — overdue</span>
+                      {% else %}{{ object.exempt_review_by }}{% endif %}
+                    {% else %}
+                      <span class="text-warning">Not set — this exemption has no end</span>
+                    {% endif %}</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+  {% plugin_full_width_page object %}
+{% endblock %}

@@ -9,6 +9,7 @@ PLUGINS = [
     "netbox_quotes",
     "netbox_refresh",
     "netbox_discovery",
+    "netbox_compliance",
 ]
 
 PLUGINS_CONFIG = {
@@ -29,5 +30,12 @@ PLUGINS_CONFIG = {
         # patches that column — see _localise_table_dates() for why that is
         # opt-in rather than simply done.
         "us_dates_in_tables": True,
+    },
+    "netbox_compliance": {
+        # A configuration check older than this many days is shown as stale.
+        # Shorter than the software side's 90: running config changes when
+        # somebody types on a switch, which is a different tempo from a code
+        # upgrade, so a month-old result is already worth a warning triangle.
+        "stale_after_days": 30,
     },
 }

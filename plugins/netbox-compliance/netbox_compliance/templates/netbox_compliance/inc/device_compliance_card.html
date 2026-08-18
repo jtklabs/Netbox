@@ -1,0 +1,42 @@
+{% load helpers %}
+{# Configuration standards in force for this device, checked or not. #}
+
+<div class="card">
+  <h5 class="card-header">
+    Config Compliance
+    <div class="card-actions">
+      <a href="{% url 'plugins:netbox_compliance:configcompliance_list' %}?device_id={{ object.pk }}"
+         class="btn btn-sm btn-ghost-primary">
+        <i class="mdi mdi-chevron-right-box-outline" aria-hidden="true"></i> All results
+      </a>
+    </div>
+  </h5>
+  {% if compliance_rows %}
+    <table class="table table-hover attr-table">
+      {% for row in compliance_rows %}
+        <tr>
+          <td>{{ row.standard|linkify }}</td>
+          <td>
+            {% if row.record %}
+              <a href="{{ row.record.get_absolute_url }}">{% badge row.label bg_color=row.color %}</a>
+            {% else %}
+              {% badge row.label bg_color=row.color %}
+            {% endif %}
+            {% if row.is_stale %}
+              <i class="mdi mdi-clock-alert-outline text-warning ms-1"
+                 title="Not checked recently" aria-hidden="true"></i>
+            {% endif %}
+            {% if row.findings %}
+              <span class="text-muted ms-1">{{ row.findings }} finding{{ row.findings|pluralize }}</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <div class="card-body">
+      <span class="text-muted">No configuration standards in force for this device</span>
+      <a href="{% url 'plugins:netbox_compliance:configstandard_add' %}" class="ms-1">Define one</a>
+    </div>
+  {% endif %}
+</div>

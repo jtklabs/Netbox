@@ -1,0 +1,86 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% load render_table from django_tables2 %}
+
+{% block title %}Configuration Compliance Report{% endblock %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Filter</h5>
+        <div class="card-body">
+          <form method="get" class="row g-3 align-items-end">
+            {% for field in form %}
+              <div class="col-md-4">
+                {{ field.label_tag }}
+                {{ field }}
+                {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+              </div>
+            {% endfor %}
+            <div class="col-md-12">
+              <button type="submit" class="btn btn-primary">Run report</button>
+              <a href="{% url 'plugins:netbox_compliance:compliance_report' %}"
+                 class="btn btn-outline-secondary">Reset</a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Every state is counted, including the ones that are not failures. A device #}
+  {# nobody has checked is Not checked, never Compliant, and an exempt device is #}
+  {# shown here rather than quietly dropped.                                     #}
+  <div class="row mb-3">
+    {% for item in summary %}
+      <div class="col">
+        <div class="card">
+          <div class="card-body text-center">
+            <h2 class="mb-0">{{ item.count }}</h2>
+            <div>{% badge item.label bg_color=item.color %}</div>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">
+          By standard
+          <span class="text-muted">
+            ({{ standard_count }} standard{{ standard_count|pluralize }} in force across
+            {{ device_count }} device{{ device_count|pluralize }})
+          </span>
+        </h5>
+        <div class="card-body table-responsive">
+          {% render_table rollup_table %}
+          <p class="text-muted mt-2 mb-0">
+            <strong>Coverage</strong> is how much of the fleet in scope has actually been
+            checked; <strong>Compliant %</strong> is measured against those checks alone.
+            They are shown together because a standard checked on four devices out of a
+            thousand and passing on all four is 100% compliant and means nothing.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">
+          {{ row_count }} result{{ row_count|pluralize }}
+          {% if row_count != total_count %}
+            <span class="text-muted">(filtered by status, of {{ total_count }})</span>
+          {% endif %}
+        </h5>
+        <div class="card-body table-responsive">
+          {% render_table table %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

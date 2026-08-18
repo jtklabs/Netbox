@@ -1,0 +1,155 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Standard</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Name</th><td>{{ object.name }}</td></tr>
+            <tr><th>Type</th>
+              <td>{% badge object.get_check_type_display bg_color=object.get_check_type_color %}</td></tr>
+            <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+            <tr><th>Pattern</th><td><code>{{ object.match_pattern }}</code></td></tr>
+            <tr><th>Expected</th>
+              <td>
+                {% if object.entries %}
+                  <ul class="list-unstyled mb-0">
+                    {% for entry in object.entries %}
+                      <li><code>{{ entry.key }}</code>
+                        {% for name, value in entry.vars.items %}
+                          <span class="text-muted">{{ name }}={{ value }}</span>
+                        {% endfor %}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  <span class="text-muted">Nothing may match the pattern</span>
+                {% endif %}
+              </td></tr>
+            <tr><th>In force</th>
+              <td>{{ object.valid_from }}{% if object.valid_to %} to {{ object.valid_to }}
+                  {% else %} &mdash; current{% endif %}
+                {% if not object.is_active %}{% badge 'Not in force' bg_color='gray' %}{% endif %}
+              </td></tr>
+          </table>
+        </div>
+      </div>
+
+      {# The scope rule is "empty means no restriction", so an empty card is a #}
+      {# fleet-wide standard rather than a standard that applies to nothing.   #}
+      <div class="card">
+        <h5 class="card-header">Scope</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Platforms</th>
+              <td>{% for platform in object.platforms.all %}{{ platform|linkify }}{% if not forloop.last %}, {% endif %}
+                  {% empty %}<span class="text-muted">Every platform</span>{% endfor %}</td></tr>
+            <tr><th>Roles</th>
+              <td>{% for role in object.roles.all %}{{ role|linkify }}{% if not forloop.last %}, {% endif %}
+                  {% empty %}<span class="text-muted">Every role</span>{% endfor %}</td></tr>
+            <tr><th>Sites</th>
+              <td>{% for site in object.sites.all %}{{ site|linkify }}{% if not forloop.last %}, {% endif %}
+                  {% empty %}<span class="text-muted">Every site</span>{% endfor %}</td></tr>
+            <tr><th>Device tags</th>
+              <td>{% for tag in object.device_tags.all %}{% badge tag.name bg_color=tag.color %}
+                  {% empty %}<span class="text-muted">Any device</span>{% endfor %}</td></tr>
+          </table>
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Remediation</h5>
+        <div class="card-body">
+          {% if not object.auto_remediable %}
+            <div class="alert alert-secondary">
+              <i class="mdi mdi-hand-back-right-outline" aria-hidden="true"></i>
+              <strong>Audit only.</strong> No mode will send configuration for this
+              standard. Violations are reported and left for a person.
+            </div>
+          {% elif not object.allow_enforce %}
+            <div class="alert alert-info">
+              <i class="mdi mdi-plus-box-outline" aria-hidden="true"></i>
+              <strong>Update only.</strong> A run may add what is missing. Removing
+              configuration is not authorised for this standard.
+            </div>
+          {% else %}
+            <div class="alert alert-warning">
+              <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+              <strong>Enforce allowed.</strong> A run in enforce mode may remove
+              configuration that this standard says must not be there.
+            </div>
+          {% endif %}
+          <table class="table table-hover attr-table">
+            <tr><th>Add</th>
+              <td>{% if object.add_template %}<code>{{ object.add_template }}</code>
+                  {% else %}<span class="text-muted">&mdash;</span>{% endif %}</td></tr>
+            <tr><th>Remove</th>
+              <td>{% if object.remove_template %}<code>{{ object.remove_template }}</code>
+                  {% else %}<span class="text-muted">&mdash;</span>{% endif %}</td></tr>
+            <tr><th>Supplied at run time</th>
+              <td>
+                {% if runtime_variables %}
+                  {% for name in runtime_variables %}<code>{{ name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+                  <div class="form-text">
+                    Not stored in NetBox — the checker supplies these from its own
+                    environment when it writes. That is how a standard can name the
+                    accounts that should exist without the database holding a credential.
+                  </div>
+                {% else %}
+                  <span class="text-muted">Nothing</span>
+                {% endif %}
+              </td></tr>
+            <tr><th>Notes</th><td>{{ object.remediation_notes|linebreaksbr|placeholder }}</td></tr>
+          </table>
+        </div>
+      </div>
+      {% include 'inc/panels/custom_fields.html' %}
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col col-md-12">
+      <div class="row mb-3">
+        {% for item in summary %}
+          <div class="col">
+            <div class="card">
+              <div class="card-body text-center">
+                <h2 class="mb-0">{{ item.count }}</h2>
+                <div>{% badge item.label bg_color=item.color %}</div>
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="card">
+        <h5 class="card-header">
+          Devices checked
+          <span class="text-muted">
+            ({{ result_total }} result{{ result_total|pluralize }}{% if result_total > 100 %}, showing 100{% endif %})
+          </span>
+          <div class="card-actions">
+            <a href="{% url 'plugins:netbox_compliance:compliance_report' %}?standard={{ object.pk }}"
+               class="btn btn-sm btn-ghost-primary">
+              <i class="mdi mdi-chart-bar" aria-hidden="true"></i> Fleet report
+            </a>
+          </div>
+        </h5>
+        <div class="card-body table-responsive">
+          {% render_table result_table %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% plugin_full_width_page object %}
+{% endblock %}
