@@ -65,8 +65,6 @@ from iosconfig import (  # noqa: E402
     evaluate,
     parse_config,
     plan_remediation,
-    redact,
-    redact_config,
 )
 from iosenv import load_settings  # noqa: E402
 from netboxio import NetBox, NetBoxError, resolve_device_owners  # noqa: E402
@@ -128,7 +126,21 @@ def select_targets(netbox, args):
     the fleet is.
     """
     if args.host:
-        return [Target(name=args.device_name or host, address=host) for host in args.host]
+        # --device-name is not just a label: naming the NetBox device lets the
+        # standards be scoped to it properly, exactly as they would be for a
+        # device selected the normal way. Without it there is no record to
+        # scope against and every active standard is checked.
+        device_id = None
+        if args.device_name:
+            match = netbox.devices(name=args.device_name)
+            if not match:
+                sys.exit('No device called %r in NetBox — drop --device-name to '
+                         'check the host anyway, unscoped.' % args.device_name)
+            device_id = match[0]['id']
+        return [
+            Target(name=args.device_name or host, address=host, device_id=device_id)
+            for host in args.host
+        ]
 
     filters = {}
     if args.device:
@@ -289,8 +301,9 @@ def _standards_for(netbox, target, args):
         # standard, and say so, because scoping cannot be applied to a device
         # that has no record to scope against.
         standards = netbox.all('/api/plugins/compliance/config-standards/', active='true')
-        log(target.name, 'not a NetBox device — checking against all %d active '
-                         'standards, unscoped' % len(standards))
+        log(target.name, 'no NetBox device record — checking against all %d active '
+                         'standards, unscoped. Name it with --device-name to scope '
+                         'them and to record the result.' % len(standards))
     else:
         standards = netbox.standards_for_device(target.device_id)
     if args.only:
@@ -490,7 +503,21 @@ def main(argv=None):
 
 
 def _post_results(netbox, outcomes):
-    items = [item for outcome in outcomes for item in build_report(outcome)]
+    # A --host target that NetBox does not know has nothing to record a result
+    # against. Posting anyway would return an error row per standard and read
+    # like the devices failed, rather than like we never said which device it
+    # was — so say that once, here, instead.
+    anonymous = [o for o in outcomes if not o.target.device_id and not _named(o)]
+    if anonymous:
+        print('not recorded in NetBox: %s — a --host target needs --device-name to '
+              'say which device the result belongs to'
+              % ', '.join(o.target.name for o in anonymous))
+
+    items = [
+        item for outcome in outcomes
+        if outcome not in anonymous
+        for item in build_report(outcome)
+    ]
     if not items:
         return
     try:
@@ -503,15 +530,25 @@ def _post_results(netbox, outcomes):
           % ', '.join('%s %s' % (count, name) for name, count in sorted(summary.items())))
 
 
+def _named(outcome):
+    """Did the caller tell us which NetBox device a --host target is?"""
+    return outcome.target.name != outcome.target.address
+
+
 def _summarise(outcomes, args):
     failed = [o for o in outcomes if o.failed]
     drifted = [o for o in outcomes if not o.failed and o.drifted]
-    clean = len(outcomes) - len(failed) - len(drifted)
+    # A device no standard applies to is not compliant, it is unmeasured, and
+    # rolling it into the green number is how a fleet report flatters itself.
+    unscoped = [o for o in outcomes if not o.failed and not o.results]
+    clean = len(outcomes) - len(failed) - len(drifted) - len(unscoped)
 
     print('')
     print('  %-24s %d' % ('compliant', clean))
     print('  %-24s %d' % ('drift found', len(drifted)))
     print('  %-24s %d' % ('failed', len(failed)))
+    if unscoped:
+        print('  %-24s %d' % ('no standards in scope', len(unscoped)))
     for outcome in failed:
         print('    %s: %s' % (outcome.target.name, outcome.error))
 

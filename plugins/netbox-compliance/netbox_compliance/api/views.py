@@ -20,6 +20,7 @@ changed one goes through save().
 """
 
 from dcim.models import Device
+from django.db.models import Count
 from django.utils import timezone
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import status
@@ -42,9 +43,12 @@ __all__ = (
 
 
 class ConfigStandardViewSet(NetBoxModelViewSet):
+    # result_count is annotated here as well as in the list view: the
+    # serializer declares it, and a declared field that quietly never appears
+    # because the queryset forgot to compute it is worse than no field.
     queryset = ConfigStandard.objects.prefetch_related(
         'platforms', 'roles', 'sites', 'device_tags', 'tags'
-    )
+    ).annotate(result_count=Count('results', distinct=True))
     serializer_class = ConfigStandardSerializer
     filterset_class = filtersets.ConfigStandardFilterSet
 

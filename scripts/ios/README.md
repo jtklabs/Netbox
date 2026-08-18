@@ -218,9 +218,12 @@ rule with an edge to get wrong, and the fleet report applies it too; one
 implementation means the report and the checker cannot disagree about what a
 device is being measured against.
 
-`--host` connects to an address directly, for a device NetBox does not know
-about yet. Scoping cannot be applied to a device with no record, so a `--host`
-target is checked against every active standard and the run says so.
+`--host` connects to an address directly — for a box reachable at an address
+NetBox does not have, or one being checked before it is onboarded. Add
+`--device-name <name>` and it is scoped and recorded exactly like any other
+device; without it there is no record to scope against, so every active standard
+is checked and the result is not written to NetBox (there would be nothing to
+attach it to). The run says which of the two happened.
 
 ## Testing
 
