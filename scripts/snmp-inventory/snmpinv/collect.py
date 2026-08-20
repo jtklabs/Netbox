@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -129,6 +130,7 @@ class AccessPoint:
     ip_address: str = ""
     group: str = ""
     status: int = 0
+    software_version: str = ""
 
     @property
     def is_up(self) -> bool:
@@ -924,6 +926,7 @@ def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoi
     ips = collect_column(binds, vendors.ARUBA_AP_IP)
     groups = collect_column(binds, vendors.ARUBA_AP_GROUP)
     statuses = collect_column(binds, vendors.ARUBA_AP_STATUS)
+    versions = collect_column(binds, vendors.ARUBA_AP_SW_VERSION)
 
     access_points = []
     for row_index in sorted(set(names) | set(serials) | set(models)):
@@ -938,6 +941,7 @@ def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoi
             ip_address=_text(ips.get(row_index)),
             group=_text(groups.get(row_index)),
             status=_int(statuses.get(row_index), 0),
+            software_version=_text(versions.get(row_index)),
         ))
     return access_points
 
@@ -971,8 +975,20 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
     for oid in profile.build_oids:
         if facts.software_version and oid in found and found[oid].value:
             build = found[oid].value.strip()
-            if build and build not in facts.software_version:
-                facts.software_version = f"{facts.software_version}-{build}"
+            # "0" is a real answer meaning no patch: Check Point reports take 0
+            # on a GA install, and stamping "Take 0" on every unpatched gateway
+            # would read as a patch level rather than the absence of one.
+            if build in ("", "0"):
+                break
+            # Skip only when the version string already carries the build as a
+            # standalone token — some platforms merge them upstream. A plain
+            # substring test is wrong here: take 20 on R81.20 must still be
+            # appended, and "20" is inside "R81.20" only as part of another
+            # number.
+            if not re.search(rf"(?<![\w.]){re.escape(build)}(?![\w.])",
+                             facts.software_version):
+                facts.software_version = profile.build_format.format(
+                    version=facts.software_version, build=build)
             break
 
     for oid in profile.serial_oids:

@@ -211,7 +211,9 @@ class TestApplianceVendors:
         device = scan("checkpoint-gaia").primary
         assert device.model == "Check Point 6200"
         assert device.serial == "1811B00234"
-        assert device.software_version == "R81.20"
+        # Version plus jumbo hotfix take: R81.20 alone does not say whether
+        # the gateway is freshly patched or running a year of unfixed CVEs.
+        assert device.software_version == "R81.20 Take 89"
 
     def test_infoblox(self):
         device = scan("infoblox-nios").primary
@@ -607,9 +609,12 @@ class TestPrefixLengthsThatCannotBeRight:
 class TestAccessPointsGetASoftwareVersion:
     """APs were the one device class arriving with the field blank.
 
-    The controller's AP table reports no version column, so nothing was ever
-    populated — every AP in the estate landed in NetBox with no software
-    version, which for a wireless fleet is most of the devices.
+    The controller's AP table DOES have a version column — wlanAPSwVersion,
+    column 34 — and it is the preferred source, because during a staged
+    upgrade APs reloading in batches briefly run a different build than the
+    controller and that column is the only place it shows. Some builds leave
+    the column empty; those APs inherit the controller's version, since
+    campus APs run the image the controller pushes.
     """
 
     def setup_method(self):
@@ -620,12 +625,17 @@ class TestAccessPointsGetASoftwareVersion:
         for ap in self.result.access_points:
             assert ap.software_version, f"{ap.name} has no software version"
 
-    def test_it_is_the_controllers_version(self):
-        """Campus APs run the image the controller pushes, so this is the
-        version they are actually running, not a guess."""
-        controller = self.result.primary.software_version
-        assert controller == "8.10.0.4"
-        assert {ap.software_version for ap in self.result.access_points} == {controller}
+    def test_the_ap_tables_own_version_wins(self):
+        """The AP build carries a suffix the controller's version lacks —
+        collapsing it to the controller's would erase real information."""
+        by_name = {ap.name: ap for ap in self.result.access_points}
+        assert by_name["dal-ap-101"].software_version == "8.10.0.4_87457"
+        assert by_name["dal-ap-103"].software_version == "8.10.0.4_87457"
+
+    def test_an_ap_without_the_column_inherits_the_controllers(self):
+        """dal-ap-102 has no wlanAPSwVersion row at all in the fixture."""
+        by_name = {ap.name: ap for ap in self.result.access_points}
+        assert by_name["dal-ap-102"].software_version == "8.10.0.4"
 
     def test_the_aps_keep_their_own_model_and_serial(self):
         """Inheriting the version must not bleed into anything else."""
@@ -706,6 +716,49 @@ class TestF5ReportsItsBuildAsWellAsItsVersion:
         build nobody can explain."""
         facts = collect_fixture("f5-bigip")
         assert "1.3.6.1.4.1.3375.2.1.4.3.0" in facts.vendor_scalars
+
+
+class TestCheckpointPatchLevel:
+    """svnServicePack is the installed jumbo hotfix take — the patch level.
+
+    Two edges worth pinning. A GA gateway with no jumbo reports take 0, and
+    "R81.20 Take 0" would read as a patch level rather than the absence of
+    one. And the already-present guard must match tokens, not substrings:
+    take 20 on R81.20 has to survive even though "20" appears inside the
+    version string.
+    """
+
+    def _scalars(self, version, take):
+        from snmpinv import vendors
+        profile = vendors.PROFILES[2620]
+        return profile, {
+            profile.version_oids[0]: VarBind(
+                profile.version_oids[0], "STRING", version),
+            profile.build_oids[0]: VarBind(
+                profile.build_oids[0], "Gauge32", take),
+        }
+
+    def _apply(self, version, take):
+        from snmpinv.collect import DeviceFacts, _apply_vendor_scalars
+
+        profile, answers = self._scalars(version, take)
+
+        class Session:
+            def get(_, host, oids):
+                return answers
+
+        facts = DeviceFacts(host="10.0.0.1")
+        _apply_vendor_scalars(Session(), "10.0.0.1", facts, profile)
+        return facts.software_version
+
+    def test_take_zero_means_no_patch(self):
+        assert self._apply("R81.20", "0") == "R81.20"
+
+    def test_a_take_matching_the_versions_digits_still_appends(self):
+        assert self._apply("R81.20", "20") == "R81.20 Take 20"
+
+    def test_a_take_matching_the_major_version_still_appends(self):
+        assert self._apply("R81.20", "81") == "R81.20 Take 81"
 
 
 class TestJuniperSrxCluster:

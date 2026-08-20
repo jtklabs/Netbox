@@ -337,6 +337,62 @@ def synced(netbox, lab):
     return {"result": result, "site_id": site_id, "first": first, "second": second}
 
 
+@pytest.fixture(scope="module")
+def synced_wlc(netbox, lab):
+    """Scan the emulated Aruba controller in, twice — its APs ride along."""
+    site_id = lab["site_ours"]["id"]
+    options = SyncOptions(
+        device_role=f"{SLUG_PREFIX}network",
+        access_point_role=f"{SLUG_PREFIX}ap",
+    )
+    result = build_scan_result(collect_fixture("aruba-7010-wlc"))
+    syncer = Syncer(netbox, options)
+    syncer.sync(result, site_id, scanned_address="10.20.0.9")
+    syncer.flush_software_reports()
+    syncer.sync(result, site_id, scanned_address="10.20.0.9")
+    syncer.flush_software_reports()
+    return {"result": result, "site_id": site_id}
+
+
+class TestAccessPointSoftwareReachesTheLifecyclePlugin:
+    """The main loop reports versions for result.devices only; APs sync on a
+    side path that used to skip the report entirely — so with the plugin
+    installed, every AP in the estate arrived with a blank version. The stack
+    fixture has no APs, which is how the gap survived the rest of this file.
+    """
+
+    # Serial -> expected version. The first and third APs report their own
+    # image via wlanAPSwVersion; the second has no version row in the fixture
+    # and must inherit the controller's.
+    EXPECTED = {
+        "CNJPJ0A001": "8.10.0.4_87457",
+        "CNJPJ0A002": "8.10.0.4",
+        "CNJPJ0B003": "8.10.0.4_87457",
+    }
+
+    def test_each_ap_has_a_version(self, netbox, synced_wlc):
+        for serial, version in self.EXPECTED.items():
+            device = netbox.first("/dcim/devices/", {"serial": serial})
+            assert device is not None, f"AP {serial} was not created"
+            if _lifecycle_ready(netbox):
+                record = netbox.first("/plugins/refresh/device-software/",
+                                      {"device_id": device["id"]})
+                assert record is not None, f"AP {serial} has no software record"
+                got = record.get("raw_version") or \
+                    (record.get("software_version") or {}).get("version")
+                assert got == version
+            else:
+                assert device["custom_fields"].get(SOFTWARE_VERSION_FIELD) == version
+
+    def test_ap_reports_do_not_pile_up_per_scan(self, netbox, synced_wlc):
+        if not _lifecycle_ready(netbox):
+            pytest.skip("Lifecycle plugin has no device-software endpoint here")
+        device = netbox.first("/dcim/devices/", {"serial": "CNJPJ0A001"})
+        # synced_wlc ran the sync twice; still exactly one record.
+        assert netbox.count("/plugins/refresh/device-software/",
+                            {"device_id": device["id"]}) == 1
+
+
 class TestFullScanAndSync:
     """Scan an emulated stack and write it into a real NetBox, twice."""
 

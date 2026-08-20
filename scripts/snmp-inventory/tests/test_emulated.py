@@ -207,7 +207,10 @@ class TestFullScanOverTheWire:
         # runs where snmpd exists, which is how it stayed on the bare version
         # while the offline tests moved to version-build with the fixture.
         ("f5-bigip", "17.1.1.3-0.0.5"),
-        ("checkpoint-gaia", "R81.20"),
+        # Version plus jumbo hotfix take; the take is a Gauge32 and this row
+        # is what proves it survives a real snmpd walk, not just the fixture
+        # parser.
+        ("checkpoint-gaia", "R81.20 Take 89"),
         ("infoblox-nios", "9.0.4-50212"),
         ("juniper-ex4300", "21.4R3-S4.9"),
         ("aruba-7010-wlc", "8.10.0.4"),

@@ -245,9 +245,10 @@ def cdp_neighbor(if_index: int, device_index: int, device_id: str, port: str,
 
 
 def aruba_ap(mac: str, name: str, model: str, serial: str, address: str,
-             group: str = "default", status: int = 1) -> list[Varbind]:
+             group: str = "default", status: int = 1,
+             sw_version: str = "") -> list[Varbind]:
     index = ".".join(str(int(part, 16)) for part in mac.split(":"))
-    return [
+    out = [
         Varbind(f"{ARUBA_AP}.2.{index}", "IpAddress", address),
         s(f"{ARUBA_AP}.3.{index}", name),
         s(f"{ARUBA_AP}.4.{index}", group),
@@ -255,6 +256,12 @@ def aruba_ap(mac: str, name: str, model: str, serial: str, address: str,
         s(f"{ARUBA_AP}.13.{index}", model),
         i(f"{ARUBA_AP}.19.{index}", status),
     ]
+    # wlanAPSwVersion — emitted only when set, because that is how the sparse
+    # case looks on the wire: the row is simply absent from the walk, not an
+    # empty string.
+    if sw_version:
+        out.append(s(f"{ARUBA_AP}.34.{index}", sw_version))
+    return out
 
 
 # --- device definitions ------------------------------------------------------
@@ -461,13 +468,18 @@ def aruba_7010_wlc() -> list[Varbind]:
                          mac=f"20:4C:03:11:22:{index:02X}", alias=f"ap uplink {index}")
     out += ip_address("10.20.0.9", 24, 1)
 
+    # Two APs report their own image via wlanAPSwVersion (the AP build carries
+    # a suffix the controller's version lacks); dal-ap-102 has no version row
+    # at all, which is how some builds leave the column — it must inherit the
+    # controller's 8.10.0.4 rather than land blank.
     aps = [
-        ("20:4C:03:AA:01:01", "dal-ap-101", "AP-515", "CNJPJ0A001", "10.20.10.11"),
-        ("20:4C:03:AA:01:02", "dal-ap-102", "AP-515", "CNJPJ0A002", "10.20.10.12"),
-        ("20:4C:03:AA:01:03", "dal-ap-103", "AP-535", "CNJPJ0B003", "10.20.10.13"),
+        ("20:4C:03:AA:01:01", "dal-ap-101", "AP-515", "CNJPJ0A001", "10.20.10.11", "8.10.0.4_87457"),
+        ("20:4C:03:AA:01:02", "dal-ap-102", "AP-515", "CNJPJ0A002", "10.20.10.12", ""),
+        ("20:4C:03:AA:01:03", "dal-ap-103", "AP-535", "CNJPJ0B003", "10.20.10.13", "8.10.0.4_87457"),
     ]
-    for mac, name, model, serial, address in aps:
-        out += aruba_ap(mac, name, model, serial, address, group="dallas-floor-1")
+    for mac, name, model, serial, address, sw_version in aps:
+        out += aruba_ap(mac, name, model, serial, address, group="dallas-floor-1",
+                        sw_version=sw_version)
     return out
 
 
@@ -559,6 +571,8 @@ def checkpoint_gaia() -> list[Varbind]:
     )
     out += [
         s("1.3.6.1.4.1.2620.1.6.4.1.0", "R81.20"),
+        # svnServicePack: the installed Jumbo Hotfix take, Gauge32 on the wire.
+        g("1.3.6.1.4.1.2620.1.6.999.0", 89),
         s("1.3.6.1.4.1.2620.1.6.16.3.0", "1811B00234"),
         s("1.3.6.1.4.1.2620.1.6.16.7.0", "Check Point 6200"),
         s("1.3.6.1.4.1.2620.1.6.16.9.0", "Check Point"),

@@ -118,8 +118,17 @@ would be inventing a switch that is not in the rack.
 | F5 | `sysGeneralChassisSerialNum` | 1.3.6.1.4.1.3375.2.1.3.3.3.0 | F5-BIGIP-SYSTEM-MIB |
 | F5 | `sysPlatformInfoMarketingName` | 1.3.6.1.4.1.3375.2.1.3.5.2.0 | F5-BIGIP-SYSTEM-MIB |
 | Check Point | `svnVersion` | 1.3.6.1.4.1.2620.1.6.4.1.0 | CHECKPOINT-MIB |
+| Check Point | `svnServicePack` | 1.3.6.1.4.1.2620.1.6.999.0 | CHECKPOINT-MIB |
 | Check Point | `svnApplianceSerialNumber` | 1.3.6.1.4.1.2620.1.6.16.3.0 | CHECKPOINT-MIB |
 | Check Point | `svnApplianceProductName` | 1.3.6.1.4.1.2620.1.6.16.7.0 | CHECKPOINT-MIB |
+
+`svnServicePack` (`{ svn 999 }`, Gauge32, resolved 2026-08-20) is described in
+the MIB only as "SVN service pack", but on Gaia it returns the installed
+**Jumbo Hotfix take** — the number a Check Point admin means by "patch level".
+It is joined to `svnVersion` as `R81.20 Take 89` via the profile's
+`build_format`. A GA install with no jumbo reports take 0, which the collector
+treats as "no build" — otherwise every unpatched gateway would read
+"Take 0" as if that were a patch level.
 | Infoblox | `ibHardwareType` | 1.3.6.1.4.1.7779.3.1.1.2.1.4.0 | IB-PLATFORMONE-MIB |
 | Infoblox | `ibSerialNumber` | 1.3.6.1.4.1.7779.3.1.1.2.1.6.0 | IB-PLATFORMONE-MIB |
 | Infoblox | `ibNiosVersion` | 1.3.6.1.4.1.7779.3.1.1.2.1.7.0 | IB-PLATFORMONE-MIB |
@@ -163,6 +172,13 @@ own. Column 1 is not-accessible and never appears in a walk;
 | 6 | `wlanAPSerialNumber` |
 | 13 | `wlanAPModelName` |
 | 19 | `wlanAPStatus` |
+| 34 | `wlanAPSwVersion` |
+
+`wlanAPSwVersion` (column 34, resolved 2026-08-20 from the cached
+WLSX-WLAN-MIB) is the per-AP running image and the preferred version source;
+APs whose row omits it inherit the controller's version, since campus APs run
+the image the controller pushes. Some ArubaOS builds leave the column empty —
+both paths are exercised in the fixtures.
 
 ## Manufacturer identification
 

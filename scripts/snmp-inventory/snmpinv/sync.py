@@ -1122,8 +1122,15 @@ class Syncer:
         often live on management networks the poller has no route to.
         """
         for record in result.access_points:
-            self._ensure_device(record, site_id, virtual_chassis=None,
-                                tenant_id=tenant_id, scanned_address="")
+            device = self._ensure_device(record, site_id, virtual_chassis=None,
+                                         tenant_id=tenant_id, scanned_address="")
+            # APs carry a software version like any other device (read from the
+            # controller's AP table, or inherited from the controller), but the
+            # main loop only reports versions for result.devices — without this
+            # the Lifecycle plugin never hears about APs at all and their
+            # version stays blank whenever the plugin is installed.
+            if self.options.manage_software_version:
+                self._queue_software_report(device, record, result)
 
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")

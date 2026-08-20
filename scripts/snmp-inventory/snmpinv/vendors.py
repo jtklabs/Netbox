@@ -39,6 +39,7 @@ ARUBA_AP_GROUP = f"{ARUBA_AP_ENTRY}.4"
 ARUBA_AP_SERIAL = f"{ARUBA_AP_ENTRY}.6"
 ARUBA_AP_MODEL_NAME = f"{ARUBA_AP_ENTRY}.13"
 ARUBA_AP_STATUS = f"{ARUBA_AP_ENTRY}.19"
+ARUBA_AP_SW_VERSION = f"{ARUBA_AP_ENTRY}.34"
 
 ARUBA_AP_STATUS_UP = 1
 
@@ -64,6 +65,10 @@ class VendorProfile:
     # own ISOs are named BIGIP-<version>-<build>.iso. Joined only when both
     # come back, so a platform that reports no build reads exactly as before.
     build_oids: tuple[str, ...] = ()
+    # How version and build combine. F5 names its images <version>-<build>, so
+    # that is the default; Check Point admins say "R81.20 Take 89" and would
+    # not recognise "R81.20-89" as a patch level.
+    build_format: str = "{version}-{build}"
     serial_oids: tuple[str, ...] = ()
     model_oids: tuple[str, ...] = ()
     # Applied to sysDescr when no version OID answered.
@@ -164,6 +169,15 @@ PROFILES: dict[int, VendorProfile] = {
         manufacturer="Check Point",
         platform="Check Point Gaia",
         version_oids=("1.3.6.1.4.1.2620.1.6.4.1.0",),      # svnVersion
+        # svnServicePack — despite the name, on Gaia this is the installed
+        # Jumbo Hotfix take, the number a Check Point admin means by "patch
+        # level". svnVersion alone says R81.20 and nothing else; the take is
+        # what distinguishes a freshly patched gateway from one running a
+        # year of unfixed CVEs, so it is the half a compliance standard has
+        # to be written against. A GA box with no jumbo reports take 0,
+        # which the collector treats as "no build" rather than appending.
+        build_oids=("1.3.6.1.4.1.2620.1.6.999.0",),
+        build_format="{version} Take {build}",
         serial_oids=("1.3.6.1.4.1.2620.1.6.16.3.0",),      # svnApplianceSerialNumber
         model_oids=("1.3.6.1.4.1.2620.1.6.16.7.0",),       # svnApplianceProductName
         entity_mib_sparse=True,
