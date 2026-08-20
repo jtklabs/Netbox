@@ -40,8 +40,22 @@ lines = PluginMenuItem(
     ),
 )
 
+coverage_expiry_report = PluginMenuItem(
+    link='plugins:netbox_quotes:coverage_expiry_report',
+    link_text='Coverage Expiry',
+    permissions=['netbox_quotes.view_quoteline'],
+)
+eol_transition_report = PluginMenuItem(
+    link='plugins:netbox_quotes:eol_transition_report',
+    link_text='EoL Transition',
+    permissions=['netbox_quotes.view_quoteline'],
+)
+
 menu = PluginMenu(
     label='Support Management',
-    groups=(('Quotes', (vendors, quotes, lines)),),
+    groups=(
+        ('Quotes', (vendors, quotes, lines)),
+        ('Reports', (coverage_expiry_report, eol_transition_report)),
+    ),
     icon_class='mdi mdi-file-document-outline',
 )

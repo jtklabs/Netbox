@@ -22,6 +22,7 @@ class VendorSerializer(NetBoxModelSerializer):
             'display',
             'name',
             'portal_url',
+            'is_third_party_maintenance',
             'description',
             'comments',
             'tags',

@@ -42,7 +42,8 @@ __all__ = (
 
 @strawberry_django.type(
     models.QuoteVendor,
-    fields=('id', 'name', 'portal_url', 'description', 'comments'),
+    fields=('id', 'name', 'portal_url', 'is_third_party_maintenance', 'description',
+            'comments'),
     filters=QuoteVendorFilter,
     pagination=True,
 )

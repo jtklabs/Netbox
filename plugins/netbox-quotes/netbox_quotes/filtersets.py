@@ -13,7 +13,7 @@ __all__ = ('VendorFilterSet', 'QuoteFilterSet', 'QuoteLineFilterSet')
 class VendorFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = Vendor
-        fields = ('id', 'name')
+        fields = ('id', 'name', 'is_third_party_maintenance')
 
     def search(self, queryset, name, value):
         if not value.strip():

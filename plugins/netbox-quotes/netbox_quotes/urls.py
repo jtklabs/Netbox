@@ -48,4 +48,9 @@ urlpatterns = [
         name='quoteline_changelog',
         kwargs={'model': QuoteLine},
     ),
+
+    path('reports/coverage-expiry/', views.CoverageExpiryReportView.as_view(),
+         name='coverage_expiry_report'),
+    path('reports/eol-transition/', views.EolTransitionReportView.as_view(),
+         name='eol_transition_report'),
 ]

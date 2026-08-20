@@ -1,4 +1,4 @@
-from dcim.models import Device, InventoryItem, Module
+from dcim.models import Device, InventoryItem, Module, Region, Site
 from django import forms
 from netbox.forms import (
     NetBoxModelFilterSetForm,
@@ -28,18 +28,22 @@ __all__ = (
     'QuoteLineForm',
     'QuoteLineFilterForm',
     'QuoteLineImportForm',
+    'CoverageExpiryReportForm',
+    'EolTransitionReportForm',
 )
 
 
 class VendorForm(NetBoxModelForm):
     fieldsets = (
-        FieldSet('name', 'portal_url', 'description', name='Vendor'),
+        FieldSet('name', 'portal_url', 'is_third_party_maintenance', 'description',
+                 name='Vendor'),
         FieldSet('tags', name='Tags'),
     )
 
     class Meta:
         model = Vendor
-        fields = ('name', 'portal_url', 'description', 'comments', 'tags')
+        fields = ('name', 'portal_url', 'is_third_party_maintenance', 'description',
+                  'comments', 'tags')
 
 
 class VendorFilterForm(NetBoxModelFilterSetForm):
@@ -50,7 +54,8 @@ class VendorFilterForm(NetBoxModelFilterSetForm):
 class VendorImportForm(NetBoxModelImportForm):
     class Meta:
         model = Vendor
-        fields = ('name', 'portal_url', 'description', 'comments', 'tags')
+        fields = ('name', 'portal_url', 'is_third_party_maintenance', 'description',
+                  'comments', 'tags')
 
 
 class QuoteForm(NetBoxModelForm):
@@ -270,3 +275,59 @@ class QuoteLineImportForm(NetBoxModelImportForm):
             'comments',
             'tags',
         )
+
+
+# --------------------------------------------------------------------------- #
+# Reports
+# --------------------------------------------------------------------------- #
+
+class CoverageExpiryReportForm(forms.Form):
+    """Filters for the coverage expiry report.
+
+    The 30/60/90 buckets are always shown; `until` moves the table's horizon.
+    Leaving it empty means 90 days, matching the furthest bucket.
+    """
+
+    until = forms.DateField(
+        required=False, widget=DatePicker(), label='Expiring by',
+        help_text='Show coverage ending on or before this date. '
+                  'Empty means the next 90 days.',
+    )
+    region = DynamicModelMultipleChoiceField(
+        queryset=Region.objects.all(), required=False,
+        help_text='Only devices in these regions, including any nested inside them',
+    )
+    site = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(), required=False,
+    )
+    vendor = DynamicModelMultipleChoiceField(
+        queryset=Vendor.objects.all(), required=False,
+        help_text='Only coverage from these vendors',
+    )
+    include_expired = forms.BooleanField(
+        required=False, initial=True, label='Include already expired',
+        help_text='Coverage that has lapsed with no later renewal recorded',
+    )
+
+
+class EolTransitionReportForm(forms.Form):
+    """Filters for the end-of-life coverage transition report."""
+
+    until = forms.DateField(
+        required=False, widget=DatePicker(), label='EoL by',
+        help_text='Devices whose hardware model reaches end of life on or '
+                  'before this date. Empty means the next 90 days; models '
+                  'already past end of life always appear.',
+    )
+    region = DynamicModelMultipleChoiceField(
+        queryset=Region.objects.all(), required=False,
+        help_text='Only devices in these regions, including any nested inside them',
+    )
+    site = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(), required=False,
+    )
+    include_transitioned = forms.BooleanField(
+        required=False, label='Include devices already on third-party coverage',
+        help_text='Show devices whose coverage is already with a third-party '
+                  'maintenance vendor, not just the ones still to move',
+    )

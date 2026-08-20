@@ -1,0 +1,85 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% load render_table from django_tables2 %}
+
+{% block title %}EoL Coverage Transition Report{% endblock %}
+
+{% block content %}
+  {% if lifecycle_missing %}
+    <div class="alert alert-warning">
+      This report needs the Hardware Lifecycle plugin (netbox_refresh), which
+      supplies the manufacturer end-of-life dates. It is not installed on this
+      instance.
+    </div>
+  {% else %}
+    <div class="row mb-3">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">Filter</h5>
+          <div class="card-body">
+            <form method="get" class="row g-3 align-items-end">
+              {% for field in form %}
+                <div class="col-md-4">
+                  {{ field.label_tag }}
+                  {{ field }}
+                  {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+                </div>
+              {% endfor %}
+              <div class="col-md-12">
+                <button type="submit" class="btn btn-primary">Run report</button>
+                <a href="{% url 'plugins:netbox_quotes:eol_transition_report' %}" class="btn btn-outline-secondary">Reset</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row mb-3">
+      <div class="col col-md-4">
+        <div class="card">
+          <h5 class="card-header">Needs coverage now</h5>
+          <div class="card-body">
+            <h2 class="mb-0 {% if summary.uncovered %}text-danger{% else %}text-muted{% endif %}">{{ summary.uncovered }}</h2>
+            <div class="form-text">EoL hardware with no active coverage</div>
+          </div>
+        </div>
+      </div>
+      <div class="col col-md-4">
+        <div class="card">
+          <h5 class="card-header">Move at renewal</h5>
+          <div class="card-body">
+            <h2 class="mb-0 {% if summary.transition %}text-warning{% else %}text-muted{% endif %}">{{ summary.transition }}</h2>
+            <div class="form-text">still covered by the OEM or a reseller</div>
+          </div>
+        </div>
+      </div>
+      <div class="col col-md-4">
+        <div class="card">
+          <h5 class="card-header">Already on third-party</h5>
+          <div class="card-body">
+            <h2 class="mb-0 text-success">{{ summary.transitioned }}</h2>
+            <div class="form-text">covered by a third-party maintenance vendor</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col col-md-12">
+        <div class="card">
+          <h5 class="card-header">
+            {{ row_count }} device{{ row_count|pluralize }} at or past manufacturer end of life by {{ horizon }}
+          </h5>
+          <div class="card-body table-responsive">
+            {% render_table table %}
+          </div>
+          <div class="card-footer text-muted">
+            Vendors are marked as third-party maintenance on their vendor page
+            &mdash; that flag is what this report treats as the transition target.
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

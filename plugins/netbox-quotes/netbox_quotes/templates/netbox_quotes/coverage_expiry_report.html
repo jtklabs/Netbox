@@ -1,0 +1,76 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% load render_table from django_tables2 %}
+
+{% block title %}Coverage Expiry Report{% endblock %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Filter</h5>
+        <div class="card-body">
+          <form method="get" class="row g-3 align-items-end">
+            {% for field in form %}
+              <div class="col-md-4">
+                {{ field.label_tag }}
+                {{ field }}
+                {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+              </div>
+            {% endfor %}
+            <div class="col-md-12">
+              <button type="submit" class="btn btn-primary">Run report</button>
+              <a href="{% url 'plugins:netbox_quotes:coverage_expiry_report' %}" class="btn btn-outline-secondary">Reset</a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# The buckets always describe the whole covered estate under the chosen #}
+  {# site/vendor filters, whatever the custom horizon is set to. #}
+  <div class="row mb-3">
+    <div class="col col-md-3">
+      <div class="card">
+        <h5 class="card-header">Already expired</h5>
+        <div class="card-body">
+          <h2 class="mb-0 {% if buckets.expired %}text-danger{% else %}text-muted{% endif %}">{{ buckets.expired }}</h2>
+          <div class="form-text">latest coverage has lapsed</div>
+        </div>
+      </div>
+    </div>
+    <div class="col col-md-3">
+      <div class="card">
+        <h5 class="card-header">Within 30 days</h5>
+        <div class="card-body"><h2 class="mb-0">{{ buckets.in_30 }}</h2></div>
+      </div>
+    </div>
+    <div class="col col-md-3">
+      <div class="card">
+        <h5 class="card-header">31&ndash;60 days</h5>
+        <div class="card-body"><h2 class="mb-0">{{ buckets.in_60 }}</h2></div>
+      </div>
+    </div>
+    <div class="col col-md-3">
+      <div class="card">
+        <h5 class="card-header">61&ndash;90 days</h5>
+        <div class="card-body"><h2 class="mb-0">{{ buckets.in_90 }}</h2></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">
+          {{ row_count }} device{{ row_count|pluralize }} with coverage ending by {{ horizon }}
+          <small class="text-muted">({{ covered_total }} covered device{{ covered_total|pluralize }} in scope)</small>
+        </h5>
+        <div class="card-body table-responsive">
+          {% render_table table %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

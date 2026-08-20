@@ -24,6 +24,17 @@ class QuoteVendor(PrimaryModel):
 
     name = models.CharField(max_length=100, unique=True)
     portal_url = models.URLField(blank=True)
+    # A flag rather than a plugin setting on purpose: which vendor plays this
+    # role is data (editable in the UI, visible on the vendor page, moves with
+    # the database), and the prod config files live outside the repo where a
+    # new required setting is exactly the kind of drift that has bitten before.
+    is_third_party_maintenance = models.BooleanField(
+        default=False,
+        verbose_name='Third-party maintenance',
+        help_text="Covers hardware past the manufacturer's end-of-support "
+                  '(e.g. Park Place). The EoL transition report treats '
+                  'coverage from such a vendor as the desired end state.',
+    )
 
     class Meta:
         ordering = ('name',)
