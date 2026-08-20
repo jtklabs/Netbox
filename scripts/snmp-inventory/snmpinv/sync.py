@@ -379,8 +379,10 @@ class Syncer:
         if not self.options.retain_replaced_hardware:
             return None
         # Only a change between two known serials counts. Filling in a blank is
-        # the first successful read, not a replacement.
-        if not old_serial or not new_serial or old_serial == new_serial:
+        # the first successful read, not a replacement — and case-insensitively,
+        # like the duplicate-serial check: a collection source that changes the
+        # case it reports in is not a chassis swap.
+        if not old_serial or not new_serial or old_serial.lower() == new_serial.lower():
             return None
 
         log.warning(
@@ -412,9 +414,17 @@ class Syncer:
         """Free the live name while keeping the retired record recognisable.
 
         Device names are unique per (name, site, tenant), so the old record has
-        to give the name up before the replacement can take it.
+        to give the name up before the replacement can take it. The serial in
+        the suffix is the RETIRED unit's own — it uniquifies a name that gets
+        retired more than once over the years.
+
+        Wording matters here and was got wrong once: "[replaced ABC123]" was
+        read in the fleet as this device having replaced serial ABC123 — its
+        own serial, since that is whose serial it is — when the intent was the
+        passive "this record WAS replaced; it was unit ABC123". "retired" is
+        unambiguous about which side of the swap this record is on.
         """
-        suffix = f" [replaced {old_serial}]"
+        suffix = f" [retired {old_serial}]"
         return (name[: 64 - len(suffix)] + suffix) if len(name) + len(suffix) > 64 else name + suffix
 
     def _tag_retired(self, device: dict) -> None:
@@ -787,7 +797,8 @@ class Syncer:
             return
         old_serial = (existing.get("serial") or "").strip()
         new_serial = (module.serial or "").strip()
-        if not old_serial or not new_serial or old_serial == new_serial:
+        # Case-insensitive for the same reason as the chassis path.
+        if not old_serial or not new_serial or old_serial.lower() == new_serial.lower():
             return
         if device is None or device.get("id", 0) < 0:
             return

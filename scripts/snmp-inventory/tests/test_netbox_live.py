@@ -845,7 +845,7 @@ class TestAnExistingDeviceKeepsBeingUpdatedWithoutAModel:
 
     def _cleanup(self, netbox):
         # Includes anything the replacement path renamed, e.g.
-        # "<name> [replaced FPR001]", which a name-exact delete would miss.
+        # "<name> [retired FPR001]", which a name-exact delete would miss.
         for device in netbox.all("/dcim/devices/", {"q": self.NAME}):
             netbox._request("DELETE", f"/dcim/devices/{device['id']}/")
         existing = netbox.first("/dcim/sites/", {"slug": self.SITE})
