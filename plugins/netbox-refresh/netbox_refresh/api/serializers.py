@@ -76,19 +76,26 @@ class ReplacementPriceSerializer(NetBoxModelSerializer):
     class Meta:
         model = ReplacementPrice
         fields = (
-            'url', 'id', 'display', 'lifecycle', 'region', 'site',
+            'url', 'id', 'display', 'device_type', 'module_type', 'region', 'site',
             'cost', 'currency', 'cost_updated',
             'description', 'comments', 'tags', 'custom_fields',
             'created', 'last_updated',
         )
-        brief_fields = ('url', 'id', 'display', 'lifecycle', 'cost', 'currency')
+        brief_fields = ('url', 'id', 'display', 'device_type', 'module_type',
+                        'cost', 'currency')
 
     def validate(self, data):
         data = super().validate(data)
-        # Mirrors the model clean(): exactly one scope. Serializer-level so an
-        # API writer gets a field-level message rather than a 500 from the DB
-        # check constraint.
+        # Mirrors the model clean(): exactly one hardware model, exactly one
+        # scope. Serializer-level so an API writer gets a field-level message
+        # rather than a 500 from the DB check constraints.
         instance = self.instance
+        device_type = data.get('device_type', instance.device_type if instance else None)
+        module_type = data.get('module_type', instance.module_type if instance else None)
+        if bool(device_type) == bool(module_type):
+            raise serializers.ValidationError(
+                'Price a device type or a module type — exactly one.'
+            )
         region = data.get('region', instance.region if instance else None)
         site = data.get('site', instance.site if instance else None)
         if bool(region) == bool(site):

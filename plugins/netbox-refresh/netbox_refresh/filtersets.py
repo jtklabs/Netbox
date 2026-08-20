@@ -118,8 +118,11 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
 
 
 class ReplacementPriceFilterSet(NetBoxModelFilterSet):
-    lifecycle_id = django_filters.ModelMultipleChoiceFilter(
-        queryset=ModelLifecycle.objects.all(), label='Hardware model',
+    device_type_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DeviceType.objects.all(), label='Device type',
+    )
+    module_type_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=ModuleType.objects.all(), label='Module type',
     )
     region_id = django_filters.ModelMultipleChoiceFilter(
         queryset=Region.objects.all(), label='Region',
@@ -137,6 +140,8 @@ class ReplacementPriceFilterSet(NetBoxModelFilterSet):
             return queryset
         return queryset.filter(
             Q(description__icontains=value)
+            | Q(device_type__model__icontains=value)
+            | Q(module_type__model__icontains=value)
             | Q(region__name__icontains=value)
             | Q(site__name__icontains=value)
             | Q(currency__iexact=value.strip())

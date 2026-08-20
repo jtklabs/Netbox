@@ -270,16 +270,22 @@ class ModelLifecycle(PrimaryModel):
 
 
 class ReplacementPrice(PrimaryModel):
-    """What one unit of a lifecycle's hardware model costs in one part of the world.
+    """What one unit of a hardware model COSTS TO BUY in one part of the world.
 
-    The lifecycle's own replacement_cost is the baseline. A ReplacementPrice
-    overrides it for the sites it covers: a price scoped to a site covers that
-    site alone; one scoped to a region covers every site at or below that
-    region. Resolution for a device is most-specific-wins — its site's price,
-    else the nearest enclosing region's walking up the tree, else the
-    baseline. That mirrors how the vendors actually quote: a global list
-    price, a country uplift, and the occasional odd site (an island, a
-    high-duty zone) priced on its own.
+    Keyed to the model being purchased — the replacement, not the hardware on
+    its way out. "A 9350 costs 1,200 EUR in EMEA" is one fact however many
+    outgoing models funnel into that purchase, and pricing it once means a
+    model later pointed at the same replacement picks the price up with no
+    re-entry. (Per Jason: "It's less what the replacement cost. It's more
+    what the new one cost.")
+
+    A price scoped to a site covers that site alone; one scoped to a region
+    covers every site at or below that region. Resolution for a device being
+    refreshed is most-specific-wins over its lifecycle's replacement model —
+    the site's price, else the nearest enclosing region's walking up the
+    tree, else the lifecycle's own baseline replacement_cost. That mirrors
+    how vendors quote: a global list price, a country uplift, and the
+    occasional odd site (an island, a high-duty zone) priced on its own.
 
     Currency lives on each price rather than being inherited, because a
     country-specific price is usually IN that country's currency. The refresh
@@ -288,14 +294,17 @@ class ReplacementPrice(PrimaryModel):
     read.
     """
 
-    lifecycle = models.ForeignKey(
-        to=ModelLifecycle,
-        on_delete=models.CASCADE,
-        related_name='regional_prices',
+    # The hardware model being bought. Two nullable FKs rather than a generic
+    # relation, matching replacement_device_type/module_type above: exactly
+    # one is set, and explicit FKs keep filtering and forms simple.
+    device_type = models.ForeignKey(
+        to='dcim.DeviceType', on_delete=models.CASCADE,
+        blank=True, null=True, related_name='replacement_prices',
     )
-    # Two nullable FKs rather than a generic relation, matching the
-    # replacement_device_type/module_type pattern above: exactly one is set,
-    # and explicit FKs keep filtering and forms simple.
+    module_type = models.ForeignKey(
+        to='dcim.ModuleType', on_delete=models.CASCADE,
+        blank=True, null=True, related_name='replacement_prices',
+    )
     region = models.ForeignKey(
         to='dcim.Region', on_delete=models.CASCADE,
         blank=True, null=True, related_name='replacement_prices',
@@ -308,18 +317,26 @@ class ReplacementPrice(PrimaryModel):
     )
     cost = models.DecimalField(
         max_digits=12, decimal_places=2,
-        help_text='Cost to replace a single unit within this scope',
+        help_text='Purchase cost of a single unit within this scope',
     )
     currency = models.CharField(max_length=3, default='USD')
     cost_updated = models.DateField(blank=True, null=True)
 
-    clone_fields = ('lifecycle', 'currency')
+    clone_fields = ('device_type', 'module_type', 'currency')
 
     class Meta:
-        ordering = ('lifecycle', 'region', 'site', 'pk')
+        ordering = ('device_type', 'module_type', 'region', 'site', 'pk')
         verbose_name = 'replacement price'
         verbose_name_plural = 'replacement prices'
         constraints = (
+            models.CheckConstraint(
+                condition=(
+                    (Q(device_type__isnull=False) & Q(module_type__isnull=True))
+                    | (Q(device_type__isnull=True) & Q(module_type__isnull=False))
+                ),
+                name='%(app_label)s_%(class)s_exactly_one_model',
+                violation_error_message='A price is for a device type or a module type — exactly one.',
+            ),
             models.CheckConstraint(
                 condition=(
                     (Q(region__isnull=False) & Q(site__isnull=True))
@@ -329,29 +346,47 @@ class ReplacementPrice(PrimaryModel):
                 violation_error_message='A price is scoped to a region or a site — exactly one.',
             ),
             models.UniqueConstraint(
-                'lifecycle', 'region',
-                condition=Q(region__isnull=False),
-                name='%(app_label)s_%(class)s_unique_region',
+                'device_type', 'region',
+                condition=Q(device_type__isnull=False) & Q(region__isnull=False),
+                name='%(app_label)s_%(class)s_unique_dt_region',
                 violation_error_message='This model already has a price for that region.',
             ),
             models.UniqueConstraint(
-                'lifecycle', 'site',
-                condition=Q(site__isnull=False),
-                name='%(app_label)s_%(class)s_unique_site',
+                'device_type', 'site',
+                condition=Q(device_type__isnull=False) & Q(site__isnull=False),
+                name='%(app_label)s_%(class)s_unique_dt_site',
+                violation_error_message='This model already has a price for that site.',
+            ),
+            models.UniqueConstraint(
+                'module_type', 'region',
+                condition=Q(module_type__isnull=False) & Q(region__isnull=False),
+                name='%(app_label)s_%(class)s_unique_mt_region',
+                violation_error_message='This model already has a price for that region.',
+            ),
+            models.UniqueConstraint(
+                'module_type', 'site',
+                condition=Q(module_type__isnull=False) & Q(site__isnull=False),
+                name='%(app_label)s_%(class)s_unique_mt_site',
                 violation_error_message='This model already has a price for that site.',
             ),
         )
 
     def __str__(self):
-        return '%s @ %s: %s %s' % (self.lifecycle, self.scope, self.cost, self.currency)
+        return '%s @ %s: %s %s' % (self.hardware_model, self.scope, self.cost, self.currency)
 
     def get_absolute_url(self):
         return reverse('plugins:netbox_refresh:replacementprice', args=[self.pk])
 
     def clean(self):
         super().clean()
+        if bool(self.device_type_id) == bool(self.module_type_id):
+            raise ValidationError('Price a device type or a module type — exactly one.')
         if bool(self.region_id) == bool(self.site_id):
             raise ValidationError('Scope the price to a region or a site — exactly one.')
+
+    @property
+    def hardware_model(self):
+        return self.device_type or self.module_type
 
     @property
     def scope(self):

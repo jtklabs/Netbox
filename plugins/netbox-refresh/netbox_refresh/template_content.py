@@ -111,6 +111,48 @@ class BaseStandardCard(PluginTemplateExtension):
         )
 
 
+class ReplacementPricingCard(PluginTemplateExtension):
+    """On the page of a model that REPLACES something: where it will be needed.
+
+    Jason's flow, verbatim: "if they have a 3560 switch and the replacement
+    is a 9350, when you go to the 9350 you would see all the sites that had
+    the 3560." This card is that view's front door — feeder models, the unit
+    count, how many prices are recorded, and the worksheet link.
+    """
+
+    models = ['dcim.devicetype']
+
+    def right_page(self):
+        from dcim.models import Device
+
+        device_type = self.context.get('object')
+        if device_type is None:
+            return ''
+        feeders = list(ModelLifecycle.objects.filter(
+            replacement_device_type=device_type
+        ).prefetch_related('assigned_object_type'))
+        if not feeders:
+            # This model replaces nothing; a permanently-empty card would just
+            # be noise on every ordinary device type page.
+            return ''
+        feeder_type_ids = [f.assigned_object_id for f in feeders
+                           if f.assigned_object_type.model == 'devicetype']
+        units = Device.objects.filter(device_type_id__in=feeder_type_ids).count()
+        sites = (Device.objects.filter(device_type_id__in=feeder_type_ids)
+                 .values('site_id').distinct().count())
+        prices = device_type.replacement_prices.count()
+        return self.render(
+            'netbox_refresh/inc/replacement_pricing_card.html',
+            extra_context={
+                'device_type': device_type,
+                'feeders': feeders,
+                'units': units,
+                'sites': sites,
+                'prices': prices,
+            },
+        )
+
+
 class DeviceTypeStandardCard(BaseStandardCard):
     models = ['dcim.devicetype']
 
@@ -127,4 +169,5 @@ template_extensions = (
     DeviceSoftwareCard,
     DeviceTypeStandardCard,
     PlatformStandardCard,
+    ReplacementPricingCard,
 )

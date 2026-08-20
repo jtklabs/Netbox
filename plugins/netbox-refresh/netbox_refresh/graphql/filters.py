@@ -47,6 +47,9 @@ class ModelLifecycleFilter(PrimaryModelFilter):
 class ReplacementPriceFilter(PrimaryModelFilter):
     currency: StrFilterLookup | None = strawberry_django.filter_field()
     cost_updated: DateFilterLookup | None = strawberry_django.filter_field()
+    device_type: Annotated['DeviceTypeFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
+        strawberry_django.filter_field()
+    )
     region: Annotated['RegionFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
         strawberry_django.filter_field()
     )

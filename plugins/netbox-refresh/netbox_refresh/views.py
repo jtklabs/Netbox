@@ -1,4 +1,5 @@
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 from dcim.models import Device, DeviceType, Module, ModuleType, Region, Site
 from django.contrib import messages
@@ -95,7 +96,7 @@ class ModelLifecycleBulkImportView(BulkImportView):
 @register_model_view(ReplacementPrice, name='list')
 class ReplacementPriceListView(ObjectListView):
     queryset = ReplacementPrice.objects.select_related(
-        'lifecycle', 'lifecycle__assigned_object_type', 'region', 'site'
+        'device_type', 'module_type', 'region', 'site'
     )
     table = tables.ReplacementPriceTable
     filterset = filtersets.ReplacementPriceFilterSet
@@ -104,7 +105,9 @@ class ReplacementPriceListView(ObjectListView):
 
 @register_model_view(ReplacementPrice)
 class ReplacementPriceView(ObjectView):
-    queryset = ReplacementPrice.objects.select_related('lifecycle', 'region', 'site')
+    queryset = ReplacementPrice.objects.select_related(
+        'device_type', 'module_type', 'region', 'site'
+    )
 
 
 @register_model_view(ReplacementPrice, 'edit')
@@ -129,6 +132,173 @@ class ReplacementPriceBulkDeleteView(BulkDeleteView):
 class ReplacementPriceBulkImportView(BulkImportView):
     queryset = ReplacementPrice.objects.all()
     model_form = forms.ReplacementPriceImportForm
+
+
+class ReplacementPriceWorksheetView(PermissionRequiredMixin, View):
+    """Price one replacement model everywhere it will be needed, on one page.
+
+    Jason's flow: "if they have a 3560 switch and the replacement is a 9350,
+    when you go to the 9350 you would see all the sites that had the 3560."
+    The rows are exactly that — every site holding hardware whose lifecycle
+    names this model as its replacement, grouped by region, with the unit
+    count so the person typing prices can see what each number multiplies.
+
+    There is deliberately no "inherit from region" checkbox. Inheritance IS
+    the absence of a site override: a site with no price of its own resolves
+    to the nearest enclosing region's, so the site column shows the inherited
+    figure greyed, and typing over it creates the override. Submitting a
+    blank where an override exists deletes it — back to inheriting.
+    """
+
+    permission_required = 'netbox_refresh.change_replacementprice'
+    template_name = 'netbox_refresh/replacementprice_worksheet.html'
+
+    def get(self, request):
+        device_type = self._device_type(request)
+        context = {'device_type': device_type,
+                   'picker': forms.WorksheetPickerForm(request.GET or None)}
+        if device_type is not None:
+            context.update(self._build(device_type))
+        return render(request, self.template_name, context)
+
+    def post(self, request):
+        device_type = self._device_type(request)
+        if device_type is None:
+            return redirect(request.path)
+
+        changed = 0
+        for kind in ('region', 'site'):
+            for key, raw_cost in request.POST.items():
+                prefix = '%s_cost_' % kind
+                if not key.startswith(prefix):
+                    continue
+                scope_pk = int(key.removeprefix(prefix))
+                currency = (request.POST.get('%s_currency_%d' % (kind, scope_pk))
+                            or 'USD').strip().upper()[:3]
+                existing = ReplacementPrice.objects.filter(
+                    device_type=device_type, **{kind: scope_pk}
+                ).first()
+                raw_cost = raw_cost.strip()
+                if not raw_cost:
+                    # Blank where an override exists: back to inheriting.
+                    if existing is not None:
+                        existing.delete()
+                        changed += 1
+                    continue
+                try:
+                    cost = Decimal(raw_cost.replace(',', ''))
+                except InvalidOperation:
+                    messages.error(request, '"%s" is not a price; row skipped.' % raw_cost)
+                    continue
+                if existing is not None:
+                    if existing.cost != cost or existing.currency != currency:
+                        existing.cost = cost
+                        existing.currency = currency
+                        existing.save()
+                        changed += 1
+                else:
+                    ReplacementPrice.objects.create(
+                        device_type=device_type, cost=cost, currency=currency,
+                        **{kind + '_id': scope_pk},
+                    )
+                    changed += 1
+        messages.success(request, 'Worksheet saved: %d price%s changed.'
+                         % (changed, '' if changed == 1 else 's'))
+        return redirect('%s?device_type=%d' % (request.path, device_type.pk))
+
+    # ------------------------------------------------------------------ #
+    def _device_type(self, request):
+        source = request.POST if request.method == 'POST' else request.GET
+        pk = source.get('device_type')
+        if not pk:
+            return None
+        return DeviceType.objects.filter(pk=pk).first()
+
+    def _build(self, device_type):
+        feeders = list(ModelLifecycle.objects.filter(
+            replacement_device_type=device_type
+        ).prefetch_related('assigned_object_type'))
+        feeder_type_ids = [f.assigned_object_id for f in feeders
+                           if f.assigned_object_type.model == 'devicetype']
+
+        site_units = defaultdict(int)
+        for row in Device.objects.filter(
+            device_type_id__in=feeder_type_ids
+        ).values('site_id').annotate(n=Count('pk')):
+            site_units[row['site_id']] = row['n']
+        sites = Site.objects.filter(pk__in=site_units).select_related('region')
+
+        prices = {
+            ('site', p.site_id) if p.site_id else ('region', p.region_id): p
+            for p in ReplacementPrice.objects.filter(device_type=device_type)
+        }
+        all_regions = Region.objects.in_bulk()
+
+        def label(region_id):
+            parts, seen = [], set()
+            while region_id is not None and region_id not in seen:
+                seen.add(region_id)
+                region = all_regions.get(region_id)
+                if region is None:
+                    break
+                parts.append(region.name)
+                region_id = region.parent_id
+            return ' / '.join(reversed(parts))
+
+        def inherited(site):
+            """What this site resolves to with no override of its own."""
+            region_id = site.region_id
+            seen = set()
+            while region_id is not None and region_id not in seen:
+                seen.add(region_id)
+                price = prices.get(('region', region_id))
+                if price is not None:
+                    return '%s %s (from %s)' % (
+                        price.cost, price.currency, all_regions[region_id].name)
+                region_id = all_regions.get(region_id) and all_regions[region_id].parent_id
+            return 'baseline'
+
+        # Region rows: every region an involved site sits in, plus every
+        # ancestor — so "set EMEA once" is possible even when every site
+        # lives deeper in the tree. Regions that already carry a price appear
+        # too, so an existing entry can always be revised or cleared.
+        region_ids = set()
+        for site in sites:
+            region_id = site.region_id
+            while region_id is not None and region_id not in region_ids:
+                region_ids.add(region_id)
+                region_id = all_regions[region_id].parent_id
+        region_ids.update(pk for kind, pk in prices if kind == 'region')
+
+        region_rows = []
+        for region_id in region_ids:
+            price = prices.get(('region', region_id))
+            region_rows.append({
+                'region': all_regions[region_id],
+                'label': label(region_id),
+                'cost': price.cost if price else '',
+                'currency': price.currency if price else 'USD',
+            })
+        region_rows.sort(key=lambda r: r['label'])
+
+        groups = defaultdict(list)
+        for site in sorted(sites, key=lambda s: s.name):
+            price = prices.get(('site', site.pk))
+            groups[label(site.region_id) or '(no region)'].append({
+                'site': site,
+                'units': site_units[site.pk],
+                'cost': price.cost if price else '',
+                'currency': price.currency if price else 'USD',
+                'inherited': inherited(site),
+            })
+        site_groups = [{'label': k, 'sites': v} for k, v in sorted(groups.items())]
+
+        return {
+            'feeders': feeders,
+            'region_rows': region_rows,
+            'site_groups': site_groups,
+            'total_units': sum(site_units.values()),
+        }
 
 
 def _sites_in_scope(regions, sites):
@@ -320,7 +490,7 @@ class RefreshReportView(PermissionRequiredMixin, View):
                 unpriced_units += model_unpriced
             total_units += installed
 
-            regional = resolver.price_count(record.pk)
+            regional = resolver.price_count(record)
             if record.replacement_cost is not None:
                 unit_cost = '%s %s' % (record.replacement_cost, record.currency)
                 if regional:

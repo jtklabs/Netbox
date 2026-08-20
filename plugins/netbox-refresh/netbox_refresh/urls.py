@@ -32,6 +32,8 @@ urlpatterns = [
 
     path('prices/', views.ReplacementPriceListView.as_view(),
          name='replacementprice_list'),
+    path('prices/worksheet/', views.ReplacementPriceWorksheetView.as_view(),
+         name='replacementprice_worksheet'),
     path('prices/add/', views.ReplacementPriceEditView.as_view(),
          name='replacementprice_add'),
     path('prices/import/', views.ReplacementPriceBulkImportView.as_view(),

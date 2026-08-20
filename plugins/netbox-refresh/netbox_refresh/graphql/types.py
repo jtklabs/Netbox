@@ -73,7 +73,8 @@ class ModelLifecycleType(PrimaryObjectType):
     pagination=True,
 )
 class ReplacementPriceType(PrimaryObjectType):
-    lifecycle: Annotated['ModelLifecycleType', strawberry.lazy('netbox_refresh.graphql.types')]
+    device_type: Annotated['DeviceTypeType', strawberry.lazy('dcim.graphql.types')] | None
+    module_type: Annotated['ModuleTypeType', strawberry.lazy('dcim.graphql.types')] | None
     region: Annotated['RegionType', strawberry.lazy('dcim.graphql.types')] | None
     site: Annotated['SiteType', strawberry.lazy('dcim.graphql.types')] | None
 

@@ -70,16 +70,18 @@ class ModelLifecycleTable(NetBoxTable):
 
 
 class ReplacementPriceTable(NetBoxTable):
-    lifecycle = tables.Column(linkify=True, verbose_name='Hardware model')
+    hardware_model = tables.Column(
+        linkify=True, orderable=False, verbose_name='Model purchased',
+    )
     scope = tables.Column(linkify=True, orderable=False, verbose_name='Applies to')
     cost = tables.Column()
     currency = tables.Column()
 
     class Meta(NetBoxTable.Meta):
         model = ReplacementPrice
-        fields = ('pk', 'id', 'lifecycle', 'scope', 'cost', 'currency',
+        fields = ('pk', 'id', 'hardware_model', 'scope', 'cost', 'currency',
                   'cost_updated', 'description', 'created', 'last_updated')
-        default_columns = ('lifecycle', 'scope', 'cost', 'currency', 'cost_updated')
+        default_columns = ('hardware_model', 'scope', 'cost', 'currency', 'cost_updated')
 
 
 class RegionCostTable(tables.Table):

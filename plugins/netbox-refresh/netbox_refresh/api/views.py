@@ -48,7 +48,7 @@ class ModelLifecycleViewSet(NetBoxModelViewSet):
 
 class ReplacementPriceViewSet(NetBoxModelViewSet):
     queryset = ReplacementPrice.objects.select_related(
-        'lifecycle', 'region', 'site'
+        'device_type', 'module_type', 'region', 'site'
     ).prefetch_related('tags')
     serializer_class = ReplacementPriceSerializer
     filterset_class = filtersets.ReplacementPriceFilterSet

@@ -677,8 +677,13 @@ class ComplianceReportForm(forms.Form):
 # --------------------------------------------------------------------------- #
 
 class ReplacementPriceForm(NetBoxModelForm):
-    lifecycle = DynamicModelChoiceField(
-        queryset=ModelLifecycle.objects.all(), label='Hardware model',
+    device_type = DynamicModelChoiceField(
+        queryset=DeviceType.objects.all(), required=False, selector=True,
+        help_text='The model being BOUGHT — the replacement, not the hardware '
+                  'on its way out',
+    )
+    module_type = DynamicModelChoiceField(
+        queryset=ModuleType.objects.all(), required=False, selector=True,
     )
     region = DynamicModelChoiceField(
         queryset=Region.objects.all(), required=False,
@@ -691,7 +696,13 @@ class ReplacementPriceForm(NetBoxModelForm):
     )
 
     fieldsets = (
-        FieldSet('lifecycle', name='Hardware model'),
+        FieldSet(
+            TabbedGroups(
+                FieldSet('device_type', name='Device Type'),
+                FieldSet('module_type', name='Module Type'),
+            ),
+            name='Hardware model being purchased',
+        ),
         FieldSet('region', 'site', name='Where this price applies (pick one)'),
         FieldSet('cost', 'currency', 'cost_updated', name='Price'),
         FieldSet('description', name='Reference'),
@@ -700,15 +711,18 @@ class ReplacementPriceForm(NetBoxModelForm):
 
     class Meta:
         model = ReplacementPrice
-        fields = ('lifecycle', 'region', 'site', 'cost', 'currency',
+        fields = ('device_type', 'module_type', 'region', 'site', 'cost', 'currency',
                   'cost_updated', 'description', 'comments', 'tags')
         widgets = {'cost_updated': DatePicker()}
 
 
 class ReplacementPriceFilterForm(NetBoxModelFilterSetForm):
     model = ReplacementPrice
-    lifecycle_id = DynamicModelMultipleChoiceField(
-        queryset=ModelLifecycle.objects.all(), required=False, label='Hardware model',
+    device_type_id = DynamicModelMultipleChoiceField(
+        queryset=DeviceType.objects.all(), required=False, label='Device type',
+    )
+    module_type_id = DynamicModelMultipleChoiceField(
+        queryset=ModuleType.objects.all(), required=False, label='Module type',
     )
     region_id = DynamicModelMultipleChoiceField(
         queryset=Region.objects.all(), required=False, label='Region',
@@ -723,19 +737,19 @@ class ReplacementPriceFilterForm(NetBoxModelFilterSetForm):
 class ReplacementPriceImportForm(NetBoxModelImportForm):
     """CSV import, because country price lists arrive as spreadsheets.
 
-    Rows name the hardware model (device_type or module_type) rather than a
-    lifecycle id — the id is a database detail nobody's sheet carries. A row
-    whose scope already has a price UPDATES it, so re-importing next year's
-    sheet revises prices instead of erroring on every line.
+    Rows name the hardware model being bought and the region or site the
+    price holds in. A row whose (model, scope) already has a price UPDATES
+    it, so re-importing next year's sheet revises prices instead of erroring
+    on every line.
     """
 
     device_type = CSVModelChoiceField(
         queryset=DeviceType.objects.all(), to_field_name='model', required=False,
-        help_text='Device type model name (this or module_type)',
+        help_text='Model name of the device type being bought (this or module_type)',
     )
     module_type = CSVModelChoiceField(
         queryset=ModuleType.objects.all(), to_field_name='model', required=False,
-        help_text='Module type model name',
+        help_text='Model name of the module type being bought',
     )
     region = CSVModelChoiceField(
         queryset=Region.objects.all(), to_field_name='name', required=False,
@@ -754,20 +768,10 @@ class ReplacementPriceImportForm(NetBoxModelImportForm):
 
     def clean(self):
         super().clean()
-        target = self.cleaned_data.get('device_type') or self.cleaned_data.get('module_type')
-        if target is None:
-            raise forms.ValidationError('Provide either device_type or module_type.')
-        lifecycle = ModelLifecycle.objects.filter(
-            assigned_object_type=ContentType.objects.get_for_model(target),
-            assigned_object_id=target.pk,
-        ).first()
-        if lifecycle is None:
-            raise forms.ValidationError(
-                '%s has no lifecycle record yet — a price hangs off one, so '
-                'import or create the lifecycle first.' % target
-            )
-        self.instance.lifecycle = lifecycle
-
+        device_type = self.cleaned_data.get('device_type')
+        module_type = self.cleaned_data.get('module_type')
+        if bool(device_type) == bool(module_type):
+            raise forms.ValidationError('Provide either device_type or module_type — exactly one.')
         region = self.cleaned_data.get('region')
         site = self.cleaned_data.get('site')
         if bool(region) == bool(site):
@@ -777,8 +781,19 @@ class ReplacementPriceImportForm(NetBoxModelImportForm):
         # the unique constraint; construct_instance builds onto this instance,
         # so the save becomes an UPDATE.
         existing = ReplacementPrice.objects.filter(
-            lifecycle=lifecycle, region=region, site=site
+            device_type=device_type, module_type=module_type,
+            region=region, site=site,
         ).first()
         if existing is not None and not self.instance.pk:
             self.instance = existing
-            self.instance.lifecycle = lifecycle
+
+
+class WorksheetPickerForm(forms.Form):
+    """Choosing which replacement model the worksheet prices."""
+
+    device_type = DynamicModelChoiceField(
+        queryset=DeviceType.objects.all(), required=False, selector=True,
+        label='Replacement model',
+        help_text='The model being purchased. The worksheet lists every site '
+                  'holding hardware that this model replaces.',
+    )
