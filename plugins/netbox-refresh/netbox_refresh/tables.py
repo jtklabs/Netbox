@@ -118,10 +118,12 @@ class SoftwareVersionTable(NetBoxTable):
 
 
 class SoftwareStandardTable(NetBoxTable):
-    assigned_object = tables.Column(
-        linkify=True, orderable=False, verbose_name='Applies to',
+    device_types = columns.ManyToManyColumn(
+        linkify_item=True, verbose_name='Device types',
     )
-    scope_type = tables.Column(orderable=False, verbose_name='Scope')
+    platforms = columns.ManyToManyColumn(
+        linkify_item=True, verbose_name='Platforms',
+    )
     approved_versions = columns.ManyToManyColumn(
         linkify_item=True, verbose_name='Approved versions',
     )
@@ -131,12 +133,12 @@ class SoftwareStandardTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = SoftwareStandard
         fields = (
-            'pk', 'id', 'assigned_object', 'scope_type', 'approved_versions',
+            'pk', 'id', 'device_types', 'platforms', 'approved_versions',
             'preferred_version', 'valid_from', 'valid_to', 'is_active',
             'description', 'created', 'last_updated',
         )
         default_columns = (
-            'assigned_object', 'scope_type', 'approved_versions', 'preferred_version',
+            'device_types', 'platforms', 'approved_versions', 'preferred_version',
             'valid_from', 'valid_to', 'is_active',
         )
 

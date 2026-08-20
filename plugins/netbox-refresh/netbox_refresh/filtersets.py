@@ -153,11 +153,12 @@ class SoftwareVersionFilterSet(NetBoxModelFilterSet):
 
 class SoftwareStandardFilterSet(NetBoxModelFilterSet):
     device_type_id = django_filters.ModelMultipleChoiceFilter(
-        queryset=DeviceType.objects.all(), method='filter_device_type',
-        label='Device type',
+        field_name='device_types', queryset=DeviceType.objects.all(),
+        label='Device type', distinct=True,
     )
     platform_id = django_filters.ModelMultipleChoiceFilter(
-        queryset=Platform.objects.all(), method='filter_platform', label='Platform',
+        field_name='platforms', queryset=Platform.objects.all(), label='Platform',
+        distinct=True,
     )
     approved_version_id = django_filters.ModelMultipleChoiceFilter(
         field_name='approved_versions', queryset=SoftwareVersion.objects.all(),
@@ -181,34 +182,13 @@ class SoftwareStandardFilterSet(NetBoxModelFilterSet):
     def search(self, queryset, name, value):
         if not value.strip():
             return queryset
-        device_types = DeviceType.objects.filter(
-            model__icontains=value
-        ).values_list('pk', flat=True)
-        platforms = Platform.objects.filter(
-            name__icontains=value
-        ).values_list('pk', flat=True)
         return queryset.filter(
             Q(description__icontains=value)
             | Q(comments__icontains=value)
             | Q(approved_versions__version__icontains=value)
-            | Q(assigned_object_type__model='devicetype',
-                assigned_object_id__in=list(device_types))
-            | Q(assigned_object_type__model='platform',
-                assigned_object_id__in=list(platforms))
+            | Q(device_types__model__icontains=value)
+            | Q(platforms__name__icontains=value)
         ).distinct()
-
-    def _scoped(self, queryset, model_class, value):
-        content_type = ContentType.objects.get_for_model(model_class)
-        return queryset.filter(
-            assigned_object_type=content_type,
-            assigned_object_id__in=[obj.pk for obj in value],
-        )
-
-    def filter_device_type(self, queryset, name, value):
-        return self._scoped(queryset, DeviceType, value) if value else queryset
-
-    def filter_platform(self, queryset, name, value):
-        return self._scoped(queryset, Platform, value) if value else queryset
 
     def filter_is_active(self, queryset, name, value):
         today = timezone.localdate()

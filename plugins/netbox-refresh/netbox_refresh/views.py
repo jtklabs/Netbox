@@ -3,7 +3,7 @@ from collections import defaultdict
 from dcim.models import Device, DeviceType, Module, ModuleType, Region, Site
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.shortcuts import redirect, render
 from django.views import View
 from netbox.views.generic import (
@@ -249,7 +249,7 @@ class SoftwareVersionView(ObjectView):
             software_version=instance
         ).select_related('device', 'device__site')[:100]
         standards = instance.approved_by_standards.prefetch_related(
-            'assigned_object_type'
+            'device_types', 'platforms'
         )
         return {'running_on': devices, 'standards': standards}
 
@@ -293,7 +293,7 @@ class SoftwareVersionBulkImportView(BulkImportView):
 @register_model_view(SoftwareStandard, name='list')
 class SoftwareStandardListView(ObjectListView):
     queryset = SoftwareStandard.objects.prefetch_related(
-        'assigned_object_type', 'approved_versions', 'preferred_version'
+        'device_types', 'platforms', 'approved_versions', 'preferred_version'
     )
     table = tables.SoftwareStandardTable
     filterset = filtersets.SoftwareStandardFilterSet
@@ -302,14 +302,17 @@ class SoftwareStandardListView(ObjectListView):
 
 @register_model_view(SoftwareStandard)
 class SoftwareStandardView(ObjectView):
-    queryset = SoftwareStandard.objects.prefetch_related('approved_versions')
+    queryset = SoftwareStandard.objects.prefetch_related(
+        'device_types', 'platforms', 'approved_versions'
+    )
 
     def get_extra_context(self, request, instance):
-        """Show the standard's own history, so supersession is visible in place."""
+        """Show related standards — anything sharing part of this one's scope —
+        so supersession is visible in place."""
         history = SoftwareStandard.objects.filter(
-            assigned_object_type=instance.assigned_object_type_id,
-            assigned_object_id=instance.assigned_object_id,
-        ).exclude(pk=instance.pk).order_by('-valid_from')
+            Q(device_types__in=instance.device_types.all())
+            | Q(platforms__in=instance.platforms.all())
+        ).exclude(pk=instance.pk).distinct().order_by('-valid_from')
         return {'history': history}
 
 

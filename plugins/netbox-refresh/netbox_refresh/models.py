@@ -6,8 +6,8 @@ Two halves, one question ("is this device current and supported?"):
                     and what replacing it costs.
   SoftwareVersion   a released version of an OS family, plus where to get its
                     image and how to verify it.
-  SoftwareStandard  the versions approved for a device type or a platform,
-                    effective-dated so history is queryable.
+  SoftwareStandard  the versions approved for a set of device types and/or
+                    platforms, effective-dated so history is queryable.
   DeviceSoftware    what a device is actually running, where that reading came
                     from, and whether it is exempt from the whole exercise.
 
@@ -50,12 +50,6 @@ __all__ = (
 # EoL is tracked per hardware MODEL, not per unit: a device type or a module
 # type. That matches how vendors publish it (one bulletin per PID).
 LIFECYCLE_ASSIGNMENT_MODELS = Q(app_label='dcim', model__in=('devicetype', 'moduletype'))
-
-# A software standard hangs off either a hardware model or an OS family. Both
-# are wanted: "all IOS-XE runs 17.09.04a" as the broad rule, "but 9500s run
-# 17.12.03" as the override. Resolution order is in compliance.py.
-STANDARD_ASSIGNMENT_MODELS = Q(app_label='dcim', model__in=('devicetype', 'platform'))
-
 
 # The annotation deliberately does not share the property's name. Django
 # assigns an annotation onto each instance it loads, and `effective_end_of_life`
@@ -399,15 +393,22 @@ class SoftwareStandard(PrimaryModel):
     backwards and hoping. valid_from doubles as the date we adopted it.
     """
 
-    assigned_object_type = models.ForeignKey(
-        to=ContentType,
-        limit_choices_to=STANDARD_ASSIGNMENT_MODELS,
-        on_delete=models.CASCADE,
-        related_name='+',
+    # Many-to-many, deliberately: fleets bless one image across a family of
+    # types ("every 2960X variant runs 15.2(7)E3"), and one-standard-per-type
+    # meant N copies of the same standard drifting apart at every edit. A
+    # standard may scope to device types, platforms, or both; the resolver
+    # still lets a device-type standard override a platform one.
+    device_types = models.ManyToManyField(
+        to='dcim.DeviceType',
+        related_name='software_standards',
+        blank=True,
+        help_text='Every device type this standard covers',
     )
-    assigned_object_id = models.PositiveBigIntegerField()
-    assigned_object = GenericForeignKey(
-        ct_field='assigned_object_type', fk_field='assigned_object_id'
+    platforms = models.ManyToManyField(
+        to='dcim.Platform',
+        related_name='software_standards',
+        blank=True,
+        help_text='Every platform this standard covers',
     )
 
     approved_versions = models.ManyToManyField(
@@ -430,31 +431,65 @@ class SoftwareStandard(PrimaryModel):
         blank=True, null=True, help_text='Leave empty while this standard is current'
     )
 
-    clone_fields = ('assigned_object_type',)
+    clone_fields = ('device_types', 'platforms', 'preferred_version')
 
     class Meta:
         ordering = ('-valid_from', 'pk')
         verbose_name = 'software standard'
         verbose_name_plural = 'software standards'
-        constraints = (
-            models.UniqueConstraint(
-                'assigned_object_type', 'assigned_object_id', 'valid_from',
-                name='%(app_label)s_%(class)s_unique_scope_from',
-                violation_error_message=(
-                    'This device type or platform already has a standard starting on that date.'
-                ),
-            ),
-        )
+        # The old single-scope unique constraint is gone with the generic FK.
+        # Overlap prevention lives in validation (see conflicting_standards):
+        # a database constraint cannot span an M2M, and what must be unique is
+        # not a column tuple but "no scope covered twice on the same day".
         indexes = (
-            models.Index(fields=('assigned_object_type', 'assigned_object_id')),
             models.Index(fields=('valid_from', 'valid_to')),
         )
 
     def __str__(self):
-        label = str(self.assigned_object) if self.assigned_object else 'Standard %s' % self.pk
+        label = self.scope_summary() if self.pk else 'Software standard'
         if self.valid_to:
             return '%s (%s to %s)' % (label, self.valid_from, self.valid_to)
         return '%s (from %s)' % (label, self.valid_from)
+
+    def scope_objects(self):
+        """Everything this standard covers, device types first."""
+        return list(self.device_types.all()) + list(self.platforms.all())
+
+    def scope_summary(self, limit: int = 2) -> str:
+        scopes = self.scope_objects()
+        if not scopes:
+            return 'Standard %s (no scope)' % self.pk
+        shown = ', '.join(str(obj) for obj in scopes[:limit])
+        extra = len(scopes) - limit
+        return '%s +%d more' % (shown, extra) if extra > 0 else shown
+
+    @classmethod
+    def conflicting_standards(cls, device_types, platforms, valid_from, valid_to,
+                              exclude_pk=None):
+        """Standards whose validity window overlaps AND that share any scope.
+
+        This is the overlap rule the old per-scope unique constraint only
+        approximated: two standards may never both claim the same device type
+        or platform on the same day, or compliance has two answers.
+        """
+        from django.db.models import Q
+        window = Q()
+        if valid_to is not None:
+            window &= Q(valid_from__lte=valid_to)
+        candidates = cls.objects.filter(window).filter(
+            Q(valid_to__isnull=True) | Q(valid_to__gte=valid_from)
+        )
+        scope = Q()
+        if device_types:
+            scope |= Q(device_types__in=[getattr(dt, 'pk', dt) for dt in device_types])
+        if platforms:
+            scope |= Q(platforms__in=[getattr(p, 'pk', p) for p in platforms])
+        if not scope:
+            return cls.objects.none()
+        candidates = candidates.filter(scope).distinct()
+        if exclude_pk is not None:
+            candidates = candidates.exclude(pk=exclude_pk)
+        return candidates
 
     def get_absolute_url(self):
         return reverse('plugins:netbox_refresh:softwarestandard', args=[self.pk])
@@ -464,19 +499,23 @@ class SoftwareStandard(PrimaryModel):
         if self.valid_from and self.valid_to and self.valid_to < self.valid_from:
             raise ValidationError({'valid_to': 'The end date cannot be before the start date.'})
 
-        # Two standards for the same scope must not both apply on the same day,
-        # or "the standard on date X" has no single answer.
-        if self.assigned_object_type_id and self.assigned_object_id and self.valid_from:
-            others = SoftwareStandard.objects.filter(
-                assigned_object_type_id=self.assigned_object_type_id,
-                assigned_object_id=self.assigned_object_id,
-            ).exclude(pk=self.pk)
-            for other in others:
-                if self.overlaps(other):
-                    raise ValidationError(
-                        'This overlaps an existing standard for the same scope (%s). '
-                        'Close that one out with an end date first.' % other
-                    )
+        # Two standards covering the same device type or platform must not both
+        # apply on the same day, or "the standard on date X" has no single
+        # answer. The M2M scopes are only readable once the row exists, so this
+        # covers the common in-place edit (shifting valid_from/valid_to on a
+        # saved standard); the form and API serializer run the same check
+        # against the SUBMITTED scopes, which is what protects creates and
+        # scope changes.
+        if self.pk and self.valid_from:
+            conflict = SoftwareStandard.conflicting_standards(
+                self.device_types.all(), self.platforms.all(),
+                self.valid_from, self.valid_to, exclude_pk=self.pk,
+            ).first()
+            if conflict:
+                raise ValidationError(
+                    'This overlaps an existing standard sharing part of its scope '
+                    '(%s). Close that one out with an end date first.' % conflict
+                )
 
         # The M2M is unavailable until the row exists, so this only fires on
         # edit; SoftwareStandardForm re-checks it against the submitted data.
@@ -502,10 +541,6 @@ class SoftwareStandard(PrimaryModel):
     @property
     def is_active(self):
         return self.applies_on(date.today())
-
-    @property
-    def scope_type(self):
-        return self.assigned_object_type.model if self.assigned_object_type_id else ''
 
 
 class DeviceSoftware(PrimaryModel):

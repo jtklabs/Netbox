@@ -98,9 +98,9 @@ class BaseStandardCard(PluginTemplateExtension):
             return None
         from netbox_refresh.compliance import active_standards
 
-        content_type = ContentType.objects.get_for_model(obj)
+        field = 'device_types' if obj._meta.model_name == 'devicetype' else 'platforms'
         return active_standards().filter(
-            assigned_object_type=content_type, assigned_object_id=obj.pk
+            **{field: obj.pk}
         ).prefetch_related('approved_versions').first()
 
     def right_page(self):

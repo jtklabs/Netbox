@@ -16,8 +16,6 @@ defined" are their own states rather than being folded into pass or fail.
 
 from datetime import date
 
-from dcim.models import DeviceType, Platform
-from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
 
 from netbox_refresh.choices import ComplianceStatusChoices
@@ -64,14 +62,18 @@ class StandardResolver:
             return
         standards = active_standards(
             self.on_date,
-            SoftwareStandard.objects.prefetch_related('approved_versions', 'assigned_object_type'),
+            SoftwareStandard.objects.prefetch_related(
+                'approved_versions', 'device_types', 'platforms'
+            ),
         )
+        # A standard now covers many scopes; index it under each one. The
+        # overlap validation guarantees no two active standards share a scope,
+        # so each key still maps to exactly one standard.
         for standard in standards:
-            model = standard.assigned_object_type.model
-            if model == 'devicetype':
-                self._by_device_type[standard.assigned_object_id] = standard
-            elif model == 'platform':
-                self._by_platform[standard.assigned_object_id] = standard
+            for device_type in standard.device_types.all():
+                self._by_device_type[device_type.pk] = standard
+            for platform in standard.platforms.all():
+                self._by_platform[platform.pk] = standard
         self._loaded = True
 
     def for_device(self, device):
@@ -93,19 +95,15 @@ def standard_for_device(device, on_date=None):
     on_date = on_date or date.today()
     base = SoftwareStandard.objects.prefetch_related('approved_versions')
 
-    # Content types come from the classes, not from device.device_type — going
-    # through the instance would fetch the related row just to learn its type.
     found = active_standards(on_date, base).filter(
-        assigned_object_type=ContentType.objects.get_for_model(DeviceType),
-        assigned_object_id=device.device_type_id,
+        device_types=device.device_type_id
     ).first()
     if found is not None:
         return found
 
     if device.platform_id:
         return active_standards(on_date, base).filter(
-            assigned_object_type=ContentType.objects.get_for_model(Platform),
-            assigned_object_id=device.platform_id,
+            platforms=device.platform_id
         ).first()
     return None
 

@@ -88,26 +88,51 @@ class SoftwareStandardSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name='plugins-api:netbox_refresh-api:softwarestandard-detail'
     )
-    assigned_object_type = ContentTypeField(queryset=ContentType.objects.all())
-    assigned_object = serializers.SerializerMethodField(read_only=True)
     is_active = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = SoftwareStandard
         fields = (
             'url', 'id', 'display',
-            'assigned_object_type', 'assigned_object_id', 'assigned_object',
+            'device_types', 'platforms',
             'approved_versions', 'preferred_version', 'valid_from', 'valid_to',
             'is_active', 'description', 'comments', 'tags', 'custom_fields',
             'created', 'last_updated',
         )
-        brief_fields = ('url', 'id', 'display', 'assigned_object', 'valid_from', 'valid_to')
+        brief_fields = ('url', 'id', 'display', 'device_types', 'platforms',
+                        'valid_from', 'valid_to')
 
-    def get_assigned_object(self, obj):
-        if obj.assigned_object is None:
-            return None
-        serializer = get_serializer_for_model(obj.assigned_object)
-        return serializer(obj.assigned_object, nested=True, context=self.context).data
+    def validate(self, data):
+        data = super().validate(data)
+        # Mirrors SoftwareStandardForm.clean(): the model cannot check scope
+        # rules before its M2M rows exist, and API writers deserve the same
+        # protection as the UI.
+        instance = self.instance
+        device_types = data.get(
+            'device_types',
+            list(instance.device_types.all()) if instance else [],
+        )
+        platforms = data.get(
+            'platforms',
+            list(instance.platforms.all()) if instance else [],
+        )
+        if not device_types and not platforms:
+            raise serializers.ValidationError(
+                'A standard must cover at least one device type or platform.'
+            )
+        valid_from = data.get('valid_from', instance.valid_from if instance else None)
+        valid_to = data.get('valid_to', instance.valid_to if instance else None)
+        if valid_from:
+            conflict = SoftwareStandard.conflicting_standards(
+                device_types, platforms, valid_from, valid_to,
+                exclude_pk=instance.pk if instance else None,
+            ).first()
+            if conflict:
+                raise serializers.ValidationError(
+                    'This overlaps an existing standard sharing part of its '
+                    'scope (%s). Close that one out with an end date first.' % conflict
+                )
+        return data
 
 
 class DeviceSoftwareSerializer(NetBoxModelSerializer):

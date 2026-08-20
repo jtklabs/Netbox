@@ -393,11 +393,16 @@ class SoftwareVersionBulkEditForm(NetBoxModelBulkEditForm):
 
 
 class SoftwareStandardForm(NetBoxModelForm):
-    device_type = DynamicModelChoiceField(
-        queryset=DeviceType.objects.all(), required=False, selector=True,
+    device_types = DynamicModelMultipleChoiceField(
+        queryset=DeviceType.objects.all(), required=False,
+        help_text='Every device type this standard covers — a fleet usually '
+                  'blesses one image across a family of types, e.g. all the '
+                  '2960X variants.',
     )
-    platform = DynamicModelChoiceField(
-        queryset=Platform.objects.all(), required=False, selector=True,
+    platforms = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False,
+        help_text='Every platform (OS family) this standard covers. A '
+                  'device-type standard overrides a platform one.',
     )
     approved_versions = DynamicModelMultipleChoiceField(
         queryset=SoftwareVersion.objects.all(),
@@ -410,13 +415,7 @@ class SoftwareStandardForm(NetBoxModelForm):
     )
 
     fieldsets = (
-        FieldSet(
-            TabbedGroups(
-                FieldSet('device_type', name='Device Type'),
-                FieldSet('platform', name='Platform'),
-            ),
-            name='Applies to',
-        ),
+        FieldSet('device_types', 'platforms', name='Applies to'),
         FieldSet('approved_versions', 'preferred_version', name='Approved software'),
         FieldSet('valid_from', 'valid_to', name='In force'),
         FieldSet('description', name='Reference'),
@@ -426,8 +425,8 @@ class SoftwareStandardForm(NetBoxModelForm):
     class Meta:
         model = SoftwareStandard
         fields = (
-            'approved_versions', 'preferred_version', 'valid_from', 'valid_to',
-            'description', 'comments', 'tags',
+            'device_types', 'platforms', 'approved_versions', 'preferred_version',
+            'valid_from', 'valid_to', 'description', 'comments', 'tags',
         )
         widgets = {'valid_from': DatePicker(), 'valid_to': DatePicker()}
         help_texts = {
@@ -436,29 +435,17 @@ class SoftwareStandardForm(NetBoxModelForm):
                         'superseding, so the history stays queryable.',
         }
 
-    def __init__(self, *args, **kwargs):
-        instance = kwargs.get('instance')
-        initial = kwargs.get('initial', {}).copy()
-        if instance is not None and instance.assigned_object:
-            field = ('device_type' if instance.assigned_object._meta.model_name == 'devicetype'
-                     else 'platform')
-            initial[field] = instance.assigned_object
-        kwargs['initial'] = initial
-        super().__init__(*args, **kwargs)
-
     def clean(self):
         super().clean()
-        device_type = self.cleaned_data.get('device_type')
-        platform = self.cleaned_data.get('platform')
-        if device_type and platform:
-            raise forms.ValidationError('Select a device type or a platform, not both.')
-        target = device_type or platform
-        if target is None:
-            raise forms.ValidationError('Select what this standard applies to.')
-        self.instance.assigned_object = target
+        device_types = self.cleaned_data.get('device_types')
+        platforms = self.cleaned_data.get('platforms')
+        if not device_types and not platforms:
+            raise forms.ValidationError('Select what this standard applies to — '
+                                        'at least one device type or platform.')
 
-        # The model cannot check this on create — the M2M does not exist until
-        # the row is saved — so it is enforced here against the submitted data.
+        # The model cannot check these on create — the M2Ms do not exist until
+        # the row is saved — so they are enforced here against the submitted
+        # data.
         approved = self.cleaned_data.get('approved_versions')
         preferred = self.cleaned_data.get('preferred_version')
         if approved and preferred and preferred not in approved:
@@ -466,16 +453,35 @@ class SoftwareStandardForm(NetBoxModelForm):
                 {'preferred_version': 'The preferred version must be one of the approved versions.'}
             )
 
-        # A platform-scoped standard approving versions of some other OS family
+        # A platform-only standard approving versions of some other OS family
         # is always a mistake, and it would silently never match anything.
-        if platform and approved:
-            wrong = [v for v in approved if v.platform_id != platform.pk]
+        # When device types are also in scope the check is skipped: the types
+        # say nothing about their OS family, so a cross-family version may be
+        # exactly what was meant.
+        if platforms and not device_types and approved:
+            allowed = {p.pk for p in platforms}
+            wrong = [v for v in approved if v.platform_id not in allowed]
             if wrong:
                 raise forms.ValidationError({
-                    'approved_versions': 'These are not %s versions: %s' % (
-                        platform, ', '.join(str(v) for v in wrong)
-                    )
+                    'approved_versions': 'These versions belong to none of the '
+                    'selected platforms: %s' % ', '.join(str(v) for v in wrong)
                 })
+
+        # No scope may be claimed by two standards on the same day, or
+        # compliance has two answers. Checked here with the submitted scopes;
+        # the model's clean() covers date edits made outside this form.
+        valid_from = self.cleaned_data.get('valid_from')
+        valid_to = self.cleaned_data.get('valid_to')
+        if valid_from:
+            conflict = SoftwareStandard.conflicting_standards(
+                device_types or (), platforms or (), valid_from, valid_to,
+                exclude_pk=self.instance.pk,
+            ).first()
+            if conflict:
+                raise forms.ValidationError(
+                    'This overlaps an existing standard sharing part of its scope '
+                    '(%s). Close that one out with an end date first.' % conflict
+                )
 
 
 class SoftwareStandardFilterForm(NetBoxModelFilterSetForm):

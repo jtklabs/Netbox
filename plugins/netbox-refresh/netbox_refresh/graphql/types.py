@@ -92,17 +92,13 @@ class SoftwareVersionType(PrimaryObjectType):
     pagination=True,
 )
 class SoftwareStandardType(PrimaryObjectType):
-    assigned_object_type: Annotated['ContentTypeType', strawberry.lazy('netbox.graphql.types')] | None
     approved_versions: list[Annotated['SoftwareVersionType', strawberry.lazy('netbox_refresh.graphql.types')]]
     preferred_version: Annotated['SoftwareVersionType', strawberry.lazy('netbox_refresh.graphql.types')] | None
 
-    # A standard hangs off a device type or a platform; device type wins when
-    # both could apply.
-    assigned_object: Annotated[
-        Annotated['DeviceTypeType', strawberry.lazy('dcim.graphql.types')]
-        | Annotated['PlatformType', strawberry.lazy('dcim.graphql.types')],
-        strawberry.union('SoftwareStandardScopeType'),
-    ] | None
+    # A standard covers any number of device types and platforms; the resolver
+    # in compliance.py still lets a device-type standard beat a platform one.
+    device_types: list[Annotated['DeviceTypeType', strawberry.lazy('dcim.graphql.types')]]
+    platforms: list[Annotated['PlatformType', strawberry.lazy('dcim.graphql.types')]]
 
     @strawberry_django.field
     def is_active(self) -> bool:

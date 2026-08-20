@@ -58,6 +58,17 @@ class SoftwareVersionFilter(PrimaryModelFilter):
 class SoftwareStandardFilter(PrimaryModelFilter):
     valid_from: DateFilterLookup | None = strawberry_django.filter_field()
     valid_to: DateFilterLookup | None = strawberry_django.filter_field()
+    # Filtering on either M2M joins the scope table, so a standard covering
+    # three matching device types comes back three times. strawberry-django's
+    # answer is the DISTINCT flag every filter input carries — pass
+    # `filters: {device_types: {...}, DISTINCT: true}` when filtering on
+    # these.
+    device_types: Annotated['DeviceTypeFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
+        strawberry_django.filter_field()
+    )
+    platforms: Annotated['PlatformFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
+        strawberry_django.filter_field()
+    )
     approved_versions: Annotated['SoftwareVersionFilter', strawberry.lazy('netbox_refresh.graphql.filters')] | None = (
         strawberry_django.filter_field()
     )

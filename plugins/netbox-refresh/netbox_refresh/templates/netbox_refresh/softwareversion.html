@@ -75,7 +75,11 @@
             <table class="table table-hover attr-table">
               {% for standard in standards %}
                 <tr>
-                  <td>{{ standard.assigned_object|linkify }}</td>
+                  <td>
+                    {% for scope in standard.scope_objects %}
+                      {{ scope|linkify }}{% if not forloop.last %}, {% endif %}
+                    {% endfor %}
+                  </td>
                   <td>{{ standard|linkify:"get_absolute_url" }}</td>
                   <td>{% if standard.is_active %}{% badge 'In force' bg_color='green' %}
                       {% else %}{% badge 'Historical' bg_color='gray' %}{% endif %}</td>
