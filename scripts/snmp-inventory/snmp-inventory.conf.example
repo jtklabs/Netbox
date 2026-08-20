@@ -55,6 +55,17 @@ retired_device_status = inventory
 # on dcim.device. The field is created automatically if it does not exist —
 # NetBox has no native per-device software version.
 manage_software_version = true
+# Write CDP/LLDP adjacencies into NetBox as Cable objects. Scanner-created
+# cables carry the `discovered` tag so they stay distinct from hand-drawn
+# documentation; an adjacency that disagrees with an existing cable is
+# reported as drift and never rewired, and a previously discovered cable
+# whose adjacency disappears is flagged, not deleted.
+sync_cables = true
+# Which neighbor classes get cabled. Phones, APs and servers announce
+# themselves over CDP/LLDP too, and cabling them is a choice, not a fact:
+# the default is network gear only. Add from: phone, ap, host, unknown.
+# Everything excluded is still reported, so nothing vanishes silently.
+cable_neighbor_classes = network
 
 [snmp]
 # Per-request timeout in seconds and how many times to retry a request.

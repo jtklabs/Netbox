@@ -164,7 +164,7 @@ def lab(netbox):
 # Addresses the fixtures hand out. They carry no test prefix of their own, so
 # they are listed explicitly rather than pattern-matched — this file must never
 # delete an address it did not create.
-FIXTURE_ADDRESSES = ("10.10.1.5/24", "10.30.0.11/24")
+FIXTURE_ADDRESSES = ("10.10.1.5/24", "10.30.0.11/24", "10.10.2.5/24")
 
 
 def _teardown(netbox: NetBox) -> None:
@@ -968,3 +968,271 @@ class TestAnExistingDeviceKeepsBeingUpdatedWithoutAModel:
             assert "Ethernet1/1" in names
         finally:
             self._cleanup(netbox)
+
+
+class TestCableSync:
+    """CDP/LLDP adjacencies becoming Cable objects, against the real API.
+
+    Cable creation is the API surface a fake gets most wrong: NetBox answers
+    the same "Duplicate termination" 400 for a rescan, for the far side of an
+    existing link, and for genuine drift, so only a live instance can prove
+    the check-first logic tells them apart. Tests in this class build on each
+    other in order, the way scans of neighboring devices arrive in real life.
+
+    The fixtures describe both ends of each link: the 9300 stack sees the
+    Arista (LLDP, sysName carrying a domain suffix) and the 2960X (both
+    protocols, landing on stack member 2); the Arista and 2960X each see the
+    stack back.
+    """
+
+    def _sync(self, netbox, fixture, site_id, address, doctor=None):
+        facts = collect_fixture(fixture)
+        if doctor is not None:
+            doctor(facts)
+        result = build_scan_result(facts)
+        syncer = Syncer(netbox, SyncOptions(device_role=f"{SLUG_PREFIX}network"))
+        syncer.sync(result, site_id, scanned_address=address)
+        return syncer
+
+    def _interface(self, netbox, device_name, interface_name):
+        device = netbox.first("/dcim/devices/", {"name": device_name})
+        assert device is not None, f"{device_name} is not in NetBox"
+        interface = netbox.first("/dcim/interfaces/",
+                                 {"device_id": device["id"], "name": interface_name})
+        assert interface is not None, f"{device_name} has no {interface_name}"
+        return interface
+
+    def _discovered_cables(self, netbox):
+        if not netbox.tag_exists("discovered"):
+            return []
+        return netbox.all("/dcim/cables/", {"tag": "discovered"})
+
+    def test_scanning_the_far_side_creates_the_cable(self, netbox, lab, synced):
+        """The Arista names the stack's port in short form ("Te1/1/1"); the
+        stack stored it long. The cable must land on the long-named port."""
+        syncer = self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"],
+                            "10.30.0.11")
+        assert len(syncer.cables.report.created) == 1
+        local = self._interface(netbox, "dc1-spine-01", "Ethernet1")
+        cable = local.get("cable")
+        assert cable, "no cable was created on the Arista's Ethernet1"
+        peers = local.get("link_peers") or []
+        assert peers and peers[0]["name"] == "TenGigabitEthernet1/1/1"
+        assert peers[0]["device"]["name"] == "bld-a-core-01"
+        full = netbox.get(f"/dcim/cables/{cable['id']}/")
+        assert [t["slug"] for t in full.get("tags", [])] == ["discovered"]
+        assert _choice(full.get("status")) == "connected"
+
+    def test_scanning_the_near_side_converges_on_the_same_cable(self, netbox, lab, synced):
+        """The stack reports the same link back — with the Arista's sysName
+        wearing its domain suffix — and must recognise the cable, not
+        duplicate it or trip over the duplicate-termination 400."""
+        before = {c["id"] for c in self._discovered_cables(netbox)}
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5")
+        report = syncer.cables.report
+        assert any("dc1-spine-01.example.net" in line for line in report.converged), (
+            f"expected the Arista link converged, got: {vars(report)}")
+        assert not report.conflicts
+        after = {c["id"] for c in self._discovered_cables(netbox)}
+        assert before == after, "a rescan changed the discovered cable set"
+
+    def test_the_stack_link_lands_on_member_two(self, netbox, lab, synced):
+        """The 2960X's uplink goes to Gi2/0/1 — the interface belongs to the
+        member-2 Device, and the name match that found the stack landed on
+        the master. The virtual-chassis-wide search is what bridges the two,
+        and the termination must be member 2's port."""
+        syncer = self._sync(netbox, "cisco-2960x", lab["site_ours"]["id"],
+                            "10.10.2.5")
+        assert len(syncer.cables.report.created) == 1, vars(syncer.cables.report)
+        local = self._interface(netbox, "bld-b-acc-01", "GigabitEthernet1/0/1")
+        peers = local.get("link_peers") or []
+        assert peers and peers[0]["name"] == "GigabitEthernet2/0/1"
+        member = netbox.get(f"/dcim/devices/{peers[0]['device']['id']}/")
+        assert member["serial"] == "FOC2530L0CD", (
+            "the cable landed on %r, not on stack member 2" % member["name"])
+
+    def test_rescans_from_both_sides_stay_idempotent(self, netbox, lab, synced):
+        before = {c["id"] for c in self._discovered_cables(netbox)}
+        assert len(before) == 2
+        for fixture, address in (("cisco-c9300-stack", "10.10.1.5"),
+                                 ("cisco-2960x", "10.10.2.5"),
+                                 ("arista-7050sx", "10.30.0.11")):
+            syncer = self._sync(netbox, fixture, lab["site_ours"]["id"], address)
+            assert not syncer.cables.report.created, (
+                f"rescan of {fixture} created cables: {syncer.cables.report.created}")
+        assert {c["id"] for c in self._discovered_cables(netbox)} == before
+
+    def test_phones_aps_and_unknowns_did_not_become_cables(self, netbox, lab, synced):
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5")
+        report = syncer.cables.report
+        filtered = " ".join(report.filtered)
+        assert "SEP0011223344AA" in filtered and "[phone]" in filtered
+        assert "bld-a-ap-01" in filtered and "[ap]" in filtered
+        assert any("unknown-sw-99" in line for line in report.unknown_neighbors)
+        # Reported, never fabricated:
+        assert netbox.first("/dcim/devices/", {"name": "unknown-sw-99"}) is None
+        assert netbox.first("/dcim/devices/", {"name": "SEP0011223344AA"}) is None
+        # And the phone's port carries no cable.
+        phone_port = self._interface(netbox, "bld-a-core-01", "GigabitEthernet1/0/2")
+        assert phone_port.get("cable") is None
+
+    def test_a_conflicting_cable_is_reported_never_rewired(self, netbox, lab, synced):
+        """Somebody re-plugs (or mis-documents) the stack's Gi2/0/1 into the
+        Arista. The 2960X still claims that port. The scan must report the
+        disagreement and leave the existing cable exactly as it found it."""
+        member2_port = self._interface(netbox, "bld-a-core-01-2", "GigabitEthernet2/0/1")
+        old_cable = (member2_port.get("cable") or {}).get("id")
+        assert old_cable, "expected the discovered cable from the earlier test"
+        netbox._request("DELETE", f"/dcim/cables/{old_cable}/")
+        hand_drawn = netbox.create("/dcim/cables/", {
+            "a_terminations": [{"object_type": "dcim.interface",
+                                "object_id": member2_port["id"]}],
+            "b_terminations": [{"object_type": "dcim.interface",
+                                "object_id": self._interface(netbox, "dc1-spine-01",
+                                                             "Ethernet2")["id"]}],
+        })
+        try:
+            syncer = self._sync(netbox, "cisco-2960x", lab["site_ours"]["id"],
+                                "10.10.2.5")
+            report = syncer.cables.report
+            assert report.conflicts, "the disagreement went unreported"
+            assert "Ethernet2" in " ".join(report.conflicts)
+            assert not report.created
+            survivor = netbox.get(f"/dcim/cables/{hand_drawn['id']}/")
+            assert survivor["id"] == hand_drawn["id"], "the hand-drawn cable was touched"
+        finally:
+            netbox._request("DELETE", f"/dcim/cables/{hand_drawn['id']}/")
+            # Restore the discovered cable so later tests see steady state.
+            self._sync(netbox, "cisco-2960x", lab["site_ours"]["id"], "10.10.2.5")
+
+    def test_a_vanished_adjacency_is_flagged_not_deleted(self, netbox, lab, synced):
+        """The 2960X goes quiet (powered off during the scan, say). Its cable
+        must be flagged as unseen and left alone — a link that is down is not
+        proof it was unplugged."""
+
+        def drop_2960x(facts):
+            facts.neighbors = [n for n in facts.neighbors
+                               if "bld-b-acc" not in n.sys_name]
+
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5", doctor=drop_2960x)
+        report = syncer.cables.report
+        assert any("GigabitEthernet2/0/1" in line for line in report.stale), vars(report)
+        member2_port = self._interface(netbox, "bld-a-core-01-2", "GigabitEthernet2/0/1")
+        assert member2_port.get("cable") is not None, "the flagged cable was deleted"
+
+    def test_a_device_with_silent_neighbor_tables_flags_nothing(self, netbox, lab, synced):
+        """No sightings at all means the protocols are off or unanswered —
+        which says nothing about the cabling, so nothing may be flagged."""
+
+        def drop_all(facts):
+            facts.neighbors = []
+
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5", doctor=drop_all)
+        assert not syncer.cables.report.stale
+
+    def test_a_nameless_neighbor_resolves_by_chassis_mac(self, netbox, lab, synced):
+        """Gear whose sysName never made it into NetBox as the device name is
+        still resolvable: the LLDP chassis id (subtype MAC) is matched against
+        the MAC addresses the scan itself recorded. The Arista's chassis id in
+        the stack fixture is its Ethernet1 MAC, so with the name blinded the
+        adjacency must still land on the same device — and converge on the
+        cable that already exists."""
+
+        def forget_names(facts):
+            for neighbor in facts.neighbors:
+                if "dc1-spine" in neighbor.sys_name:
+                    neighbor.sys_name = ""
+
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5", doctor=forget_names)
+        report = syncer.cables.report
+        assert any("00:1C:73:AA:BB:01" in line or "Ethernet1" in line
+                   for line in report.converged), vars(report)
+        assert not any("00:1C:73" in line for line in report.unknown_neighbors)
+
+    def test_a_husk_of_a_deleted_neighbor_is_released_not_drift(self, netbox, lab, synced):
+        """Deleting a cabled device leaves the cable squatting one-ended on
+        the surviving port (NetBox strips terminations, keeps the Cable). A
+        discovered-tagged husk must be released and the observed link cabled;
+        reporting it as drift would block that port forever, against a far
+        end that no longer exists."""
+        arista = netbox.first("/dcim/devices/", {"name": "dc1-spine-01"})
+        assert arista is not None
+        netbox._request("DELETE", f"/dcim/devices/{arista['id']}/")
+
+        stack_port = self._interface(netbox, "bld-a-core-01", "TenGigabitEthernet1/1/1")
+        husk = stack_port.get("cable")
+        assert husk is not None, (
+            "expected NetBox to keep the cable after the device delete — if "
+            "this fails, NetBox changed the no-cascade behaviour and the husk "
+            "handling in cables.py can be retired")
+        assert not stack_port.get("link_peers")
+
+        # Re-onboard the Arista; its side of the link must be rebuilt.
+        syncer = self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"],
+                            "10.30.0.11")
+        report = syncer.cables.report
+        assert len(report.husks_removed) == 1, vars(report)
+        assert not report.conflicts
+        assert len(report.created) == 1
+        fresh = self._interface(netbox, "dc1-spine-01", "Ethernet1")
+        peers = fresh.get("link_peers") or []
+        assert peers and peers[0]["name"] == "TenGigabitEthernet1/1/1"
+
+    def test_an_untagged_husk_still_goes_to_a_person(self, netbox, lab, synced):
+        """The same one-ended state on a HAND-DRAWN cable is not the
+        scanner's to clean up: it must surface as drift, untouched."""
+        stack_port = self._interface(netbox, "bld-a-core-01", "TenGigabitEthernet1/1/1")
+        live_cable = (stack_port.get("cable") or {}).get("id")
+        assert live_cable
+        netbox._request("DELETE", f"/dcim/cables/{live_cable}/")
+        hand_drawn = netbox.create("/dcim/cables/", {
+            "a_terminations": [{"object_type": "dcim.interface",
+                                "object_id": stack_port["id"]}],
+            "b_terminations": [{"object_type": "dcim.interface",
+                                "object_id": self._interface(
+                                    netbox, "dc1-spine-01", "Ethernet3")["id"]}],
+        })
+        try:
+            # Orphan the hand-drawn cable's far end.
+            ethernet3 = self._interface(netbox, "dc1-spine-01", "Ethernet3")
+            netbox._request("DELETE", f"/dcim/interfaces/{ethernet3['id']}/")
+            syncer = self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"],
+                                "10.30.0.11")
+            report = syncer.cables.report
+            assert report.conflicts, vars(report)
+            assert not report.husks_removed
+            assert netbox.get(f"/dcim/cables/{hand_drawn['id']}/")["id"] == hand_drawn["id"]
+        finally:
+            netbox._request("DELETE", f"/dcim/cables/{hand_drawn['id']}/")
+            self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"], "10.30.0.11")
+
+    def test_fully_dangling_discovered_cables_are_swept(self, netbox, lab, synced):
+        """Zero terminations means no device filter can ever find it — only
+        the tag-wide sweep. Runs last: it deletes interfaces to manufacture
+        the state, and the re-syncs put them back."""
+        e2 = self._interface(netbox, "dc1-spine-01", "Ethernet2")
+        g2 = self._interface(netbox, "bld-b-acc-01", "GigabitEthernet1/0/2")
+        doomed = netbox.create("/dcim/cables/", {
+            "a_terminations": [{"object_type": "dcim.interface", "object_id": e2["id"]}],
+            "b_terminations": [{"object_type": "dcim.interface", "object_id": g2["id"]}],
+            "tags": [{"slug": "discovered"}],
+        })
+        netbox._request("DELETE", f"/dcim/interfaces/{e2['id']}/")
+        netbox._request("DELETE", f"/dcim/interfaces/{g2['id']}/")
+        zero_ended = netbox.get(f"/dcim/cables/{doomed['id']}/")
+        assert not zero_ended.get("a_terminations") and not zero_ended.get("b_terminations")
+
+        syncer = self._sync(netbox, "cisco-c9300-stack", lab["site_ours"]["id"],
+                            "10.10.1.5")
+        assert any(f"cable {doomed['id']}" in line
+                   for line in syncer.cables.report.husks_removed), \
+            vars(syncer.cables.report)
+        assert netbox.count("/dcim/cables/", {"id": doomed["id"]}) == 0
+        # Put the deleted interfaces back for whatever runs after.
+        self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"], "10.30.0.11")
+        self._sync(netbox, "cisco-2960x", lab["site_ours"]["id"], "10.10.2.5")

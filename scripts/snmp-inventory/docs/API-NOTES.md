@@ -158,6 +158,90 @@ family. Custom fields are created through `/extras/custom-fields/` with
 
 `custom_fields` merges on PATCH — sending one key leaves the others alone.
 
+## Cables
+
+Verified against the live 4.6.7 before the cable sync was written, the same
+way prefix scoping was.
+
+### Terminations are generic lists
+
+```json
+POST /dcim/cables/
+{"a_terminations": [{"object_type": "dcim.interface", "object_id": 412}],
+ "b_terminations": [{"object_type": "dcim.interface", "object_id": 414}],
+ "status": "connected", "tags": [{"slug": "discovered"}]}
+```
+
+The response echoes each termination with the full nested interface,
+including its device — enough to name both ends without extra requests.
+
+### Any second cable touching an occupied termination is a 400
+
+```
+{"__all__": ["Duplicate termination found for dcim.interface 412: cable 1"]}
+```
+
+This fires identically for a straight rescan, for the same link created from
+the other side (B→A after A→B), and for a genuinely conflicting cable. The
+API cannot tell those apart, so the scanner must: **read the interface
+first**. `interface.cable` carries the cable id, `cable_end` the side, and
+`link_peers` the far-end interface(s) with their devices — same cable id on
+both intended ends means converged, an occupied end pointing elsewhere means
+drift. Create-and-tolerate-400 would misread drift as convergence.
+
+### Deleting a device does NOT delete the cables touching it
+
+Deleting a device cascades to its interfaces, and each interface takes its
+CableTermination rows with it — but the **Cable object itself survives**,
+now with one end dangling or with no terminations at all. Observed live:
+after a cabled device was deleted, its cables remained as
+`"a_terminations": []` husks, one of them still holding its other end on the
+surviving peer's port.
+
+Two consequences the cable sync handles explicitly:
+
+- A one-ended husk **occupies the surviving port**, so every later attempt
+  to cable that port is refused as a duplicate termination — and naive drift
+  detection reports it as a conflict forever, against a far end that no
+  longer exists. `discovered`-tagged husks are released (deleted) and the
+  observed link takes the port; untagged ones still go to a person.
+- A zero-ended husk matches **no device-scoped filter at all** — no
+  `?device_id=`, no interface check can reach it — so only a tag-wide sweep
+  (`?tag=discovered`, empty termination lists) ever finds one.
+
+### Filters that the cable sync leans on
+
+- `/dcim/cables/?device_id=N` returns cables touching any of the device's
+  terminations, whichever side they are on.
+- `/dcim/cables/?tag=discovered` works, with the usual caveat that an
+  unknown tag slug is a 400 — guard with `tag_exists()` before the first
+  cable was ever created.
+- `/dcim/interfaces/?virtual_chassis_id=N` returns every member's
+  interfaces in one query, which is how a remote port like `Gi2/0/1` is
+  found on member 2 after the *master's* name matched. (A bogus id is a 400,
+  like every `*_id` filter.)
+- `/dcim/mac-addresses/?mac_address=` matches case-insensitively (queried
+  lowercase against a stored uppercase value), so LLDP chassis-id MACs can
+  be resolved without normalising to NetBox's stored case.
+- `/dcim/devices/?name__ie=` is real and case-insensitive
+  (`?name__ie=BLD-A-CORE-01` returned exactly the lowercase-named device).
+  Neighbor sysNames arrive in whatever case the neighbor's admin typed, so
+  the cable sync matches with it rather than exact `?name=`.
+
+### An unknown filter parameter is silently IGNORED
+
+```
+GET /dcim/devices/?definitely_not_a_filter=1   ->  every device, 200
+```
+
+No error, no empty list — the full unfiltered set. This is the nastiest
+failure shape on this page: mistype a filter name and a lookup meant to find
+one object "finds" the whole table. It is why the cable sync treats a
+multi-match as ambiguous-and-refuse rather than picking the first row, and
+why `name__ie` above was verified with a positive match (a `count: 0` alone
+cannot distinguish "filtered to nothing" from "filter never applied" — though
+an ignored filter here would return everything, not nothing).
+
 ## Authentication
 
 NetBox 4.6 issues v2 tokens shaped `nbt_<key>.<secret>` which authenticate as:

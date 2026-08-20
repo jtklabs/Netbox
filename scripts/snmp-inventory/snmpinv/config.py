@@ -146,6 +146,9 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             move_devices_between_sites=section.getboolean("move_devices_between_sites", True),
             retain_replaced_hardware=section.getboolean("retain_replaced_hardware", True),
             retired_device_status=section.get("retired_device_status", "inventory"),
+            sync_cables=section.getboolean("sync_cables", True),
+            cable_neighbor_classes=_class_list(
+                section.get("cable_neighbor_classes", "network")),
         )
 
     if parser.has_section("snmp"):
@@ -174,6 +177,24 @@ def load(config_path: str, credentials_path: str = "") -> Config:
         config.credentials = _credentials_from_parser(parser)
 
     return config
+
+
+def _class_list(value: str) -> tuple:
+    """Parse `cable_neighbor_classes = network, phone` into a tuple.
+
+    Unrecognised class names are kept rather than rejected — the filter
+    simply never matches them — but warned about, because a typo here
+    silently narrows what gets cabled.
+    """
+    from .neighbors import CLASS_AP, CLASS_HOST, CLASS_NETWORK, CLASS_PHONE, CLASS_UNKNOWN
+
+    known = {CLASS_NETWORK, CLASS_PHONE, CLASS_AP, CLASS_HOST, CLASS_UNKNOWN}
+    classes = tuple(part.strip() for part in value.split(",") if part.strip())
+    for name in classes:
+        if name not in known:
+            log.warning("cable_neighbor_classes contains %r, which is not one "
+                        "of %s — it will never match", name, sorted(known))
+    return classes
 
 
 def load_credentials(path: str) -> list[Credential]:

@@ -116,6 +116,7 @@ class NetBox:
             _quieten_tls_warnings()
         self.created: dict[str, int] = {}
         self.updated: dict[str, int] = {}
+        self.deleted: dict[str, int] = {}
         # Dry-run stand-ins get descending negative ids. Real NetBox ids are
         # always positive, so a negative id anywhere downstream is
         # unambiguously an object this run only pretended to create.
@@ -227,6 +228,31 @@ class NetBox:
         self.updated[path] = self.updated.get(path, 0) + 1
         log.info("updated %s: %s", what, _brief(payload))
         return response.json()
+
+    def delete(self, path: str, object_id: int, label: str = "") -> None:
+        """DELETE, honouring dry-run.
+
+        The scanner's standing rule is that it removes nothing — absent data
+        must never erase somebody's documentation — and this method exists
+        for the single exception: an object of the scanner's own making that
+        can no longer document anything. Concretely, a `discovered`-tagged
+        cable whose terminations NetBox stripped when the interfaces under
+        them were deleted (see cables.py and docs/API-NOTES.md). Nothing else
+        calls this, and nothing else should.
+        """
+        what = label or f"{path}{object_id}"
+        if self.dry_run:
+            if object_id is not None and object_id < 0:
+                return
+            log.info("[dry-run] would delete %s", what)
+            self.deleted[path] = self.deleted.get(path, 0) + 1
+            return
+        response = self._request("DELETE", f"{path}{object_id}/")
+        if response.status_code not in (204,):
+            raise NetBoxError(
+                f"DELETE {path}{object_id}/ -> {response.status_code}: {response.text[:400]}")
+        self.deleted[path] = self.deleted.get(path, 0) + 1
+        log.info("deleted %s", what)
 
     def ensure(self, path: str, lookup: dict, payload: dict, label: str = "") -> dict | None:
         """Return the existing object matching `lookup`, else create it."""
@@ -346,13 +372,15 @@ class NetBox:
         )
 
     def summary(self) -> str:
-        if not self.created and not self.updated:
+        if not self.created and not self.updated and not self.deleted:
             return "no changes"
         parts = []
         for path, n in sorted(self.created.items()):
             parts.append(f"+{n} {path.strip('/').split('/')[-1]}")
         for path, n in sorted(self.updated.items()):
             parts.append(f"~{n} {path.strip('/').split('/')[-1]}")
+        for path, n in sorted(self.deleted.items()):
+            parts.append(f"-{n} {path.strip('/').split('/')[-1]}")
         return ", ".join(parts)
 
 

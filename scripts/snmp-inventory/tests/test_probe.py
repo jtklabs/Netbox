@@ -83,6 +83,20 @@ class TestTheReportSaysWhatWasFound:
         assert "ACCESS POINTS" in text
         assert "dal-ap-101" in text and "AP-515" in text
 
+    def test_neighbors_are_shown_deduplicated_and_classified(self):
+        """The section an operator reads before letting cables be drawn."""
+        text = report_for("cisco-c9300-stack")
+        assert "NEIGHBORS — CDP/LLDP (5 links from 7 sightings)" in text
+        # One line per link, not per protocol sighting...
+        assert text.count("SEP0011223344AA") == 1
+        assert "cdp+lldp" in text
+        # ...with the class the filter would use.
+        assert "phone" in text and "ap" in text
+
+    def test_a_device_without_neighbors_says_so(self):
+        text = report_for("f5-bigip")
+        assert "NEIGHBORS — CDP/LLDP (none)" in text
+
 
 class TestJsonOutput:
     def test_it_is_valid_json_with_the_expected_shape(self):
@@ -98,6 +112,9 @@ class TestJsonOutput:
         assert len(data["stack_members"]) == 3
         assert data["would_create"]["virtual_chassis"] == "bld-a-core-01"
         assert data["system"]["enterprise"] == 9
+        assert len(data["neighbor_sightings"]) == 7
+        assert len(data["adjacencies"]) == 5
+        assert {a["class"] for a in data["adjacencies"]} == {"network", "phone", "ap"}
 
     def test_every_interface_carries_the_type_it_would_get(self):
         facts = collect_fixture("arista-7050sx")

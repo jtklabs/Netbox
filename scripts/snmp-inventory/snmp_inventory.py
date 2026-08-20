@@ -171,6 +171,11 @@ def main(argv=None) -> int:
         "done in %.1fs — %d scanned, %d failed; NetBox: %s",
         elapsed, scanned, failed, netbox.summary(),
     )
+    if not args.collect_only and config.sync.sync_cables:
+        # The cable pass mostly matters for what it did NOT do — conflicts,
+        # unknown neighbors, unmatched ports — and those belong in the
+        # end-of-run summary, not scattered per-device through the log.
+        log.info("cables: %s", syncer.cables.summary())
     return 0 if scanned else 1
 
 

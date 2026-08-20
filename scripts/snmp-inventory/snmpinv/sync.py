@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .cables import DEFAULT_CABLE_CLASSES, CableSyncer
 from .model import DeviceRecord, InterfaceRecord, ModuleRecord, ScanResult
 from .netbox import NetBox, NetBoxError
 
@@ -127,12 +128,19 @@ class SyncOptions:
     # contracts and quotes are matched on.
     retain_replaced_hardware: bool = True
     retired_device_status: str = RETIRED_DEVICE_STATUS
+    # Write CDP/LLDP adjacencies as Cable objects. The classes tuple is the
+    # safety valve: phones, APs and servers announce themselves as neighbors
+    # too, and cabling them is a modelling choice — default is network gear
+    # only, and everything filtered is reported rather than dropped.
+    sync_cables: bool = True
+    cable_neighbor_classes: tuple = DEFAULT_CABLE_CLASSES
 
 
 class Syncer:
     def __init__(self, netbox: NetBox, options: SyncOptions | None = None):
         self.netbox = netbox
         self.options = options or SyncOptions()
+        self.cables = CableSyncer(netbox, self.options.cable_neighbor_classes)
         self._custom_field_ready = False
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
@@ -194,6 +202,12 @@ class Syncer:
                 self._sync_interfaces(device, record, scanned_address, tenant_id)
             if self.options.manage_software_version:
                 self._queue_software_report(device, record, result)
+
+        # After the interfaces, which cables terminate on; gated on both
+        # switches because with sync_interfaces off the local ends may not
+        # exist and every adjacency would report as unmatched.
+        if self.options.sync_cables and self.options.sync_interfaces and created:
+            self.cables.sync_result(result, created)
 
         if self.options.sync_access_points and result.access_points:
             self._sync_access_points(result, site_id, tenant_id)

@@ -114,6 +114,26 @@ def _teardown(netbox):
 
     sites = [s for s in netbox.all("/dcim/sites/")
              if (s.get("slug") or "").startswith(SLUG)]
+    test_site_ids = {s["id"] for s in sites}
+
+    # Detach virtual-chassis masters before deleting devices. A VC master
+    # cannot be deleted while it holds the role, and the delete() below
+    # swallows the 409 — so without this the master, its VC and the site all
+    # quietly survive into the NEXT suite run, where the netbox_live cable
+    # tests find a bld-a-core-01 they never created (with a dangling
+    # discovered cable squatting on its uplink) and fail for reasons nothing
+    # in that file explains.
+    for vc in netbox.all("/dcim/virtual-chassis/"):
+        master = vc.get("master") or {}
+        if master.get("id") and any(
+                (m.get("site") or {}).get("id") in test_site_ids
+                for m in netbox.all("/dcim/devices/", {"virtual_chassis_id": vc["id"]})):
+            try:
+                session.patch("%sdcim/virtual-chassis/%s/" % (netbox.base, vc["id"]),
+                              json={"master": None}, timeout=30)
+            except requests.RequestException:
+                pass
+
     for site in sites:
         for device in netbox.all("/dcim/devices/", {"site_id": site["id"]}):
             delete("/dcim/devices/", device["id"])

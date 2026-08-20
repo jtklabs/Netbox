@@ -46,6 +46,8 @@ serial matching, Hardware Lifecycle EoL), so owning discovery fits.
   own serial and model, positions and master from CISCO-STACKWISE-MIB
 - **Software version** for every supported vendor
 - **Aruba access points**, from the controller that terminates them
+- **CDP/LLDP neighbors**, synced into NetBox as tagged Cable objects — see
+  [Cables from CDP/LLDP](#cables-from-cdplldp)
 
 ### Vendors
 
@@ -100,6 +102,70 @@ Find everything running a given release:
 /plugins/refresh/device-software/?version=17.03.04a     # with the plugin
 /dcim/devices/?cf_software_version=17.03.04a            # with the custom field
 ```
+
+## Cables from CDP/LLDP
+
+Every scan also reads who the device says it is cabled to — LLDP on
+everything, CDP as well on Cisco — and writes confirmed adjacencies into
+NetBox as **Cable** objects, so the patching documents itself.
+
+The matching in between is deliberately fussy, because a wrong cable is worse
+than a missing one: nobody notices it until they are standing in front of the
+rack. Every resolution step either finds exactly one answer or reports and
+writes nothing:
+
+- **The neighbor's name is matched with domain-suffix tolerance** (`sw1`
+  vs `sw1.corp.example.com`, case-insensitively), then by its chassis MAC
+  against interface MACs, then by its CDP management address. Several
+  candidates → reported as ambiguous, never picked from.
+- **Port names are canonicalised across spellings.** CDP says
+  `GigabitEthernet1/0/1`, LLDP usually `Gi1/0/1`, and NetBox holds whatever
+  `ifName` said. The documented Cisco long↔short pairs are folded together;
+  an unrecognised prefix passes through untouched, so exotic hardware fails
+  visibly (an unmatched-port report) rather than matching something wrong.
+- **Stack links land on the member.** `Gi2/0/1` on `sw1` terminates on the
+  member-2 Device of sw1's virtual chassis, found by searching the whole
+  chassis — the name match alone would have put the cable on the master.
+- **One link, one cable, from either side.** A Cisco box reports the same
+  link over both protocols; both sightings merge before anything is written.
+  Scanning A then B converges on a single cable, and rescans create nothing.
+
+Safety rules, all deliberate:
+
+- Scanner cables carry the **`discovered` tag** and stay a class of their
+  own — updatable and bulk-removable without touching hand-drawn cabling.
+- An adjacency that **disagrees with an existing cable** on either end is
+  drift: reported loudly, never rewired.
+- A previously discovered cable whose adjacency **disappears** is flagged,
+  not deleted — the far end may simply have been down during the scan. A
+  device whose neighbor tables answer nothing flags nothing at all, since
+  disabled protocols say nothing about cabling.
+- The one thing the scanner ever deletes is its own **husks**. NetBox keeps
+  a Cable when the interfaces under it are deleted (a decommissioned
+  neighbor leaves its cable squatting one-ended on the surviving port, or
+  dangling with no ends at all — see docs/API-NOTES.md). A
+  `discovered`-tagged husk documents nothing and blocks the port against the
+  link that actually exists now, so it is released and logged; a hand-drawn
+  cable in the same state is still reported as drift and left for a person.
+- A neighbor **NetBox has never heard of** is reported as pending. No device
+  is fabricated to terminate its cable.
+- **Phones, APs and servers are not cabled by default.** They announce
+  themselves as neighbors too, and cabling them is a modelling choice:
+  `cable_neighbor_classes = network` cables network gear only (classified
+  from the capability bits and the platform string the neighbor reports
+  about itself). Add `phone`, `ap`, `host` or `unknown` to widen it.
+  Everything excluded is reported, so nothing vanishes silently.
+
+Turn the whole thing off with `sync_cables = false`.
+
+One honest limitation: an unmanaged switch or media converter between two
+managed devices is invisible to both protocols, so the two sides see each
+other "directly" and the cable drawn says so. That is what the protocols
+know, not necessarily what the patch panel does.
+
+`--probe` prints the whole neighbor view first — deduplicated links, the
+class each neighbor would be filed under, and how the local port was resolved
+— so what a box reports can be inspected before any cable is drawn.
 
 ## How a poller decides what to scan
 
@@ -918,9 +984,12 @@ snmpinv/
   snmp.py                    net-snmp subprocess wrapper, snmp.conf, parsing
   collect.py                 walks a device into structured facts
   model.py                   facts -> NetBox-shaped records (stacks, modules)
+  neighbors.py               CDP/LLDP sightings -> adjacencies (dedupe,
+                             canonical port names, neighbor classes)
   selection.py               which addresses this poller owns
   netbox.py                  REST client: lookup-or-create, dry-run
   sync.py                    idempotent writes
+  cables.py                  adjacencies -> tagged Cable objects, safely
   config.py                  config and credential files
 tests/
   emulator/                  snmpd-backed device emulator + fixture generator
