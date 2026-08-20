@@ -22,7 +22,7 @@ from strawberry_django import DateFilterLookup, DatetimeFilterLookup, StrFilterL
 from netbox_refresh import models
 
 if TYPE_CHECKING:
-    from dcim.graphql.filters import DeviceFilter, DeviceTypeFilter, PlatformFilter
+    from dcim.graphql.filters import DeviceFilter, DeviceTypeFilter, PlatformFilter, RegionFilter, SiteFilter
 
 __all__ = (
     'ModelLifecycleFilter',
@@ -39,6 +39,18 @@ class ModelLifecycleFilter(PrimaryModelFilter):
     bulletin_number: StrFilterLookup | None = strawberry_django.filter_field()
     source: StrFilterLookup | None = strawberry_django.filter_field()
     replacement_device_type: Annotated['DeviceTypeFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
+        strawberry_django.filter_field()
+    )
+
+
+@strawberry_django.filter_type(models.ReplacementPrice, lookups=True)
+class ReplacementPriceFilter(PrimaryModelFilter):
+    currency: StrFilterLookup | None = strawberry_django.filter_field()
+    cost_updated: DateFilterLookup | None = strawberry_django.filter_field()
+    region: Annotated['RegionFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
+        strawberry_django.filter_field()
+    )
+    site: Annotated['SiteFilter', strawberry.lazy('dcim.graphql.filters')] | None = (
         strawberry_django.filter_field()
     )
 

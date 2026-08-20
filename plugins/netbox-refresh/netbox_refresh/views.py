@@ -18,6 +18,7 @@ from netbox.views.generic import (
 from utilities.views import register_model_view
 
 from netbox_refresh import compliance, filtersets, forms, tables
+from netbox_refresh.pricing import PriceResolver
 from netbox_refresh.models import (
     EFFECTIVE_EOL_ALIAS,
     effective_end_of_life_expression,
@@ -25,6 +26,7 @@ from netbox_refresh.models import (
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
@@ -86,6 +88,49 @@ class ModelLifecycleBulkImportView(BulkImportView):
     model_form = forms.ModelLifecycleImportForm
 
 
+# --------------------------------------------------------------------------- #
+# Replacement prices
+# --------------------------------------------------------------------------- #
+
+@register_model_view(ReplacementPrice, name='list')
+class ReplacementPriceListView(ObjectListView):
+    queryset = ReplacementPrice.objects.select_related(
+        'lifecycle', 'lifecycle__assigned_object_type', 'region', 'site'
+    )
+    table = tables.ReplacementPriceTable
+    filterset = filtersets.ReplacementPriceFilterSet
+    filterset_form = forms.ReplacementPriceFilterForm
+
+
+@register_model_view(ReplacementPrice)
+class ReplacementPriceView(ObjectView):
+    queryset = ReplacementPrice.objects.select_related('lifecycle', 'region', 'site')
+
+
+@register_model_view(ReplacementPrice, 'edit')
+class ReplacementPriceEditView(ObjectEditView):
+    queryset = ReplacementPrice.objects.all()
+    form = forms.ReplacementPriceForm
+
+
+@register_model_view(ReplacementPrice, 'delete')
+class ReplacementPriceDeleteView(ObjectDeleteView):
+    queryset = ReplacementPrice.objects.all()
+
+
+@register_model_view(ReplacementPrice, 'bulk_delete')
+class ReplacementPriceBulkDeleteView(BulkDeleteView):
+    queryset = ReplacementPrice.objects.all()
+    filterset = filtersets.ReplacementPriceFilterSet
+    table = tables.ReplacementPriceTable
+
+
+@register_model_view(ReplacementPrice, 'bulk_import')
+class ReplacementPriceBulkImportView(BulkImportView):
+    queryset = ReplacementPrice.objects.all()
+    model_form = forms.ReplacementPriceImportForm
+
+
 def _sites_in_scope(regions, sites):
     """The sites a report is scoped to, from either filter or both.
 
@@ -115,11 +160,58 @@ def _sites_in_scope(regions, sites):
     return list(within)
 
 
+def _money(per_currency):
+    """One cell for a currency->amount mapping: '12,000.00 USD + 9,500.00 EUR'.
+
+    Never converted or combined — any exchange rate hardcoded here would be
+    wrong by the time it was read, so each currency keeps its own number.
+    """
+    if not per_currency:
+        return '—'
+    return ' + '.join(
+        '{:,.2f} {}'.format(amount, currency)
+        for currency, amount in sorted(per_currency.items())
+    )
+
+
+def _region_rows(region_agg):
+    """The per-region cost breakdown, labelled with each region's tree path."""
+    all_regions = Region.objects.in_bulk()
+
+    def label(region_id):
+        parts = []
+        seen = set()
+        while region_id is not None and region_id not in seen:
+            seen.add(region_id)
+            region = all_regions.get(region_id)
+            if region is None:
+                break
+            parts.append(region.name)
+            region_id = region.parent_id
+        return ' / '.join(reversed(parts))
+
+    rows = []
+    for region_id, agg in region_agg.items():
+        region = all_regions.get(region_id)
+        rows.append({
+            'region': label(region_id) if region else '(no region)',
+            'region_url': region.get_absolute_url() if region else None,
+            'units': agg['units'],
+            'total': _money(agg['totals']),
+            'unpriced': agg['unpriced'] or '',
+        })
+    # Alphabetical by path keeps siblings together; the regionless bucket last.
+    rows.sort(key=lambda r: (r['region_url'] is None, r['region']))
+    return rows
+
+
 class RefreshReportView(PermissionRequiredMixin, View):
     """Hardware reaching a lifecycle milestone in a window, with replacement cost.
 
-    Installed counts are gathered with two aggregate queries rather than one per
-    model, so the report stays cheap as the estate grows.
+    Installed counts are gathered per model and site with two aggregate
+    queries, so the report stays cheap as the estate grows — and priced per
+    site, because ReplacementPrice lets the same model cost different money
+    in different places.
     """
 
     permission_required = 'netbox_refresh.view_modellifecycle'
@@ -156,31 +248,45 @@ class RefreshReportView(PermissionRequiredMixin, View):
         module_type_ids = [r.assigned_object_id for r in records
                            if r.assigned_object_type.model == 'moduletype']
 
-        device_counts = defaultdict(int)
+        # Counts are per (model, site), not just per model: the same box does
+        # not cost the same in every country, so money can only be summed
+        # after each site's units are priced at that site's rate.
+        device_site_counts = defaultdict(dict)   # type_id -> {site_id: n}
         if device_type_ids:
             device_qs = Device.objects.filter(device_type_id__in=device_type_ids)
             if sites:
                 device_qs = device_qs.filter(site__in=sites)
-            for row in device_qs.values('device_type_id').annotate(n=Count('pk')):
-                device_counts[row['device_type_id']] = row['n']
+            for row in device_qs.values('device_type_id', 'site_id').annotate(n=Count('pk')):
+                device_site_counts[row['device_type_id']][row['site_id']] = row['n']
 
-        module_counts = defaultdict(int)
+        module_site_counts = defaultdict(dict)   # type_id -> {site_id: n}
         if module_type_ids:
             module_qs = Module.objects.filter(module_type_id__in=module_type_ids)
             if sites:
                 module_qs = module_qs.filter(device__site__in=sites)
-            for row in module_qs.values('module_type_id').annotate(n=Count('pk')):
-                module_counts[row['module_type_id']] = row['n']
+            for row in module_qs.values('module_type_id', 'device__site_id').annotate(n=Count('pk')):
+                module_site_counts[row['module_type_id']][row['device__site_id']] = row['n']
 
         type_cache = {
             'devicetype': DeviceType.objects.in_bulk(device_type_ids),
             'moduletype': ModuleType.objects.in_bulk(module_type_ids),
         }
+        involved_site_ids = {
+            site_id
+            for per_site in list(device_site_counts.values()) + list(module_site_counts.values())
+            for site_id in per_site
+        }
+        site_cache = Site.objects.in_bulk(involved_site_ids)
+        resolver = PriceResolver([r.pk for r in records])
 
         rows = []
         totals = defaultdict(lambda: 0)
         total_units = 0
-        missing_cost = 0
+        models_with_gaps = 0
+        unpriced_units = 0
+        # region_id (None = siteless bucket) -> aggregation for the breakdown
+        region_agg = defaultdict(lambda: {'units': 0, 'unpriced': 0,
+                                          'totals': defaultdict(lambda: 0)})
         for record in records:
             model_name = record.assigned_object_type.model
             obj = type_cache.get(model_name, {}).get(record.assigned_object_id)
@@ -188,17 +294,40 @@ class RefreshReportView(PermissionRequiredMixin, View):
                 continue
             if manufacturers and obj.manufacturer_id not in {m.pk for m in manufacturers}:
                 continue
-            installed = (device_counts if model_name == 'devicetype' else module_counts)[obj.pk]
+            per_site = (device_site_counts if model_name == 'devicetype'
+                        else module_site_counts)[obj.pk]
+            installed = sum(per_site.values())
             if sites and not installed:
                 continue  # nothing of this model at the selected sites
 
-            unit_cost = record.replacement_cost
-            extended = unit_cost * installed if unit_cost is not None else None
-            if unit_cost is None:
-                missing_cost += 1
-            else:
-                totals[record.currency] += extended
+            extended = defaultdict(lambda: 0)    # currency -> amount, this model
+            model_unpriced = 0
+            for site_id, count in per_site.items():
+                site = site_cache.get(site_id)
+                hit = resolver.resolve(record, site)
+                bucket = region_agg[site.region_id if site else None]
+                bucket['units'] += count
+                if hit is None:
+                    model_unpriced += count
+                    bucket['unpriced'] += count
+                    continue
+                amount = hit.cost * count
+                extended[hit.currency] += amount
+                totals[hit.currency] += amount
+                bucket['totals'][hit.currency] += amount
+            if model_unpriced:
+                models_with_gaps += 1
+                unpriced_units += model_unpriced
             total_units += installed
+
+            regional = resolver.price_count(record.pk)
+            if record.replacement_cost is not None:
+                unit_cost = '%s %s' % (record.replacement_cost, record.currency)
+                if regional:
+                    unit_cost += ' (+%d regional)' % regional
+            else:
+                unit_cost = '%d regional price%s' % (regional, 's' if regional != 1 else '') \
+                    if regional else '—'
 
             replacement = record.replacement
             rows.append({
@@ -210,8 +339,8 @@ class RefreshReportView(PermissionRequiredMixin, View):
                 'installed': installed,
                 'replacement': replacement or '—',
                 'replacement_url': replacement.get_absolute_url() if replacement else None,
-                'unit_cost': unit_cost if unit_cost is not None else '—',
-                'extended_cost': extended if extended is not None else '—',
+                'unit_cost': unit_cost,
+                'extended_cost': _money(extended),
             })
 
         rows.sort(key=lambda r: (r['milestone_date'] is None, r['milestone_date']))
@@ -220,10 +349,12 @@ class RefreshReportView(PermissionRequiredMixin, View):
         return render(request, self.template_name, {
             'form': form,
             'table': table,
+            'region_table': tables.RegionCostTable(_region_rows(region_agg)),
             'row_count': len(rows),
             'total_units': total_units,
             'totals': dict(totals),
-            'missing_cost': missing_cost,
+            'missing_cost': models_with_gaps,
+            'unpriced_units': unpriced_units,
             'date_label': dict(forms.RefreshReportForm.DATE_FIELD_CHOICES).get(date_field),
         })
 

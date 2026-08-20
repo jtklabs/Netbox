@@ -15,6 +15,7 @@ from rest_framework.response import Response
 
 from netbox_refresh import filtersets
 from netbox_refresh.api.serializers import (
+    ReplacementPriceSerializer,
     DeviceSoftwareSerializer,
     ModelLifecycleSerializer,
     SoftwareReportSerializer,
@@ -24,6 +25,7 @@ from netbox_refresh.api.serializers import (
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
@@ -42,6 +44,14 @@ class ModelLifecycleViewSet(NetBoxModelViewSet):
     )
     serializer_class = ModelLifecycleSerializer
     filterset_class = filtersets.ModelLifecycleFilterSet
+
+
+class ReplacementPriceViewSet(NetBoxModelViewSet):
+    queryset = ReplacementPrice.objects.select_related(
+        'lifecycle', 'region', 'site'
+    ).prefetch_related('tags')
+    serializer_class = ReplacementPriceSerializer
+    filterset_class = filtersets.ReplacementPriceFilterSet
 
 
 class SoftwareVersionViewSet(NetBoxModelViewSet):

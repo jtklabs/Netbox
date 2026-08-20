@@ -23,15 +23,19 @@ from netbox_refresh import models
 from netbox_refresh.graphql.filters import (
     DeviceSoftwareFilter,
     ModelLifecycleFilter,
+    ReplacementPriceFilter,
     SoftwareStandardFilter,
     SoftwareVersionFilter,
 )
 
 if TYPE_CHECKING:
-    from dcim.graphql.types import DeviceType, DeviceTypeType, ModuleTypeType, PlatformType
+    from dcim.graphql.types import (
+        DeviceType, DeviceTypeType, ModuleTypeType, PlatformType, RegionType, SiteType,
+    )
 
 __all__ = (
     'ModelLifecycleType',
+    'ReplacementPriceType',
     'SoftwareVersionType',
     'SoftwareStandardType',
     'DeviceSoftwareType',
@@ -60,6 +64,18 @@ class ModelLifecycleType(PrimaryObjectType):
     def status(self) -> str:
         """Derived from the dates — see ModelLifecycle.status."""
         return self.status
+
+
+@strawberry_django.type(
+    models.ReplacementPrice,
+    fields='__all__',
+    filters=ReplacementPriceFilter,
+    pagination=True,
+)
+class ReplacementPriceType(PrimaryObjectType):
+    lifecycle: Annotated['ModelLifecycleType', strawberry.lazy('netbox_refresh.graphql.types')]
+    region: Annotated['RegionType', strawberry.lazy('dcim.graphql.types')] | None
+    site: Annotated['SiteType', strawberry.lazy('dcim.graphql.types')] | None
 
 
 @strawberry_django.type(

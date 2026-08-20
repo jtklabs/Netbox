@@ -4,6 +4,7 @@ from netbox.tables import NetBoxTable, columns
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
@@ -66,6 +67,33 @@ class ModelLifecycleTable(NetBoxTable):
             'end_of_support', 'effective_end_of_life',
             'replacement', 'replacement_cost', 'installed_count', 'extended_cost',
         )
+
+
+class ReplacementPriceTable(NetBoxTable):
+    lifecycle = tables.Column(linkify=True, verbose_name='Hardware model')
+    scope = tables.Column(linkify=True, orderable=False, verbose_name='Applies to')
+    cost = tables.Column()
+    currency = tables.Column()
+
+    class Meta(NetBoxTable.Meta):
+        model = ReplacementPrice
+        fields = ('pk', 'id', 'lifecycle', 'scope', 'cost', 'currency',
+                  'cost_updated', 'description', 'created', 'last_updated')
+        default_columns = ('lifecycle', 'scope', 'cost', 'currency', 'cost_updated')
+
+
+class RegionCostTable(tables.Table):
+    """Report rows are plain dicts assembled by the view, not model instances."""
+
+    region = tables.Column(linkify=lambda record: record['region_url'])
+    units = tables.Column(verbose_name='Units')
+    total = tables.Column(verbose_name='Replacement cost')
+    unpriced = tables.Column(verbose_name='Unpriced units')
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'Nothing to price in the selected window.'
+        orderable = False
 
 
 class RefreshReportTable(tables.Table):

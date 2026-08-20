@@ -8,12 +8,14 @@ from netbox_refresh.choices import SoftwareSourceChoices
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
 
 __all__ = (
     'ModelLifecycleSerializer',
+    'ReplacementPriceSerializer',
     'SoftwareVersionSerializer',
     'SoftwareStandardSerializer',
     'DeviceSoftwareSerializer',
@@ -64,6 +66,36 @@ class ModelLifecycleSerializer(NetBoxModelSerializer):
     def get_extended_cost(self, obj):
         value = obj.extended_cost
         return str(value) if value is not None else None
+
+
+class ReplacementPriceSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name='plugins-api:netbox_refresh-api:replacementprice-detail'
+    )
+
+    class Meta:
+        model = ReplacementPrice
+        fields = (
+            'url', 'id', 'display', 'lifecycle', 'region', 'site',
+            'cost', 'currency', 'cost_updated',
+            'description', 'comments', 'tags', 'custom_fields',
+            'created', 'last_updated',
+        )
+        brief_fields = ('url', 'id', 'display', 'lifecycle', 'cost', 'currency')
+
+    def validate(self, data):
+        data = super().validate(data)
+        # Mirrors the model clean(): exactly one scope. Serializer-level so an
+        # API writer gets a field-level message rather than a 500 from the DB
+        # check constraint.
+        instance = self.instance
+        region = data.get('region', instance.region if instance else None)
+        site = data.get('site', instance.site if instance else None)
+        if bool(region) == bool(site):
+            raise serializers.ValidationError(
+                'Scope the price to a region or a site — exactly one.'
+            )
+        return data
 
 
 class SoftwareVersionSerializer(NetBoxModelSerializer):

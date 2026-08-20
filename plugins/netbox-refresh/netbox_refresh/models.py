@@ -42,6 +42,7 @@ from netbox_refresh.choices import (
 
 __all__ = (
     'ModelLifecycle',
+    'ReplacementPrice',
     'SoftwareVersion',
     'SoftwareStandard',
     'DeviceSoftware',
@@ -124,10 +125,13 @@ class ModelLifecycle(PrimaryModel):
         help_text="Vendor migration guidance when no single successor model applies",
     )
 
-    # --- Cost of replacing ONE unit of this model.
+    # --- Cost of replacing ONE unit of this model. This is the baseline;
+    # ReplacementPrice records override it per region or site, because the
+    # same box does not cost the same in every country.
     replacement_cost = models.DecimalField(
         max_digits=12, decimal_places=2, blank=True, null=True,
-        help_text='Cost to replace a single unit',
+        help_text='Baseline cost to replace a single unit. Regional prices, '
+                  'where defined, override this for their sites.',
     )
     currency = models.CharField(max_length=3, default='USD')
     cost_updated = models.DateField(blank=True, null=True)
@@ -263,6 +267,95 @@ class ModelLifecycle(PrimaryModel):
 
     def get_source_color(self):
         return LifecycleSourceChoices.colors.get(self.source)
+
+
+class ReplacementPrice(PrimaryModel):
+    """What one unit of a lifecycle's hardware model costs in one part of the world.
+
+    The lifecycle's own replacement_cost is the baseline. A ReplacementPrice
+    overrides it for the sites it covers: a price scoped to a site covers that
+    site alone; one scoped to a region covers every site at or below that
+    region. Resolution for a device is most-specific-wins — its site's price,
+    else the nearest enclosing region's walking up the tree, else the
+    baseline. That mirrors how the vendors actually quote: a global list
+    price, a country uplift, and the occasional odd site (an island, a
+    high-duty zone) priced on its own.
+
+    Currency lives on each price rather than being inherited, because a
+    country-specific price is usually IN that country's currency. The refresh
+    report never converts — it sums per currency and shows each total, since
+    any exchange rate this plugin hardcoded would be wrong by the time it was
+    read.
+    """
+
+    lifecycle = models.ForeignKey(
+        to=ModelLifecycle,
+        on_delete=models.CASCADE,
+        related_name='regional_prices',
+    )
+    # Two nullable FKs rather than a generic relation, matching the
+    # replacement_device_type/module_type pattern above: exactly one is set,
+    # and explicit FKs keep filtering and forms simple.
+    region = models.ForeignKey(
+        to='dcim.Region', on_delete=models.CASCADE,
+        blank=True, null=True, related_name='replacement_prices',
+        help_text='Covers every site at or below this region',
+    )
+    site = models.ForeignKey(
+        to='dcim.Site', on_delete=models.CASCADE,
+        blank=True, null=True, related_name='replacement_prices',
+        help_text='Covers exactly this site, overriding any region price',
+    )
+    cost = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        help_text='Cost to replace a single unit within this scope',
+    )
+    currency = models.CharField(max_length=3, default='USD')
+    cost_updated = models.DateField(blank=True, null=True)
+
+    clone_fields = ('lifecycle', 'currency')
+
+    class Meta:
+        ordering = ('lifecycle', 'region', 'site', 'pk')
+        verbose_name = 'replacement price'
+        verbose_name_plural = 'replacement prices'
+        constraints = (
+            models.CheckConstraint(
+                condition=(
+                    (Q(region__isnull=False) & Q(site__isnull=True))
+                    | (Q(region__isnull=True) & Q(site__isnull=False))
+                ),
+                name='%(app_label)s_%(class)s_exactly_one_scope',
+                violation_error_message='A price is scoped to a region or a site — exactly one.',
+            ),
+            models.UniqueConstraint(
+                'lifecycle', 'region',
+                condition=Q(region__isnull=False),
+                name='%(app_label)s_%(class)s_unique_region',
+                violation_error_message='This model already has a price for that region.',
+            ),
+            models.UniqueConstraint(
+                'lifecycle', 'site',
+                condition=Q(site__isnull=False),
+                name='%(app_label)s_%(class)s_unique_site',
+                violation_error_message='This model already has a price for that site.',
+            ),
+        )
+
+    def __str__(self):
+        return '%s @ %s: %s %s' % (self.lifecycle, self.scope, self.cost, self.currency)
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_refresh:replacementprice', args=[self.pk])
+
+    def clean(self):
+        super().clean()
+        if bool(self.region_id) == bool(self.site_id):
+            raise ValidationError('Scope the price to a region or a site — exactly one.')
+
+    @property
+    def scope(self):
+        return self.region or self.site
 
 
 def _plugin_settings():

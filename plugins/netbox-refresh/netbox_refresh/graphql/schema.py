@@ -17,6 +17,7 @@ import strawberry_django
 from netbox_refresh.graphql.types import (
     DeviceSoftwareType,
     ModelLifecycleType,
+    ReplacementPriceType,
     SoftwareStandardType,
     SoftwareVersionType,
 )
@@ -28,6 +29,8 @@ __all__ = ('LifecycleQuery', 'schema')
 class LifecycleQuery:
     model_lifecycle: ModelLifecycleType = strawberry_django.field()
     model_lifecycle_list: list[ModelLifecycleType] = strawberry_django.field()
+    replacement_price: ReplacementPriceType = strawberry_django.field()
+    replacement_price_list: list[ReplacementPriceType] = strawberry_django.field()
 
     software_version: SoftwareVersionType = strawberry_django.field()
     software_version_list: list[SoftwareVersionType] = strawberry_django.field()

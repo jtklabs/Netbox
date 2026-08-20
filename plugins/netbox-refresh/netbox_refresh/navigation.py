@@ -26,6 +26,7 @@ def _item(name, label, permission_model, *, add=True, import_=True):
 
 
 lifecycle = _item('modellifecycle', 'Model Lifecycles', 'modellifecycle')
+replacement_prices = _item('replacementprice', 'Replacement Prices', 'replacementprice')
 
 refresh_report = PluginMenuItem(
     link='plugins:netbox_refresh:refresh_report',
@@ -56,7 +57,7 @@ version_rollup = PluginMenuItem(
 menu = PluginMenu(
     label='Lifecycle',
     groups=(
-        ('Hardware', (lifecycle, refresh_report)),
+        ('Hardware', (lifecycle, replacement_prices, refresh_report)),
         ('Software', (software_versions, software_standards, device_software,
                       compliance_report, version_rollup)),
     ),

@@ -8,6 +8,7 @@ from dcim.models import (
     Manufacturer,
     ModuleType,
     Platform,
+    Region,
     Site,
 )
 from django.conf import settings
@@ -25,12 +26,14 @@ from netbox_refresh.choices import (
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
 
 __all__ = (
     'ModelLifecycleFilterSet',
+    'ReplacementPriceFilterSet',
     'SoftwareVersionFilterSet',
     'SoftwareStandardFilterSet',
     'DeviceSoftwareFilterSet',
@@ -112,6 +115,32 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
         if value:
             return queryset.filter(replacement_cost__isnull=False)
         return queryset.filter(replacement_cost__isnull=True)
+
+
+class ReplacementPriceFilterSet(NetBoxModelFilterSet):
+    lifecycle_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=ModelLifecycle.objects.all(), label='Hardware model',
+    )
+    region_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Region.objects.all(), label='Region',
+    )
+    site_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Site.objects.all(), label='Site',
+    )
+
+    class Meta:
+        model = ReplacementPrice
+        fields = ('id', 'currency')
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(description__icontains=value)
+            | Q(region__name__icontains=value)
+            | Q(site__name__icontains=value)
+            | Q(currency__iexact=value.strip())
+        )
 
 
 class SoftwareVersionFilterSet(NetBoxModelFilterSet):

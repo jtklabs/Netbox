@@ -43,7 +43,9 @@
           {% endif %}
           {% if missing_cost %}
             <div class="form-text text-warning">
-              {{ missing_cost }} model{{ missing_cost|pluralize }} in this window have no cost set,
+              {{ unpriced_units }} unit{{ unpriced_units|pluralize }} across
+              {{ missing_cost }} model{{ missing_cost|pluralize }} have no price
+              anywhere &mdash; not at their site, region, or as a baseline &mdash;
               so the total is understated.
             </div>
           {% endif %}
@@ -60,6 +62,20 @@
       <div class="card">
         <h5 class="card-header">Units to replace</h5>
         <div class="card-body"><h2 class="mb-0">{{ total_units }}</h2></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Cost by region</h5>
+        <div class="card-body table-responsive">
+          {# Each unit priced at its own site's rate — site price, else the #}
+          {# nearest enclosing region's, else the model's baseline. Currencies #}
+          {# are never converted; each keeps its own total. #}
+          {% render_table region_table %}
+        </div>
       </div>
     </div>
   </div>

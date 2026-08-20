@@ -5,6 +5,7 @@ from netbox_refresh import views
 from netbox_refresh.models import (
     DeviceSoftware,
     ModelLifecycle,
+    ReplacementPrice,
     SoftwareStandard,
     SoftwareVersion,
 )
@@ -28,6 +29,23 @@ urlpatterns = [
          name='modellifecycle_delete'),
     path('lifecycle/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='modellifecycle_changelog', kwargs={'model': ModelLifecycle}),
+
+    path('prices/', views.ReplacementPriceListView.as_view(),
+         name='replacementprice_list'),
+    path('prices/add/', views.ReplacementPriceEditView.as_view(),
+         name='replacementprice_add'),
+    path('prices/import/', views.ReplacementPriceBulkImportView.as_view(),
+         name='replacementprice_bulk_import'),
+    path('prices/delete/', views.ReplacementPriceBulkDeleteView.as_view(),
+         name='replacementprice_bulk_delete'),
+    path('prices/<int:pk>/', views.ReplacementPriceView.as_view(),
+         name='replacementprice'),
+    path('prices/<int:pk>/edit/', views.ReplacementPriceEditView.as_view(),
+         name='replacementprice_edit'),
+    path('prices/<int:pk>/delete/', views.ReplacementPriceDeleteView.as_view(),
+         name='replacementprice_delete'),
+    path('prices/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='replacementprice_changelog', kwargs={'model': ReplacementPrice}),
 
     path('software-versions/', views.SoftwareVersionListView.as_view(),
          name='softwareversion_list'),
