@@ -19,6 +19,11 @@ services:
       - netbox-media-files:/opt/netbox/netbox/media:rw
       - netbox-reports-files:/opt/netbox/netbox/reports:rw
       - netbox-scripts-files:/opt/netbox/netbox/scripts:rw
+      # Repo-managed custom scripts. Read-only on purpose: the repo is the
+      # source of truth, and NetBox reads these through a local Data Source
+      # (docs/SCHEDULED-JOBS.md) rather than by uploads that would live only
+      # on this disposable node.
+      - ./netbox-scripts:/opt/netbox/netbox/scripts-repo:z,ro
   netbox-worker:
     <<: *netbox
     depends_on:
