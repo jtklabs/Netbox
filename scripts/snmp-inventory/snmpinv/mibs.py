@@ -282,53 +282,72 @@ CDP_CAP_BIT_NAMES = {
 
 ENTERPRISE_PREFIX = "1.3.6.1.4.1."
 
+# Every number below was checked against the IANA Private Enterprise Numbers
+# registry on 2026-08-20 — the first audit of this table found EIGHT numbers
+# labelled "Aruba Networks" of which only one (14823) was actually Aruba's;
+# 14179 is Airespace, which CISCO bought, so every Cisco AireOS WLC would
+# have landed in NetBox as Aruba hardware. Where an assignee was acquired,
+# the label is the brand the GEAR carries, with the registry name alongside;
+# additions come from the registry, never from memory.
 ENTERPRISE_MANUFACTURERS = {
     9: "Cisco",
-    11: "HPE",
+    11: "HPE",                      # registry: Hewlett-Packard
     43: "3Com",
     171: "D-Link",
     193: "Ericsson",
     207: "Allied Telesis",
+    244: "Lantronix",
+    318: "APC",                     # American Power Conversion (Schneider)
+    332: "Digi International",
+    664: "Adtran",
     674: "Dell",
     789: "NetApp",
-    1588: "Broadcom",
+    1588: "Brocade",                # FC/VDX switches; now a Broadcom company
     1916: "Extreme Networks",
-    1991: "Foundry Networks",
+    1991: "Foundry Networks",       # registry: Brocade, formerly Foundry
     2011: "Huawei",
-    2352: "Zhone",
+    2352: "Ericsson",               # registry: formerly RedBack Networks
     2620: "Check Point",
     2636: "Juniper Networks",
     3224: "Netscreen",
-    3417: "Blue Coat",
+    3417: "Blue Coat",              # registry: CacheFlow, renamed Blue Coat
     3375: "F5 Networks",
     4526: "Netgear",
-    4874: "Adtran",
+    4874: "Juniper Networks",       # registry: Juniper/Unisphere (E-series)
+    5504: "Zhone",
     5951: "NetScaler",
     6027: "Force10",
     6486: "Alcatel-Lucent",
     6527: "Nokia",
     8072: "net-snmp",
-    9694: "Aruba Networks",
+    8741: "SonicWall",
+    9694: "Arbor Networks",         # DDoS mitigation; now NETSCOUT
+    # Registry says Frogfoot Networks, but Ubiquiti airOS radios answer with
+    # sysObjectID under 10002 in the field — the label follows the hardware
+    # that actually reports here, not the registry's assignee.
     10002: "Ubiquiti",
+    10418: "Avocent",
     11863: "TP-Link",
     12356: "Fortinet",
-    12532: "SonicWall",
-    14179: "Aruba Networks",
-    14525: "Aruba Networks",
+    12532: "Pulse Secure",          # registry: Neoteris; the Juniper IVE/SA line
+    13742: "Raritan",
+    14179: "Cisco",                 # registry: Airespace — AireOS WLCs
+    14525: "Juniper Networks",      # registry: Trapeze — WLA/WLC wireless
     14823: "Aruba Networks",
     14988: "MikroTik",
-    16057: "Aruba Networks",
-    18011: "Aruba Networks",
-    21091: "Aruba Networks",
+    17713: "Cambium Networks",
+    21091: "Exinda Networks",       # WAN optimisation; now GFI
+    25049: "Opengear",
     25053: "Ruckus",
     25461: "Palo Alto Networks",
-    26543: "IBM",
+    26543: "IBM",                   # registry: Blade Network Technologies
     29671: "Cisco Meraki",
     30065: "Arista Networks",
-    35265: "Cambium Networks",
+    35265: "Eltex",
     41112: "Ubiquiti",
-    47196: "Aruba Networks",
-    52642: "Aruba Networks",
+    44227: "Pulse Secure",
+    47196: "HPE",                   # registry: Hewlett Packard Enterprise
+    52642: "FS.COM",
 }
 
 # --- ifType -> NetBox interface type ----------------------------------------
@@ -357,7 +376,10 @@ IF_TYPE_L2_VLAN = 135
 IF_TYPE_L3_IPVLAN = 136
 IF_TYPE_IEEE8023AD_LAG = 161
 IF_TYPE_BRIDGE = 209
-IF_TYPE_STACK_SUBIF = 202
+# IANAifType calls 202 virtualTg ("Virtual Trunk Group") — the old name here,
+# STACK_SUBIF, described the Cisco StackSub-St* interfaces that report this
+# type in the field, not what the number means. Either way it is virtual.
+IF_TYPE_VIRTUAL_TG = 202
 
 # Types that carry no hardware of their own. NetBox calls all of these
 # "virtual" apart from bridges, which have their own type.
@@ -367,7 +389,7 @@ IF_TYPES_VIRTUAL = {
     IF_TYPE_TUNNEL,
     IF_TYPE_L2_VLAN,
     IF_TYPE_L3_IPVLAN,
-    IF_TYPE_STACK_SUBIF,
+    IF_TYPE_VIRTUAL_TG,
 }
 
 # ifTypes that are Ethernet in some form and should be resolved by speed.

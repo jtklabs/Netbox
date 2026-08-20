@@ -121,14 +121,6 @@ would be inventing a switch that is not in the rack.
 | Check Point | `svnServicePack` | 1.3.6.1.4.1.2620.1.6.999.0 | CHECKPOINT-MIB |
 | Check Point | `svnApplianceSerialNumber` | 1.3.6.1.4.1.2620.1.6.16.3.0 | CHECKPOINT-MIB |
 | Check Point | `svnApplianceProductName` | 1.3.6.1.4.1.2620.1.6.16.7.0 | CHECKPOINT-MIB |
-
-`svnServicePack` (`{ svn 999 }`, Gauge32, resolved 2026-08-20) is described in
-the MIB only as "SVN service pack", but on Gaia it returns the installed
-**Jumbo Hotfix take** — the number a Check Point admin means by "patch level".
-It is joined to `svnVersion` as `R81.20 Take 89` via the profile's
-`build_format`. A GA install with no jumbo reports take 0, which the collector
-treats as "no build" — otherwise every unpatched gateway would read
-"Take 0" as if that were a patch level.
 | Infoblox | `ibHardwareType` | 1.3.6.1.4.1.7779.3.1.1.2.1.4.0 | IB-PLATFORMONE-MIB |
 | Infoblox | `ibSerialNumber` | 1.3.6.1.4.1.7779.3.1.1.2.1.6.0 | IB-PLATFORMONE-MIB |
 | Infoblox | `ibNiosVersion` | 1.3.6.1.4.1.7779.3.1.1.2.1.7.0 | IB-PLATFORMONE-MIB |
@@ -144,6 +136,14 @@ treats as "no build" — otherwise every unpatched gateway would read
 | Blue Coat | `sgProxySoftware` | 1.3.6.1.4.1.3417.2.11.1.2.0 | BLUECOAT-SG-PROXY-MIB |
 | Blue Coat | `sgProxyVersion` | 1.3.6.1.4.1.3417.2.11.1.3.0 | BLUECOAT-SG-PROXY-MIB |
 | Blue Coat | `sgProxySerialNumber` | 1.3.6.1.4.1.3417.2.11.1.4.0 | BLUECOAT-SG-PROXY-MIB |
+
+`svnServicePack` (`{ svn 999 }`, Gauge32, resolved 2026-08-20) is described in
+the MIB only as "SVN service pack", but on Gaia it returns the installed
+**Jumbo Hotfix take** — the number a Check Point admin means by "patch level".
+It is joined to `svnVersion` as `R81.20 Take 89` via the profile's
+`build_format`. A GA install with no jumbo reports take 0, which the collector
+treats as "no build" — otherwise every unpatched gateway would read
+"Take 0" as if that were a patch level.
 
 Infoblox chain, since it is several hops:
 `infoblox { enterprises 7779 }` → `ibSNMP { infoblox 3 }` →
@@ -174,6 +174,10 @@ own. Column 1 is not-accessible and never appears in a walk;
 | 19 | `wlanAPStatus` |
 | 34 | `wlanAPSwVersion` |
 
+`wlanAPStatus` is an `ArubaAPStatus` — `up(1)`, `down(2)` — confirmed from
+the ARUBA-TC textual-conventions module (netdisco-mibs `aruba/aruba-tc.my`),
+which is where the constant `ARUBA_AP_STATUS_UP = 1` comes from.
+
 `wlanAPSwVersion` (column 34, resolved 2026-08-20 from the cached
 WLSX-WLAN-MIB) is the per-AP running image and the preferred version source;
 APs whose row omits it inherit the controller's version, since campus APs run
@@ -190,6 +194,22 @@ lookup table is exactly the behaviour that produced device types like
 
 `entPhysicalMfgName` is preferred over the enterprise map whenever the device
 supplies it.
+
+**Provenance of the map itself**: every number in `ENTERPRISE_MANUFACTURERS`
+was checked against the IANA Private Enterprise Numbers registry
+(<https://www.iana.org/assignments/enterprise-numbers.txt>) on 2026-08-20.
+That audit found the table's original content had EIGHT arcs labelled "Aruba
+Networks" of which only 14823 was Aruba's — the others were Arbor Networks
+(9694), Airespace/**Cisco** (14179, AireOS WLCs), Trapeze/**Juniper**
+(14525), EventGnosis (16057, removed), Apollo Communications (18011,
+removed), Exinda (21091), HPE (47196) and FS.COM (52642) — plus 4874
+labelled Adtran (it is Juniper/Unisphere; Adtran is 664), 12532 labelled
+SonicWall (it is Neoteris/Pulse Secure; SonicWall is 8741), 2352 labelled
+Zhone (it is Redback/Ericsson; Zhone is 5504) and 35265 labelled Cambium (it
+is Eltex; Cambium is 17713). One deliberate divergence from the registry
+remains: 10002 is registered to Frogfoot Networks but kept as Ubiquiti,
+because airOS radios answer with sysObjectID under it in the field.
+`tests/test_enterprise_map.py` pins the corrections.
 
 ## Juniper jnxContents chassis-row instances
 
@@ -354,3 +374,34 @@ matched the definition regex as a definition named IMPORTS, whose lazy
 IB-SMI-MIB is written exactly this way, so `infoblox { enterprises 7779 }` was
 eaten and the whole subtree failed to resolve. The parser now strips
 `IMPORTS … ;` sections before matching.
+
+## 2026-08-20 second full pass (requested before sign-off)
+
+Everything the scanner asks for was re-verified in one sweep, from files
+fetched fresh that day:
+
+* **All ten vendor profiles** re-resolved from the cached vendor MIBs —
+  every scalar matches the code (Aruba's AP table including column 34,
+  Check Point including `svnServicePack`, Juniper's jnxContents columns,
+  F5's build, Blue Coat, Palo Alto, Fortinet, Infoblox, Opengear).
+* **Standard MIBs** (SNMPv2-MIB, IF-MIB + ifXTable, IP-MIB both address
+  tables, ENTITY-MIB) resolved from the IETF module texts — all 40 objects
+  match, including every entPhysicalTable column 2–16 and the
+  PhysicalClass 1–12 enum.
+* **CISCO-STACKWISE-MIB** — all eight cswSwitchInfoTable columns and the
+  full SwitchState enum confirmed from the Cisco module.
+* **LLDP-MIB (IEEE 802.1AB)** — lldpRemEntry columns 4–12 and
+  lldpLocPortEntry columns 2–4 resolved from the IEEE module;
+  `INDEX { lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex }` and
+  `INDEX { lldpLocPortNum }` confirmed verbatim, as were all three
+  subtype/capability enumerations (chassis 1–7, port 1–7, capability bits
+  0–7 — and the port numbering really does differ from the chassis one).
+* **CISCO-CDP-MIB** — cdpCacheEntry columns 3–9 and
+  `INDEX { cdpCacheIfIndex, cdpCacheDeviceIndex }` confirmed;
+  CISCO-TC `ip(1)` confirmed for cdpCacheAddressType.
+* **IANAifType** — every claimed ifType number matches, with one naming
+  correction: 202 is `virtualTg`, not a stack sub-interface type. The
+  constant was renamed (`IF_TYPE_VIRTUAL_TG`); Cisco StackSub-St* ports do
+  report 202 in the field, and it stays classified virtual either way.
+* **The enterprise-manufacturer map** — the audit's only real findings; see
+  "Manufacturer identification" above.
