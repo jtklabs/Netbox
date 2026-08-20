@@ -170,6 +170,108 @@ CSW_STATE_NAMES = {
 # been removed should not become a Device in NetBox — there is no hardware.
 CSW_STATES_PRESENT = {1, 2, 3, CSW_STATE_READY, 5, 6, 7, 8}
 
+# --- LLDP-MIB (IEEE 802.1AB) ------------------------------------------------
+#
+# An IEEE MIB, so its root is 1.0.8802.1.1.2 — outside 1.3.6.1 entirely. A
+# walk of 1.3.6.1 never sees it, which is why probe --save-walk captures both
+# trees and the emulator registers a second pass_persist subtree for it.
+
+LLDP_MIB = "1.0.8802.1.1.2"
+
+# lldpRemTable: one row per neighbor heard. INDEX { lldpRemTimeMark,
+# lldpRemLocalPortNum, lldpRemIndex } — so columns 1-3 are index-only and a
+# row's OID suffix is <timeMark>.<localPortNum>.<remIndex>. lldpRemLocalPortNum
+# is formally an index into lldpLocPortTable, NOT an ifIndex; many platforms
+# make the two equal but the MIB does not promise it, hence the local-port
+# table below.
+LLDP_REM_ENTRY = f"{LLDP_MIB}.1.4.1.1"
+LLDP_REM_CHASSIS_ID_SUBTYPE = f"{LLDP_REM_ENTRY}.4"
+LLDP_REM_CHASSIS_ID = f"{LLDP_REM_ENTRY}.5"
+LLDP_REM_PORT_ID_SUBTYPE = f"{LLDP_REM_ENTRY}.6"
+LLDP_REM_PORT_ID = f"{LLDP_REM_ENTRY}.7"
+LLDP_REM_PORT_DESC = f"{LLDP_REM_ENTRY}.8"
+LLDP_REM_SYS_NAME = f"{LLDP_REM_ENTRY}.9"
+LLDP_REM_SYS_DESC = f"{LLDP_REM_ENTRY}.10"
+LLDP_REM_SYS_CAP_SUPPORTED = f"{LLDP_REM_ENTRY}.11"
+LLDP_REM_SYS_CAP_ENABLED = f"{LLDP_REM_ENTRY}.12"
+
+# lldpLocPortTable: what lldpRemLocalPortNum actually indexes. INDEX
+# { lldpLocPortNum }, so the row suffix is the port number itself.
+LLDP_LOC_PORT_ENTRY = f"{LLDP_MIB}.1.3.7.1"
+LLDP_LOC_PORT_ID_SUBTYPE = f"{LLDP_LOC_PORT_ENTRY}.2"
+LLDP_LOC_PORT_ID = f"{LLDP_LOC_PORT_ENTRY}.3"
+LLDP_LOC_PORT_DESC = f"{LLDP_LOC_PORT_ENTRY}.4"
+
+# LldpChassisIdSubtype (LLDP-MIB TEXTUAL-CONVENTION).
+LLDP_CHASSIS_SUBTYPE_CHASSIS_COMPONENT = 1
+LLDP_CHASSIS_SUBTYPE_INTERFACE_ALIAS = 2
+LLDP_CHASSIS_SUBTYPE_PORT_COMPONENT = 3
+LLDP_CHASSIS_SUBTYPE_MAC = 4
+LLDP_CHASSIS_SUBTYPE_NETWORK_ADDRESS = 5
+LLDP_CHASSIS_SUBTYPE_INTERFACE_NAME = 6
+LLDP_CHASSIS_SUBTYPE_LOCAL = 7
+
+# LldpPortIdSubtype. Note the numbers do NOT line up with the chassis
+# subtypes: macAddress is 3 here and 4 there, interfaceName 5 here and 6
+# there. Reusing one map for both would misread every MAC-flavoured port id.
+LLDP_PORT_SUBTYPE_INTERFACE_ALIAS = 1
+LLDP_PORT_SUBTYPE_PORT_COMPONENT = 2
+LLDP_PORT_SUBTYPE_MAC = 3
+LLDP_PORT_SUBTYPE_NETWORK_ADDRESS = 4
+LLDP_PORT_SUBTYPE_INTERFACE_NAME = 5
+LLDP_PORT_SUBTYPE_AGENT_CIRCUIT_ID = 6
+LLDP_PORT_SUBTYPE_LOCAL = 7
+
+# LldpSystemCapabilitiesMap BITS positions. On the wire BITS are an octet
+# string with bit 0 as the HIGH-ORDER bit of the first octet (RFC 2578
+# §7.1.4): bridge+router = 0x28. 0x28 is a printable "(", so net-snmp may
+# print the value as STRING rather than Hex-STRING — decode both.
+LLDP_CAP_BIT_NAMES = {
+    0: "other",
+    1: "repeater",
+    2: "bridge",
+    3: "wlanAccessPoint",
+    4: "router",
+    5: "telephone",
+    6: "docsisCableDevice",
+    7: "stationOnly",
+}
+
+# --- CISCO-CDP-MIB ----------------------------------------------------------
+#
+# cdpCacheTable is INDEX { cdpCacheIfIndex, cdpCacheDeviceIndex }: the first
+# index element is "normally, the ifIndex value of the local interface" (the
+# MIB's own wording), so a row joins straight onto the interface table, and
+# the second distinguishes several neighbors heard on one port.
+
+CDP_CACHE_ENTRY = "1.3.6.1.4.1.9.9.23.1.2.1.1"
+CDP_CACHE_ADDRESS_TYPE = f"{CDP_CACHE_ENTRY}.3"
+CDP_CACHE_ADDRESS = f"{CDP_CACHE_ENTRY}.4"
+CDP_CACHE_VERSION = f"{CDP_CACHE_ENTRY}.5"
+CDP_CACHE_DEVICE_ID = f"{CDP_CACHE_ENTRY}.6"
+CDP_CACHE_DEVICE_PORT = f"{CDP_CACHE_ENTRY}.7"
+CDP_CACHE_PLATFORM = f"{CDP_CACHE_ENTRY}.8"
+CDP_CACHE_CAPABILITIES = f"{CDP_CACHE_ENTRY}.9"
+
+# CiscoNetworkProtocol (CISCO-TC): the address type for a plain IPv4 address.
+CDP_ADDRESS_TYPE_IP = 1
+
+# cdpCacheCapabilities bit meanings. The MIB deliberately does not enumerate
+# them — its DESCRIPTION defers to the CDP specification — so only the low
+# seven bits, stable across Cisco's public CDP TLV documentation, are decoded.
+# Higher bits are carried raw and rendered as hex rather than guessed at,
+# and the neighbor-class filter leans on cdpCachePlatform (the device naming
+# itself in its own words) rather than on this word alone.
+CDP_CAP_BIT_NAMES = {
+    0x01: "router",
+    0x02: "transparentBridge",
+    0x04: "sourceRouteBridge",
+    0x08: "switch",
+    0x10: "host",
+    0x20: "igmp",
+    0x40: "repeater",
+}
+
 # --- Vendor identification --------------------------------------------------
 #
 # sysObjectID is *only* used to name the manufacturer, never the model: the

@@ -221,3 +221,37 @@ def test_software_version_over_the_wire(fixture_name, expected_version):
         collector = Collector([LAB_CREDENTIAL], timeout=3)
         facts = collector.collect(device.address)
     assert facts.software_version == expected_version
+
+
+class TestNeighborsOverTheWire:
+    """CDP/LLDP through a real snmpd, which is where two transport bugs hid.
+
+    The LLDP subtree lives at 1.0.8802 and is only served because the
+    emulator registers a second pass_persist root for it; and binary octet
+    values (a 10.x address starts with byte 0x0A — a newline; CDP capability
+    words start with NULs) only survive because Hex-STRING values cross the
+    line-based pass_persist protocol as type "octet" hex text, not raw
+    bytes. When either regresses, rows quietly vanish — so this counts them.
+    """
+
+    def test_all_sightings_survive_the_wire(self, cisco_stack):
+        collector = Collector([LAB_CREDENTIAL], timeout=3)
+        facts = collector.collect(cisco_stack.address)
+        assert len(facts.neighbors) == 7
+        by_protocol = {}
+        for neighbor in facts.neighbors:
+            by_protocol.setdefault(neighbor.protocol, []).append(neighbor)
+        assert len(by_protocol["lldp"]) == 5
+        assert len(by_protocol["cdp"]) == 2
+
+    def test_binary_octets_survive_the_wire(self, cisco_stack):
+        """The two hazard bytes: 0x0A inside an address, 0x00 leading a MAC
+        and a capability word."""
+        collector = Collector([LAB_CREDENTIAL], timeout=3)
+        facts = collector.collect(cisco_stack.address)
+        cdp = {n.sys_name: n for n in facts.neighbors if n.protocol == "cdp"}
+        assert cdp["bld-b-acc-01.example.net"].mgmt_address == "10.10.2.5"
+        assert cdp["bld-b-acc-01.example.net"].capabilities_raw == "00000028"
+        phone_lldp = next(n for n in facts.neighbors
+                          if n.protocol == "lldp" and n.sys_name == "SEP0011223344AA")
+        assert phone_lldp.port_id == "00:11:22:33:44:AA"

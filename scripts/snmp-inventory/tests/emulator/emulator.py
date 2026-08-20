@@ -114,7 +114,14 @@ class EmulatedDevice:
             # Serve the entire tree from the fixture. Priority 1 beats snmpd's
             # own built-in MIB modules (which default to 127), so the emulated
             # device's system group is the fixture's, not this Linux box's.
-            f"pass_persist -p 1 .1.3.6.1 {_python()} {_RESPONDER} {self.walk_path}",
+            f"pass_persist -p 1 .1.3.6.1 {_python()} {_RESPONDER} {self.walk_path} .1.3.6.1",
+            # LLDP-MIB is an IEEE MIB rooted at 1.0.8802 — outside 1.3.6.1
+            # entirely — so it needs its own registration or the emulated
+            # device answers noSuchObject for every LLDP OID and a neighbor
+            # fixture silently tests nothing. Each responder is told its root
+            # so a getnext running off the end of one subtree answers NONE
+            # instead of leaking an OID from the other registration.
+            f"pass_persist -p 1 .1.0.8802 {_python()} {_RESPONDER} {self.walk_path} .1.0.8802",
         ]
         for user in [self._primary_user()] + self.extra_users:
             lines.append(_create_user_line(user))

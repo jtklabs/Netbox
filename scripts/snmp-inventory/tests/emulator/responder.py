@@ -68,9 +68,19 @@ def write_response(out, varbind: Varbind | None) -> None:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        sys.stderr.write("usage: responder.py <walkfile>\n")
+        sys.stderr.write("usage: responder.py <walkfile> [root-oid]\n")
         return 2
-    responder = Responder(load_walk(sys.argv[1]))
+    varbinds = load_walk(sys.argv[1])
+    if len(sys.argv) > 2:
+        # Serve only the registered subtree. The emulator registers this
+        # program twice — at .1.3.6.1 and at .1.0.8802, because LLDP-MIB's
+        # IEEE root lies outside 1.3.6.1 — and a getnext that runs off the end
+        # of one subtree must answer NONE rather than an OID from the other
+        # registration's territory.
+        prefix = sys.argv[2].strip().lstrip(".")
+        varbinds = [v for v in varbinds
+                    if v.oid == prefix or v.oid.startswith(prefix + ".")]
+    responder = Responder(varbinds)
 
     stdin = sys.stdin
     out = sys.stdout.buffer

@@ -214,6 +214,119 @@ curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/blue
 ./resolve_oid.py ~/mibs/bluecoat sgProxyVersion sgProxySerialNumber
 ```
 
+## LLDP-MIB (IEEE 802.1AB)
+
+**This is an IEEE MIB, not an IETF one: its root is `1.0.8802.1.1.2`, outside
+the familiar 1.3.6.1 tree entirely.** `lldpMIB ::= { iso std(0) iso8802(8802)
+ieee802dot1(1) ieee802dot1mibs(1) 2 }` — the assignment inlines its named
+numbers, so the resolver anchors it from `iso` alone. Two practical
+consequences of the unusual root, handled where they bite: a walk of 1.3.6.1
+never sees LLDP (probe `--save-walk` walks both trees), and the emulator's
+`pass_persist` registration at .1.3.6.1 does not cover it (a second
+registration serves .1.0.8802).
+
+```bash
+mkdir -p ~/mibs/ieee && cd ~/mibs/ieee
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/LLDP-MIB
+python3 docs/resolve_oid.py ~/mibs/ieee lldpRemTable lldpLocPortTable
+```
+
+`lldpRemTable` = 1.0.8802.1.1.2.1.4.1, entry `.1`.
+
+**`INDEX { lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex }`** — columns
+1–3 are the index and never appear in a walk. `lldpRemLocalPortNum` is
+formally an index into `lldpLocPortTable`, **not** an ifIndex: many platforms
+number the two identically, but the MIB does not promise it, so the local port
+is resolved through `lldpLocPortTable` whenever the device serves that table
+and falls back to ifIndex (with a debug note) only when it does not.
+
+| Column | Object |
+|---|---|
+| 4 | `lldpRemChassisIdSubtype` |
+| 5 | `lldpRemChassisId` |
+| 6 | `lldpRemPortIdSubtype` |
+| 7 | `lldpRemPortId` |
+| 8 | `lldpRemPortDesc` |
+| 9 | `lldpRemSysName` |
+| 10 | `lldpRemSysDesc` |
+| 11 | `lldpRemSysCapSupported` |
+| 12 | `lldpRemSysCapEnabled` |
+
+`lldpLocPortTable` = 1.0.8802.1.1.2.1.3.7, entry `.1`, `INDEX {
+lldpLocPortNum }`: `lldpLocPortIdSubtype` (2), `lldpLocPortId` (3),
+`lldpLocPortDesc` (4).
+
+Enumerations, from the MIB's own TEXTUAL-CONVENTIONs:
+
+- `LldpChassisIdSubtype`: chassisComponent(1), interfaceAlias(2),
+  portComponent(3), macAddress(4), networkAddress(5), interfaceName(6),
+  local(7).
+- `LldpPortIdSubtype`: interfaceAlias(1), portComponent(2), macAddress(3),
+  networkAddress(4), interfaceName(5), agentCircuitId(6), local(7).
+- `LldpSystemCapabilitiesMap` BITS: other(0), repeater(1), bridge(2),
+  wlanAccessPoint(3), router(4), telephone(5), docsisCableDevice(6),
+  stationOnly(7). BITS are an octet string on the wire with bit 0 as the
+  high-order bit of the first octet (RFC 2578 §7.1.4), so bridge+router is
+  0x28 — which is a printable `(`, meaning net-snmp may render the value as
+  STRING rather than Hex-STRING and the decoder must accept both.
+
+## CISCO-CDP-MIB
+
+Source: `librenms/mibs/cisco/CISCO-CDP-MIB` (with CISCO-SMI for the
+`ciscoMgmt` anchor and CISCO-TC for the address TCs). Root is
+`{ ciscoMgmt 23 }` = 1.3.6.1.4.1.9.9.23.
+
+```bash
+mkdir -p ~/mibs/cisco && cd ~/mibs/cisco
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/cisco/CISCO-CDP-MIB
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/cisco/CISCO-SMI
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/cisco/CISCO-TC
+python3 docs/resolve_oid.py ~/mibs/cisco cdpCacheTable cdpCacheDeviceId
+```
+
+`cdpCacheTable` = 1.3.6.1.4.1.9.9.23.1.2.1, entry `.1`.
+
+**`INDEX { cdpCacheIfIndex, cdpCacheDeviceIndex }`** — the first index element
+is "normally, the ifIndex value of the local interface" (the MIB's own
+wording), so a CDP row joins straight onto the interface table; the second
+distinguishes multiple neighbors heard on one port.
+
+| Column | Object |
+|---|---|
+| 3 | `cdpCacheAddressType` (`CiscoNetworkProtocol`; `ip(1)` per CISCO-TC) |
+| 4 | `cdpCacheAddress` (octet string; 4 bytes for ip(1)) |
+| 5 | `cdpCacheVersion` |
+| 6 | `cdpCacheDeviceId` |
+| 7 | `cdpCacheDevicePort` |
+| 8 | `cdpCachePlatform` |
+| 9 | `cdpCacheCapabilities` |
+
+`cdpCacheCapabilities` is an OCTET STRING whose bit meanings the MIB
+deliberately does **not** enumerate — its DESCRIPTION defers to "the latest
+version of the CDP specification" (REFERENCE: Cisco Discovery Protocol
+Specification, 10/19/94). The low seven bits are stable across Cisco's public
+CDP TLV documentation — 0x01 router, 0x02 transparent bridge, 0x04
+source-route bridge, 0x08 switch, 0x10 host, 0x20 IGMP, 0x40 repeater — and
+only those are decoded; higher bits are carried raw and shown as hex rather
+than guessed at. Because the capability word is spec-referenced rather than
+MIB-defined, the CDP neighbor-class filter leans on `cdpCachePlatform` (the
+device naming itself in its own words: "Cisco IP Phone 7962", "cisco
+AIR-AP2802I-B-K9") with the capability bits as a supplement.
+
+## 2026-08-20 CDP/LLDP resolution, and a third resolver bug
+
+Resolving CISCO-CDP-MIB found the third parser bug of the svnVersion class,
+and this one would have produced a *wrong* number, not a missing one: a
+`SEQUENCE` member declared as a bare `OBJECT IDENTIFIER` —
+`cdpCacheSysObjectID  OBJECT IDENTIFIER,` — matched the definition regex, and
+its lazy `(.*?)::=` swallowed everything up to the first real assignment after
+the SEQUENCE block. That both deleted `cdpCacheIfIndex` from the parse and
+recorded its OID (`cdpCacheEntry 1`) under the name `cdpCacheSysObjectID`,
+whose true assignment is `{ cdpCacheEntry 18 }` — verified by reading the
+file. The parser now strips `::= SEQUENCE { … }` bodies before matching, the
+same treatment IMPORTS got. SEQUENCE members are type declarations, never OID
+assignments, so nothing legitimate is lost.
+
 ## 2026-08-20 re-verification, and a resolver bug it found
 
 Every OID above was re-resolved from freshly fetched MIBs on 2026-08-20 — all

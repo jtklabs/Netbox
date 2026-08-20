@@ -25,6 +25,13 @@ The most important shapes encoded here:
                         the APs get inventoried
     firewalls/LBs       ENTITY-MIB deliberately near-empty, so model and serial
                         have to come from the vendor's own scalars
+    neighbor tables     the stack, the 2960X and the Arista carry CDP/LLDP
+                        adjacency data describing the SAME links from both
+                        ends — Cisco-to-Cisco seen twice (CDP long names, LLDP
+                        short names), the Arista LLDP-only, one link landing
+                        on stack member 2, and a phone, an AP and an unknown
+                        switch that exercise the neighbor-class filter and the
+                        report-don't-guess paths
 
 Usage:
     ./make_fixtures.py [--output-dir ../fixtures]
@@ -48,6 +55,12 @@ IPADDR = "1.3.6.1.2.1.4.34.1"
 IPPFX = "1.3.6.1.2.1.4.32.1.5"
 CSW = "1.3.6.1.4.1.9.9.500.1.2.1.1"
 ARUBA_AP = "1.3.6.1.4.1.14823.2.2.1.5.2.1.4.1"
+# LLDP-MIB is an IEEE MIB: its root is 1.0.8802, OUTSIDE 1.3.6.1. The
+# emulator registers a second pass_persist subtree for it, and --save-walk
+# captures it separately, both because of exactly this.
+LLDP_REM = "1.0.8802.1.1.2.1.4.1.1"     # lldpRemEntry, columns .N.<t>.<port>.<idx>
+LLDP_LOC = "1.0.8802.1.1.2.1.3.7.1"     # lldpLocPortEntry, columns .N.<port>
+CDP = "1.3.6.1.4.1.9.9.23.1.2.1.1"      # cdpCacheEntry, columns .N.<ifIndex>.<devIdx>
 
 CLASS_CHASSIS = 3
 CLASS_CONTAINER = 5
@@ -162,6 +175,75 @@ def stack_member(entity_index: int, number: int, role: int, state: int, mac: str
     ]
 
 
+def lldp_loc_port(port_num: int, name: str, subtype: int = 5) -> list[Varbind]:
+    """One lldpLocPortTable row: what lldpRemLocalPortNum actually indexes.
+
+    subtype 5 is interfaceName. The row exists so the scanner can resolve the
+    local port through the table the MIB prescribes instead of assuming the
+    port number is an ifIndex.
+    """
+    return [
+        i(f"{LLDP_LOC}.2.{port_num}", subtype),
+        s(f"{LLDP_LOC}.3.{port_num}", name),
+        s(f"{LLDP_LOC}.4.{port_num}", name),
+    ]
+
+
+def lldp_neighbor(port_num: int, rem_index: int, chassis: str, port_id: str,
+                  sys_name: str, caps_hex: str, chassis_subtype: int = 4,
+                  port_subtype: int = 5, sys_desc: str = "",
+                  port_desc: str = "") -> list[Varbind]:
+    """One lldpRemTable row. Index is <timeMark>.<localPortNum>.<remIndex>.
+
+    `chassis` and `port_id` are rendered per their subtype: colon-hex strings
+    become Hex-STRING octets (a MAC under chassis subtype 4, an
+    address-family-prefixed address under subtype 5), anything else a plain
+    STRING. Capability BITS go over as octets too — 0x28 (bridge+router) is a
+    printable "(", which is exactly the case the collector must survive.
+    """
+    idx = f"0.{port_num}.{rem_index}"
+
+    def rendered(oid: str, value: str) -> Varbind:
+        if ":" in value and all(len(p) == 2 for p in value.split(":")):
+            return hexs(oid, value)
+        return s(oid, value)
+
+    rows = [
+        i(f"{LLDP_REM}.4.{idx}", chassis_subtype),
+        rendered(f"{LLDP_REM}.5.{idx}", chassis),
+        i(f"{LLDP_REM}.6.{idx}", port_subtype),
+        rendered(f"{LLDP_REM}.7.{idx}", port_id),
+        s(f"{LLDP_REM}.8.{idx}", port_desc),
+        s(f"{LLDP_REM}.9.{idx}", sys_name),
+        s(f"{LLDP_REM}.10.{idx}", sys_desc),
+        hexs(f"{LLDP_REM}.11.{idx}", caps_hex),
+        hexs(f"{LLDP_REM}.12.{idx}", caps_hex),
+    ]
+    return rows
+
+
+def cdp_neighbor(if_index: int, device_index: int, device_id: str, port: str,
+                 platform: str, caps_hex: str, address: str = "",
+                 version: str = "") -> list[Varbind]:
+    """One cdpCacheTable row. Index is <local ifIndex>.<deviceIndex>."""
+    idx = f"{if_index}.{device_index}"
+    rows = []
+    if address:
+        packed = ipaddress.ip_address(address).packed
+        rows += [
+            i(f"{CDP}.3.{idx}", 1),     # CiscoNetworkProtocol ip(1)
+            hexs(f"{CDP}.4.{idx}", ":".join(f"{b:02X}" for b in packed)),
+        ]
+    rows += [
+        s(f"{CDP}.5.{idx}", version or f"Cisco IOS Software running on {device_id}"),
+        s(f"{CDP}.6.{idx}", device_id),
+        s(f"{CDP}.7.{idx}", port),
+        s(f"{CDP}.8.{idx}", platform),
+        hexs(f"{CDP}.9.{idx}", caps_hex),
+    ]
+    return rows
+
+
 def aruba_ap(mac: str, name: str, model: str, serial: str, address: str,
              group: str = "default", status: int = 1) -> list[Varbind]:
     index = ".".join(str(int(part, 16)) for part in mac.split(":"))
@@ -259,6 +341,56 @@ def cisco_c9300_stack() -> list[Varbind]:
                      alias="oob management", descr="GigabitEthernet0/0")
 
     out += ip_address("10.10.1.5", 24, management_index)
+
+    # --- CDP/LLDP neighbors. The links here are the other half of the ones
+    # the arista-7050sx and cisco-2960x fixtures report, so a sync of both
+    # sides must converge on one cable per link.
+    #
+    # lldpLocPortNum == ifIndex on this fixture (what IOS-XE does), but the
+    # table is still present and the scanner still resolves through it.
+    for port_num, name in (
+        (1, "GigabitEthernet1/0/1"), (2, "GigabitEthernet1/0/2"),
+        (3, "GigabitEthernet1/0/3"), (4, "TenGigabitEthernet1/1/1"),
+        (6, "GigabitEthernet2/0/1"), (11, "GigabitEthernet3/0/1"),
+    ):
+        out += lldp_loc_port(port_num, name)
+
+    # The Arista spine, LLDP only — EOS speaks no CDP, so no cdpCache row for
+    # it anywhere. Its sysName carries a domain suffix while the NetBox device
+    # is the short name, which is the matching problem, not an accident.
+    out += lldp_neighbor(4, 1, "00:1C:73:AA:BB:01", "Ethernet1",
+                         "dc1-spine-01.example.net", "28",
+                         sys_desc="Arista Networks EOS version 4.29.2F")
+    # The 2960X access switch, on STACK MEMBER 2's port — the cable must land
+    # on the member device, not the master. A Cisco-to-Cisco link shows up in
+    # both protocols: LLDP names the remote port in short form, CDP in long
+    # form, and the two sightings are one adjacency.
+    out += lldp_neighbor(6, 1, "00:1E:14:11:22:01", "Gi1/0/1",
+                         "bld-b-acc-01", "28")
+    out += cdp_neighbor(6, 1, "bld-b-acc-01.example.net", "GigabitEthernet1/0/1",
+                        "cisco WS-C2960X-48FPD-L", "00:00:00:28",
+                        address="10.10.2.5")
+    # An IP phone. CDP names the platform outright; the LLDP-MED sighting
+    # carries the telephone capability bit, a network-address chassis id and a
+    # MAC port id. The default neighbor filter must exclude it.
+    out += cdp_neighbor(2, 1, "SEP0011223344AA", "Port 1",
+                        "Cisco IP Phone 7962", "00:00:04:90",
+                        address="10.10.20.31",
+                        version="SCCP42.9-4-2SR3-1S")
+    out += lldp_neighbor(2, 2, "01:0A:0A:14:1F", "00:11:22:33:44:AA",
+                         "SEP0011223344AA", "24",
+                         chassis_subtype=5, port_subtype=3,
+                         port_desc="SW PORT")
+    # A wireless AP, LLDP only, wlanAccessPoint capability set — also
+    # filtered by default (APs are inventoried from their controller).
+    out += lldp_neighbor(11, 1, "20:4C:03:BB:01:01", "20:4C:03:BB:01:01",
+                         "bld-a-ap-01", "30",
+                         port_subtype=3,
+                         sys_desc="ArubaOS (MODEL: 515), Version 8.10.0.4")
+    # A switch NetBox has never heard of: stays a reported one-sided
+    # sighting, never a fabricated device.
+    out += lldp_neighbor(3, 1, "AA:BB:CC:00:99:01", "ge-0/0/7",
+                         "unknown-sw-99", "28")
     return out
 
 
@@ -286,6 +418,22 @@ def arista_7050sx() -> list[Varbind]:
     out += interface(5, "Management1", 6, 1000, mac="00:1C:73:AA:BB:FF", alias="oob")
     out += interface(6, "Port-Channel10", 161, 40000, alias="mlag peer link")
     out += ip_address("10.30.0.11", 24, 5)
+
+    # LLDP only — the other side of the stack's Te1/1/1 sighting. The local
+    # port numbering here is DELIBERATELY not the ifIndex (Ethernet1 is LLDP
+    # port 101): the MIB never promises the two are equal, some platforms
+    # genuinely diverge, and this fixture is what keeps the
+    # lldpLocPortTable-resolution path exercised. Real EOS happens to use the
+    # ifIndex; a capture from real hardware can replace this whole file.
+    out += lldp_loc_port(101, "Ethernet1")
+    out += lldp_loc_port(102, "Ethernet2")
+    # The remote port arrives in Cisco short form ("Te1/1/1") while the stack
+    # fixture's ifName is the long form — the canonicalisation problem, from
+    # the expanding side.
+    out += lldp_neighbor(101, 1, "AC:F2:C5:11:22:01", "Te1/1/1",
+                         "bld-a-core-01", "28",
+                         sys_desc="Cisco IOS Software [Amsterdam], Catalyst L3 "
+                                  "Switch Software (CAT9K_IOSXE)")
     return out
 
 
@@ -500,6 +648,16 @@ def cisco_single_2960() -> list[Varbind]:
                          mac=f"00:1E:14:11:22:{index:02X}", alias=f"access {index}")
     out += interface(10, "Vlan1", 53, 0, mac="00:1E:14:11:22:FE", alias="management")
     out += ip_address("10.10.2.5", 24, 10)
+
+    # The uplink to the 9300 stack, seen from this side — the stack fixture
+    # reports the same link from member 2's port. Both protocols again, and
+    # again LLDP short-form vs CDP long-form for the same remote port.
+    out += lldp_loc_port(1, "GigabitEthernet1/0/1")
+    out += lldp_neighbor(1, 1, "AC:F2:C5:11:22:01", "Gi2/0/1",
+                         "bld-a-core-01", "28")
+    out += cdp_neighbor(1, 1, "bld-a-core-01", "GigabitEthernet2/0/1",
+                        "cisco C9300-48P", "00:00:00:29",
+                        address="10.10.1.5")
     return out
 
 

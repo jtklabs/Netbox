@@ -754,3 +754,82 @@ class TestBluecoatProxySG:
 
     def test_platform(self):
         assert self.result.primary.platform == "SGOS"
+
+
+class TestNeighborCollection:
+    """CDP and LLDP tables, decoded from the fixtures.
+
+    LLDP is the awkward one: its MIB lives at 1.0.8802 (outside 1.3.6.1), its
+    row index carries a local port number that is NOT an ifIndex, and its
+    values arrive typed by companion subtype columns. Each of those is what a
+    test here pins down.
+    """
+
+    def setup_method(self):
+        self.facts = collect_fixture("cisco-c9300-stack")
+
+    def test_both_protocols_are_collected(self):
+        protocols = {n.protocol for n in self.facts.neighbors}
+        assert protocols == {"cdp", "lldp"}
+        assert len(self.facts.neighbors) == 7
+
+    def test_lldp_local_port_resolves_through_the_local_port_table(self):
+        """The MIB routes lldpRemLocalPortNum through lldpLocPortTable, and
+        the resolution must say it went that way."""
+        lldp = [n for n in self.facts.neighbors if n.protocol == "lldp"]
+        assert all(n.local_port_source == "lldpLocPortId interfaceName" for n in lldp)
+        by_port = {n.local_port: n for n in lldp}
+        assert "TenGigabitEthernet1/1/1" in by_port
+        assert by_port["TenGigabitEthernet1/1/1"].local_if_index == 4
+
+    def test_lldp_local_port_number_is_not_assumed_to_be_ifindex(self):
+        """The Arista fixture numbers its LLDP ports 101+ while its ifIndexes
+        are 1..6 — the case that catches a portNum==ifIndex shortcut."""
+        facts = collect_fixture("arista-7050sx")
+        neighbor = facts.neighbors[0]
+        assert neighbor.local_port_num == 101
+        assert neighbor.local_if_index == 1
+        assert neighbor.local_port == "Ethernet1"
+
+    def test_chassis_id_is_decoded_per_its_subtype(self):
+        """Six octets are a MAC only because subtype 4 says so; the phone's
+        subtype-5 chassis id is an address-family-prefixed IP."""
+        by_name = {n.sys_name: n for n in self.facts.neighbors if n.protocol == "lldp"}
+        spine = by_name["dc1-spine-01.example.net"]
+        assert spine.chassis_id_subtype == mibs.LLDP_CHASSIS_SUBTYPE_MAC
+        assert spine.chassis_id == "00:1C:73:AA:BB:01"
+        phone = by_name["SEP0011223344AA"]
+        assert phone.chassis_id_subtype == mibs.LLDP_CHASSIS_SUBTYPE_NETWORK_ADDRESS
+        assert phone.chassis_id == "10.10.20.31"
+        assert phone.port_id == "00:11:22:33:44:AA"     # port subtype 3 = MAC
+
+    def test_capability_bits_decode_through_printable_octets(self):
+        """0x28 (bridge+router) is a printable "(" — the emulator and real
+        agents both serve it as STRING, and the bits must still decode."""
+        spine = next(n for n in self.facts.neighbors
+                     if n.sys_name == "dc1-spine-01.example.net")
+        assert n_caps(spine) == {"bridge", "router"}
+        phone = next(n for n in self.facts.neighbors
+                     if n.protocol == "lldp" and n.sys_name == "SEP0011223344AA")
+        assert n_caps(phone) == {"bridge", "telephone"}
+
+    def test_cdp_decodes_platform_capabilities_and_address(self):
+        cdp = {n.sys_name: n for n in self.facts.neighbors if n.protocol == "cdp"}
+        access = cdp["bld-b-acc-01.example.net"]
+        assert access.platform == "cisco WS-C2960X-48FPD-L"
+        assert access.mgmt_address == "10.10.2.5"
+        assert n_caps(access) == {"switch", "igmp"}
+        assert access.local_if_index == 6
+        assert access.local_port == "GigabitEthernet2/0/1"
+        # Bits beyond the publicly documented seven stay raw, not guessed.
+        phone = cdp["SEP0011223344AA"]
+        assert phone.capabilities_raw == "00000490"
+        assert n_caps(phone) == {"host"}
+
+    def test_a_device_without_lldp_reports_no_neighbors(self):
+        facts = collect_fixture("f5-bigip")
+        assert facts.neighbors == []
+
+
+def n_caps(neighbor):
+    return set(neighbor.capabilities)

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import sys
 
-from . import mibs, vendors
+from . import mibs, neighbors as neighbors_module, vendors
 from .collect import Collector, DeviceFacts
 from .model import ScanResult, build_scan_result
 from .snmp import CredentialSession, SnmpAuthError, SnmpError, SnmpTimeoutError
@@ -223,6 +223,38 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
     else:
         w("  none reported\n")
 
+    if facts.neighbors:
+        adjacencies = neighbors_module.build_adjacencies(facts.neighbors)
+        _section(w, f"NEIGHBORS — CDP/LLDP ({len(adjacencies)} links from "
+                    f"{len(facts.neighbors)} sightings)")
+        w(f"  {'local port':<{_NAME_WIDTH}} {'class':<9} {'via':<9} "
+          f"remote\n")
+        for adjacency in adjacencies:
+            kind = neighbors_module.classify(adjacency)
+            via = "+".join(adjacency.protocols)
+            remote = adjacency.remote_name or adjacency.chassis_mac or "?"
+            w(f"  {(adjacency.local_port or '?')[:_NAME_WIDTH]:<{_NAME_WIDTH}} "
+              f"{kind:<9} {via:<9} {remote} port {adjacency.remote_port or '?'}\n")
+            detail = []
+            if adjacency.platform:
+                detail.append(adjacency.platform)
+            if adjacency.capabilities:
+                detail.append("caps " + ",".join(sorted(adjacency.capabilities)))
+            if adjacency.mgmt_address:
+                detail.append(adjacency.mgmt_address)
+            if detail:
+                w(f"  {'':<{_NAME_WIDTH}} {' | '.join(detail)}\n")
+            # The MIB's local-port indirection makes "which port is this" a
+            # resolution, not a lookup — say which route resolved it whenever
+            # it was anything other than the direct one.
+            if adjacency.local_port_source not in ("cdpCacheIfIndex",
+                                                   "lldpLocPortId interfaceName"):
+                w(f"  {'':<{_NAME_WIDTH}} local port via {adjacency.local_port_source}\n")
+    elif facts.profile is not None:
+        _section(w, "NEIGHBORS — CDP/LLDP (none)")
+        w("  No neighbor tables answered. Either the protocols are disabled\n")
+        w("  on this device, or nothing is currently adjacent.\n")
+
     if facts.access_points:
         _section(w, f"ACCESS POINTS — reported by this controller "
                     f"({len(facts.access_points)})")
@@ -369,6 +401,35 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
              "up": ap.is_up}
             for ap in facts.access_points
         ],
+        # Both layers on purpose: the sightings are what the device said, the
+        # adjacencies are what the scanner made of them, and a wrong-looking
+        # link is diagnosed by comparing the two.
+        "neighbor_sightings": [
+            {
+                "protocol": n.protocol, "local_port": n.local_port,
+                "local_if_index": n.local_if_index,
+                "local_port_source": n.local_port_source,
+                "chassis_id": n.chassis_id, "chassis_id_subtype": n.chassis_id_subtype,
+                "port_id": n.port_id, "port_id_subtype": n.port_id_subtype,
+                "port_desc": n.port_desc, "sys_name": n.sys_name,
+                "platform": n.platform, "mgmt_address": n.mgmt_address,
+                "capabilities": sorted(n.capabilities),
+                "capabilities_raw": n.capabilities_raw,
+            }
+            for n in facts.neighbors
+        ],
+        "adjacencies": [
+            {
+                "local_port": a.local_port, "local_if_index": a.local_if_index,
+                "remote_name": a.remote_name, "remote_port": a.remote_port,
+                "remote_port_source": a.remote_port_source,
+                "chassis_mac": a.chassis_mac, "mgmt_address": a.mgmt_address,
+                "platform": a.platform, "protocols": list(a.protocols),
+                "capabilities": sorted(a.capabilities),
+                "class": neighbors_module.classify(a),
+            }
+            for a in neighbors_module.build_adjacencies(facts.neighbors)
+        ],
         "would_create": {
             "devices": [
                 {
@@ -405,6 +466,14 @@ def _save_walk(collector: Collector, facts: DeviceFacts, address: str, path: str
                                retries=collector.retries,
                                use_bulk=collector.use_bulk) as session:
             raw = session.walk_raw(address, "1.3.6.1")
+            # LLDP-MIB is rooted at 1.0.8802 — an IEEE arc entirely outside
+            # 1.3.6.1 — so a walk of 1.3.6.1 never captures it and a fixture
+            # saved without this second walk would silently prove nothing
+            # about neighbor handling.
+            try:
+                raw += session.walk_raw(address, mibs.LLDP_MIB)
+            except SnmpError:
+                pass    # no LLDP on this device; the main walk still stands
     except SnmpError as exc:
         print(f"  could not capture a walk: {exc}", file=sys.stderr)
         return

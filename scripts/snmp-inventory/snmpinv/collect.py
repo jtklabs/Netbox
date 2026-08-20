@@ -136,6 +136,41 @@ class AccessPoint:
 
 
 @dataclass
+class Neighbor:
+    """One CDP or LLDP neighbor sighting, as the device reported it.
+
+    This is a raw sighting, not a resolved adjacency: the same physical link
+    shows up once per protocol on a Cisco box, the remote port name arrives in
+    whatever form that protocol favours (CDP long, LLDP usually short), and
+    nothing here has been matched against NetBox. neighbors.py does the
+    dedupe, canonicalisation and classification; sync-time code does the
+    matching. Keeping the sighting verbatim is what lets --probe show exactly
+    what the device said when a match later looks wrong.
+    """
+
+    protocol: str                       # "lldp" or "cdp"
+    local_if_index: int | None = None   # resolved; None when resolution failed
+    local_port: str = ""                # local interface name, as resolved
+    # How local_port/local_if_index were arrived at — LLDP's local port number
+    # is an index into lldpLocPortTable, not an ifIndex, and the report should
+    # say which route resolved it (or that only the unreliable fallback was
+    # available) rather than presenting every resolution as equally solid.
+    local_port_source: str = ""
+    local_port_num: int | None = None   # LLDP lldpRemLocalPortNum, verbatim
+    chassis_id_subtype: int = 0         # LLDP LldpChassisIdSubtype; 0 for CDP
+    chassis_id: str = ""                # decoded per subtype (MAC-formatted when MAC)
+    port_id_subtype: int = 0            # LLDP LldpPortIdSubtype; 0 for CDP
+    port_id: str = ""                   # remote port, exactly as reported
+    port_desc: str = ""
+    sys_name: str = ""                  # LLDP sysName / CDP deviceId
+    sys_desc: str = ""                  # LLDP sysDesc / CDP version paragraph
+    platform: str = ""                  # CDP cdpCachePlatform; LLDP has none
+    capabilities: frozenset = frozenset()   # decoded names, e.g. {"bridge","router"}
+    capabilities_raw: str = ""          # verbatim hex, so undecoded bits stay visible
+    mgmt_address: str = ""              # CDP management address when it is IPv4
+
+
+@dataclass
 class DeviceFacts:
     """Everything one device told us about itself."""
 
@@ -158,6 +193,7 @@ class DeviceFacts:
     ips: list[InterfaceIP] = field(default_factory=list)
     stack_members: list[StackMember] = field(default_factory=list)
     access_points: list[AccessPoint] = field(default_factory=list)
+    neighbors: list[Neighbor] = field(default_factory=list)
 
     software_version: str = ""
     vendor_serial: str = ""
@@ -199,7 +235,8 @@ class Collector:
 
     def __init__(self, credentials: list[Credential], timeout: int = 5, retries: int = 1,
                  use_bulk: bool = True, collect_interfaces: bool = True,
-                 collect_ips: bool = True, max_repetitions: int = 25,
+                 collect_ips: bool = True, collect_neighbors: bool = True,
+                 max_repetitions: int = 25,
                  bulk_state: BulkState | None = None):
         if not credentials:
             raise ValueError("at least one SNMPv3 credential set is required")
@@ -209,6 +246,7 @@ class Collector:
         self.use_bulk = use_bulk
         self.collect_interfaces = collect_interfaces
         self.collect_ips = collect_ips
+        self.collect_neighbors = collect_neighbors
         self.max_repetitions = max_repetitions
         # Devices that cannot answer a full-size GETBULK are remembered, so the
         # timeouts that discover the limit are paid once rather than every run.
@@ -303,6 +341,16 @@ class Collector:
         # trip, so it is gated on the vendor rather than attempted blindly.
         if profile is not None and profile.name == "cisco":
             facts.stack_members = _walk_stack_members(session, host)
+
+        if self.collect_neighbors:
+            # LLDP is IEEE-standard and tried on everything: a device without
+            # it answers "nothing in that subtree" in one round trip. CDP is
+            # gated on the vendor like the stackwise table — and Cisco boxes
+            # typically run both, so the same physical link is expected to
+            # show up twice here; neighbors.py deduplicates the sightings.
+            facts.neighbors = _walk_lldp_neighbors(session, host, facts.interfaces)
+            if profile is not None and profile.name == "cisco":
+                facts.neighbors += _walk_cdp_neighbors(session, host, facts.interfaces)
 
         if profile is not None:
             _apply_vendor_scalars(session, host, facts, profile)
@@ -545,6 +593,316 @@ def _walk_stack_members(session: CredentialSession, host: str) -> list[StackMemb
             mac_address=_text(macs.get(key)),
         ))
     return members
+
+
+# --- CDP / LLDP neighbors ---------------------------------------------------
+
+
+@dataclass
+class _LocPort:
+    """One lldpLocPortTable row: what a lldpRemLocalPortNum points at."""
+
+    subtype: int
+    port_id: str
+    descr: str
+
+
+def _walk_lldp_neighbors(session: CredentialSession, host: str,
+                         interfaces: dict[int, Interface]) -> list[Neighbor]:
+    """LLDP-MIB lldpRemTable — every neighbor this device has heard.
+
+    The row index is <timeMark>.<localPortNum>.<remIndex>. localPortNum is an
+    index into lldpLocPortTable, NOT an ifIndex — the MIB is explicit that the
+    association goes through that table — so the local table is walked first
+    and each neighbor's local port resolved through it. Only when a device
+    serves no local table at all is the port number tried as an ifIndex, which
+    is the equality most platforms happen to implement but none promise, and
+    the sighting records which route was taken so the report can say.
+    """
+    try:
+        binds = session.walk(host, mibs.LLDP_REM_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: lldpRemTable unavailable (%s)", host, exc)
+        return []
+    if not binds:
+        return []
+
+    loc_ports = _walk_lldp_local_ports(session, host)
+    by_name, by_descr = _interface_lookups(interfaces)
+
+    chassis_subtypes = collect_column(binds, mibs.LLDP_REM_CHASSIS_ID_SUBTYPE)
+    chassis_ids = collect_column(binds, mibs.LLDP_REM_CHASSIS_ID)
+    port_subtypes = collect_column(binds, mibs.LLDP_REM_PORT_ID_SUBTYPE)
+    port_ids = collect_column(binds, mibs.LLDP_REM_PORT_ID)
+    port_descs = collect_column(binds, mibs.LLDP_REM_PORT_DESC)
+    sys_names = collect_column(binds, mibs.LLDP_REM_SYS_NAME)
+    sys_descs = collect_column(binds, mibs.LLDP_REM_SYS_DESC)
+    caps_enabled = collect_column(binds, mibs.LLDP_REM_SYS_CAP_ENABLED)
+    caps_supported = collect_column(binds, mibs.LLDP_REM_SYS_CAP_SUPPORTED)
+
+    neighbors = []
+    for row_index in sorted(set(chassis_ids) | set(port_ids) | set(sys_names),
+                            key=_row_key):
+        parts = row_index.split(".")
+        if len(parts) != 3:
+            continue
+        try:
+            port_num = int(parts[1])
+        except ValueError:
+            continue
+        if_index, local_name, source = _resolve_lldp_local_port(
+            port_num, loc_ports, interfaces, by_name, by_descr
+        )
+        chassis_subtype = _int(chassis_subtypes.get(row_index), 0)
+        port_subtype = _int(port_subtypes.get(row_index), 0)
+        # Enabled capabilities are what the neighbor is doing; supported is
+        # what it could do. Classification wants the former, but plenty of
+        # gear sends only the latter, so fall back rather than losing the
+        # signal entirely.
+        caps_bind = caps_enabled.get(row_index) or caps_supported.get(row_index)
+        caps_bytes = _octets(caps_bind)
+        neighbors.append(Neighbor(
+            protocol="lldp",
+            local_if_index=if_index,
+            local_port=local_name,
+            local_port_source=source,
+            local_port_num=port_num,
+            chassis_id_subtype=chassis_subtype,
+            chassis_id=_decode_lldp_chassis_id(chassis_subtype, chassis_ids.get(row_index)),
+            port_id_subtype=port_subtype,
+            port_id=_decode_lldp_port_id(port_subtype, port_ids.get(row_index)),
+            port_desc=_printable(port_descs.get(row_index)),
+            sys_name=_printable(sys_names.get(row_index)),
+            sys_desc=_printable(sys_descs.get(row_index)),
+            capabilities=_lldp_capability_names(caps_bytes),
+            capabilities_raw=caps_bytes.hex(),
+        ))
+    return neighbors
+
+
+def _walk_lldp_local_ports(session: CredentialSession, host: str) -> dict[int, _LocPort]:
+    try:
+        binds = session.walk(host, mibs.LLDP_LOC_PORT_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: lldpLocPortTable unavailable (%s)", host, exc)
+        return {}
+    subtypes = collect_column(binds, mibs.LLDP_LOC_PORT_ID_SUBTYPE)
+    ids = collect_column(binds, mibs.LLDP_LOC_PORT_ID)
+    descrs = collect_column(binds, mibs.LLDP_LOC_PORT_DESC)
+    out: dict[int, _LocPort] = {}
+    for key in set(subtypes) | set(ids) | set(descrs):
+        if not key.isdigit():
+            continue
+        out[int(key)] = _LocPort(
+            subtype=_int(subtypes.get(key), 0),
+            port_id=_printable(ids.get(key)),
+            descr=_printable(descrs.get(key)),
+        )
+    return out
+
+
+def _resolve_lldp_local_port(port_num: int, loc_ports: dict[int, _LocPort],
+                             interfaces: dict[int, Interface],
+                             by_name: dict[str, int], by_descr: dict[str, int],
+                             ) -> tuple[int | None, str, str]:
+    """Turn a lldpRemLocalPortNum into (ifIndex, interface name, how).
+
+    The "how" travels with the sighting: a port resolved through the local
+    table is solid, one resolved by assuming portNum == ifIndex is the
+    fallback the MIB warns against, and a report that cannot say which is
+    which would make both look equally trustworthy.
+    """
+    loc = loc_ports.get(port_num)
+    if loc is not None:
+        if loc.subtype == mibs.LLDP_PORT_SUBTYPE_INTERFACE_NAME and loc.port_id:
+            index = by_name.get(loc.port_id, by_descr.get(loc.port_id))
+            return index, loc.port_id, "lldpLocPortId interfaceName"
+        if (loc.subtype == mibs.LLDP_PORT_SUBTYPE_LOCAL and loc.port_id.isdigit()
+                and int(loc.port_id) in interfaces):
+            index = int(loc.port_id)
+            return index, interfaces[index].display_name(), "lldpLocPortId local(7) as ifIndex"
+        if loc.descr:
+            index = by_name.get(loc.descr, by_descr.get(loc.descr))
+            if index is not None:
+                return index, interfaces[index].display_name(), "lldpLocPortDesc"
+        if loc.port_id:
+            # The table answered but nothing matches an interface we walked.
+            # Keep the device's own name for the port; the report shows it.
+            return None, loc.port_id, "lldpLocPortId (no interface matched)"
+    if port_num in interfaces:
+        return (port_num, interfaces[port_num].display_name(),
+                "port number as ifIndex (no lldpLocPortTable row)")
+    return None, "", "unresolved"
+
+
+def _walk_cdp_neighbors(session: CredentialSession, host: str,
+                        interfaces: dict[int, Interface]) -> list[Neighbor]:
+    """CISCO-CDP-MIB cdpCacheTable, indexed <ifIndex>.<deviceIndex>.
+
+    Unlike LLDP, the first index element here IS the local ifIndex (the MIB
+    says so), so the local interface join is direct.
+    """
+    try:
+        binds = session.walk(host, mibs.CDP_CACHE_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: cdpCacheTable unavailable (%s)", host, exc)
+        return []
+
+    device_ids = collect_column(binds, mibs.CDP_CACHE_DEVICE_ID)
+    ports = collect_column(binds, mibs.CDP_CACHE_DEVICE_PORT)
+    platforms = collect_column(binds, mibs.CDP_CACHE_PLATFORM)
+    versions = collect_column(binds, mibs.CDP_CACHE_VERSION)
+    caps = collect_column(binds, mibs.CDP_CACHE_CAPABILITIES)
+    addr_types = collect_column(binds, mibs.CDP_CACHE_ADDRESS_TYPE)
+    addrs = collect_column(binds, mibs.CDP_CACHE_ADDRESS)
+
+    neighbors = []
+    for row_index in sorted(set(device_ids) | set(ports), key=_row_key):
+        parts = row_index.split(".")
+        if len(parts) != 2:
+            continue
+        try:
+            if_index = int(parts[0])
+        except ValueError:
+            continue
+        caps_bytes = _octets(caps.get(row_index))
+        caps_value = int.from_bytes(caps_bytes, "big") if caps_bytes else 0
+        mgmt = ""
+        if _int(addr_types.get(row_index), 0) == mibs.CDP_ADDRESS_TYPE_IP:
+            data = _octets(addrs.get(row_index))
+            if len(data) == 4:
+                mgmt = ".".join(str(b) for b in data)
+        iface = interfaces.get(if_index)
+        neighbors.append(Neighbor(
+            protocol="cdp",
+            local_if_index=if_index,
+            local_port=iface.display_name() if iface is not None else "",
+            local_port_source="cdpCacheIfIndex",
+            sys_name=_printable(device_ids.get(row_index)),
+            sys_desc=_printable(versions.get(row_index)),
+            port_id=_printable(ports.get(row_index)),
+            platform=_printable(platforms.get(row_index)),
+            capabilities=frozenset(
+                name for bit, name in mibs.CDP_CAP_BIT_NAMES.items() if caps_value & bit
+            ),
+            capabilities_raw=caps_bytes.hex(),
+            mgmt_address=mgmt,
+        ))
+    return neighbors
+
+
+def _interface_lookups(interfaces: dict[int, Interface]) -> tuple[dict[str, int], dict[str, int]]:
+    """Name -> ifIndex and descr -> ifIndex, for local-port resolution."""
+    by_name: dict[str, int] = {}
+    by_descr: dict[str, int] = {}
+    for index, iface in interfaces.items():
+        if iface.name:
+            by_name.setdefault(iface.name, index)
+        if iface.descr:
+            by_descr.setdefault(iface.descr, index)
+    return by_name, by_descr
+
+
+def _row_key(row_index: str) -> tuple[int, ...]:
+    """Numeric sort for multi-part row indexes; string order puts 10 before 2."""
+    return tuple(int(p) for p in row_index.split(".") if p.isdigit())
+
+
+def _octets(bind: VarBind | None) -> bytes:
+    """The raw octets of a value, whichever way net-snmp printed it.
+
+    A Hex-STRING arrives from the parser as colon-joined hex. A value whose
+    bytes happen to be printable is printed as STRING instead — the LLDP
+    capability octet 0x28 (bridge+router) is a "(" — so both forms have to
+    decode to the same bytes or capability bits vanish on exactly the devices
+    whose capabilities are the common ones.
+    """
+    if bind is None or not bind.value:
+        return b""
+    if bind.type == "Hex-STRING":
+        try:
+            return bytes(int(p, 16) for p in bind.value.split(":") if p)
+        except ValueError:
+            return b""
+    return bind.value.encode("latin-1", "replace")
+
+
+def _printable(bind: VarBind | None) -> str:
+    """A text value that may have been printed as Hex-STRING.
+
+    Agents emit octet-string columns as Hex-STRING whenever net-snmp cannot
+    prove them printable — some stacks do it for every port name. A name is
+    more useful as "Gi1/0/1" than "47:69:31:2F:30:2F:31", so convert when the
+    bytes are clean ASCII and keep the hex form when they are not (that is
+    real information: the value genuinely is binary).
+    """
+    if bind is None:
+        return ""
+    if bind.type == "Hex-STRING":
+        data = _octets(bind)
+        text = data.decode("ascii", errors="replace").strip("\x00").strip()
+        if text and all(32 <= ord(c) < 127 for c in text):
+            return text
+        return bind.value
+    return bind.value.strip()
+
+
+def _mac_from_bytes(data: bytes) -> str:
+    return ":".join(f"{b:02X}" for b in data)
+
+
+def _decode_lldp_chassis_id(subtype: int, bind: VarBind | None) -> str:
+    """Decode lldpRemChassisId according to its subtype column.
+
+    The subtype is what makes the bytes meaningful: the same six octets are a
+    MAC under subtype 4 and a hostname fragment under subtype 6. Guessing from
+    the shape of the bytes instead of reading the subtype is how a switch
+    named "AABBCC" turns into a MAC address.
+    """
+    if bind is None:
+        return ""
+    data = _octets(bind)
+    if subtype == mibs.LLDP_CHASSIS_SUBTYPE_MAC and len(data) == 6:
+        return _mac_from_bytes(data)
+    if subtype == mibs.LLDP_CHASSIS_SUBTYPE_NETWORK_ADDRESS and data:
+        # First octet is the IANA address family: 1 IPv4, 2 IPv6.
+        if data[0] == 1 and len(data) == 5:
+            return ".".join(str(b) for b in data[1:])
+        if data[0] == 2 and len(data) == 17:
+            return str(ipaddress.IPv6Address(data[1:]))
+    return _printable(bind)
+
+
+def _decode_lldp_port_id(subtype: int, bind: VarBind | None) -> str:
+    """Decode lldpRemPortId per LldpPortIdSubtype.
+
+    Careful: the port subtype numbering is NOT the chassis numbering —
+    macAddress is 3 here and 4 there.
+    """
+    if bind is None:
+        return ""
+    data = _octets(bind)
+    if subtype == mibs.LLDP_PORT_SUBTYPE_MAC and len(data) == 6:
+        return _mac_from_bytes(data)
+    if subtype == mibs.LLDP_PORT_SUBTYPE_NETWORK_ADDRESS and data:
+        if data[0] == 1 and len(data) == 5:
+            return ".".join(str(b) for b in data[1:])
+    return _printable(bind)
+
+
+def _lldp_capability_names(data: bytes) -> frozenset:
+    """Decode a LldpSystemCapabilitiesMap BITS value.
+
+    BITS number from the high-order bit of the first octet (RFC 2578
+    §7.1.4), so bridge(2) is 0x20 of octet 0, not 0x04.
+    """
+    names = set()
+    for byte_index, byte in enumerate(data):
+        for bit in range(8):
+            if byte & (0x80 >> bit):
+                position = byte_index * 8 + bit
+                names.add(mibs.LLDP_CAP_BIT_NAMES.get(position, f"bit{position}"))
+    return frozenset(names)
 
 
 def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoint]:

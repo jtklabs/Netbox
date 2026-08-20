@@ -71,6 +71,17 @@ def parse(mib_dir: str) -> dict[str, list[str]]:
         # docstring: the parser quietly misreading structure it was never
         # pointed at.
         text = re.sub(r"\bIMPORTS\b.*?;", "", text, flags=re.S)
+        # Strip SEQUENCE bodies too. Their members are type declarations, not
+        # OID assignments, and a member declared as a bare OBJECT IDENTIFIER —
+        # "cdpCacheSysObjectID  OBJECT IDENTIFIER," in CISCO-CDP-MIB — matches
+        # the definition regex, whose lazy (.*?)::= then swallows everything up
+        # to the NEXT real assignment. That both deletes that assignment from
+        # the parse (cdpCacheIfIndex went missing) and records the swallowed
+        # assignment's OID under the sequence member's name (cdpCacheSysObjectID
+        # would have resolved to cdpCacheEntry.1 — a confident wrong answer).
+        # Third bug of this class; see OID-SOURCES.md. SEQUENCE members cannot
+        # nest braces, so the non-greedy [^}]* is safe.
+        text = re.sub(r"::=\s*SEQUENCE\s*\{[^}]*\}", "", text)
         for match in _DEFINITION.finditer(text):
             assignments.setdefault(match.group(1), match.group(3).split())
         for match in _PLAIN.finditer(text):

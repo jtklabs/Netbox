@@ -30,7 +30,7 @@ _HEX_BYTE = re.compile(r"^[0-9A-Fa-f]{2}$")
 # net-snmp's printed type -> the type name pass_persist expects back.
 PASS_TYPES = {
     "STRING": "string",
-    "Hex-STRING": "string",
+    "Hex-STRING": "octet",
     "INTEGER": "integer",
     "Gauge32": "gauge",
     "Counter32": "counter",
@@ -55,22 +55,29 @@ class Varbind:
     def pass_value_bytes(self) -> bytes:
         """Render the value the way pass_persist wants it.
 
-        Hex-STRINGs go back as raw bytes so snmpd re-prints them as
-        Hex-STRING — that is what a real device does for a MAC address, and the
-        scanner's parser needs to face it.
+        Hex-STRINGs go back as type "octet", whose value is space-separated
+        hex TEXT — snmpd.conf(5)'s own words: 'octets are sent as ASCII,
+        space-separated hex strings, e.g. "00 3f dd 00 c6 be"'. snmpd builds
+        a real OCTET STRING from it, so the client still sees Hex-STRING for
+        binary values, exactly as from a real device. They must NOT go back
+        as raw bytes on this line-based protocol: a value byte of 0x0A reads
+        as end-of-line and desyncs the whole stream (every 10.x.y.z address
+        starts with one), and a 0x00 truncates the line — which is how CDP
+        rows silently vanished from the emulated wire until an assertion
+        counted them.
 
-        Embedded newlines are flattened to spaces. This is a hard limit of
-        net-snmp's pass_persist protocol, which is line-based: the value is one
-        line, and a second line would be read as the next command and desync
-        the stream. Real devices *do* return multi-line strings — Cisco's
-        sysDescr is a four-line paragraph — so the emulator cannot cover that
-        case and the recorded-walk tests carry it instead
+        Embedded newlines in TEXT values are flattened to spaces. That is a
+        hard limit of the protocol for the string type: the value is one
+        line, and a second line would be read as the next command. Real
+        devices *do* return multi-line strings — Cisco's sysDescr is a
+        four-line paragraph — so the emulator cannot cover that case and the
+        recorded-walk tests carry it instead
         (test_parsing.py::test_multiline_value_is_joined). The fixture keeps
         the real multi-line text; only what goes over this wire is flattened.
         """
         if self.type == "Hex-STRING":
             parts = [p for p in self.value.replace(":", " ").split() if _HEX_BYTE.match(p)]
-            return bytes(int(p, 16) for p in parts)
+            return " ".join(p.lower() for p in parts).encode()
         if self.type == "Timeticks":
             match = re.match(r"\((\d+)\)", self.value)
             if match:
