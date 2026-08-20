@@ -74,6 +74,13 @@ class DiscoveryPollerTable(NetBoxTable):
 
 
 class HardwareReplacementTable(NetBoxTable):
+    # No edit action: replacements are audit rows, immutable by design, and no
+    # _edit route exists. ActionsColumn defaults to ('edit', 'delete',
+    # 'changelog') and REVERSES each action's URL per row — so with the default
+    # the page renders fine while empty and raises NoReverseMatch the moment
+    # the first real replacement lands, which is exactly how it reached
+    # production unseen.
+    actions = columns.ActionsColumn(actions=('delete', 'changelog'))
     device = tables.Column(linkify=True)
     kind = columns.ChoiceFieldColumn()
     old_serial = tables.Column(verbose_name='Serial removed')
