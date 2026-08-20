@@ -203,7 +203,10 @@ class TestFullScanOverTheWire:
     [
         ("palo-pa3220", "11.1.4-h7"),
         ("fortigate-600e", "v7.2.8,build1639,240110 (GA)"),
-        ("f5-bigip", "17.1.1.3"),
+        # Version-build, joined the way F5 names its own ISOs. This test only
+        # runs where snmpd exists, which is how it stayed on the bare version
+        # while the offline tests moved to version-build with the fixture.
+        ("f5-bigip", "17.1.1.3-0.0.5"),
         ("checkpoint-gaia", "R81.20"),
         ("infoblox-nios", "9.0.4-50212"),
         ("juniper-ex4300", "21.4R3-S4.9"),

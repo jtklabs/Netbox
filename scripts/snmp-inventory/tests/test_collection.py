@@ -706,3 +706,51 @@ class TestF5ReportsItsBuildAsWellAsItsVersion:
         build nobody can explain."""
         facts = collect_fixture("f5-bigip")
         assert "1.3.6.1.4.1.3375.2.1.4.3.0" in facts.vendor_scalars
+
+
+class TestJuniperSrxCluster:
+    """The two SRX field reports: empty jnxBoxSerialNo, node-prefixed strings.
+
+    The fixture encodes an SRX1500 chassis-cluster primary exactly as the
+    fleet reported it — no serial from the box scalar, and "node0 Juniper
+    SRX1500 Internet Router" everywhere a human-readable string appears. The
+    scanner must come out the other side with a clean model and the chassis
+    serial from the jnxContentsTable fallback row.
+    """
+
+    def setup_method(self):
+        self.result = scan("juniper-srx1500-cluster")
+
+    def test_model_has_no_node_prefix(self):
+        device = self.result.primary
+        assert device.model == "SRX1500"
+        assert "node" not in device.model.lower()
+
+    def test_serial_comes_from_the_contents_row(self):
+        assert self.result.primary.serial == "DK2919AF0042"
+
+    def test_manufacturer_is_separate_from_model(self):
+        assert self.result.primary.manufacturer == "Juniper Networks"
+        assert "Juniper" not in self.result.primary.model
+
+    def test_version_from_sysdescr(self):
+        assert self.result.primary.software_version == "21.4R3-S5.4"
+
+
+class TestBluecoatProxySG:
+    """The "nothing but a name" report: SGOS has no ENTITY-MIB at all."""
+
+    def setup_method(self):
+        self.result = scan("bluecoat-sg-s400")
+
+    def test_model_from_sysdescr_words(self):
+        device = self.result.primary
+        assert device.model == "SG-S400"
+        assert device.manufacturer == "Blue Coat"
+
+    def test_serial_and_version_from_sgproxy_scalars(self):
+        assert self.result.primary.serial == "0723160042"
+        assert self.result.primary.software_version == "6.6.5.2"
+
+    def test_platform(self):
+        assert self.result.primary.platform == "SGOS"

@@ -60,6 +60,17 @@ def parse(mib_dir: str) -> dict[str, list[str]]:
         if not os.path.isfile(path) or path.endswith((".py", ".md")):
             continue
         text = re.sub(r"--.*?$", "", open(path, errors="replace").read(), flags=re.M)
+        # Strip IMPORTS sections before matching. When a MIB writes its imports
+        # on one line — "IMPORTS MODULE-IDENTITY, OBJECT-TYPE, enterprises" —
+        # the definition regex reads it as a definition named IMPORTS, and its
+        # lazy (.*?)::= then swallows everything up to the file's FIRST real
+        # assignment, deleting that assignment from the parse. Infoblox's
+        # IB-SMI-MIB is written exactly this way: `infoblox ::= { enterprises
+        # 7779 }` was eaten and the entire 7779 subtree failed to resolve.
+        # Same failure class as the svnVersion incident in the module
+        # docstring: the parser quietly misreading structure it was never
+        # pointed at.
+        text = re.sub(r"\bIMPORTS\b.*?;", "", text, flags=re.S)
         for match in _DEFINITION.finditer(text):
             assignments.setdefault(match.group(1), match.group(3).split())
         for match in _PLAIN.finditer(text):

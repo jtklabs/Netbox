@@ -350,6 +350,11 @@ def f5_bigip() -> list[Varbind]:
     out += [
         s("1.3.6.1.4.1.3375.2.1.4.1.0", "BIG-IP"),
         s("1.3.6.1.4.1.3375.2.1.4.2.0", "17.1.1.3"),
+        # sysProductBuild — the walk previously carried this line as a HAND
+        # EDIT that this generator did not know about, so regenerating the
+        # fixtures silently deleted it and broke the two F5 build tests. The
+        # generator is the source of truth; real captures replace whole files.
+        s("1.3.6.1.4.1.3375.2.1.4.3.0", "0.0.5"),
         s("1.3.6.1.4.1.3375.2.1.3.3.3.0", "f5-chs-01234567"),
         s("1.3.6.1.4.1.3375.2.1.3.5.2.0", "BIG-IP i5800"),
     ]
@@ -498,6 +503,73 @@ def cisco_single_2960() -> list[Varbind]:
     return out
 
 
+def juniper_srx1500_cluster() -> list[Varbind]:
+    """An SRX1500 chassis cluster primary — the two reported failure shapes.
+
+    Field reports from the fleet, encoded here so the fixes stay fixed:
+    jnxBoxSerialNo answers EMPTY (the "no serials" report), and every
+    descriptive string carries the cluster node prefix — "node0 Juniper
+    SRX1500 Internet Router" (the "node number in the model" report). The
+    real serial and the clean model live on the jnxContentsTable chassis row
+    (index 1.1.0.0), which is where the profile's fallback OIDs look.
+    """
+    out = system_group(
+        "Juniper Networks, Inc. srx1500 internet router, kernel JUNOS 21.4R3-S5.4, "
+        "Build date: 2023-09-15 06:12:01 UTC Copyright (c) 1996-2023 Juniper Networks, Inc.",
+        # Product arc under 2636.1.1.1.2; only the enterprise number (2636) is
+        # read, the leaf is immaterial to the scanner by design.
+        "1.3.6.1.4.1.2636.1.1.1.2.134",
+        "dal-srx-01",
+        location="Dallas / Edge",
+    )
+    # Chassis clusters prefix ENTITY strings with the node, and leave the
+    # model and serial columns empty on the chassis row.
+    out += entity(
+        1, "node0 Juniper SRX1500 Internet Router", CLASS_CHASSIS, 0, -1,
+        name="node0 Chassis", model="", serial="",
+        mfg="Juniper Networks", hw="REV 08", sw="21.4R3-S5.4",
+    )
+    out += [
+        s("1.3.6.1.4.1.2636.3.1.2.0", "node0 Juniper SRX1500 Internet Router"),
+        s("1.3.6.1.4.1.2636.3.1.3.0", ""),                       # empty — the report
+        s("1.3.6.1.4.1.2636.3.1.8.1.6.1.1.0.0", "node0 Juniper SRX1500 Internet Router"),
+        s("1.3.6.1.4.1.2636.3.1.8.1.7.1.1.0.0", "DK2919AF0042"),  # jnxContentsSerialNo
+        s("1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0", "SRX1500"),      # jnxContentsModel
+    ]
+    out += interface(1, "ge-0/0/0", 6, 1000, mac="4C:6D:58:11:22:01", alias="untrust")
+    out += interface(2, "ge-0/0/1", 6, 1000, mac="4C:6D:58:11:22:02", alias="trust")
+    out += interface(3, "fxp0", 6, 1000, mac="4C:6D:58:11:22:0F", alias="management")
+    out += interface(4, "reth0", 161, 2000, alias="cluster reth")
+    out += ip_address("10.60.0.40", 24, 3)
+    return out
+
+
+def bluecoat_sg_s400() -> list[Varbind]:
+    """A ProxySG — the "nothing but a name" report.
+
+    sysDescr and sysObjectID are verbatim from a real captured walk (librenms
+    test corpus, tests/snmpsim/sgos.snmprec). ENTITY-MIB is absent on SGOS, so
+    identity comes entirely from the BLUECOAT-SG-PROXY-MIB scalars and the
+    sysDescr words; without the vendor profile the scanner could record
+    nothing beyond the hostname, which is exactly what the fleet saw.
+    """
+    out = system_group(
+        "Blue Coat SG-S400 Series, Version: SGOS 6.6.5.2, Release id: 193348 Proxy Edition",
+        "1.3.6.1.4.1.3417.1.1.37",
+        "dal-proxy-01",
+        location="Dallas / DMZ",
+    )
+    out += [
+        s("1.3.6.1.4.1.3417.2.11.1.2.0", "SGOS"),          # sgProxySoftware
+        s("1.3.6.1.4.1.3417.2.11.1.3.0", "6.6.5.2"),       # sgProxyVersion
+        s("1.3.6.1.4.1.3417.2.11.1.4.0", "0723160042"),    # sgProxySerialNumber
+    ]
+    out += interface(1, "0:0", 6, 1000, mac="00:D0:83:11:22:01", alias="inside")
+    out += interface(2, "0:1", 6, 1000, mac="00:D0:83:11:22:02", alias="outside")
+    out += ip_address("10.70.0.50", 24, 1)
+    return out
+
+
 DEVICES = {
     "cisco-c9300-stack": cisco_c9300_stack,
     "cisco-2960x": cisco_single_2960,
@@ -511,6 +583,8 @@ DEVICES = {
     "infoblox-nios": infoblox_nios,
     "juniper-ex4300": juniper_ex4300,
     "opengear-cm7148": opengear_console,
+    "juniper-srx1500-cluster": juniper_srx1500_cluster,
+    "bluecoat-sg-s400": bluecoat_sg_s400,
 }
 
 

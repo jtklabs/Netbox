@@ -181,10 +181,51 @@ PROFILES: dict[int, VendorProfile] = {
         name="juniper",
         manufacturer="Juniper Networks",
         platform="Junos",
-        serial_oids=("1.3.6.1.4.1.2636.3.1.3.0",),         # jnxBoxSerialNo
-        model_oids=("1.3.6.1.4.1.2636.3.1.2.0",),          # jnxBoxDescr
+        # jnxBoxSerialNo first; SRX (clusters and some branch boxes) leave it
+        # empty and answer on the jnxContentsTable chassis row instead. That
+        # table is indexed {container, L1, L2, L3} (JUNIPER-MIB, jnxContents-
+        # Entry INDEX clause): the chassis is container 1 and its row is
+        # 1.1.0.0 — or 1.0.0.0 where L1 is "zero if unavailable", the MIB's
+        # own wording. Both instances are tried; exact GETs, no walk needed.
+        serial_oids=(
+            "1.3.6.1.4.1.2636.3.1.3.0",              # jnxBoxSerialNo
+            "1.3.6.1.4.1.2636.3.1.8.1.7.1.1.0.0",    # jnxContentsSerialNo, chassis row
+            "1.3.6.1.4.1.2636.3.1.8.1.7.1.0.0.0",
+        ),
+        # jnxContentsModel is a dedicated model column ("SRX1500"), unlike
+        # jnxBoxDescr, which is a sentence ("node0 Juniper SRX1500 Internet
+        # Router" on clusters) — prefer the field, keep the sentence as the
+        # last resort and let the model tidier strip the node/vendor noise.
+        model_oids=(
+            "1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0",   # jnxContentsModel, chassis row
+            "1.3.6.1.4.1.2636.3.1.8.1.14.1.0.0.0",
+            "1.3.6.1.4.1.2636.3.1.2.0",              # jnxBoxDescr
+        ),
         # "Juniper Networks, Inc. ex4300-48t ... JUNOS 21.4R3-S4.9 ..."
         version_patterns=(r"JUNOS\s+([\w.\-]+)", r"[Kk]ernel JUNOS\s+([\w.\-]+)"),
+    ),
+    # Blue Coat / Symantec ProxySG. ENTITY-MIB is not implemented on SGOS, so
+    # everything comes from BLUECOAT-SG-PROXY-MIB scalars plus sysDescr. The
+    # sysDescr wording is wire-verified from a captured walk (librenms test
+    # corpus, tests/snmpsim/sgos.snmprec):
+    #   "Blue Coat SG-S400 Series, Version: SGOS 6.6.5.2, Release id: 193348
+    #    Proxy Edition"
+    # The MIB has no model object at all — the products subtree under
+    # 3417.1.1 encodes the model in sysObjectID, which is exactly the lookup-
+    # table game this scanner refuses to play — so the model comes from the
+    # device's own sysDescr words.
+    3417: VendorProfile(
+        name="bluecoat",
+        manufacturer="Blue Coat",
+        platform="SGOS",
+        version_oids=("1.3.6.1.4.1.3417.2.11.1.3.0",),     # sgProxyVersion
+        serial_oids=("1.3.6.1.4.1.3417.2.11.1.4.0",),      # sgProxySerialNumber
+        version_patterns=(r"SGOS\s+([0-9][\w.]*)",),
+        model_patterns=(
+            r"Blue\s?Coat\s+(SG[\w-]+)",
+            r"Symantec\s+(SG[\w-]+)",
+        ),
+        entity_mib_sparse=True,
     ),
     # Opengear publishes no version scalar we can rely on across their console
     # server range, so this profile is sysDescr-only by design.

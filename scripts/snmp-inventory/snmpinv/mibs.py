@@ -197,6 +197,7 @@ ENTERPRISE_MANUFACTURERS = {
     2620: "Check Point",
     2636: "Juniper Networks",
     3224: "Netscreen",
+    3417: "Blue Coat",
     3375: "F5 Networks",
     4526: "Netgear",
     4874: "Adtran",

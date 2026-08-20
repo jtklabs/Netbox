@@ -128,6 +128,13 @@ would be inventing a switch that is not in the rack.
 | Aruba | `wlsxSysExtHostname` | 1.3.6.1.4.1.14823.2.2.1.2.1.2.0 | WLSX-SYSTEMEXT-MIB |
 | Aruba | `wlsxSysExtModelName` | 1.3.6.1.4.1.14823.2.2.1.2.1.3.0 | WLSX-SYSTEMEXT-MIB |
 | Aruba | `wlsxSysExtLicenseSerialNumber` | 1.3.6.1.4.1.14823.2.2.1.2.1.11.0 | WLSX-SYSTEMEXT-MIB |
+| F5 | `sysProductBuild` | 1.3.6.1.4.1.3375.2.1.4.3.0 | F5-BIGIP-SYSTEM-MIB |
+| Juniper | `jnxContentsDescr` | 1.3.6.1.4.1.2636.3.1.8.1.6 | JUNIPER-MIB (mib-jnx-chassis) |
+| Juniper | `jnxContentsSerialNo` | 1.3.6.1.4.1.2636.3.1.8.1.7 | JUNIPER-MIB (mib-jnx-chassis) |
+| Juniper | `jnxContentsModel` | 1.3.6.1.4.1.2636.3.1.8.1.14 | JUNIPER-MIB (mib-jnx-chassis) |
+| Blue Coat | `sgProxySoftware` | 1.3.6.1.4.1.3417.2.11.1.2.0 | BLUECOAT-SG-PROXY-MIB |
+| Blue Coat | `sgProxyVersion` | 1.3.6.1.4.1.3417.2.11.1.3.0 | BLUECOAT-SG-PROXY-MIB |
+| Blue Coat | `sgProxySerialNumber` | 1.3.6.1.4.1.3417.2.11.1.4.0 | BLUECOAT-SG-PROXY-MIB |
 
 Infoblox chain, since it is several hops:
 `infoblox { enterprises 7779 }` → `ibSNMP { infoblox 3 }` →
@@ -167,3 +174,54 @@ lookup table is exactly the behaviour that produced device types like
 
 `entPhysicalMfgName` is preferred over the enterprise map whenever the device
 supplies it.
+
+## Juniper jnxContents chassis-row instances
+
+`jnxContentsTable` is indexed `{ jnxContentsContainerIndex, L1, L2, L3 }`
+(JUNIPER-MIB, `jnxContentsEntry` INDEX clause). The chassis is container 1;
+its row is `1.1.0.0`, or `1.0.0.0` on platforms where L1 is "zero if
+unavailable or inapplicable" — the MIB's own wording for the L-indexes. The
+profile GETs both instances of `jnxContentsSerialNo` and `jnxContentsModel`
+as fallbacks for SRX, which (clustered and some branch boxes) answer an empty
+`jnxBoxSerialNo`. Fetch used:
+
+```bash
+mkdir -p ~/mibs/juniper && cd ~/mibs/juniper
+curl -fsSLO https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/juniper/mib-jnx-smi.txt
+curl -fsSLO https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/juniper/mib-jnx-chassis.txt
+./resolve_oid.py ~/mibs/juniper jnxContentsSerialNo jnxContentsModel
+```
+
+## Blue Coat chain
+
+`blueCoat { enterprises 3417 }` → `blueCoatMgmt { blueCoat 2 }` →
+`bluecoatSGProxyMIB { blueCoatMgmt 11 }` → `sgProxyConfig { … 1 }`, objects
+2/3/4. The MIB defines **no model object** — the products subtree under
+3417.1.1 encodes the model in sysObjectID, which is the lookup-table game this
+scanner refuses — so the model comes from sysDescr, whose wording is
+wire-verified from a real captured walk (librenms test corpus,
+`tests/snmpsim/sgos.snmprec`):
+
+```
+sysDescr    = Blue Coat SG-S400 Series, Version: SGOS 6.6.5.2, Release id: 193348 Proxy Edition
+sysObjectID = 1.3.6.1.4.1.3417.1.1.37
+```
+
+```bash
+mkdir -p ~/mibs/bluecoat && cd ~/mibs/bluecoat
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/bluecoat/BLUECOAT-MIB
+curl -fsSLO https://raw.githubusercontent.com/librenms/librenms/master/mibs/bluecoat/BLUECOAT-SG-PROXY-MIB
+./resolve_oid.py ~/mibs/bluecoat sgProxyVersion sgProxySerialNumber
+```
+
+## 2026-08-20 re-verification, and a resolver bug it found
+
+Every OID above was re-resolved from freshly fetched MIBs on 2026-08-20 — all
+ten platforms match what ships. The sweep found one bug in `resolve_oid.py`
+itself, the same class as the svnVersion incident: a MIB that writes its
+IMPORTS on one line ("IMPORTS MODULE-IDENTITY, OBJECT-TYPE, enterprises")
+matched the definition regex as a definition named IMPORTS, whose lazy
+`(.*?)::=` then swallowed the file's first real assignment. Infoblox's
+IB-SMI-MIB is written exactly this way, so `infoblox { enterprises 7779 }` was
+eaten and the whole subtree failed to resolve. The parser now strips
+`IMPORTS … ;` sections before matching.

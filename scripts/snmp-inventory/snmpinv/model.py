@@ -183,11 +183,47 @@ def _tidy_manufacturer(raw: str) -> str:
         ("checkpoint", "Check Point"),
         ("infoblox", "Infoblox"),
         ("f5 ", "F5 Networks"),
+        ("blue coat", "Blue Coat"),
+        ("bluecoat", "Blue Coat"),
         ("opengear", "Opengear"),
     ):
         if needle in lowered:
             return canonical
     return cleaned
+
+
+# SRX chassis clusters prefix reported strings with their cluster node —
+# "node0 Juniper SRX1500 Internet Router" — and creating a device type per
+# node number is exactly the model-mangling this scanner exists to end.
+_MODEL_NODE_PREFIX = re.compile(r"^node\d+[\s:]+", re.IGNORECASE)
+# A model field is not the place for the vendor's name: the manufacturer is a
+# separate NetBox object (the Arista fixture asserts "Arista" never appears in
+# the model). Only KNOWN vendor names are stripped, only at the start, and only
+# when followed by whitespace — so "Aruba7010", which contains the vendor name
+# with no space, survives untouched.
+_MODEL_VENDOR_PREFIX = re.compile(
+    r"^(?:juniper(?:\s+networks)?(?:,?\s+inc\.?)?"
+    r"|cisco(?:\s+systems)?(?:,?\s+inc\.?)?"
+    r"|blue\s?coat(?:\s+systems)?(?:,?\s+inc\.?)?"
+    r"|arista(?:\s+networks)?"
+    r")\s+",
+    re.IGNORECASE,
+)
+# Marketing role suffixes appear when the "model" came from a description
+# scalar (jnxBoxDescr is a sentence, not a field). Fixed list, matched only at
+# the end — no real part number ends in these words.
+_MODEL_ROLE_SUFFIX = re.compile(
+    r"\s+(?:internet router|services gateway|ethernet switch|security appliance)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _tidy_model(raw: str) -> str:
+    cleaned = raw.strip()
+    cleaned = _MODEL_NODE_PREFIX.sub("", cleaned)
+    cleaned = _MODEL_VENDOR_PREFIX.sub("", cleaned)
+    cleaned = _MODEL_ROLE_SUFFIX.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _model_for(facts: DeviceFacts, entity: Entity | None) -> str:
@@ -199,9 +235,9 @@ def _model_for(facts: DeviceFacts, entity: Entity | None) -> str:
     later has to un-learn.
     """
     if entity is not None and entity.model:
-        return entity.model.strip()
+        return _tidy_model(entity.model)
     if facts.vendor_model:
-        return facts.vendor_model.strip()
+        return _tidy_model(facts.vendor_model)
     return ""
 
 
