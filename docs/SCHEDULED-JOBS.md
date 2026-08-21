@@ -87,7 +87,9 @@ jobs.py`) and schedules itself: when `CISCO_CLIENT_ID` and
 *system job* and the worker enqueues it at startup and re-enqueues after every
 run — the same mechanism NetBox uses for its own housekeeping. The cadence is
 `CISCO_SYNC_INTERVAL_MINUTES` (default 10080, weekly; 0 turns the schedule off
-and leaves the Sync button). No shell, no manual enqueue.
+and leaves the button). To run it by hand at any time: **Lifecycle → Model
+Lifecycles → Sync from Cisco** (top right; disabled, with the reason, until
+credentials are configured). No shell, no manual enqueue.
 
 Credentials live in `prod.env` on the data disk, or in Docker secret files
 `/run/secrets/cisco_client_id` / `cisco_client_secret` (read first). Check a

@@ -33,6 +33,14 @@ from netbox_refresh.models import (
 )
 
 
+def _cisco_configured():
+    """Are both halves of the Cisco Support API credential pair present?"""
+    from netbox_refresh.sync import get_credentials
+
+    client_id, client_secret = get_credentials()
+    return bool(client_id and client_secret)
+
+
 @register_model_view(ModelLifecycle, name='list')
 class ModelLifecycleListView(ObjectListView):
     queryset = ModelLifecycle.objects.prefetch_related(
@@ -41,6 +49,11 @@ class ModelLifecycleListView(ObjectListView):
     table = tables.ModelLifecycleTable
     filterset = filtersets.ModelLifecycleFilterSet
     filterset_form = forms.ModelLifecycleFilterForm
+    # The generic list plus a "Sync from Cisco" button — see the template.
+    template_name = 'netbox_refresh/modellifecycle_list.html'
+
+    def get_extra_context(self, request):
+        return {'cisco_configured': _cisco_configured()}
 
 
 @register_model_view(ModelLifecycle)
@@ -818,13 +831,23 @@ class CiscoSyncView(PermissionRequiredMixin, View):
     def post(self, request):
         from netbox_refresh.jobs import CiscoEoxSyncJob
 
+        if not _cisco_configured():
+            # Say so here rather than enqueueing a job whose only possible
+            # outcome is an error entry under Jobs a minute later.
+            messages.error(
+                request,
+                'Cisco Support API credentials are not configured '
+                '(CISCO_CLIENT_ID / CISCO_CLIENT_SECRET), so the sync cannot run.',
+            )
+            return redirect('plugins:netbox_refresh:modellifecycle_list')
         try:
-            CiscoEoxSyncJob.enqueue(user=request.user)
+            job = CiscoEoxSyncJob.enqueue(user=request.user)
         except Exception as exc:  # noqa: BLE001 - surface scheduling failures in the UI
             messages.error(request, 'Could not start the Cisco EoX sync: %s' % exc)
         else:
             messages.success(
                 request,
-                'Cisco EoX sync started. Progress is under Operations › Jobs.',
+                'Cisco EoX sync started (job #%s). Progress is under Operations › Jobs.'
+                % job.pk,
             )
         return redirect('plugins:netbox_refresh:modellifecycle_list')
