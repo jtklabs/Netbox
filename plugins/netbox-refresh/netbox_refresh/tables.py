@@ -60,11 +60,11 @@ class ModelLifecycleTable(NetBoxTable):
             'end_of_service_attach', 'end_of_service_contract_renewal', 'end_of_support',
             'replacement', 'replacement_cost', 'currency', 'installed_count',
             'extended_cost', 'cost_updated', 'bulletin_number', 'source', 'last_synced',
-            'description',
+            'last_checked', 'description',
         )
         default_columns = (
             'assigned_object', 'part_number', 'status', 'end_of_sale',
-            'end_of_support', 'effective_end_of_life',
+            'end_of_support', 'effective_end_of_life', 'last_checked',
             'replacement', 'replacement_cost', 'installed_count', 'extended_cost',
         )
 

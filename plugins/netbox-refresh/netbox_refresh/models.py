@@ -52,6 +52,20 @@ __all__ = (
 # type. That matches how vendors publish it (one bulletin per PID).
 LIFECYCLE_ASSIGNMENT_MODELS = Q(app_label='dcim', model__in=('devicetype', 'moduletype'))
 
+# Every vendor-published lifecycle date on ModelLifecycle, in bulletin order.
+# The status logic, the forms and the Cisco sync all iterate this rather than
+# each keeping its own list, so a date added here reaches all three.
+LIFECYCLE_DATE_FIELDS = (
+    'announcement_date',
+    'end_of_sale',
+    'end_of_sw_maintenance',
+    'end_of_security_support',
+    'end_of_routine_failure_analysis',
+    'end_of_service_attach',
+    'end_of_service_contract_renewal',
+    'end_of_support',
+)
+
 # The annotation deliberately does not share the property's name. Django
 # assigns an annotation onto each instance it loads, and `effective_end_of_life`
 # is a read-only property, so a same-named annotation raises "property has no
@@ -142,6 +156,18 @@ class ModelLifecycle(PrimaryModel):
         default=LifecycleSourceChoices.SOURCE_MANUAL,
     )
     last_synced = models.DateTimeField(blank=True, null=True)
+    # When somebody last went looking for this model's end-of-life dates —
+    # by hand on the vendor's site, or the Cisco sync. The point is the
+    # empty-dates case: a record that was checked and found nothing is
+    # "EoL not announced", which is an answer; one that was never checked is
+    # "unknown", which is a to-do. Without this date the two are
+    # indistinguishable and the to-do list never shrinks.
+    last_checked = models.DateField(
+        blank=True, null=True, verbose_name='EoL last checked',
+        help_text="When the vendor was last checked for this model's "
+                  'end-of-life dates. Set it even when nothing was found — '
+                  'especially then.',
+    )
 
     clone_fields = ('currency', 'source')
 
@@ -246,14 +272,34 @@ class ModelLifecycle(PrimaryModel):
         return min(published) if published else None
 
     @property
+    def has_any_date(self):
+        """Has the vendor published anything at all for this model?"""
+        return any(getattr(self, field) for field in LIFECYCLE_DATE_FIELDS)
+
+    @property
+    def checked_on(self):
+        """The most recent date anyone looked for EoL data on this model.
+
+        A Cisco sync counts as a check even on records created before
+        last_checked existed, so older synced rows read as checked too.
+        """
+        synced = self.last_synced.date() if self.last_synced else None
+        candidates = [d for d in (self.last_checked, synced) if d]
+        return max(candidates) if candidates else None
+
+    @property
     def status(self):
         today = date.today()
         if self.effective_end_of_life and self.effective_end_of_life <= today:
             return LifecycleStatusChoices.STATUS_END_OF_SUPPORT
         if self.end_of_sale and self.end_of_sale <= today:
             return LifecycleStatusChoices.STATUS_END_OF_SALE
-        if self.end_of_sale or self.end_of_support or self.announcement_date:
+        if self.has_any_date:
             return LifecycleStatusChoices.STATUS_EOS_ANNOUNCED
+        # No dates. Whether that is an answer or a gap depends on whether
+        # anyone has looked.
+        if self.checked_on:
+            return LifecycleStatusChoices.STATUS_NOT_ANNOUNCED
         return LifecycleStatusChoices.STATUS_UNKNOWN
 
     def get_status_display(self):

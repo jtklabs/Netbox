@@ -46,7 +46,7 @@ class ModelLifecycleSerializer(NetBoxModelSerializer):
             'replacement_device_type', 'replacement_module_type', 'replacement',
             'replacement_notes', 'replacement_cost', 'currency', 'cost_updated',
             'installed_count', 'extended_cost',
-            'source', 'last_synced',
+            'source', 'last_synced', 'last_checked',
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )
         brief_fields = ('url', 'id', 'display', 'assigned_object', 'end_of_support', 'status')

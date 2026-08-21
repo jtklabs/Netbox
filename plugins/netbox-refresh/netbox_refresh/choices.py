@@ -14,16 +14,23 @@ class LifecycleSourceChoices(ChoiceSet):
 
 
 class LifecycleStatusChoices(ChoiceSet):
-    """Derived status — computed from the dates, never stored."""
+    """Derived status — computed from the dates, never stored.
 
-    STATUS_CURRENT = 'current'
+    Two states look alike on the dates alone and mean opposite things:
+    'unknown' is a model nobody has looked into, 'not-announced' is one that
+    WAS checked (last_checked, or a Cisco sync) and the vendor had nothing to
+    announce. The first is a to-do; the second is good news and a date to
+    re-check from.
+    """
+
+    STATUS_NOT_ANNOUNCED = 'not-announced'
     STATUS_EOS_ANNOUNCED = 'eos-announced'
     STATUS_END_OF_SALE = 'end-of-sale'
     STATUS_END_OF_SUPPORT = 'end-of-support'
     STATUS_UNKNOWN = 'unknown'
 
     CHOICES = [
-        (STATUS_CURRENT, 'Current', 'green'),
+        (STATUS_NOT_ANNOUNCED, 'EoL not announced', 'green'),
         (STATUS_EOS_ANNOUNCED, 'EoL announced', 'cyan'),
         (STATUS_END_OF_SALE, 'Past end of sale', 'orange'),
         (STATUS_END_OF_SUPPORT, 'Past end of support', 'red'),

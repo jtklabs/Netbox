@@ -62,6 +62,13 @@
             <tr><th>Data source</th>
               <td>{% badge object.get_source_display bg_color=object.get_source_color %}</td></tr>
             <tr><th>Last synced</th><td>{{ object.last_synced|placeholder }}</td></tr>
+            <tr><th>EoL last checked</th>
+              <td>{{ object.last_checked|placeholder }}
+                {% if not object.has_any_date and object.checked_on %}
+                  <span class="text-muted">&mdash; nothing announced as of this date</span>
+                {% elif not object.has_any_date %}
+                  <span class="text-warning">&mdash; never checked</span>
+                {% endif %}</td></tr>
             <tr><th>Bulletin</th>
               <td>{% if object.bulletin_url %}<a href="{{ object.bulletin_url }}">{{ object.bulletin_number|default:'Product bulletin' }}</a>{% else %}{{ object.bulletin_number|placeholder }}{% endif %}</td></tr>
             <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>

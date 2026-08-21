@@ -14,20 +14,12 @@ from django.utils import timezone
 
 from netbox_refresh.choices import LifecycleSourceChoices
 from netbox_refresh.cisco import BATCH_SIZE, CiscoEoxClient, CiscoEoxError
-from netbox_refresh.models import ModelLifecycle
+from netbox_refresh.models import LIFECYCLE_DATE_FIELDS, ModelLifecycle
 
 logger = logging.getLogger('netbox.plugins.netbox_refresh')
 
-DATE_FIELDS = (
-    'announcement_date',
-    'end_of_sale',
-    'end_of_sw_maintenance',
-    'end_of_security_support',
-    'end_of_routine_failure_analysis',
-    'end_of_service_attach',
-    'end_of_service_contract_renewal',
-    'end_of_support',
-)
+# One list for the status logic, the forms and the sync — see models.py.
+DATE_FIELDS = LIFECYCLE_DATE_FIELDS
 
 
 def get_settings():
@@ -99,7 +91,16 @@ def sync(dry_run=False, force=False, limit=None, logger_fn=None):
         for pid in batch:
             data = results.get(pid)
             if data is None:
+                # Cisco answered "no EoL data" — which for current hardware
+                # means nothing is announced. That is a finding, not a miss:
+                # record that the model was checked today so it reads as
+                # "EoL not announced" rather than "unknown", and so the
+                # check date is there to re-check from.
                 summary['no_data'] += 1
+                for obj in by_pid[pid]:
+                    outcome = _record_checked(obj, dry_run=dry_run, force=force)
+                    if outcome != 'skipped_manual':
+                        summary['not_announced'] = summary.get('not_announced', 0) + 1
                 continue
             for obj in by_pid[pid]:
                 outcome = _apply(obj, data, dry_run=dry_run, force=force)
@@ -109,6 +110,34 @@ def sync(dry_run=False, force=False, limit=None, logger_fn=None):
                         summary['replacements_linked'] += 1
 
     return summary
+
+
+def _record_checked(obj, dry_run=False, force=False):
+    """Stamp a model as checked today when Cisco had nothing to announce.
+
+    Dates already on the record are left alone: a no-data answer for a
+    model that previously had dates is a feed oddity to look at, not a
+    reason to erase what the vendor once published. Manual records are
+    respected exactly as _apply respects them.
+    """
+    content_type = ContentType.objects.get_for_model(obj)
+    record = ModelLifecycle.objects.filter(
+        assigned_object_type=content_type, assigned_object_id=obj.pk
+    ).first()
+    if record and record.source == LifecycleSourceChoices.SOURCE_MANUAL and not force:
+        return 'skipped_manual'
+    created = record is None
+    if created:
+        record = ModelLifecycle(
+            assigned_object_type=content_type, assigned_object_id=obj.pk,
+            source=LifecycleSourceChoices.SOURCE_CISCO,
+        )
+    record.last_synced = timezone.now()
+    record.last_checked = timezone.localdate()
+    if not dry_run:
+        record.full_clean(exclude=['assigned_object_type', 'assigned_object_id'])
+        record.save()
+    return 'created' if created else 'updated'
 
 
 def _apply(obj, data, dry_run=False, force=False):
@@ -130,6 +159,7 @@ def _apply(obj, data, dry_run=False, force=False):
     record.bulletin_url = data.get('bulletin_url') or ''
     record.source = LifecycleSourceChoices.SOURCE_CISCO
     record.last_synced = timezone.now()
+    record.last_checked = timezone.localdate()
 
     replacement = _resolve_replacement(obj, data.get('replacement_pid'))
     if replacement is not None:

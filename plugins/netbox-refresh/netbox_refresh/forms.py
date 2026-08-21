@@ -30,9 +30,11 @@ from netbox_refresh.choices import (
     ChecksumTypeChoices,
     ComplianceStatusChoices,
     LifecycleSourceChoices,
+    LifecycleStatusChoices,
     SoftwareSourceChoices,
 )
 from netbox_refresh.models import (
+    LIFECYCLE_DATE_FIELDS,
     DeviceSoftware,
     ModelLifecycle,
     ReplacementPrice,
@@ -63,16 +65,8 @@ __all__ = (
     'ComplianceReportForm',
 )
 
-DATE_FIELDS = (
-    'announcement_date',
-    'end_of_sale',
-    'end_of_sw_maintenance',
-    'end_of_security_support',
-    'end_of_routine_failure_analysis',
-    'end_of_service_attach',
-    'end_of_service_contract_renewal',
-    'end_of_support',
-)
+# One list for the status logic, the forms and the sync — see models.py.
+DATE_FIELDS = LIFECYCLE_DATE_FIELDS
 
 
 class ModelLifecycleForm(NetBoxModelForm):
@@ -99,7 +93,7 @@ class ModelLifecycleForm(NetBoxModelForm):
             ),
             name='Hardware model',
         ),
-        FieldSet(*DATE_FIELDS, name='Lifecycle dates'),
+        FieldSet(*DATE_FIELDS, 'last_checked', name='Lifecycle dates'),
         FieldSet(
             TabbedGroups(
                 FieldSet('replacement_device_type', name='Device Type'),
@@ -116,6 +110,7 @@ class ModelLifecycleForm(NetBoxModelForm):
     class Meta:
         model = ModelLifecycle
         fields = DATE_FIELDS + (
+            'last_checked',
             'replacement_device_type', 'replacement_module_type', 'replacement_notes',
             'replacement_cost', 'currency', 'cost_updated',
             'bulletin_number', 'bulletin_url', 'source',
@@ -124,6 +119,7 @@ class ModelLifecycleForm(NetBoxModelForm):
         widgets = dict(
             {field: DatePicker() for field in DATE_FIELDS},
             cost_updated=DatePicker(),
+            last_checked=DatePicker(),
         )
 
     def __init__(self, *args, **kwargs):
@@ -168,6 +164,16 @@ class ModelLifecycleFilterForm(NetBoxModelFilterSetForm):
         required=False, widget=DatePicker(), label='End of sale before',
     )
     source = forms.MultipleChoiceField(choices=LifecycleSourceChoices, required=False)
+    status = forms.MultipleChoiceField(
+        choices=LifecycleStatusChoices, required=False,
+        help_text='Derived from the dates and the last-checked date',
+    )
+    last_checked__gte = forms.DateField(
+        required=False, widget=DatePicker(), label='EoL checked after',
+    )
+    last_checked__lte = forms.DateField(
+        required=False, widget=DatePicker(), label='EoL checked before',
+    )
     has_replacement = forms.NullBooleanField(required=False)
     has_cost = forms.NullBooleanField(required=False)
     tag = TagFilterField(model)
@@ -225,10 +231,12 @@ class ModelLifecycleImportForm(NetBoxModelImportForm):
         for name in DATE_FIELDS
     })
     cost_updated = forms.DateField(required=False, input_formats=CSV_DATE_INPUT_FORMATS)
+    last_checked = forms.DateField(required=False, input_formats=CSV_DATE_INPUT_FORMATS)
 
     class Meta:
         model = ModelLifecycle
         fields = ('device_type', 'module_type') + DATE_FIELDS + (
+            'last_checked',
             'replacement_device_type', 'replacement_module_type', 'replacement_notes',
             'replacement_cost', 'currency', 'cost_updated',
             'bulletin_number', 'bulletin_url', 'source', 'description', 'comments', 'tags',
@@ -271,6 +279,11 @@ class ModelLifecycleBulkEditForm(NetBoxModelBulkEditForm):
     model = ModelLifecycle
     end_of_sale = forms.DateField(required=False, widget=DatePicker())
     end_of_support = forms.DateField(required=False, widget=DatePicker())
+    # Bulk on purpose: "I checked these thirty Juniper models this morning and
+    # none has an announcement" is one edit, not thirty.
+    last_checked = forms.DateField(
+        required=False, widget=DatePicker(), label='EoL last checked',
+    )
     replacement_cost = forms.DecimalField(required=False, max_digits=12, decimal_places=2)
     currency = forms.CharField(required=False, max_length=3)
     cost_updated = forms.DateField(required=False, widget=DatePicker())

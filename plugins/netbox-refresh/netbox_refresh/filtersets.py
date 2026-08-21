@@ -21,9 +21,13 @@ from netbox.filtersets import NetBoxModelFilterSet
 from netbox_refresh.choices import (
     ChecksumTypeChoices,
     LifecycleSourceChoices,
+    LifecycleStatusChoices,
     SoftwareSourceChoices,
 )
 from netbox_refresh.models import (
+    EFFECTIVE_EOL_ALIAS,
+    LIFECYCLE_DATE_FIELDS,
+    effective_end_of_life_expression,
     DeviceSoftware,
     ModelLifecycle,
     ReplacementPrice,
@@ -61,6 +65,9 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
     has_cost = django_filters.BooleanFilter(
         method='filter_has_cost', label='Has a replacement cost',
     )
+    status = django_filters.MultipleChoiceFilter(
+        choices=LifecycleStatusChoices, method='filter_status', label='Status',
+    )
 
     class Meta:
         model = ModelLifecycle
@@ -68,6 +75,7 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
         # gte/lte lookups (end_of_support__gte=..., end_of_support__lte=...).
         fields = {
             'id': ['exact'],
+            'last_checked': ['exact', 'gte', 'lte'],
             'announcement_date': ['exact', 'gte', 'lte'],
             'end_of_sale': ['exact', 'gte', 'lte'],
             'end_of_sw_maintenance': ['exact', 'gte', 'lte'],
@@ -115,6 +123,45 @@ class ModelLifecycleFilterSet(NetBoxModelFilterSet):
         if value:
             return queryset.filter(replacement_cost__isnull=False)
         return queryset.filter(replacement_cost__isnull=True)
+
+    def filter_status(self, queryset, name, value):
+        """The SQL form of ModelLifecycle.status, so the list can be cut by it.
+
+        Mirrors the property's precedence exactly — past end of life, then
+        past end of sale, then anything announced, then checked-but-nothing,
+        then never checked. Keep the two in step: a status that filters one
+        way and renders another is worse than no filter.
+        """
+        if not value:
+            return queryset
+        today = timezone.localdate()
+        queryset = queryset.annotate(
+            **{EFFECTIVE_EOL_ALIAS: effective_end_of_life_expression()}
+        )
+        # Every negation below runs over nullable columns, and SQL's
+        # NOT (NULL <= today) is NULL — which drops the row — rather than
+        # true. Spelling out IS NOT NULL inside each positive term makes its
+        # negation read "null or in the future", which is what is meant.
+        past_eol = (Q(**{'%s__isnull' % EFFECTIVE_EOL_ALIAS: False})
+                    & Q(**{'%s__lte' % EFFECTIVE_EOL_ALIAS: today}))
+        past_eos = ~past_eol & Q(end_of_sale__isnull=False) & Q(end_of_sale__lte=today)
+        any_date = Q()
+        for field_name in LIFECYCLE_DATE_FIELDS:
+            any_date |= Q(**{'%s__isnull' % field_name: False})
+        announced = ~past_eol & ~past_eos & any_date
+        checked = Q(last_checked__isnull=False) | Q(last_synced__isnull=False)
+        by_status = {
+            LifecycleStatusChoices.STATUS_END_OF_SUPPORT: past_eol,
+            LifecycleStatusChoices.STATUS_END_OF_SALE: past_eos,
+            LifecycleStatusChoices.STATUS_EOS_ANNOUNCED: announced,
+            LifecycleStatusChoices.STATUS_NOT_ANNOUNCED: ~any_date & checked,
+            LifecycleStatusChoices.STATUS_UNKNOWN: ~any_date & ~checked,
+        }
+        query = Q()
+        for status in value:
+            if status in by_status:
+                query |= by_status[status]
+        return queryset.filter(query)
 
 
 class ReplacementPriceFilterSet(NetBoxModelFilterSet):
