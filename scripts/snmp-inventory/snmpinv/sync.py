@@ -219,7 +219,7 @@ class Syncer:
                        tenant_id: int | None = None,
                        scanned_address: str = "") -> dict | None:
         manufacturer = self._ensure_manufacturer(record.manufacturer)
-        device_type = self._ensure_device_type(manufacturer, record.model)
+        device_type = self._ensure_device_type(manufacturer, record.model, record.part_number)
         role = self._ensure_role(
             self.options.access_point_role if record.is_access_point else self.options.device_role
         )
@@ -609,12 +609,18 @@ class Syncer:
             label=f"manufacturer {name}",
         )
 
-    def _ensure_device_type(self, manufacturer: dict | None, model: str) -> dict | None:
+    def _ensure_device_type(self, manufacturer: dict | None, model: str,
+                            part_number: str = "") -> dict | None:
         """Create the device type exactly as the device named its model.
 
         The model string is used verbatim. Rewriting it — stripping a prefix,
         title-casing it, gluing the manufacturer on — is how you end up with
         `aristaDCS7050SX272Q` instead of `DCS-7050SX-72Q`.
+
+        part_number is the vendor's own orderable identifier when the device
+        publishes one apart from the name (Juniper's FRU model name). It is
+        written on create and filled in on an existing type that has none;
+        a part number somebody typed by hand is never overwritten.
         """
         if not model or manufacturer is None:
             return None
@@ -622,12 +628,17 @@ class Syncer:
             "/dcim/device-types/", {"manufacturer_id": manufacturer["id"], "model": model}
         )
         if existing is not None:
+            if part_number and not (existing.get("part_number") or "").strip():
+                updated = self.netbox.update(
+                    "/dcim/device-types/", existing["id"], {"part_number": part_number},
+                    label=f"device type {model} part number",
+                )
+                return updated or existing
             return existing
-        return self.netbox.create(
-            "/dcim/device-types/",
-            {"manufacturer": manufacturer["id"], "model": model, "slug": slugify(model)},
-            label=f"device type {model}",
-        )
+        payload = {"manufacturer": manufacturer["id"], "model": model, "slug": slugify(model)}
+        if part_number:
+            payload["part_number"] = part_number
+        return self.netbox.create("/dcim/device-types/", payload, label=f"device type {model}")
 
     def _ensure_module_type(self, manufacturer: dict | None, model: str) -> dict | None:
         if not model or manufacturer is None:

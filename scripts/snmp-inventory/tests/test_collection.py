@@ -224,6 +224,7 @@ class TestApplianceVendors:
     def test_juniper(self):
         device = scan("juniper-ex4300").primary
         assert device.model == "EX4300-48T"
+        assert device.part_number == "EX4300-48T"
         assert device.serial == "PE3714AF0123"
         assert device.software_version == "21.4R3-S4.9"
         assert device.platform == "Junos"
@@ -777,6 +778,14 @@ class TestJuniperSrxCluster:
     def test_model_has_no_node_prefix(self):
         device = self.result.primary
         assert device.model == "SRX1500"
+
+    def test_the_fru_model_name_goes_to_part_number_not_the_model(self):
+        """jnxContentsModel is Juniper's orderable identifier — a raw-looking
+        string the fleet first saw land in the model field. It belongs in
+        part_number; the model is jnxBoxDescr reduced to the product name."""
+        device = self.result.primary
+        assert device.part_number == "SRX1500-SYS-JB"
+        assert device.model == "SRX1500"
         assert "node" not in device.model.lower()
 
     def test_serial_comes_from_the_contents_row(self):
@@ -886,3 +895,25 @@ class TestNeighborCollection:
 
 def n_caps(neighbor):
     return set(neighbor.capabilities)
+
+
+class TestJuniperBoxDescrReduction:
+    """jnxBoxDescr is a sentence; the model is the product token inside it.
+
+    Equivalent to the fleet's old `Juniper\\s+(.*?)\\s+Internet` regex, but
+    also covering the role suffixes that regex never matched.
+    """
+
+    def reduce(self, text):
+        from snmpinv.model import _tidy_model
+        return _tidy_model(text)
+
+    def test_the_cases_the_old_regex_handled(self):
+        assert self.reduce("Juniper SRX1500 Internet Router") == "SRX1500"
+        assert self.reduce("node0 Juniper SRX1500 Internet Router") == "SRX1500"
+
+    def test_the_cases_it_did_not(self):
+        assert self.reduce("Juniper EX4300-48T Ethernet Switch") == "EX4300-48T"
+        assert self.reduce("Juniper SRX345 Services Gateway") == "SRX345"
+        assert self.reduce("Juniper MX480 Internet Backbone Router") == "MX480"
+        assert self.reduce("Juniper Networks, Inc. srx1500 internet router") == "srx1500"

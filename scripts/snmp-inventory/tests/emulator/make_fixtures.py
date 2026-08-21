@@ -617,6 +617,7 @@ def juniper_ex4300() -> list[Varbind]:
     out += [
         s("1.3.6.1.4.1.2636.3.1.2.0", "Juniper EX4300-48T Ethernet Switch"),
         s("1.3.6.1.4.1.2636.3.1.3.0", "PE3714AF0123"),
+        s("1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0", "EX4300-48T"),     # jnxContentsModel
     ]
     for index in range(1, 4):
         out += interface(index, f"ge-0/0/{index - 1}", 6, 1000,
@@ -706,7 +707,11 @@ def juniper_srx1500_cluster() -> list[Varbind]:
         s("1.3.6.1.4.1.2636.3.1.3.0", ""),                       # empty — the report
         s("1.3.6.1.4.1.2636.3.1.8.1.6.1.1.0.0", "node0 Juniper SRX1500 Internet Router"),
         s("1.3.6.1.4.1.2636.3.1.8.1.7.1.1.0.0", "DK2919AF0042"),  # jnxContentsSerialNo
-        s("1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0", "SRX1500"),      # jnxContentsModel
+        # jnxContentsModel is the FRU model name, not the product name — the
+        # fleet reported a raw-looking identifier here; this value is synthetic
+        # but that shape, so the tests prove it lands in part_number and never
+        # in the model name.
+        s("1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0", "SRX1500-SYS-JB"),
     ]
     out += interface(1, "ge-0/0/0", 6, 1000, mac="4C:6D:58:11:22:01", alias="untrust")
     out += interface(2, "ge-0/0/1", 6, 1000, mac="4C:6D:58:11:22:02", alias="trust")

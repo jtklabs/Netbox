@@ -211,6 +211,17 @@ remains: 10002 is registered to Frogfoot Networks but kept as Ubiquiti,
 because airOS radios answer with sysObjectID under it in the field.
 `tests/test_enterprise_map.py` pins the corrections.
 
+## Juniper: product name vs FRU model name
+
+Two objects, two NetBox fields, checked against the JUNIPER-MIB text
+(mib-jnx-chassis) on 2026-08-21:
+
+| Object | MIB DESCRIPTION (verbatim) | Written to |
+|---|---|---|
+| `jnxBoxDescr` (…3.1.2.0) | "The name, model, or detailed description of the box, indicating which product the box is about, for example 'M40'." | `DeviceType.model`, after the model tidier strips a `node0 ` prefix, the `Juniper` prefix and the role suffix ("Internet Router", "Ethernet Switch", "Services Gateway", "Internet Backbone Router") — "node0 Juniper SRX1500 Internet Router" → `SRX1500`. The same reduction the fleet's old `Juniper\s+(.*?)\s+Internet` regex did, covering the non-"Internet" suffixes too. |
+| `jnxContentsModel` (…8.1.14, chassis row) | "The FRU model name of this subject, blank if unknown or unavailable." | `DeviceType.part_number` — the orderable identifier ("SRX1500-SYS-JB"-shaped). It first shipped as the model name and read as a raw number; it is the right thing for the part number and the wrong thing for the name. |
+| `jnxContentsPartNo` (…8.1.10) | "The part number of this subject, blank if unknown or unavailable." | not used — Juniper's internal numeric part number, rawer still. |
+
 ## Juniper jnxContents chassis-row instances
 
 `jnxContentsTable` is indexed `{ jnxContentsContainerIndex, L1, L2, L3 }`

@@ -64,6 +64,9 @@ class DeviceRecord:
     name: str
     serial: str = ""
     model: str = ""
+    # The vendor's orderable identifier when it differs from the model name
+    # (Juniper's FRU model name). Empty for vendors that have no such split.
+    part_number: str = ""
     manufacturer: str = ""
     platform: str = ""
     software_version: str = ""
@@ -213,7 +216,8 @@ _MODEL_VENDOR_PREFIX = re.compile(
 # scalar (jnxBoxDescr is a sentence, not a field). Fixed list, matched only at
 # the end — no real part number ends in these words.
 _MODEL_ROLE_SUFFIX = re.compile(
-    r"\s+(?:internet router|services gateway|ethernet switch|security appliance)\s*$",
+    r"\s+(?:internet backbone router|internet router|services gateway|ethernet switch"
+    r"|security appliance)\s*$",
     re.IGNORECASE,
 )
 
@@ -319,6 +323,8 @@ def _build_stack_devices(facts: DeviceFacts, members: list[_Member], base_name: 
             name=name,
             serial=_serial_for(facts, member.entity) if member.entity else "",
             model=_model_for(facts, member.entity),
+            # The vendor scalar describes the box that answered — the master.
+            part_number=facts.vendor_part_number.strip() if member.is_master else "",
             manufacturer=manufacturer,
             platform=platform,
             software_version=facts.software_version,
@@ -336,6 +342,7 @@ def _build_single_device(facts: DeviceFacts, name: str, manufacturer: str,
         name=name,
         serial=_serial_for(facts, entity),
         model=_model_for(facts, entity),
+        part_number=facts.vendor_part_number.strip(),
         manufacturer=manufacturer,
         platform=platform,
         software_version=facts.software_version,

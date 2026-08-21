@@ -71,6 +71,12 @@ class VendorProfile:
     build_format: str = "{version}-{build}"
     serial_oids: tuple[str, ...] = ()
     model_oids: tuple[str, ...] = ()
+    # The vendor's own orderable identifier for the chassis, when it publishes
+    # one separately from the product name — Juniper's FRU model name, for
+    # instance. Written to DeviceType.part_number; the model name stays the
+    # thing people say out loud. Most vendors have no such split and leave
+    # this empty.
+    part_number_oids: tuple[str, ...] = ()
     # Applied to sysDescr when no version OID answered.
     version_patterns: tuple[str, ...] = ()
     # Applied to sysDescr when no model OID answered. Only for vendors that
@@ -206,14 +212,27 @@ PROFILES: dict[int, VendorProfile] = {
             "1.3.6.1.4.1.2636.3.1.8.1.7.1.1.0.0",    # jnxContentsSerialNo, chassis row
             "1.3.6.1.4.1.2636.3.1.8.1.7.1.0.0.0",
         ),
-        # jnxContentsModel is a dedicated model column ("SRX1500"), unlike
-        # jnxBoxDescr, which is a sentence ("node0 Juniper SRX1500 Internet
-        # Router" on clusters) — prefer the field, keep the sentence as the
-        # last resort and let the model tidier strip the node/vendor noise.
-        model_oids=(
+        # Two different things, and both are wanted — checked against the
+        # JUNIPER-MIB text (mib-jnx-chassis) 2026-08-21:
+        #   jnxBoxDescr      "The name, model, or detailed description of the
+        #                    box ... for example 'M40'" — the product name as a
+        #                    sentence: "Juniper SRX1500 Internet Router", with
+        #                    "node0 " in front on a cluster. The model tidier
+        #                    reduces it to "SRX1500" (same reduction as the
+        #                    old Juniper\s+(.*?)\s+Internet regex, and it also
+        #                    handles "Ethernet Switch", "Services Gateway",
+        #                    "Internet Backbone Router").
+        #   jnxContentsModel "The FRU model name of this subject" — the
+        #                    orderable identifier ("SRX1500-SYS-JB"-shaped),
+        #                    which the fleet reported as a raw-looking
+        #                    number. Right for DeviceType.part_number, wrong
+        #                    for the model name people recognise.
+        # jnxContentsPartNo (…8.1.10, "The part number of this subject") is
+        # Juniper's internal numeric part number and is deliberately not used.
+        model_oids=("1.3.6.1.4.1.2636.3.1.2.0",),    # jnxBoxDescr
+        part_number_oids=(
             "1.3.6.1.4.1.2636.3.1.8.1.14.1.1.0.0",   # jnxContentsModel, chassis row
             "1.3.6.1.4.1.2636.3.1.8.1.14.1.0.0.0",
-            "1.3.6.1.4.1.2636.3.1.2.0",              # jnxBoxDescr
         ),
         # "Juniper Networks, Inc. ex4300-48t ... JUNOS 21.4R3-S4.9 ..."
         version_patterns=(r"JUNOS\s+([\w.\-]+)", r"[Kk]ernel JUNOS\s+([\w.\-]+)"),

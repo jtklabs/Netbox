@@ -200,6 +200,7 @@ class DeviceFacts:
     software_version: str = ""
     vendor_serial: str = ""
     vendor_model: str = ""
+    vendor_part_number: str = ""
     # Every vendor scalar that was asked for, and what it returned. None means
     # the device had no such object. Diagnostic only — nothing reads it to
     # decide anything, it exists so --probe can explain an empty version.
@@ -950,7 +951,8 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
                           profile: vendors.VendorProfile) -> None:
     """Fetch the vendor's version/serial/model scalars in one GET."""
     wanted = (list(profile.version_oids) + list(profile.build_oids)
-              + list(profile.serial_oids) + list(profile.model_oids))
+              + list(profile.serial_oids) + list(profile.model_oids)
+              + list(profile.part_number_oids))
     if not wanted:
         return
     try:
@@ -998,6 +1000,10 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
     for oid in profile.model_oids:
         if oid in found and found[oid].value:
             facts.vendor_model = found[oid].value
+            break
+    for oid in profile.part_number_oids:
+        if oid in found and found[oid].value:
+            facts.vendor_part_number = found[oid].value
             break
 
 
