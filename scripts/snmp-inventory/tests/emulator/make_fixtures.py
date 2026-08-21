@@ -484,16 +484,28 @@ def aruba_7010_wlc() -> list[Varbind]:
 
 
 def aruba_clearpass() -> list[Varbind]:
+    """A ClearPass appliance, as the fleet's actually answer.
+
+    The sysDescr shape is verbatim from a production box ("ClearPass Policy
+    Manager 6.10.6.186545, Model: C1000, FIPS Mode: Disabled" — values here
+    are synthetic, the shape is not); there is NO ENTITY-MIB and NO WLSX
+    object. What it does serve is its own CPPM-MIB cppmSystemTable: one row,
+    model/serial/version in columns 1-3, index 18 (see vendors.py).
+    """
     out = system_group(
-        "ClearPass Policy Manager, Version 6.11.5.253053",
+        "ClearPass Policy Manager 6.11.5.253053, Model: C2000, FIPS Mode: Disabled",
         "1.3.6.1.4.1.14823.1.6.1",
         "dal-cppm-01",
         location="Dallas / MDF",
     )
-    out += entity(
-        1, "ClearPass C3010", CLASS_CHASSIS, 0, -1, name="ClearPass C3010",
-        model="CP-HW-5K", serial="CP5K220100123", mfg="Aruba Networks", sw="6.11.5",
-    )
+    cppm = "1.3.6.1.4.1.14823.1.6.1.1.1.1.1"
+    out += [
+        s(f"{cppm}.1.1", "C2000"),              # cppmSystemModel
+        s(f"{cppm}.2.1", "CNC2K2310042"),       # cppmSystemSerialNumber
+        s(f"{cppm}.3.1", "6.11.5.253053"),      # cppmSystemVersion
+        s(f"{cppm}.4.1", "dal-cppm-01"),        # cppmSystemHostname
+        i(f"{cppm}.18.1", 1),                   # cppmSystemIdx
+    ]
     out += interface(1, "eth0", 6, 1000, mac="00:50:56:AA:10:01", alias="management")
     out += ip_address("10.20.0.10", 24, 1)
     return out

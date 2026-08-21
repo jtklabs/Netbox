@@ -950,33 +950,67 @@ def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoi
 def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFacts,
                           profile: vendors.VendorProfile) -> None:
     """Fetch the vendor's version/serial/model scalars in one GET."""
-    wanted = (list(profile.version_oids) + list(profile.build_oids)
-              + list(profile.serial_oids) + list(profile.model_oids)
-              + list(profile.part_number_oids))
-    if not wanted:
+    everything = (list(profile.version_oids) + list(profile.build_oids)
+                  + list(profile.serial_oids) + list(profile.model_oids)
+                  + list(profile.part_number_oids))
+    if not everything:
         return
-    try:
-        found = session.get(host, wanted)
-    except SnmpError as exc:
-        log.debug("%s: vendor scalars unavailable (%s)", host, exc)
-        return
+    # An entry ending in ".*" names a table COLUMN to walk rather than a
+    # scalar to GET — for one-row vendor tables whose row index is not worth
+    # guessing (ClearPass's cppmSystemTable). Exact OIDs go in one batched
+    # GET; the walks run afterwards, and only for values still empty, so a
+    # device that answered the scalars never pays for the walks.
+    wanted = [oid for oid in everything if not oid.endswith(".*")]
+    found = {}
+    if wanted:
+        try:
+            found = session.get(host, wanted)
+        except SnmpError as exc:
+            log.debug("%s: vendor scalars unavailable (%s)", host, exc)
+            found = {}
+    walked: dict[str, VarBind | None] = {}
+
+    def _first_row(oid):
+        """First value of a walked column, cached per column, None if nothing."""
+        if oid not in walked:
+            try:
+                binds = session.walk(host, oid[:-2])
+            except SnmpError as exc:
+                log.debug("%s: vendor column %s unavailable (%s)", host, oid, exc)
+                binds = []
+            walked[oid] = next((b for b in binds if b.value), None)
+        return walked[oid]
+
+    def _lookup(oid):
+        if oid.endswith(".*"):
+            return _first_row(oid)
+        return found.get(oid)
     # Kept so the probe can show what was asked and what came back. When a
     # platform reports no version the question is always "was the OID wrong,
     # or did the device answer nothing?", and only the raw result answers it.
+    # Walked columns are recorded lazily below, as they are consulted.
     facts.vendor_scalars = {
         oid: (found[oid].value if oid in found else None) for oid in wanted
     }
 
+    def _answer(oid):
+        bind = _lookup(oid)
+        if oid.endswith(".*"):
+            facts.vendor_scalars[oid] = bind.value if bind is not None else None
+        return bind.value if bind is not None and bind.value else ""
+
     for oid in profile.version_oids:
-        if oid in found and found[oid].value:
-            facts.software_version = found[oid].value
+        value = _answer(oid)
+        if value:
+            facts.software_version = value
             break
     # Appended rather than substituted, and only when the version itself came
     # back — a build with no version is meaningless on its own, and writing one
     # into the software version field would read as a version nobody recognises.
     for oid in profile.build_oids:
-        if facts.software_version and oid in found and found[oid].value:
-            build = found[oid].value.strip()
+        value = _answer(oid)
+        if facts.software_version and value:
+            build = value.strip()
             # "0" is a real answer meaning no patch: Check Point reports take 0
             # on a GA install, and stamping "Take 0" on every unpatched gateway
             # would read as a patch level rather than the absence of one.
@@ -994,16 +1028,19 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
             break
 
     for oid in profile.serial_oids:
-        if oid in found and found[oid].value:
-            facts.vendor_serial = found[oid].value
+        value = _answer(oid)
+        if value:
+            facts.vendor_serial = value
             break
     for oid in profile.model_oids:
-        if oid in found and found[oid].value:
-            facts.vendor_model = found[oid].value
+        value = _answer(oid)
+        if value:
+            facts.vendor_model = value
             break
     for oid in profile.part_number_oids:
-        if oid in found and found[oid].value:
-            facts.vendor_part_number = found[oid].value
+        value = _answer(oid)
+        if value:
+            facts.vendor_part_number = value
             break
 
 

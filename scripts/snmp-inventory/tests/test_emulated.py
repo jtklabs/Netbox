@@ -214,6 +214,9 @@ class TestFullScanOverTheWire:
         ("infoblox-nios", "9.0.4-50212"),
         ("juniper-ex4300", "21.4R3-S4.9"),
         ("aruba-7010-wlc", "8.10.0.4"),
+        # ClearPass: version comes from a walked CPPM-MIB column, not a GET —
+        # this row is what proves the ".*" walk path against a real snmpd.
+        ("aruba-clearpass", "6.11.5.253053"),
     ],
 )
 def test_software_version_over_the_wire(fixture_name, expected_version):

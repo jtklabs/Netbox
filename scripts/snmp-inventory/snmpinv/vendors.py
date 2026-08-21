@@ -49,6 +49,20 @@ ARUBA_SYS_MODEL_NAME = "1.3.6.1.4.1.14823.2.2.1.2.1.3.0"
 ARUBA_SYS_SWITCH_ROLE = "1.3.6.1.4.1.14823.2.2.1.2.1.4.0"
 ARUBA_SYS_LICENSE_SERIAL = "1.3.6.1.4.1.14823.2.2.1.2.1.11.0"
 
+# ClearPass Policy Manager (CPPM-MIB). Same enterprise arc as the WLCs, none
+# of the same objects: ClearPass serves neither WLSX-SYSTEMEXT nor ENTITY-MIB,
+# so before this every CPPM arrived with a manufacturer and nothing else.
+# cppmSystemTable is a one-row table (INDEX cppmSystemIdx, column 18); the
+# row instance is not guessed — these are walked, first row wins — hence the
+# ".*" suffix, which collect.py treats as "walk this column". Resolved
+# 2026-08-21 from two independent MIB browsers (the raw MIB is not in the
+# usual mirrors); descriptions verbatim: "ClearPass server model",
+# "ClearPass server serial number". Details in docs/OID-SOURCES.md.
+CPPM_SYSTEM_ENTRY = "1.3.6.1.4.1.14823.1.6.1.1.1.1.1"
+CPPM_SYSTEM_MODEL = f"{CPPM_SYSTEM_ENTRY}.1.*"
+CPPM_SYSTEM_SERIAL = f"{CPPM_SYSTEM_ENTRY}.2.*"
+CPPM_SYSTEM_VERSION = f"{CPPM_SYSTEM_ENTRY}.3.*"
+
 
 @dataclass(frozen=True)
 class VendorProfile:
@@ -127,10 +141,22 @@ PROFILES: dict[int, VendorProfile] = {
         name="aruba",
         manufacturer="Aruba Networks",
         platform="ArubaOS",
-        serial_oids=(ARUBA_SYS_LICENSE_SERIAL,),
-        model_oids=(ARUBA_SYS_MODEL_NAME,),
+        # WLC scalars first (one batched GET; they answer on controllers and
+        # are noSuchObject on ClearPass), then the ClearPass table columns,
+        # walked only when the scalars came back empty.
+        serial_oids=(ARUBA_SYS_LICENSE_SERIAL, CPPM_SYSTEM_SERIAL),
+        model_oids=(ARUBA_SYS_MODEL_NAME, CPPM_SYSTEM_MODEL),
+        version_oids=(CPPM_SYSTEM_VERSION,),
         # "ArubaOS (MODEL: Aruba7010), Version 8.10.0.4"
-        version_patterns=(r"Version\s+([0-9][\w.\-]*)",),
+        # ClearPass writes its sysDescr as "ClearPass Policy Manager
+        # 6.10.6.186545, Model: C1000, FIPS Mode: Disabled" — no "Version"
+        # keyword, so it gets its own pattern; and the model pattern is the
+        # fallback for a CPPM whose MIB table is not served.
+        version_patterns=(
+            r"ClearPass Policy Manager\s+([0-9][\w.\-]*)",
+            r"Version\s+([0-9][\w.\-]*)",
+        ),
+        model_patterns=(r"Model:\s*([A-Za-z0-9][\w\-]*)",),
         extra_walks=(ARUBA_AP_ENTRY,),
     ),
     25461: VendorProfile(

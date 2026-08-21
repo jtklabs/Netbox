@@ -184,6 +184,32 @@ APs whose row omits it inherit the controller's version, since campus APs run
 the image the controller pushes. Some ArubaOS builds leave the column empty —
 both paths are exercised in the fixtures.
 
+## Aruba ClearPass (CPPM-MIB)
+
+ClearPass shares Aruba's enterprise arc (14823) with the controllers but
+serves none of the controller objects and no ENTITY-MIB, so it first arrived
+with a manufacturer and nothing else. Its own MIB has a one-row system table:
+
+| Object | OID | Description (verbatim) |
+|---|---|---|
+| `cppmSystemTable` / entry | 1.3.6.1.4.1.14823.1.6.1.1.1.1 / `.1` | INDEX `cppmSystemIdx` (column 18) |
+| `cppmSystemModel` | …1.1.1.1.1.**1** | "ClearPass server model" |
+| `cppmSystemSerialNumber` | …1.1.1.1.1.**2** | "ClearPass server serial number" |
+| `cppmSystemVersion` | …1.1.1.1.1.**3** | (software version) |
+| `cppmSystemHostname` | …1.1.1.1.1.4 | |
+
+Provenance: the raw CPPM-MIB is not carried by the librenms or netdisco
+mirrors; the OIDs and descriptions above were taken 2026-08-21 from two
+independent MIB browsers (mibs.observium.org and mibbrowser.online), which
+agree column for column. The profile walks the three columns (`.*` suffix in
+`vendors.py`) rather than GETting a guessed row instance.
+
+Fallback when the table is not served: sysDescr, which a production box writes
+as `ClearPass Policy Manager 6.10.6.186545, Model: C1000, FIPS Mode: Disabled`
+— the profile's `ClearPass Policy Manager\s+([0-9][\w.\-]*)` and
+`Model:\s*([A-Za-z0-9][\w\-]*)` patterns read code and model from it; the
+serial is not in sysDescr.
+
 ## Manufacturer identification
 
 `sysObjectID` is used **only** for the enterprise arc — the `N` in

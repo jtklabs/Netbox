@@ -235,9 +235,40 @@ class TestApplianceVendors:
         assert device.manufacturer == "Opengear"
 
     def test_clearpass(self):
+        """ClearPass serves no ENTITY-MIB and no WLSX objects — everything
+        comes from its own cppmSystemTable, walked (one row, index not
+        guessed), with sysDescr as the fallback."""
         device = scan("aruba-clearpass").primary
-        assert device.software_version.startswith("6.11.5")
+        assert device.model == "C2000"
+        assert device.serial == "CNC2K2310042"
+        assert device.software_version == "6.11.5.253053"
         assert device.platform == "Aruba ClearPass"
+        assert device.manufacturer == "Aruba Networks"
+
+    def test_clearpass_without_its_mib_still_reads_sysdescr(self):
+        """The production sysDescr shape, verbatim — model and code are in
+        it, the serial is not, and a box that does not serve CPPM-MIB must
+        still come out with the first two."""
+        from snmpinv.collect import DeviceFacts, _apply_vendor_scalars
+        from snmpinv import vendors
+
+        class NothingServed:
+            def get(self, host, oids):
+                return {}
+
+            def walk(self, host, oid):
+                return []
+
+        profile = vendors.PROFILES[14823]
+        facts = DeviceFacts(host="10.0.0.1")
+        facts.sys_descr = ("ClearPass Policy Manager 6.10.6.186545, Model: C1000, "
+                           "FIPS Mode: Disabled")
+        facts.profile = profile
+        _apply_vendor_scalars(NothingServed(), "10.0.0.1", facts, profile)
+        assert facts.vendor_model == ""
+        assert vendors.extract_model(facts.sys_descr, profile.model_patterns) == "C1000"
+        assert vendors.extract_version(facts.sys_descr, profile.version_patterns) == "6.10.6.186545"
+        assert facts.vendor_serial == ""
 
 
 class TestNeverGuessesAModel:
