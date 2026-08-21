@@ -13,7 +13,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from netbox_refresh.choices import LifecycleSourceChoices
-from netbox_refresh.cisco import BATCH_SIZE, CiscoEoxClient, CiscoEoxError
+from netbox_refresh.cisco import CiscoEoxClient, CiscoEoxError, batch_product_ids
 from netbox_refresh.models import LIFECYCLE_DATE_FIELDS, ModelLifecycle
 
 logger = logging.getLogger('netbox.plugins.netbox_refresh')
@@ -78,9 +78,10 @@ def sync(dry_run=False, force=False, limit=None, logger_fn=None):
     summary = {'types': len(targets), 'pids': len(pids), 'updated': 0, 'created': 0,
                'no_data': 0, 'skipped_manual': 0, 'replacements_linked': 0, 'errors': 0}
 
-    for start in range(0, len(pids), BATCH_SIZE):
-        batch = pids[start:start + BATCH_SIZE]
-        emit('looking up PIDs %d-%d of %d' % (start + 1, start + len(batch), len(pids)))
+    done = 0
+    for batch in batch_product_ids(pids):
+        emit('looking up PIDs %d-%d of %d' % (done + 1, done + len(batch), len(pids)))
+        done += len(batch)
         try:
             results = client.fetch(batch)
         except CiscoEoxError as exc:

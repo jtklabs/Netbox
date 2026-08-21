@@ -13,6 +13,15 @@ The bits of this API that surprise people, all handled below:
   * Response records echo the input in EOXInputValue, whitespace-padded, and the
     array is not 1:1 with the request (a PID with several migration paths
     returns several records), so correlate on the stripped value.
+  * The PID list lives in the URL PATH and the spec caps that segment at 250
+    characters as well as 20 PIDs. Twenty real PIDs ("WS-C3850-48P-L" is 14
+    characters) blow through 250, so batches are cut on BOTH limits — see
+    batch_product_ids(). Verified against the published spec 2026-08-20
+    (https://developer.cisco.com/docs/support-apis/eox/): endpoint, the two
+    limits, responseencoding, the PaginationResponseRecord/EOXRecord field
+    names and the value/dateFormat date shape all match what is used below;
+    auth is client_credentials with the id and secret in the form body, token
+    lifetime 3600s, sent as "Authorization: Bearer".
 """
 
 import logging
@@ -27,8 +36,10 @@ logger = logging.getLogger('netbox.plugins.netbox_refresh')
 TOKEN_URL = 'https://id.cisco.com/oauth2/default/v1/token'
 EOX_BY_PID_URL = 'https://apix.cisco.com/supporttools/eox/rest/5/EOXByProductID/{page}/{pids}'
 
-# Cisco accepts 20 product IDs per call.
+# Cisco accepts 20 product IDs per call — and the comma-joined, URL-encoded
+# list sits in a path segment the spec limits to 250 characters. Both bind.
 BATCH_SIZE = 20
+MAX_PID_PATH_CHARS = 250
 # Unofficial but consistently reported: 5 calls/sec, 5000/day. Stay under it.
 REQUEST_PAUSE_SECONDS = 0.25
 MAX_ATTEMPTS = 4
@@ -43,6 +54,32 @@ RETRY_ERRORS = {'SSA_ERR_011', 'SSA_ERR_012', 'SSA_ERR_013', 'SSA_ERR_014',
 
 class CiscoEoxError(Exception):
     """Raised when a batch could not be retrieved at all."""
+
+
+def _encode_pids(product_ids):
+    # PIDs legitimately contain / = +, and they sit in a path segment.
+    return ','.join(quote(pid, safe='') for pid in product_ids)
+
+
+def batch_product_ids(product_ids):
+    """Yield batches that respect both of Cisco's limits on one request.
+
+    At most BATCH_SIZE PIDs, and at most MAX_PID_PATH_CHARS once comma-joined
+    and URL-encoded. A single PID that alone exceeds the path limit is yielded
+    on its own and left for the API to reject — dropping it silently would
+    make a model vanish from the sync with no trace.
+    """
+    batch = []
+    for pid in product_ids:
+        candidate = batch + [pid]
+        if batch and (len(candidate) > BATCH_SIZE
+                      or len(_encode_pids(candidate)) > MAX_PID_PATH_CHARS):
+            yield batch
+            batch = [pid]
+        else:
+            batch = candidate
+    if batch:
+        yield batch
 
 
 def _clean(value):
@@ -110,6 +147,17 @@ class CiscoEoxClient:
         self._expires_at = time.time() + float(payload.get('expires_in', 3600)) - 60
         return self._token
 
+    def check_auth(self):
+        """Obtain a token and say how long it is good for. Nothing else.
+
+        For validating a new credential pair before a sync (the management
+        command's --check-auth): it exercises exactly the OAuth path and no
+        EoX lookup, so a failure here is a credential problem, full stop.
+        """
+        self._token = None
+        self._get_token()
+        return max(0, int(self._expires_at - time.time()))
+
     def _request(self, url):
         last_error = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -149,10 +197,15 @@ class CiscoEoxClient:
         None means Cisco has no EoL data for that PID (which includes current
         hardware with nothing announced yet).
         """
-        product_ids = list(product_ids)[:BATCH_SIZE]
+        product_ids = list(product_ids)
+        if len(product_ids) > BATCH_SIZE:
+            raise CiscoEoxError('fetch() takes at most %d PIDs; use batch_product_ids()'
+                                % BATCH_SIZE)
         results = {pid.upper(): None for pid in product_ids}
-        # PIDs legitimately contain / = +, and they sit in a path segment.
-        encoded = ','.join(quote(pid, safe='') for pid in product_ids)
+        encoded = _encode_pids(product_ids)
+        if len(encoded) > MAX_PID_PATH_CHARS and len(product_ids) > 1:
+            raise CiscoEoxError('PID list is %d characters; Cisco allows %d per request. '
+                                'Use batch_product_ids().' % (len(encoded), MAX_PID_PATH_CHARS))
 
         page = 1
         while True:

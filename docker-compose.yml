@@ -24,6 +24,11 @@ services:
       # (docs/SCHEDULED-JOBS.md) rather than by uploads that would live only
       # on this disposable node.
       - ./netbox-scripts:/opt/netbox/netbox/scripts-repo:z,ro
+      # Drop zone for CSV files to import (lifecycle dates, prices, quotes)
+      # and for scripts to write exports into. The directory is kept in the
+      # repo (csv/.gitkeep) so Docker does not create it root-owned on first
+      # start; the CSVs themselves are git-ignored — they carry pricing.
+      - ./csv:/opt/netbox/netbox/csv:z,rw
   netbox-worker:
     <<: *netbox
     depends_on:

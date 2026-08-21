@@ -26,3 +26,8 @@ scripts/snmp-inventory/snmp-inventory.conf
 scripts/snmp-inventory/snmp-credentials.conf
 scripts/snmp-inventory/devices.csv
 scripts/snmp-inventory/*.log
+
+# Import/export drop zone — CSVs carry pricing and quotes
+csv/*
+!csv/.gitkeep
+!csv/README.md

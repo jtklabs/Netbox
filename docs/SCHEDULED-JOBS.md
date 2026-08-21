@@ -8,7 +8,7 @@ is what executes everything below.
 | What | Lives | Scheduled by |
 |---|---|---|
 | Data-update scripts (custom scripts) | `netbox-scripts/` in this repo | NetBox's Run Script form ("Schedule at" + "Recurs every N minutes") |
-| Plugin jobs (Cisco EoX sync) | `netbox_refresh` | The sync button today; interval scheduling below |
+| Plugin jobs (Cisco EoX sync) | `netbox_refresh` | Self-scheduled system job once credentials are configured (weekly by default) |
 | Collector-side sweeps (SNMP inventory, config audit) | The poller boxes | cron / systemd timers on those boxes — see `scripts/snmp-inventory/README.md`, "Two schedules" |
 
 ## Custom scripts: the lane for "scripts that update data"
@@ -82,19 +82,26 @@ all demonstrated and commented. House rules:
 ## Plugin jobs: the Cisco EoX sync
 
 The Lifecycle plugin's EoX sync is a NetBox `JobRunner` (`netbox_refresh/
-jobs.py`). The sync button on the lifecycle list enqueues it once. To make it
-recur, enqueue it with an interval from a one-off shell (interval in minutes —
-this example is weekly):
+jobs.py`) and schedules itself: when `CISCO_CLIENT_ID` and
+`CISCO_CLIENT_SECRET` are configured, the plugin registers the job as a NetBox
+*system job* and the worker enqueues it at startup and re-enqueues after every
+run — the same mechanism NetBox uses for its own housekeeping. The cadence is
+`CISCO_SYNC_INTERVAL_MINUTES` (default 10080, weekly; 0 turns the schedule off
+and leaves the Sync button). No shell, no manual enqueue.
+
+Credentials live in `prod.env` on the data disk, or in Docker secret files
+`/run/secrets/cisco_client_id` / `cisco_client_secret` (read first). Check a
+new pair before the first sync — it gets a token and looks nothing up:
 
 ```bash
-docker compose exec netbox /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py shell -c "
-from netbox_refresh.jobs import CiscoEoxSyncJob
-CiscoEoxSyncJob.enqueue(interval=10080)"
+docker compose exec netbox /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py sync_cisco_eol --check-auth
 ```
 
-The scheduled entry is visible (and cancellable) under Operations → Jobs like
-everything else. Enqueue it once — a second enqueue with an interval creates a
-second recurring series.
+A dry run (`sync_cisco_eol --dry-run --limit 5`) then shows what the first
+real sync would write. The scheduled entry is visible (and cancellable) under
+Operations → Jobs like everything else. Every model the sync checks is stamped
+with that date — Cisco answering "no EoL data" for current hardware records as
+**EoL not announced**, not as a gap.
 
 ## Collector-side schedules
 

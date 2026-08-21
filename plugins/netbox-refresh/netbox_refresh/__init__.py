@@ -42,6 +42,12 @@ class RefreshConfig(PluginConfig):
         # environment instead of being written into configuration.
         'cisco_client_id': '',
         'cisco_client_secret': '',
+        # How often the worker runs the EoX sync on its own, in minutes.
+        # Weekly by default — vendors announce EoL in bulletins, not by the
+        # hour. 0 disables the automatic schedule (the button still works).
+        # Only registered when credentials are configured, so a stack with
+        # no Cisco API access never schedules a job that can only fail.
+        'cisco_sync_interval_minutes': 60 * 24 * 7,
         # Card placement on device/device-type pages.
         'lifecycle_card_position': 'right_page',
         # Base URL of the internal HTTP file server that holds code images.
@@ -64,6 +70,39 @@ class RefreshConfig(PluginConfig):
         super().ready()
         if self.default_settings and _setting_enabled('us_dates_in_tables'):
             _localise_table_dates()
+        _register_eox_system_job()
+
+
+def _register_eox_system_job():
+    """Put the Cisco EoX sync on the worker's schedule, if it can run at all.
+
+    NetBox's rqworker enqueues everything in registry['system_jobs'] at
+    startup and JobRunner re-enqueues after each run, so registering here is
+    all it takes to make the sync recur — the same mechanism NetBox uses for
+    its own housekeeping. Done from ready() rather than with the @system_job
+    decorator because the interval comes from settings, and because a job
+    that cannot authenticate should not be scheduled to fail weekly.
+    """
+    from django.conf import settings
+    from netbox.registry import registry
+
+    configured = settings.PLUGINS_CONFIG.get('netbox_refresh', {})
+    interval = configured.get(
+        'cisco_sync_interval_minutes',
+        RefreshConfig.default_settings['cisco_sync_interval_minutes'],
+    )
+    try:
+        interval = int(interval or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    if interval <= 0:
+        return
+    if not (configured.get('cisco_client_id') and configured.get('cisco_client_secret')):
+        return
+
+    from netbox_refresh.jobs import CiscoEoxSyncJob
+
+    registry['system_jobs'][CiscoEoxSyncJob] = {'interval': interval}
 
 
 def _setting_enabled(name):
