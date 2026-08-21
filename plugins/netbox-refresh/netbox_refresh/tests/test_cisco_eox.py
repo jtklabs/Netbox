@@ -424,3 +424,45 @@ class SystemJobRegistrationTest(SimpleTestCase):
         entry = self.registered({'cisco_client_id': 'id', 'cisco_client_secret': 's',
                                  'cisco_sync_interval_minutes': 1440})
         self.assertEqual(entry['interval'], 1440)
+
+
+class CandidateSelectionTest(TestCase):
+    """Which types the sync looks up. The first live run found none: the
+    scanner creates types with the PID in `model` and no part_number, and
+    names the manufacturer whatever entPhysicalMfgName said."""
+
+    def setUp(self):
+        from netbox_refresh.sync import candidate_types, pid_for
+        self.candidate_types = candidate_types
+        self.pid_for = pid_for
+
+    def test_a_scanner_created_type_with_no_part_number_is_looked_up_by_model(self):
+        mfr = Manufacturer.objects.create(name='Cisco', slug='cisco')
+        dt = DeviceType.objects.create(manufacturer=mfr, model='WS-C3650-48PS-L',
+                                       slug='ws-c3650-48ps-l')      # no part_number
+        self.assertEqual([self.pid_for(o) for o in self.candidate_types()], ['WS-C3650-48PS-L'])
+        self.assertEqual(dt.part_number, '')
+
+    def test_part_number_wins_over_model_when_present(self):
+        mfr = Manufacturer.objects.create(name='Cisco', slug='cisco')
+        DeviceType.objects.create(manufacturer=mfr, model='Catalyst 9300 48-port PoE+',
+                                  slug='c9300-48p', part_number='C9300-48P')
+        self.assertEqual([self.pid_for(o) for o in self.candidate_types()], ['C9300-48P'])
+
+    def test_manufacturer_spelled_the_entity_mib_way_still_matches(self):
+        for name in ('Cisco Systems, Inc.', 'cisco', 'Cisco Systems'):
+            mfr = Manufacturer.objects.create(name=name, slug=name.lower().replace(' ', '-').replace(',', '').replace('.', ''))
+            DeviceType.objects.create(manufacturer=mfr, model='PID-%s' % mfr.pk, slug='pid-%s' % mfr.pk)
+        self.assertEqual(len(self.candidate_types()), 3)
+
+    def test_other_manufacturers_are_left_alone(self):
+        mfr = Manufacturer.objects.create(name='Juniper Networks', slug='juniper')
+        DeviceType.objects.create(manufacturer=mfr, model='EX4300-48P', slug='ex4300-48p')
+        self.assertEqual(self.candidate_types(), [])
+
+    def test_replacement_resolves_by_model_too(self):
+        from netbox_refresh.sync import _resolve_replacement
+        mfr = Manufacturer.objects.create(name='Cisco', slug='cisco')
+        old = DeviceType.objects.create(manufacturer=mfr, model='WS-C3650-48PS-L', slug='old')
+        new = DeviceType.objects.create(manufacturer=mfr, model='C9300L-48P-4G-E', slug='new')
+        self.assertEqual(_resolve_replacement(old, 'c9300l-48p-4g-e'), new)

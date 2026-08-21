@@ -34,27 +34,62 @@ def get_credentials():
     )
 
 
+def pid_for(obj):
+    """The Cisco product ID to look up for a device or module type.
+
+    part_number when it is filled in; otherwise the model name. The SNMP
+    scanner creates types verbatim from entPhysicalModelName — which for
+    Cisco IS the PID ("WS-C3650-48PS-L", "C9300-48P") — and leaves
+    part_number empty, so requiring part_number looked up nothing at all.
+    """
+    return (obj.part_number or obj.model or '').strip()
+
+
+def _manufacturer_query(names):
+    """Match the configured manufacturer names loosely.
+
+    Case-insensitive, and "Cisco" also matches "Cisco Systems" and "Cisco
+    Systems, Inc." — the scanner takes the name from entPhysicalMfgName, and
+    Cisco gear spells itself all three ways across platforms.
+    """
+    from django.db.models import Q
+
+    query = Q()
+    for name in names:
+        name = (name or '').strip()
+        if not name:
+            continue
+        query |= Q(manufacturer__name__iexact=name) | Q(manufacturer__name__istartswith=name + ' ')
+    return query
+
+
 def candidate_types():
-    """Device/module types with a Cisco part number, which is the PID we query."""
+    """Device/module types whose PID we can look up — see pid_for()."""
     from dcim.models import DeviceType, ModuleType
 
     manufacturers = get_settings().get('cisco_manufacturers') or ['Cisco']
+    query = _manufacturer_query(manufacturers)
     found = []
     for model in (DeviceType, ModuleType):
-        found.extend(
-            model.objects.filter(manufacturer__name__in=manufacturers)
-            .exclude(part_number='')
-            .select_related('manufacturer')
-        )
+        for obj in model.objects.filter(query).select_related('manufacturer'):
+            if pid_for(obj):
+                found.append(obj)
     return found
 
 
 def _resolve_replacement(obj, pid):
-    """Find the DeviceType/ModuleType matching a Cisco migration PID, if we stock it."""
+    """Find the DeviceType/ModuleType matching a Cisco migration PID, if we stock it.
+
+    By part_number or by model, for the same reason pid_for() accepts either.
+    """
+    from django.db.models import Q
+
     if not pid:
         return None
     model = type(obj)
-    return model.objects.filter(part_number__iexact=pid).first()
+    return model.objects.filter(
+        Q(part_number__iexact=pid) | Q(model__iexact=pid)
+    ).order_by('pk').first()
 
 
 def sync(dry_run=False, force=False, limit=None, logger_fn=None):
@@ -67,12 +102,18 @@ def sync(dry_run=False, force=False, limit=None, logger_fn=None):
     targets = candidate_types()
     if limit:
         targets = targets[:limit]
-    emit('%d Cisco device/module types with a part number' % len(targets))
+    names = get_settings().get('cisco_manufacturers') or ['Cisco']
+    emit('%d Cisco device/module types to look up (manufacturer %s; PID from '
+         'part_number, else model)' % (len(targets), ', '.join(names)))
+    if not targets:
+        emit('Nothing to do: no device or module type has a manufacturer matching '
+             '%s. Check the manufacturer name on your Cisco device types, or set '
+             'cisco_manufacturers in the plugin settings.' % ', '.join(names))
 
     # Several types can share a PID; look each PID up once.
     by_pid = {}
     for obj in targets:
-        by_pid.setdefault(obj.part_number.strip().upper(), []).append(obj)
+        by_pid.setdefault(pid_for(obj).upper(), []).append(obj)
     pids = sorted(by_pid)
 
     summary = {'types': len(targets), 'pids': len(pids), 'updated': 0, 'created': 0,
