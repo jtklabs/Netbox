@@ -1,0 +1,22 @@
+{#-
+  Cisco IOS / IOS-XE -- local accounts.
+
+  Negations come first, in the same config push as the rewrite: an account
+  whose hash type is changing (a legacy `password 7`) will not accept a new
+  `secret` on top, so it has to be removed and written back.
+
+  Available variables:
+    remove     list[Entry]  accounts to negate; entry.line is `username <name>`
+    add        list[str]    accounts to write
+    users      {name: password}  plaintext, or a hash when hash_type is set
+    privilege  str|None
+    role       str|None     EOS only; unused here
+    algorithm  str|None     md5 | sha256 | scrypt -- IOS `algorithm-type`
+    hash_type  str|None     5 | 8 | 9 -- the value is already hashed
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for name in add %}
+username {{ name }}{% if privilege %} privilege {{ privilege }}{% endif %}{% if hash_type %} secret {{ hash_type }} {{ users[name] }}{% elif algorithm %} algorithm-type {{ algorithm }} secret {{ users[name] }}{% else %} secret {{ users[name] }}{% endif %}
+{% endfor %}

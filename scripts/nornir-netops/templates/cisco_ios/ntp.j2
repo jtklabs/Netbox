@@ -1,0 +1,23 @@
+{#-
+  Cisco IOS / IOS-XE -- NTP servers.
+
+  Syntax: ntp server [vrf NAME] <host> [source INTERFACE] [prefer]
+
+  Available variables:
+    add     list[str]   server addresses to add (already normalized)
+    remove  list[Entry] lines to negate; entry.line is the device's own text
+    vrf     str|None
+    prefer  str|None    one of `add`, marked preferred
+    source  str|None    source interface
+    iburst  bool        not used on IOS; declared by the feature for Arista
+
+  Blank lines are dropped by the renderer, so lay this out for readability.
+-#}
+{% for server in add %}
+ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ server }}{% if source %} source {{ source }}{% endif %}{% if prefer and server == prefer %} prefer{% endif %}
+{% endfor %}
+{#- Negate the device's own line so options we do not model (key, version,
+    source, a vrf) are removed with it instead of being left behind. -#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}

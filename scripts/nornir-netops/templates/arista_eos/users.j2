@@ -1,0 +1,13 @@
+{#-
+  Arista EOS -- local accounts.
+
+  Same shape as the IOS template: negate, then rewrite, in one push. EOS has no
+  `algorithm-type`; a plaintext secret is hashed by the device (sha512), and a
+  pre-computed hash is named by --hash-type (5 or sha512).
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for name in add %}
+username {{ name }}{% if privilege %} privilege {{ privilege }}{% endif %}{% if role %} role {{ role }}{% endif %} secret {% if hash_type %}{{ hash_type }} {% endif %}{{ users[name] }}
+{% endfor %}

@@ -27,6 +27,14 @@ scripts/snmp-inventory/snmp-credentials.conf
 scripts/snmp-inventory/devices.csv
 scripts/snmp-inventory/*.log
 
+# nornir-netops — device credentials, real inventory and run reports stay local
+scripts/nornir-netops/.env
+scripts/nornir-netops/inventory/hosts.csv
+scripts/nornir-netops/*.report.json
+scripts/nornir-netops/reports/
+scripts/nornir-netops/.venv/
+scripts/nornir-netops/.pytest_cache/
+
 # Import/export drop zone — CSVs carry pricing and quotes
 csv/*
 !csv/.gitkeep

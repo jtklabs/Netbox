@@ -1,0 +1,10 @@
+# Copy to hosts.csv and edit. Only the address column is required.
+#   platform blank  -> autodetected over SSH (cisco_ios / arista_eos)
+#   username/password blank -> the global credentials are used
+#   any other column (site, role, ...) becomes filterable: --filter site=atl
+host,name,platform,port,username,password,site,role
+10.1.10.11,atl-core-sw1,cisco_ios,,,,atl,core
+10.1.10.12,atl-core-sw2,cisco_ios,,,,atl,core
+10.1.20.21,atl-dc-leaf1,arista_eos,,,,atl,leaf
+10.1.20.22,atl-dc-leaf2,arista_eos,,,,atl,leaf
+10.2.10.11,rdu-edge-rtr1,,,,,rdu,edge

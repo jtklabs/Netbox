@@ -1,0 +1,597 @@
+"""End to end through the CLI, with netmiko replaced by a fake device.
+
+Everything below `cli.main` is real: argument parsing, the CSV inventory,
+nornir's threaded runner, the diff and the templates. Only the SSH session is
+faked, so these tests catch wiring mistakes a unit test would not.
+"""
+
+import json
+import re
+
+import pytest
+from nornir.core.task import Result
+
+from netops import cli, runner
+
+CSV = """host,name,platform,site
+10.1.1.1,sw1,cisco_ios,atl
+10.1.1.2,leaf1,arista_eos,rdu
+"""
+
+
+class FakeDevice:
+    """A device that actually holds a running-config.
+
+    Stateful on purpose: the runner reads the config back after applying, so a
+    fixture that always returned the pre-change output would make every apply
+    look like it failed -- and would hide idempotence bugs.
+    """
+
+    def __init__(self, lines):
+        self.lines = list(lines)
+
+    def show(self, command):
+        """Emulate `show running-config | include <regex>`."""
+        _, _, pattern = command.partition("include ")
+        return "\n".join(line for line in self.lines if re.search(pattern.strip(), line))
+
+    def apply(self, commands):
+        for command in commands:
+            if command.startswith("no "):
+                target = command[3:]
+                self.lines = [
+                    line
+                    for line in self.lines
+                    if line != target and not line.startswith(target + " ")
+                ]
+            else:
+                self.lines.append(command)
+
+
+@pytest.fixture
+def device(monkeypatch):
+    """Record what would be sent; serve it from a stateful fake device."""
+    devices = {
+        "sw1": FakeDevice(
+            [
+                "ntp server 10.10.10.1",
+                "ntp server 10.10.10.2 prefer",
+                "username admin privilege 15 password 7 070C285F4D06485744",
+                "username netauto privilege 15 secret 9 $9$saLt$abcdef",
+                "snmp-server packetsize 1500",
+            ]
+        ),
+        "leaf1": FakeDevice(
+            [
+                "ntp server 10.10.10.1 iburst",
+                "username admin privilege 15 role network-admin secret sha512 $6$saLt$abc",
+                "username admin ssh-key ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCexample",
+            ]
+        ),
+    }
+    sent = {"config": {}, "commands": {}, "devices": devices}
+
+    def send_command(task, command_string, **kwargs):
+        sent["commands"].setdefault(task.host.name, []).append(command_string)
+        box = devices.setdefault(task.host.name, FakeDevice([]))
+        if command_string.startswith("show"):
+            return Result(host=task.host, result=box.show(command_string))
+        return Result(host=task.host, result="[OK]")
+
+    def send_config(task, config_commands, **kwargs):
+        sent["config"].setdefault(task.host.name, []).extend(config_commands)
+        devices.setdefault(task.host.name, FakeDevice([])).apply(config_commands)
+        return Result(host=task.host, result="\n".join(config_commands))
+
+    monkeypatch.setattr(runner, "netmiko_send_command", send_command)
+    monkeypatch.setattr(runner, "netmiko_send_config", send_config)
+    return sent
+
+
+@pytest.fixture
+def csv_file(tmp_path):
+    path = tmp_path / "hosts.csv"
+    path.write_text(CSV, encoding="utf-8")
+    return str(path)
+
+
+@pytest.fixture
+def login(monkeypatch):
+    monkeypatch.setenv("NET_USER", "netauto")
+    monkeypatch.setenv("NET_PASS", "sekrit")
+
+
+def run(csv_file, *extra):
+    return cli.main(["ntp", "--no-env-file", "--csv", csv_file, *extra])
+
+
+def run_feature(feature, csv_file, *extra):
+    return cli.main([feature, "--no-env-file", "--csv", csv_file, *extra])
+
+
+PASSWORD = "R0tati0n-Passw0rd"
+
+
+@pytest.fixture
+def user_password(monkeypatch):
+    monkeypatch.setenv("NETOPS_PW_ADMIN", PASSWORD)
+    return PASSWORD
+
+
+# --------------------------------------------------------------------------- #
+# dry run
+# --------------------------------------------------------------------------- #
+
+
+def test_dry_run_is_the_default_and_changes_nothing(device, csv_file, login, capsys):
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+
+    assert "DRY RUN" in out
+    assert "ntp server 10.99.99.1" in out  # the IOS form
+    assert "ntp server 10.99.99.1 iburst" in out  # the EOS form
+    assert device["config"] == {}  # nothing was pushed
+    assert device["commands"]["sw1"] == ["show running-config | include ^ntp server"]
+
+
+def test_dry_run_shows_the_save_command_it_would_run(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1")
+    assert "write memory" in capsys.readouterr().out
+
+
+def test_dry_run_replace_lists_the_removals(device, csv_file, login, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--replace") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "no ntp server 10.10.10.2 prefer" in out
+    assert "no ntp server 10.10.10.1" in out
+    assert device["config"] == {}
+
+
+def test_add_mode_never_removes(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--add")
+    assert "no ntp server" not in capsys.readouterr().out
+
+
+def test_already_compliant_device_reports_no_changes(device, csv_file, login, capsys):
+    assert run(csv_file, "-s", "10.10.10.1", "--limit", "leaf1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "already compliant" in out
+    assert "1 compliant" in out
+
+
+def test_fail_on_diff_exits_two(device, csv_file, login):
+    assert run(csv_file, "-s", "10.99.99.1", "--fail-on-diff") == cli.EXIT_DIFF
+
+
+def test_fail_on_diff_is_quiet_when_compliant(device, csv_file, login):
+    assert run(csv_file, "-s", "10.10.10.1", "--limit", "leaf1", "--fail-on-diff") == cli.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# apply
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_pushes_per_platform_commands(device, csv_file, login, capsys):
+    assert run(csv_file, "-s", "10.99.99.1,10.99.99.2", "--apply", "-y") == cli.EXIT_OK
+    assert device["config"]["sw1"] == [
+        "ntp server 10.99.99.1",
+        "ntp server 10.99.99.2",
+    ]
+    assert device["config"]["leaf1"] == [
+        "ntp server 10.99.99.1 iburst",
+        "ntp server 10.99.99.2 iburst",
+    ]
+    assert "APPLYING CHANGES" in capsys.readouterr().out
+
+
+def test_apply_replace_adds_and_removes(device, csv_file, login):
+    run(csv_file, "-s", "10.99.99.1", "--replace", "--apply", "-y", "--limit", "sw1")
+    assert device["config"]["sw1"] == [
+        "ntp server 10.99.99.1",
+        "no ntp server 10.10.10.1",
+        "no ntp server 10.10.10.2 prefer",
+    ]
+
+
+def test_apply_saves_the_config(device, csv_file, login):
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
+    assert device["commands"]["sw1"][-1] == "write memory"
+
+
+def test_no_save_skips_the_write(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--no-save")
+    assert "write memory" not in device["commands"]["sw1"]
+    assert "write memory" not in capsys.readouterr().out
+
+
+def test_apply_does_nothing_on_a_compliant_device(device, csv_file, login):
+    assert run(csv_file, "-s", "10.10.10.1", "--limit", "leaf1", "--apply", "-y") == cli.EXIT_OK
+    assert device["config"] == {}
+    assert "write memory" not in device["commands"]["leaf1"]
+
+
+def test_prefer_and_vrf_reach_the_device(device, csv_file, login):
+    run(
+        csv_file, "-s", "10.99.99.1,10.99.99.2", "--prefer", "10.99.99.2",
+        "--vrf", "MGMT", "--apply", "-y", "--limit", "sw1",
+    )
+    assert device["config"]["sw1"] == [
+        "ntp server vrf MGMT 10.99.99.1",
+        "ntp server vrf MGMT 10.99.99.2 prefer",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# selection, failures, reporting
+# --------------------------------------------------------------------------- #
+
+
+def test_limit_selects_one_device(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "sw1" in out and "leaf1" not in out
+    assert "1 device(s)" in out
+
+
+def test_limit_accepts_an_address(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--limit", "10.1.1.2")
+    assert "leaf1" in capsys.readouterr().out
+
+
+def test_filter_on_a_csv_column(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--filter", "site=rdu")
+    out = capsys.readouterr().out
+    assert "leaf1" in out and "sw1 " not in out
+
+
+def test_no_match_is_a_usage_error(device, csv_file, login, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--limit", "nope") == cli.EXIT_USAGE
+    assert "no devices matched" in capsys.readouterr().err
+
+
+def test_missing_credentials_is_a_usage_error(device, csv_file, capsys):
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "no credentials for" in err
+    assert "AWS Secrets Manager" in err
+
+
+def test_unsupported_platform_fails_that_device_only(device, tmp_path, login, capsys):
+    path = tmp_path / "mixed.csv"
+    path.write_text(CSV + "10.1.1.3,fw1,juniper_junos,atl\n", encoding="utf-8")
+    assert run(str(path), "-s", "10.99.99.1") == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "no 'ntp' support" in out
+    assert "1 failed" in out
+    assert "ntp server 10.99.99.1" in out  # the other two still planned
+
+
+def test_device_error_does_not_stop_the_others(device, csv_file, login, monkeypatch, capsys):
+    def flaky(task, command_string, **kwargs):
+        if task.host.name == "sw1":
+            raise OSError("connection refused")
+        return Result(host=task.host, result="ntp server 10.10.10.1 iburst")
+
+    monkeypatch.setattr(runner, "netmiko_send_command", flaky)
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "OSError: connection refused" in out
+    assert "ntp server 10.99.99.1 iburst" in out  # leaf1 still planned
+
+
+def test_json_report(device, csv_file, login, tmp_path):
+    report = tmp_path / "report.json"
+    run(csv_file, "-s", "10.99.99.1", "--replace", "--report", str(report))
+
+    document = json.loads(report.read_text())
+    assert document["feature"] == "ntp"
+    assert document["mode"] == "replace"
+    assert document["dry_run"] is True
+    assert document["desired"] == ["10.99.99.1"]
+
+    sw1 = document["devices"]["sw1"]
+    assert sw1["status"] == "pending"
+    assert sw1["platform"] == "cisco_ios"
+    assert sw1["current"] == ["ntp server 10.10.10.1", "ntp server 10.10.10.2 prefer"]
+    assert sw1["commands"][0] == "ntp server 10.99.99.1"
+    assert sw1["applied"] is False
+    assert "generated_at" in document
+
+
+def test_report_records_an_applied_run(device, csv_file, login, tmp_path):
+    report = tmp_path / "report.json"
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--report", str(report))
+    sw1 = json.loads(report.read_text())["devices"]["sw1"]
+    assert (sw1["status"], sw1["applied"]) == ("changed", True)
+    assert sw1["save_command"] == "write memory"
+
+
+def test_verbose_shows_current_state(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "-v", "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "current:" in out
+    assert "ntp server 10.10.10.2 prefer" in out
+
+
+# --------------------------------------------------------------------------- #
+# platform autodetection
+# --------------------------------------------------------------------------- #
+
+
+def test_blank_platform_is_autodetected(device, tmp_path, login, monkeypatch, capsys):
+    path = tmp_path / "unknown.csv"
+    path.write_text("host,name,platform\n10.1.1.9,mystery,\n", encoding="utf-8")
+
+    class FakeDetect:
+        def __init__(self, **kwargs):
+            assert kwargs["device_type"] == "autodetect"
+            assert kwargs["username"] == "netauto"
+
+        def autodetect(self):
+            return "cisco_ios"
+
+    monkeypatch.setattr("netmiko.ssh_autodetect.SSHDetect", FakeDetect)
+    assert run(str(path), "-s", "10.99.99.1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "detecting platform on 1 device(s)" in out
+    assert "[cisco_ios]" in out
+
+
+def test_undetectable_platform_fails_cleanly(device, tmp_path, login, monkeypatch, capsys):
+    path = tmp_path / "unknown.csv"
+    path.write_text("host,name,platform\n10.1.1.9,mystery,\n", encoding="utf-8")
+
+    class FakeDetect:
+        def __init__(self, **kwargs):
+            pass
+
+        def autodetect(self):
+            return None
+
+    monkeypatch.setattr("netmiko.ssh_autodetect.SSHDetect", FakeDetect)
+    assert run(str(path), "-s", "10.99.99.1") == cli.EXIT_FAILED
+    assert "could not autodetect" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# .env wiring
+# --------------------------------------------------------------------------- #
+
+
+def test_env_file_supplies_credentials(device, csv_file, tmp_path, monkeypatch, capsys):
+    env = tmp_path / "creds.env"
+    env.write_text("NET_USER=fromenv\nNET_PASS=fromenv\n", encoding="utf-8")
+    code = cli.main(["ntp", "--env-file", str(env), "--csv", csv_file, "-s", "10.99.99.1"])
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_OK
+    assert "credentials: fromenv via environment" in out
+    assert "fromenv" in out and "NET_PASS" not in out
+
+
+def test_missing_env_file_is_a_usage_error(device, csv_file, tmp_path, capsys):
+    code = cli.main(
+        ["ntp", "--env-file", str(tmp_path / "nope.env"), "--csv", csv_file, "-s", "10.1.1.1"]
+    )
+    assert code == cli.EXIT_USAGE
+    assert "env file not found" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# idempotence
+# --------------------------------------------------------------------------- #
+
+
+def test_applying_twice_is_a_no_op(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
+    capsys.readouterr()
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert out.count("already compliant") == 2
+    assert "2 compliant" in out
+
+
+def test_apply_is_verified_against_a_read_back(device, csv_file, login, tmp_path):
+    report = tmp_path / "r.json"
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--report", str(report))
+    sw1 = json.loads(report.read_text())["devices"]["sw1"]
+    assert sw1["verified"] is True
+    assert sw1["missing_after"] == []
+    # show, config, show (read back), write memory
+    assert device["commands"]["sw1"].count("show running-config | include ^ntp server") == 2
+
+
+def test_no_verify_skips_the_read_back(device, csv_file, login):
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--no-verify")
+    assert device["commands"]["sw1"].count("show running-config | include ^ntp server") == 1
+
+
+def test_a_change_that_does_not_take_is_reported_and_not_saved(
+    device, csv_file, login, monkeypatch, capsys
+):
+    """The dangerous case: the push is accepted but the config did not change."""
+
+    def swallow(task, config_commands, **kwargs):
+        return Result(host=task.host, result="")  # device ignores it
+
+    monkeypatch.setattr(runner, "netmiko_send_config", swallow)
+    assert run(csv_file, "-s", "10.99.99.1", "--apply", "-y") == cli.EXIT_FAILED
+
+    out = capsys.readouterr().out
+    assert "APPLIED BUT NOT VERIFIED" in out
+    assert "still missing after the change: 10.99.99.1" in out
+    assert "startup-config was NOT saved" in out
+    assert "write memory" not in device["commands"]["sw1"]  # not persisted
+    assert "2 unverified" in out
+
+
+# --------------------------------------------------------------------------- #
+# users
+# --------------------------------------------------------------------------- #
+
+
+def test_users_dry_run_negates_then_rewrites(device, csv_file, login, user_password, capsys):
+    assert run_feature("users", csv_file, "-U", "admin", "--limit", "sw1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines.index("no username admin") < lines.index(
+        "username admin privilege 15 secret <redacted>"
+    )
+
+
+def test_users_dry_run_shows_the_weak_type_it_is_replacing(
+    device, csv_file, login, user_password, capsys
+):
+    run_feature("users", csv_file, "-U", "admin", "--limit", "sw1", "-v")
+    assert "username admin privilege 15 password 7 (weak)" in capsys.readouterr().out
+
+
+def test_the_password_never_reaches_the_terminal(device, csv_file, login, user_password, capsys):
+    run_feature("users", csv_file, "-U", "admin", "--apply", "-y", "-v")
+    out = capsys.readouterr().out
+    assert PASSWORD not in out
+    assert "secret <redacted>" in out
+
+
+def test_the_password_does_reach_the_device(device, csv_file, login, user_password):
+    run_feature("users", csv_file, "-U", "admin", "--apply", "-y", "--limit", "sw1")
+    assert device["config"]["sw1"] == [
+        "no username admin",
+        f"username admin privilege 15 secret {PASSWORD}",
+    ]
+
+
+def test_the_password_never_reaches_the_report(
+    device, csv_file, login, user_password, tmp_path
+):
+    report = tmp_path / "users.json"
+    run_feature("users", csv_file, "-U", "admin", "--apply", "-y", "--report", str(report))
+    text = report.read_text()
+    assert PASSWORD not in text
+    assert "<redacted>" in text
+
+
+def test_users_apply_is_verified_and_saved(device, csv_file, login, user_password, capsys):
+    assert run_feature("users", csv_file, "-U", "admin", "--apply", "-y") == cli.EXIT_OK
+    assert "write memory" in device["commands"]["sw1"]
+    assert "2 changed" in capsys.readouterr().out
+
+
+def test_rotation_rewrites_on_every_run(device, csv_file, login, user_password, capsys):
+    """Unlike NTP, a rotation is never 'already compliant' -- the point is to
+    set the password again, and a salted hash cannot be compared."""
+    run_feature("users", csv_file, "-U", "admin", "--apply", "-y")
+    capsys.readouterr()
+    run_feature("users", csv_file, "-U", "admin", "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "no username admin" in out
+    assert "already compliant" not in out
+
+
+def test_only_missing_leaves_an_existing_account_alone(
+    device, csv_file, login, user_password, capsys
+):
+    assert (
+        run_feature("users", csv_file, "-U", "admin", "--only-missing", "--limit", "sw1")
+        == cli.EXIT_OK
+    )
+    assert "already compliant" in capsys.readouterr().out
+
+
+def test_only_missing_still_creates_an_absent_account(
+    device, csv_file, login, user_password, capsys
+):
+    run_feature("users", csv_file, "-U", "admin", "--only-missing", "--limit", "leaf1")
+    capsys.readouterr()
+    monkey = device["devices"]["leaf1"]
+    monkey.lines = [line for line in monkey.lines if not line.startswith("username admin")]
+    run_feature("users", csv_file, "-U", "admin", "--only-missing", "--limit", "leaf1")
+    out = capsys.readouterr().out
+    assert "username admin privilege 15 secret <redacted>" in out
+    assert "no username admin" not in out
+
+
+def test_replace_purges_unmanaged_accounts_but_not_the_login(
+    device, csv_file, login, user_password
+):
+    run_feature("users", csv_file, "-U", "admin", "--replace", "--apply", "-y", "--limit", "sw1")
+    pushed = device["config"]["sw1"]
+    assert "no username admin" in pushed
+    # netauto is the account this run is logged in as
+    assert "no username netauto" not in pushed
+    assert "username netauto privilege 15 secret 9 $9$saLt$abcdef" in device["devices"]["sw1"].lines
+
+
+def test_replace_can_be_told_to_purge_the_login_account(
+    device, csv_file, login, user_password
+):
+    run_feature(
+        "users", csv_file, "-U", "admin", "--replace", "--allow-remove-self",
+        "--apply", "-y", "--limit", "sw1",
+    )
+    assert "no username netauto" in device["config"]["sw1"]
+
+
+def test_users_missing_password_is_a_usage_error(device, csv_file, login, capsys):
+    code = run_feature("users", csv_file, "-U", "nosuchpassword")
+    assert code == cli.EXIT_USAGE
+    assert "NETOPS_PW_NOSUCHPASSWORD" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# snmp packet size
+# --------------------------------------------------------------------------- #
+
+
+def test_snmp_skips_arista_rather_than_failing_it(device, csv_file, login, capsys):
+    assert run_feature("snmp-packetsize", csv_file) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "skipped -- EOS has no `snmp-server packetsize` equivalent" in out
+    assert "snmp-server packetsize 1300" in out  # the IOS box is still planned
+    assert "1 not applicable" in out
+
+
+def test_snmp_sets_the_size_and_is_then_compliant(device, csv_file, login, capsys):
+    assert run_feature("snmp-packetsize", csv_file, "--apply", "-y") == cli.EXIT_OK
+    assert device["config"]["sw1"] == ["snmp-server packetsize 1300"]
+    capsys.readouterr()
+
+    assert run_feature("snmp-packetsize", csv_file) == cli.EXIT_OK
+    assert "already compliant" in capsys.readouterr().out
+
+
+def test_snmp_custom_size(device, csv_file, login):
+    run_feature("snmp-packetsize", csv_file, "--size", "1400", "--apply", "-y")
+    assert device["config"]["sw1"] == ["snmp-server packetsize 1400"]
+
+
+def test_snmp_size_out_of_range_is_rejected(device, csv_file, login, capsys):
+    with pytest.raises(SystemExit):
+        run_feature("snmp-packetsize", csv_file, "--size", "20000")
+    assert "must be between" in capsys.readouterr().err
+
+
+def test_an_eos_ssh_key_is_removed_with_the_account(device, csv_file, login, user_password):
+    run_feature("users", csv_file, "-U", "admin", "--apply", "-y", "--limit", "leaf1")
+    assert device["config"]["leaf1"] == [
+        "no username admin ssh-key",
+        "no username admin",
+        f"username admin privilege 15 secret {PASSWORD}",
+    ]
+    assert not any("ssh-key" in line for line in device["devices"]["leaf1"].lines)
+
+
+def test_only_missing_still_removes_an_ssh_key(device, csv_file, login, user_password, capsys):
+    """The account keeps its password; the alternative credential does not."""
+    assert (
+        run_feature(
+            "users", csv_file, "-U", "admin", "--only-missing", "--apply", "-y",
+            "--limit", "leaf1",
+        )
+        == cli.EXIT_OK
+    )
+    assert device["config"]["leaf1"] == ["no username admin ssh-key"]
+    lines = device["devices"]["leaf1"].lines
+    assert not any("ssh-key" in line for line in lines)
+    assert "username admin privilege 15 role network-admin secret sha512 $6$saLt$abc" in lines

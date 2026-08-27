@@ -1,0 +1,174 @@
+"""The Nornir tasks: detect the platform, read state, plan, optionally push."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Mapping, Sequence
+
+from nornir.core.task import Result, Task
+from nornir_netmiko import netmiko_send_command, netmiko_send_config
+
+from .core import (
+    MODE_ADD,
+    SAVE_COMMANDS,
+    Feature,
+    NotApplicable,
+    canonical_platform,
+    plan_changes,
+    render,
+    scrub,
+)
+
+# `show run | include ...` can take a while on a chassis with a large config,
+# and `write memory` on a busy box longer still. netmiko's 10s default is too
+# tight for both.
+SHOW_TIMEOUT = 60
+SAVE_TIMEOUT = 120
+
+
+def detect_platform(task: Task) -> Result:
+    """Fill in a blank platform column by asking the device what it is.
+
+    Runs before the main task so an unknown box fails during detection with a
+    clear message instead of halfway through a config push. The answer is both
+    the netmiko device_type used to connect and the template directory used to
+    render, which is why it is canonicalized to netmiko's spelling.
+    """
+    from netmiko.ssh_autodetect import SSHDetect
+
+    host = task.host
+    params: Dict[str, Any] = {
+        "device_type": "autodetect",
+        "host": host.hostname,
+        "username": host.username,
+        "password": host.password,
+        "port": host.port or 22,
+    }
+    extras = host.get_connection_parameters("netmiko").extras or {}
+    if extras.get("secret"):
+        params["secret"] = extras["secret"]
+
+    guess = SSHDetect(**params).autodetect()
+    if not guess:
+        raise ValueError(
+            "could not autodetect the platform; set the platform column in the CSV"
+        )
+    platform = canonical_platform(guess)
+    host.platform = platform
+    return Result(host=host, result=platform, changed=False)
+
+
+def _read_state(task: Task, support) -> List:
+    shown = task.run(
+        task=netmiko_send_command,
+        name=support.show_command,
+        command_string=support.show_command,
+        enable=True,
+        read_timeout=SHOW_TIMEOUT,
+    )
+    return support.parse(shown.result or "")
+
+
+def configure_feature(
+    task: Task,
+    feature: Feature,
+    desired: Sequence[str],
+    variables: Mapping[str, Any],
+    secrets: Sequence[str],
+    mode: str,
+    dry_run: bool,
+    save: bool,
+    verify: bool,
+) -> Result:
+    """Read current state, work out the delta, and apply it unless dry running.
+
+    A dry run still connects: `--replace` cannot know what to remove without
+    reading the device, and an add-only plan that ignored current state would
+    report changes that are already in place.
+
+    Nothing sensitive survives this function. Rendered commands and device
+    output are scrubbed of `secrets` before they go into the payload, so the
+    password reaches the device and neither the terminal nor the report.
+    """
+    platform = canonical_platform(task.host.platform)
+    payload: Dict[str, Any] = {
+        "platform": platform,
+        "mode": mode,
+        "current": [],
+        "desired": list(desired),
+        "add": [],
+        "remove": [],
+        "commands": [],
+        "save_command": None,
+        "compliant": False,
+        "applied": False,
+        "saved": None,
+        "skipped": False,
+        "skip_reason": None,
+        "verified": None,
+        "missing_after": [],
+        "output": None,
+        "save_output": None,
+    }
+
+    try:
+        support = feature.support_for(platform)  # raises UnsupportedPlatform
+    except NotApplicable as exc:
+        # Not an error: the setting does not exist on this OS.
+        payload.update(skipped=True, skip_reason=str(exc), compliant=True)
+        return Result(host=task.host, result=payload, changed=False)
+
+    current = _read_state(task, support)
+    context = {
+        "login_user": task.host.username,
+        "platform": platform,
+        "variables": variables,
+    }
+    to_add, to_remove = feature.plan(current, desired, mode, context)
+
+    commands: List[str] = []
+    if to_add or to_remove:
+        commands = render(feature.name, platform, to_add, to_remove, variables)
+
+    payload.update(
+        current=[entry.shown for entry in current],
+        add=list(to_add),
+        remove=[entry.shown for entry in to_remove],
+        commands=[scrub(command, secrets) for command in commands],
+        save_command=SAVE_COMMANDS.get(platform) if (commands and save) else None,
+        compliant=not commands,
+    )
+
+    if not commands or dry_run:
+        return Result(host=task.host, result=payload, changed=False)
+
+    pushed = task.run(
+        task=netmiko_send_config,
+        name=f"configure {feature.name}",
+        config_commands=commands,
+    )
+    payload["applied"] = True
+    payload["output"] = scrub(pushed.result, secrets)
+
+    # Read back before saving. If a `no username x` landed but its replacement
+    # did not, this is what notices -- and not saving leaves startup-config with
+    # the account still in it.
+    if verify:
+        after = _read_state(task, support)
+        missing, _ = plan_changes(after, desired, MODE_ADD)
+        payload["verified"] = not missing
+        payload["missing_after"] = missing
+
+    if payload["save_command"] and payload["verified"] is not False:
+        saved = task.run(
+            task=netmiko_send_command,
+            name=payload["save_command"],
+            command_string=payload["save_command"],
+            enable=True,
+            read_timeout=SAVE_TIMEOUT,
+        )
+        payload["save_output"] = scrub(saved.result, secrets)
+        payload["saved"] = True
+    elif payload["save_command"]:
+        payload["saved"] = False
+
+    return Result(host=task.host, result=payload, changed=True)

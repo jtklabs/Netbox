@@ -1,0 +1,9 @@
+{#-
+  Cisco IOS / IOS-XE -- SNMP maximum packet size.
+
+  A scalar setting: writing the new value replaces the old one, so `remove` is
+  always empty and `add` holds at most the one size.
+-#}
+{% for size in add %}
+snmp-server packetsize {{ size }}
+{% endfor %}

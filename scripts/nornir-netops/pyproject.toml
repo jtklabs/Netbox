@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nornir-netops"
+version = "0.1.0"
+description = "Nornir-driven, template-based config convergence from a CSV of device addresses"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "nornir>=3.4.1",
+    "nornir-netmiko>=1.0.0",
+    "netmiko>=4.2.0",
+    "Jinja2>=3.1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+netops = "netops.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["netops*"]
+
+# Templates live in ./templates, beside the package, so they stay easy to edit.
+# `pip install -e .` therefore works out of the box; a non-editable install must
+# point $NETOPS_TEMPLATES at a copy of that directory.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
