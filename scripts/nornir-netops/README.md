@@ -250,8 +250,9 @@ instead of a password.
 | `--log-file`, `--no-log-file`, `--debug` | See [When a device fails](#when-a-device-fails). |
 
 Exit codes: `0` all good, `1` a device failed or could not be verified, `2`
-drift found with `--fail-on-diff`, `3` a usage or credential problem, `130`
-interrupted with Ctrl-C.
+drift -- either found with `--fail-on-diff`, or drift the tool declined to fix
+(see [ACLs](#acls)), `3` a usage or credential problem, `130` interrupted with
+Ctrl-C.
 
 ### Concurrency
 
@@ -385,6 +386,39 @@ The negation and the rebuild go out in the same config push. **There is a real
 gap between them** -- a few milliseconds inside one session during which the
 ACL does not exist, and anything referencing it behaves as that platform
 behaves with a missing ACL. There is no reordering that is safer.
+
+Whether that is acceptable depends on the ACL, so **each one decides for
+itself**:
+
+```yaml
+acls:
+  - name: SNMP-POLLERS
+    permit: snmp.allow
+    deny_log: true
+    rebuild: true        # a missed poll is an acceptable cost here
+```
+
+Dropping a poller list for a moment costs a missed poll. Dropping the ACL on a
+VTY line or an edge interface is a different question with a different answer,
+so `rebuild` is off unless the file says otherwise. Without it:
+
+* an ACL that is **missing** is still created -- there is nothing to delete, so
+  there is no window;
+* an ACL that **exists and has drifted** is reported and left alone:
+
+```console
+atl-core-sw1 (10.1.10.11) [cisco_ios] NEEDS ATTENTION
+    VTY-ACCESS has drifted (1 entries on the device, 2 in the standard).
+    Rewriting it means deleting it first, so it would not exist for a moment --
+    set `rebuild: true` on VTY-ACCESS in the standards file if that is
+    acceptable for this ACL, or fix it by hand.
+
+summary: 1 device(s), 0 compliant, 0 changed, 1 needing attention
+```
+
+A device needing attention exits `2` whether or not `--fail-on-diff` was given:
+the tool was asked to converge and deliberately did not, which is not something
+to leave to an unread log.
 
 The file states networks once, platform-neutrally, and each template writes
 them the way its platform does: IOS gets wildcard masks (`10.1.1.0 0.0.0.255`,
@@ -659,7 +693,7 @@ pip install pytest
 pytest
 ```
 
-342 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+347 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

@@ -239,8 +239,13 @@ class Entry:
 
 
 #: A feature's planner. Given what the device has, what we want, the mode and a
-#: context ({"login_user", "platform", "variables"}), return the keys to
-#: configure and the entries to negate. `plan_changes` is the default.
+#: context, return the keys to configure and the entries to negate.
+#: `plan_changes` is the default.
+#:
+#: The context carries "login_user", "platform", "variables", "ignores", and
+#: "advisories" -- a list a planner can append to when it finds drift it is
+#: deliberately not going to fix. The device is then reported as needing
+#: attention rather than as compliant, without any command being sent.
 PlanFunc = Callable[
     [Sequence["Entry"], Sequence[str], str, Mapping[str, Any]],
     Tuple[List[str], List["Entry"]],

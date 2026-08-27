@@ -45,8 +45,9 @@ STATUS_ORDER = {
     "skipped": 1,
     "pending": 2,
     "changed": 3,
-    "unverified": 4,
-    "failed": 5,
+    "attention": 4,
+    "unverified": 5,
+    "failed": 6,
 }
 
 
@@ -346,6 +347,12 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
                 print(style.dim(f"    {line}"))
         return
 
+    if status == "attention":
+        print(f"{header} {style.warn('NEEDS ATTENTION')}")
+        for note in record["advisories"]:
+            print(style.warn(f"    {note}"))
+        return
+
     if status == "unverified":
         label = style.bad("APPLIED BUT NOT VERIFIED")
     elif status == "changed":
@@ -363,6 +370,8 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
         print(f"    {command}")
     if record["save_command"]:
         print(f"    {record['save_command']}")
+    for note in record.get("advisories") or ():
+        print(style.warn(f"    {note}"))
     if status == "unverified":
         missing = ", ".join(record["missing_after"])
         print(style.bad(f"    !! still missing after the change: {missing}"))
@@ -381,7 +390,15 @@ def _print_report(
         _print_host(style, name, records[name], verbose)
         print()
 
-    counts = {"ok": 0, "pending": 0, "changed": 0, "failed": 0, "skipped": 0, "unverified": 0}
+    counts = {
+        "ok": 0,
+        "pending": 0,
+        "changed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "unverified": 0,
+        "attention": 0,
+    }
     for record in records.values():
         counts[record["status"]] += 1
 
@@ -392,6 +409,8 @@ def _print_report(
         summary.append(style.ok(f"{counts['changed']} changed"))
     if counts["skipped"]:
         summary.append(style.dim(f"{counts['skipped']} not applicable"))
+    if counts["attention"]:
+        summary.append(style.warn(f"{counts['attention']} needing attention"))
     if counts["unverified"]:
         summary.append(style.bad(f"{counts['unverified']} unverified"))
     if counts["failed"]:
@@ -470,6 +489,7 @@ def selftest() -> int:
                         "platform": platform,
                         "variables": desired.variables,
                         "ignores": support.ignores,
+                        "advisories": advisories,
                     },
                 )
                 try:
@@ -488,7 +508,9 @@ def selftest() -> int:
                 print(f"  --{mode}:")
                 for command in commands:
                     print(f"    {scrub(command, shown_secrets)}")
-                if not commands:
+                for note in advisories:
+                    print(f"    ! {note}")
+                if not commands and not advisories:
                     print("    (no changes)")
             print()
 
@@ -740,6 +762,10 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
 
     if any(r["status"] in ("failed", "unverified") for r in records.values()):
         return EXIT_FAILED
+    if any(r["status"] == "attention" for r in records.values()):
+        # Drift the tool declined to fix always needs a human, whether or not
+        # --fail-on-diff was asked for.
+        return EXIT_DIFF
     if args.fail_on_diff and any(r["status"] == "pending" for r in records.values()):
         return EXIT_DIFF
     return EXIT_OK
@@ -752,6 +778,8 @@ def _status_of(payload: Dict[str, Any]) -> str:
         return "unverified"  # the change was pushed but did not take
     if payload["compliant"]:
         return "ok"
+    if payload.get("advisories") and not payload["commands"]:
+        return "attention"  # out of compliance, and not ours to fix
     return "changed" if payload["applied"] else "pending"
 
 

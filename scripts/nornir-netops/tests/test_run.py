@@ -847,6 +847,7 @@ acls:
   - name: SNMP-POLLERS
     permit: snmp.allow
     deny_log: true
+    rebuild: true
 """
 
 SNMP_AUTH = "snmp-auth-passphrase"
@@ -924,6 +925,27 @@ def test_acl_out_of_order_on_the_device_is_rebuilt(device, csv_file, login, stan
     )
     run_feature("acl", csv_file, "--apply", "-y", "--limit", "sw1")
     assert device["config"]["sw1"][0] == "no ip access-list standard SNMP-POLLERS"
+
+
+def test_a_drifted_acl_without_rebuild_is_reported_and_nothing_is_sent(
+    device, csv_file, login, tmp_path, capsys
+):
+    """Deleting an ACL to reorder it is a per-ACL decision, not a default."""
+    (tmp_path / "standards.yaml").write_text(
+        "acls:\n  - name: VTY-ACCESS\n    permit: [10.1.1.0/24]\n", encoding="utf-8"
+    )
+    device["devices"]["sw1"].lines.extend(
+        ["ip access-list standard VTY-ACCESS", " 10 permit 10.9.9.9/32"]
+    )
+    code = run_feature("acl", csv_file, "--apply", "-y", "--limit", "sw1")
+
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_DIFF  # a human is needed, whatever the flags said
+    assert "NEEDS ATTENTION" in out
+    assert "has drifted" in out
+    assert "rebuild: true" in out
+    assert device["config"] == {}  # nothing was sent
+    assert "1 needing attention" in out
 
 
 def test_snmp_removes_a_community_and_rewrites_a_weak_user(

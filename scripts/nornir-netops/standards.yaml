@@ -97,16 +97,24 @@ banner:
 
 # --------------------------------------------------------------------------
 # ACLs  ->  configure.py acl
-# Entries are applied in the order written, and a device whose entries are in a
-# different order is rebuilt to match -- order is the whole meaning of an ACL.
+# Entries are applied in the order written -- order is the whole meaning of an
+# ACL, so a device whose entries are in a different order has drifted.
 #
 # `permit: snmp.allow` points at the networks above rather than repeating them.
+#
+# `rebuild: true` says this ACL may be deleted and rewritten to correct it.
+# Correcting the order is not possible any other way, and for the few
+# milliseconds between the two commands the ACL does not exist. That is fine
+# for a poller list -- it costs a missed poll -- and it is emphatically not
+# fine for a VTY or edge ACL. So it is per-ACL, and off unless stated. An ACL
+# that is simply missing is created either way; there is nothing to delete.
 # --------------------------------------------------------------------------
 acls:
   - name: SNMP-POLLERS
     type: standard
     permit: snmp.allow
     deny_log: true       # trailing `deny any log`, so denied polls are visible
+    rebuild: true        # a missed poll is an acceptable cost here
 
 # --------------------------------------------------------------------------
 # Local accounts  ->  configure.py users

@@ -109,6 +109,7 @@ def configure_feature(
         "commands": [],
         "save_command": None,
         "compliant": False,
+        "advisories": [],
         "applied": False,
         "saved": None,
         "skipped": False,
@@ -139,8 +140,11 @@ def configure_feature(
         "platform": platform,
         "variables": variables,
         "ignores": support.ignores,
+        # A planner appends here when it finds drift it will not fix by itself.
+        "advisories": [],
     }
     to_add, to_remove = feature.plan(current, desired, mode, context)
+    advisories: List[str] = list(context["advisories"])
 
     commands: List[str] = []
     if to_add or to_remove:
@@ -154,7 +158,9 @@ def configure_feature(
         remove=[entry.shown for entry in to_remove],
         commands=[scrub(command, secrets) for command in commands],
         save_command=SAVE_COMMANDS.get(platform) if (commands and save) else None,
-        compliant=not commands,
+        advisories=advisories,
+        # Drift we are not fixing is still drift: this device is not compliant.
+        compliant=not commands and not advisories,
     )
 
     if not commands or dry_run:

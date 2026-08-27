@@ -21,10 +21,21 @@ def parse_args(argv, document=None):
     return args
 
 
-DOCUMENT = {
-    "snmp": {"allow": ["10.1.1.0/24", "10.2.0.0/16"]},
-    "acls": [{"name": "SNMP-POLLERS", "permit": "snmp.allow", "deny_log": True}],
-}
+def document(rebuild=True):
+    return {
+        "snmp": {"allow": ["10.1.1.0/24", "10.2.0.0/16"]},
+        "acls": [
+            {
+                "name": "SNMP-POLLERS",
+                "permit": "snmp.allow",
+                "deny_log": True,
+                "rebuild": rebuild,
+            }
+        ],
+    }
+
+
+DOCUMENT = document()
 
 
 # --------------------------------------------------------------------------- #
@@ -88,9 +99,21 @@ def test_display_summarizes_rather_than_dumping():
     assert parse_acls(IOS_SAMPLE)[0].shown == "ip access-list standard SNMP-POLLERS (2 entries)"
 
 
-def context(document=None):
-    desired = FEATURE.build_desired(parse_args([], document or DOCUMENT))
-    return desired, {"platform": "cisco_ios", "variables": desired.variables}
+def context(doc=None, advisories=None):
+    desired = FEATURE.build_desired(parse_args([], doc or DOCUMENT))
+    return desired, {
+        "platform": "cisco_ios",
+        "variables": desired.variables,
+        "advisories": advisories if advisories is not None else [],
+    }
+
+
+DRIFTED = (
+    "ip access-list standard SNMP-POLLERS\n"
+    " 10 permit 10.2.0.0 0.0.255.255\n"
+    " 20 permit 10.1.1.0 0.0.0.255\n"
+    " 30 deny any log\n"
+)
 
 
 def test_an_acl_that_matches_exactly_is_left_alone():
@@ -107,13 +130,7 @@ def test_an_acl_that_matches_exactly_is_left_alone():
 def test_entries_in_the_wrong_order_are_rebuilt():
     """Order is the whole meaning of an ACL, so a reordering is a difference."""
     desired, ctx = context()
-    reordered = parse_acls(
-        "ip access-list standard SNMP-POLLERS\n"
-        " 10 permit 10.2.0.0 0.0.255.255\n"
-        " 20 permit 10.1.1.0 0.0.0.255\n"
-        " 30 deny any log\n"
-    )
-    add, remove = plan_acls(reordered, desired.keys, MODE_ADD, ctx)
+    add, remove = plan_acls(parse_acls(DRIFTED), desired.keys, MODE_ADD, ctx)
     assert add == ["SNMP-POLLERS"]
     assert [e.line for e in remove] == ["ip access-list standard SNMP-POLLERS"]
 
@@ -122,6 +139,50 @@ def test_a_missing_entry_is_a_rebuild():
     desired, ctx = context()
     add, remove = plan_acls(parse_acls(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
     assert add == ["SNMP-POLLERS"] and len(remove) == 1
+
+
+# --------------------------------------------------------------------------- #
+# rebuild is per-ACL: deleting one to reorder it is not always acceptable
+# --------------------------------------------------------------------------- #
+
+
+def test_drift_is_reported_not_rewritten_when_rebuild_is_not_set():
+    advisories = []
+    desired, ctx = context(document(rebuild=False), advisories)
+    add, remove = plan_acls(parse_acls(DRIFTED), desired.keys, MODE_ADD, ctx)
+
+    assert (add, remove) == ([], [])  # nothing is sent
+    assert len(advisories) == 1
+    assert "has drifted" in advisories[0]
+    assert "rebuild: true" in advisories[0]
+
+
+def test_a_missing_acl_is_created_even_without_rebuild():
+    """There is nothing to delete, so there is no window to worry about."""
+    advisories = []
+    desired, ctx = context(document(rebuild=False), advisories)
+    add, remove = plan_acls([], desired.keys, MODE_ADD, ctx)
+    assert (add, remove, advisories) == (["SNMP-POLLERS"], [], [])
+
+
+def test_a_matching_acl_says_nothing_either_way():
+    advisories = []
+    desired, ctx = context(document(rebuild=False), advisories)
+    matching = parse_acls(
+        "ip access-list standard SNMP-POLLERS\n"
+        " 10 permit 10.1.1.0 0.0.0.255\n"
+        " 20 permit 10.2.0.0 0.0.255.255\n"
+        " 30 deny any log\n"
+    )
+    assert plan_acls(matching, desired.keys, MODE_ADD, ctx) == ([], [])
+    assert advisories == []
+
+
+def test_rebuild_defaults_to_off():
+    desired = FEATURE.build_desired(
+        parse_args([], {"acls": [{"name": "X", "permit": ["10.1.1.0/24"]}]})
+    )
+    assert desired.variables["acls"]["X"]["rebuild"] is False
 
 
 def test_a_missing_acl_is_created_without_a_negation():

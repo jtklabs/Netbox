@@ -11,6 +11,14 @@ that is not worse. The gap is a few milliseconds inside one session, but it is
 a real gap: while it is open the ACL does not exist, and anything referencing
 it behaves as that platform behaves with a missing ACL.
 
+Whether that is acceptable depends entirely on the ACL. Dropping an SNMP poller
+list for a moment costs a missed poll; dropping the ACL on a VTY line or an
+edge interface is a different question with a different answer. So each ACL in
+the standards file decides for itself with `rebuild: true`. Without it an ACL
+that is *missing* is still created -- there is nothing to delete, so there is no
+gap -- but one that exists and has drifted is reported for a human rather than
+rewritten.
+
 --replace deliberately does nothing extra here. Making a device's ACLs exactly
 the file's list would delete every ACL this file does not mention -- VTY, NAT,
 route-map -- which is not a thing to offer as a flag.
@@ -146,15 +154,28 @@ def plan_acls(
     wanted: Mapping[str, Any] = (context.get("variables") or {}).get("acls", {})
     configured = {entry.key: entry for entry in current}
 
+    advisories: List[str] = context.get("advisories") if context.get("advisories") is not None else []
+
     to_add: List[str] = []
     to_remove: List[Entry] = []
     for name in desired:
         entry = configured.get(name)
         target = _signature(wanted[name]["entries"])
-        if entry is not None:
-            if _signature(entry.data.get("entries", ())) == target:
-                continue  # same entries, same order
-            to_remove.append(entry)  # rebuild: negate, then write it back
+        if entry is None:
+            to_add.append(name)  # nothing to delete, so nothing to expose
+            continue
+        if _signature(entry.data.get("entries", ())) == target:
+            continue  # same entries, same order
+        if not wanted[name].get("rebuild"):
+            advisories.append(
+                f"{name} has drifted ({len(entry.data.get('entries', ()))} entries on the "
+                f"device, {len(wanted[name]['entries'])} in the standard). Rewriting it "
+                f"means deleting it first, so it would not exist for a moment -- set "
+                f"`rebuild: true` on {name} in the standards file if that is acceptable "
+                f"for this ACL, or fix it by hand."
+            )
+            continue
+        to_remove.append(entry)  # negate, then write it back
         to_add.append(name)
     return to_add, to_remove
 
@@ -183,7 +204,14 @@ def _acl_from_standards(item: Mapping[str, Any], standards) -> Dict[str, Any]:
 
     if not entries:
         raise StandardsError(f"acl {name} has no entries")
-    return {"name": name, "type": kind, "entries": entries}
+    return {
+        "name": name,
+        "type": kind,
+        "entries": entries,
+        # Whether this particular ACL may be deleted and rewritten to correct
+        # its order. Off unless the file says otherwise.
+        "rebuild": bool(item.get("rebuild", False)),
+    }
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
