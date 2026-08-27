@@ -541,9 +541,9 @@ no snmp-server user nmsuser NMS-RO v3
 snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-POLLERS
 ```
 
-If you need to rotate a passphrase without a protocol change, remove the user
-by hand -- the next run recreates it. (`--rotate`, mirroring the local-accounts
-behaviour, would be a small addition if that turns out to be routine.)
+A passphrase change alone therefore looks like no change at all. `--rewrite-users`
+pushes it anyway -- see [An ACL per user](#an-acl-per-user) below, which has the
+same problem for the same reason.
 
 **Passphrases** come from `$NETOPS_SNMP_AUTH_<USER>` and
 `$NETOPS_SNMP_PRIV_<USER>`, or from a `--passphrase-secret` AWS secret shaped
@@ -563,13 +563,68 @@ flags it and the command is redacted everywhere it is shown:
 no snmp-server community <redacted>
 ```
 
-Two platform differences the templates carry: IOS writes the privacy protocol
-as two tokens (`aes 128`) and EOS as one (`aes128`); and **EOS has no `access
-<acl>` clause on a group**, so an EOS device gets the users, groups and views
-but not the poller restriction -- EOS does that with a control-plane ACL, which
-this tool does not manage. Apply it separately. The platform declares `access`
-as a field it cannot express, so it is never compared there; without that the
-group would be rebuilt on every run forever.
+### An ACL per user
+
+`snmp.acl` is the default for everything. A user or a group may name its own,
+which is how one account is usable only from the NMS and another only from the
+monitoring VLAN:
+
+```yaml
+snmp:
+  acl: SNMP-POLLERS          # the default
+  users:
+    - name: nmsuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+      acl: SNMP-NMS          # only from the NMS itself
+    - name: monuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+      acl: SNMP-MONITORING
+
+acls:
+  - name: SNMP-NMS
+    permit: [10.1.1.50/32]
+    deny_log: true
+    rebuild: true
+```
+
+```
+snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-NMS
+snmp-server user monuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-MONITORING
+```
+
+An ACL named here must be defined in `acls:`, or the run stops and says which
+ones are -- binding SNMP to an access list that does not exist is worse than
+not binding it. If the file has no `acls:` section at all, the ACLs are managed
+elsewhere and the name is taken on trust.
+
+**A group's ACL is compared; a user's cannot be.** The group is written into
+the running config, so drift on it is visible. `show snmp user` reports the
+group and the protocols and nothing else, so on IOS a user's ACL can be set but
+never read back -- changing one in the file will not show up as drift. Push it
+with:
+
+```bash
+./configure.py snmp --apply --rewrite-users
+```
+
+which negates and recreates every managed user regardless of what the device
+reports. It is also how a changed passphrase gets pushed, for the same reason.
+
+Run `configure.py acl` before `configure.py snmp` on a device that does not
+have the ACLs yet -- SNMP will happily reference one that does not exist.
+
+### Platform differences
+
+IOS writes the privacy protocol as two tokens (`aes 128`) and EOS as one
+(`aes128`). **EOS has no `access <acl>` clause at all**, so an EOS device gets
+the users, groups and views but not the poller restriction -- EOS does that
+with a control-plane ACL, which this tool does not manage. Apply it separately.
+The platform declares `access` as a field it cannot express, so it is never
+compared there; without that the group would be rebuilt on every run forever.
 
 Views are written before groups and groups before users, because a group naming
 a view that does not exist yet is rejected, as is a user in a group that does
@@ -790,7 +845,7 @@ pip install pytest
 pytest
 ```
 
-394 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+406 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

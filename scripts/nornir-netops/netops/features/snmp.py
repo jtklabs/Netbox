@@ -14,6 +14,15 @@ standard, and left alone when they match.
 community exists, so any community found on a device is removed -- in `--add`
 mode too, because "there must be none" is not an extra to be left alone. If the
 standards file says nothing about communities, none are touched.
+
+**Each user may name its own ACL.** `snmp.acl` is the default for everything;
+a `acl:` on an individual user or group overrides it, which is how one poller
+gets one allow list and another gets a different one. A group's ACL is written
+into the running config and is therefore compared like any other field. A
+*user's* is not: `show snmp user` reports the group and the protocols and
+nothing else, so on IOS the binding can be set but never read back. It is
+written whenever the user is written, and `--rewrite-users` is the way to push
+a changed one without waiting for some other field to differ.
 """
 
 from __future__ import annotations
@@ -298,6 +307,12 @@ def plan_snmp(
             to_add.append(key)
             continue
         kind = wanted[key]["kind"]
+        if kind == "user" and variables.get("rewrite_users"):
+            # Asked for explicitly: there is nothing to compare a passphrase or
+            # a user's ACL against, so this is the only way to push either.
+            to_remove.append(entry)
+            to_add.append(key)
+            continue
         fields = [f for f in COMPARED.get(kind, ()) if f not in ignores]
         if fields and _differs(entry.data, wanted[key], fields):
             # A v3 user cannot be edited into a different group or protocol, and
@@ -382,6 +397,21 @@ def resolve_passphrases(
 # --------------------------------------------------------------------------- #
 
 
+def selftest_placeholders(standards) -> Dict[str, str]:
+    """Placeholder passphrases for whichever users the standards file names.
+
+    Derived rather than hardcoded: adding a user to the file should not also
+    mean editing this module for the offline render to keep working.
+    """
+    placeholders: Dict[str, str] = {}
+    for item in standards.entries("snmp.users"):
+        if not isinstance(item, Mapping) or not item.get("name"):
+            continue
+        for variable in passphrase_variables(str(item["name"])):
+            placeholders[variable] = "selftest-placeholder"
+    return placeholders
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--passphrase-secret",
@@ -394,6 +424,30 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--location", help="override snmp.location from the standards file"
     )
     parser.add_argument("--contact", help="override snmp.contact from the standards file")
+    parser.add_argument(
+        "--rewrite-users",
+        action="store_true",
+        help="negate and recreate every managed v3 user, whether or not it looks "
+        "different. The way to push a changed passphrase or a changed per-user "
+        "ACL, neither of which can be read back from a device.",
+    )
+
+
+def _acl_names(standards) -> Optional[set]:
+    """The ACLs the standards file defines, or None if it defines none.
+
+    Used to catch a typo before it binds SNMP to an access list that does not
+    exist. If the file has no `acls:` section at all the ACLs are managed
+    somewhere else, and naming one here is not this tool's business to police.
+    """
+    defined = standards.value("acls")
+    if not defined:
+        return None
+    names = set()
+    for item in defined:
+        if isinstance(item, Mapping) and item.get("name"):
+            names.add(str(item["name"]))
+    return names or None
 
 
 def build_desired(args: argparse.Namespace) -> Desired:
@@ -401,6 +455,22 @@ def build_desired(args: argparse.Namespace) -> Desired:
     section = standards.section("snmp")
     if not section:
         raise ValueError("no snmp section in the standards file")
+
+    known_acls = _acl_names(standards)
+
+    def acl_for(item: Mapping[str, Any], what: str) -> Optional[str]:
+        """This item's own ACL, else the section default, else nothing."""
+        name = item.get("acl", section.get("acl"))
+        if not name:
+            return None
+        name = validate_word(str(name), "ACL name")
+        if known_acls is not None and name not in known_acls:
+            raise StandardsError(
+                f"{what} names ACL {name!r}, which the acls: section does not "
+                f"define (defined: {', '.join(sorted(known_acls))}). Binding SNMP "
+                f"to an access list that does not exist is worse than not binding it."
+            )
+        return name
 
     acl = section.get("acl")
     if acl:
@@ -443,7 +513,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
                 "write": validate_word(str(item["write"]), "view name")
                 if item.get("write")
                 else None,
-                "access": acl,
+                "access": acl_for(item, f"snmp group {name}"),
             },
         )
 
@@ -456,7 +526,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "group": validate_word(str(item["group"]), "group name"),
             "auth": _protocol(item.get("auth")),
             "priv": _protocol(item.get("priv")),
-            "access": acl,
+            "access": acl_for(item, f"snmp user {name}"),
         }
         users.append(record)
         add(f"user:{name}", record)
@@ -508,6 +578,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "entries": entries,
             "acl": acl,
             "forbid_communities": communities is not None,
+            "rewrite_users": bool(getattr(args, "rewrite_users", False)),
         },
         secrets=[value for record in passphrases.values() for value in record.values()],
     )
@@ -529,8 +600,5 @@ FEATURE = Feature(
     build_desired=build_desired,
     plan=plan_snmp,
     selftest_args=[],
-    selftest_env={
-        "NETOPS_SNMP_AUTH_NMSUSER": "selftest-placeholder",
-        "NETOPS_SNMP_PRIV_NMSUSER": "selftest-placeholder",
-    },
+    selftest_env_from=selftest_placeholders,
 )

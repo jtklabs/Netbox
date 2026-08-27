@@ -480,7 +480,10 @@ def selftest() -> int:
         feature.add_arguments(sub)
         # A feature whose values come from the environment (passwords) declares
         # placeholders here rather than putting them on a command line.
-        for key, value in feature.selftest_env.items():
+        placeholders = dict(feature.selftest_env)
+        if feature.selftest_env_from is not None:
+            placeholders.update(feature.selftest_env_from(standards))
+        for key, value in placeholders.items():
             os.environ.setdefault(key, value)
         namespace = sub.parse_args(feature.selftest_args)
         namespace.standards = standards

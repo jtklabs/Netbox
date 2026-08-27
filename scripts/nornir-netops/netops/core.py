@@ -306,6 +306,9 @@ class Feature:
     #: Environment the selftest sets first, for a feature whose values come
     #: from the environment rather than from a flag (passwords).
     selftest_env: Dict[str, str] = field(default_factory=dict)
+    #: The same, but derived from the standards file, so adding a user to the
+    #: file does not also mean editing a placeholder into this module.
+    selftest_env_from: Optional[Callable[[Any], Dict[str, str]]] = None
     #: Platforms that genuinely have no equivalent setting, mapped to why.
     #: These are skipped and reported, not failed -- a fleet-wide run of a
     #: Cisco-only knob should not turn every Arista red.

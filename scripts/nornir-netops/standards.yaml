@@ -49,13 +49,13 @@ syslog:
 # passwords do -- see the README.
 # --------------------------------------------------------------------------
 snmp:
-  # Networks allowed to poll. Stated once here and referenced by the ACL below,
-  # so there is one place to add a new poller.
+  # Networks allowed to poll at all. Stated once here and referenced by the
+  # ACL below, so there is one place to add a new poller.
   allow:
     - 10.1.1.0/24        # NMS / poller subnet
     - 10.2.0.0/16        # monitoring VLANs
 
-  # The ACL that enforces `allow`, applied to the groups and hosts below.
+  # The default ACL, applied to any group or user that does not name its own.
   acl: SNMP-POLLERS
 
   communities: []        # v2c: none permitted, remove any found
@@ -73,11 +73,24 @@ snmp:
       security: priv     # noauth | auth | priv
       read: NMS-VIEW
 
+  # Each user may name its own ACL, so one account is usable only from the NMS
+  # and another only from the monitoring VLAN. Without `acl:` a user gets
+  # `snmp.acl` above.
+  #
+  # A user's ACL cannot be read back from a device -- `show snmp user` reports
+  # the group and the protocols and nothing else -- so changing one here does
+  # not show up as drift. Push it with `configure.py snmp --rewrite-users`.
   users:
     - name: nmsuser
       group: NMS-RO
       auth: sha
       priv: aes 128
+      acl: SNMP-NMS
+    - name: monuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+      acl: SNMP-MONITORING
 
   hosts:
     - host: 10.1.1.50
@@ -110,11 +123,25 @@ banner:
 # that is simply missing is created either way; there is nothing to delete.
 # --------------------------------------------------------------------------
 acls:
-  - name: SNMP-POLLERS
+  - name: SNMP-POLLERS   # the default: everything allowed to poll
     type: standard
     permit: snmp.allow
     deny_log: true       # trailing `deny any log`, so denied polls are visible
     rebuild: true        # a missed poll is an acceptable cost here
+
+  - name: SNMP-NMS       # the NMS account, usable only from the NMS itself
+    type: standard
+    permit:
+      - 10.1.1.50/32
+    deny_log: true
+    rebuild: true
+
+  - name: SNMP-MONITORING
+    type: standard
+    permit:
+      - 10.2.5.0/24
+    deny_log: true
+    rebuild: true
 
 # --------------------------------------------------------------------------
 # Local accounts  ->  configure.py users

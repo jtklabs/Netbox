@@ -279,3 +279,133 @@ def test_an_injected_location_is_rejected():
 
     with pytest.raises(InvalidValue):
         FEATURE.build_desired(parse_args((), document))
+
+
+# --------------------------------------------------------------------------- #
+# an ACL per user
+# --------------------------------------------------------------------------- #
+
+
+MULTI_ACL = {
+    "snmp": {
+        "acl": "SNMP-POLLERS",
+        "groups": [{"name": "NMS-RO", "security": "priv", "read": "NMS-VIEW"}],
+        "users": [
+            {"name": "nmsuser", "group": "NMS-RO", "auth": "sha", "priv": "aes 128",
+             "acl": "SNMP-NMS"},
+            {"name": "monuser", "group": "NMS-RO", "auth": "sha", "priv": "aes 128",
+             "acl": "SNMP-MONITORING"},
+            {"name": "plainuser", "group": "NMS-RO", "auth": "sha", "priv": "aes 128"},
+        ],
+    },
+    "acls": [
+        {"name": "SNMP-POLLERS", "permit": ["10.1.1.0/24"]},
+        {"name": "SNMP-NMS", "permit": ["10.1.1.50/32"]},
+        {"name": "SNMP-MONITORING", "permit": ["10.2.5.0/24"]},
+    ],
+}
+
+
+@pytest.fixture
+def multi_passphrases(monkeypatch):
+    for user in ("NMSUSER", "MONUSER", "PLAINUSER"):
+        monkeypatch.setenv(f"NETOPS_SNMP_AUTH_{user}", AUTH)
+        monkeypatch.setenv(f"NETOPS_SNMP_PRIV_{user}", PRIV)
+
+
+def test_each_user_gets_its_own_acl(multi_passphrases):
+    entries = FEATURE.build_desired(parse_args((), MULTI_ACL)).variables["entries"]
+    assert entries["user:nmsuser"]["access"] == "SNMP-NMS"
+    assert entries["user:monuser"]["access"] == "SNMP-MONITORING"
+
+
+def test_a_user_without_its_own_acl_gets_the_default(multi_passphrases):
+    entries = FEATURE.build_desired(parse_args((), MULTI_ACL)).variables["entries"]
+    assert entries["user:plainuser"]["access"] == "SNMP-POLLERS"
+
+
+def test_the_group_keeps_the_default_acl(multi_passphrases):
+    entries = FEATURE.build_desired(parse_args((), MULTI_ACL)).variables["entries"]
+    assert entries["group:NMS-RO"]["access"] == "SNMP-POLLERS"
+
+
+def test_a_group_may_name_its_own_acl(multi_passphrases):
+    document = {
+        "snmp": {
+            "acl": "SNMP-POLLERS",
+            "groups": [{"name": "NMS-RO", "security": "priv", "acl": "SNMP-NMS"}],
+        },
+        "acls": MULTI_ACL["acls"],
+    }
+    entries = FEATURE.build_desired(parse_args((), document)).variables["entries"]
+    assert entries["group:NMS-RO"]["access"] == "SNMP-NMS"
+
+
+def test_each_user_renders_with_its_own_acl(multi_passphrases):
+    desired = FEATURE.build_desired(parse_args((), MULTI_ACL))
+    commands = render("snmp", "cisco_ios", desired.keys, [], desired.variables)
+    assert any(c.endswith("access SNMP-NMS") and "nmsuser" in c for c in commands)
+    assert any(c.endswith("access SNMP-MONITORING") and "monuser" in c for c in commands)
+    assert any(c.endswith("access SNMP-POLLERS") and "plainuser" in c for c in commands)
+
+
+def test_a_typo_in_an_acl_name_is_caught(multi_passphrases):
+    """Binding SNMP to an access list that does not exist is worse than not
+    binding it at all."""
+    document = {
+        "snmp": {"users": [{"name": "nmsuser", "group": "G", "auth": "sha",
+                            "acl": "SNMP-NSM"}]},
+        "acls": MULTI_ACL["acls"],
+    }
+    with pytest.raises(StandardsError) as caught:
+        FEATURE.build_desired(parse_args((), document))
+    assert "SNMP-NSM" in str(caught.value)
+    assert "SNMP-NMS" in str(caught.value)  # tells you what is defined
+
+
+def test_no_acls_section_means_the_acls_live_elsewhere(multi_passphrases):
+    """A file that does not define ACLs is not claiming to own them."""
+    document = {"snmp": dict(MULTI_ACL["snmp"])}
+    entries = FEATURE.build_desired(parse_args((), document)).variables["entries"]
+    assert entries["user:nmsuser"]["access"] == "SNMP-NMS"
+
+
+# --------------------------------------------------------------------------- #
+# --rewrite-users: the only way to push what cannot be read back
+# --------------------------------------------------------------------------- #
+
+
+def test_a_matching_user_is_rewritten_when_asked(passphrases):
+    """A changed passphrase or a changed per-user ACL is invisible from the
+    device, so nothing else would ever trigger the rewrite."""
+    desired, ctx = context(
+        platform="arista_eos", ignores=("access",), args=["--rewrite-users"]
+    )
+    add, remove = plan_snmp(parse_snmp(EOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "user:nmsuser" in add
+    assert "snmp-server user nmsuser NMS-RO v3" in [e.line for e in remove]
+
+
+def test_rewrite_users_leaves_groups_and_views_alone(passphrases):
+    desired, ctx = context(
+        platform="arista_eos", ignores=("access",), args=["--rewrite-users"]
+    )
+    add, _ = plan_snmp(parse_snmp(EOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert not any(key.startswith(("group:", "view:")) for key in add)
+
+
+def test_without_the_flag_a_matching_user_is_still_left_alone(passphrases):
+    desired, ctx = context(platform="arista_eos", ignores=("access",))
+    add, _ = plan_snmp(parse_snmp(EOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "user:nmsuser" not in add
+
+
+def test_selftest_placeholders_come_from_the_standards_file():
+    """Adding a user to the file must not also mean editing this module."""
+    from netops.features.snmp import selftest_placeholders
+    from netops.standards import Standards
+
+    placeholders = selftest_placeholders(Standards(path="t", document=MULTI_ACL))
+    assert "NETOPS_SNMP_AUTH_MONUSER" in placeholders
+    assert "NETOPS_SNMP_PRIV_PLAINUSER" in placeholders
+    assert all(len(value) >= 8 for value in placeholders.values())

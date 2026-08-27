@@ -1210,3 +1210,31 @@ def test_open_change_and_change_together_is_a_usage_error(
 def test_no_servicenow_call_without_the_flags(device, csv_file, login, snow):
     run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
     assert snow.created is None and snow.updates == []
+
+
+def test_rewrite_users_pushes_a_changed_per_user_acl(
+    device, csv_file, login, tmp_path, snmp_passphrases
+):
+    """The device cannot report a user's ACL, so only --rewrite-users pushes it."""
+    (tmp_path / "standards.yaml").write_text(
+        STANDARDS.replace("      priv: aes 128", "      priv: aes 128\n      acl: SNMP-NMS")
+        + "  - name: SNMP-NMS\n    permit: [10.1.1.50/32]\n",
+        encoding="utf-8",
+    )
+    box = device["devices"]["sw1"]
+    box.extra["show snmp user"] = (
+        "User name: nmsuser\n"
+        "Authentication Protocol: SHA\n"
+        "Privacy Protocol: AES128\n"
+        "Group-name: NMS-RO\n"
+    )
+    # Everything the device can report already matches, so nothing is rewritten...
+    run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1")
+    assert not any("snmp-server user" in c for c in device["config"].get("sw1", []))
+
+    # ...until asked.
+    device["config"].clear()
+    run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1", "--rewrite-users")
+    pushed = device["config"]["sw1"]
+    assert "no snmp-server user nmsuser NMS-RO v3" in pushed
+    assert any(c.endswith("access SNMP-NMS") for c in pushed)
