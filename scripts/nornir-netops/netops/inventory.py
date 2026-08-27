@@ -73,6 +73,7 @@ class CSVInventory:
         password: Optional[str] = None,
         secret: Optional[str] = None,
         key_file: Optional[str] = None,
+        conn_timeout: Optional[float] = None,
         port: int = 22,
         platform: Optional[str] = None,
     ) -> None:
@@ -81,6 +82,7 @@ class CSVInventory:
         self.password = password
         self.secret = secret
         self.key_file = key_file
+        self.conn_timeout = conn_timeout
         self.port = port
         self.platform = canonical_platform(platform) or None
 
@@ -96,6 +98,10 @@ class CSVInventory:
         if self.key_file:
             default_extras["use_keys"] = True
             default_extras["key_file"] = self.key_file
+        if self.conn_timeout:
+            # Caps how long a worker sits on an unreachable device before the
+            # next one gets the slot.
+            default_extras["conn_timeout"] = self.conn_timeout
         defaults = Defaults(
             username=self.username,
             password=self.password,
@@ -174,6 +180,7 @@ def init_nornir(
     key_file: Optional[str],
     port: int,
     workers: int,
+    conn_timeout: Optional[float] = None,
 ) -> Nornir:
     """Build a Nornir instance from the CSV. Logging to file is off -- this is
     an interactive tool and the report is the output."""
@@ -189,6 +196,7 @@ def init_nornir(
                 "password": password,
                 "secret": secret,
                 "key_file": key_file,
+                "conn_timeout": conn_timeout,
                 "port": port,
             },
         },

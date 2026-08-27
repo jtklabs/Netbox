@@ -46,6 +46,11 @@ def detect_platform(task: Task) -> Result:
     extras = host.get_connection_parameters("netmiko").extras or {}
     if extras.get("secret"):
         params["secret"] = extras["secret"]
+    # Autodetect opens its own session, so it needs the same patience limit --
+    # otherwise an unreachable device stalls here on netmiko's default instead.
+    for passthrough in ("conn_timeout", "use_keys", "key_file"):
+        if extras.get(passthrough) is not None:
+            params[passthrough] = extras[passthrough]
 
     guess = SSHDetect(**params).autodetect()
     if not guess:

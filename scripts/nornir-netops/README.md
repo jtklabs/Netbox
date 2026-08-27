@@ -183,9 +183,68 @@ instead of a password.
 | `--no-verify` | Skip the read-back that confirms the change landed. |
 | `--fail-on-diff` | Exit 2 if anything is out of compliance. For a cron drift check. |
 | `-v` | Also show current state and raw device output. |
+| `-w, --workers` | How many devices to work on at once. Default 10. |
+| `--conn-timeout` | Seconds to wait for the TCP connection before giving up on a device. Default 10. |
+| `--log-file`, `--no-log-file`, `--debug` | See [When a device fails](#when-a-device-fails). |
 
 Exit codes: `0` all good, `1` a device failed or could not be verified, `2`
-drift found with `--fail-on-diff`, `3` a usage or credential problem.
+drift found with `--fail-on-diff`, `3` a usage or credential problem, `130`
+interrupted with Ctrl-C.
+
+### Concurrency
+
+Devices are worked in parallel by nornir's threaded runner -- `--workers`,
+default 10. Sessions are almost entirely waiting on the network, so raising it
+for a big CSV is cheap:
+
+```bash
+./configure.py ntp -s 10.50.0.10 --workers 50
+```
+
+The platform autodetect pass is threaded the same way. The banner says what is
+actually happening, capped at the number of devices in the run:
+
+```
+DRY RUN -- no configuration will be changed  |  ntp, mode=add, 240 device(s), 50 at a time
+```
+
+An unreachable device holds its worker for `--conn-timeout` seconds and then
+frees it, so a handful of dead addresses slows a run by seconds, not minutes.
+
+### When a device fails
+
+One line per device, and the run continues:
+
+```console
+atl-dc-leaf1 (10.1.20.21) [arista_eos] already compliant
+
+atl-core-sw1 (10.1.10.11) [cisco_ios] would run (2 commands)
+    ntp server 10.50.0.10
+    write memory
+
+atl-core-sw2 (10.1.10.12) [cisco_ios] FAILED -- timed out connecting -- unreachable, filtered, or wrong port
+
+rdu-edge-rtr1 (10.2.10.11) [cisco_ios] FAILED -- authentication failed -- check username, password or enable secret
+
+summary: 4 device(s), 1 compliant, 1 with pending changes, 2 failed
+full detail in netops-debug.log
+```
+
+Devices are ordered quiet-first, so the ones needing attention sit next to the
+summary rather than scrolled off the top.
+
+The full exception and traceback -- netmiko's nine-line "common causes"
+explanation, nornir's per-task traceback, all of it -- goes to
+`netops-debug.log` instead of the terminal. The file is only created when there
+is something to record, so a clean run leaves nothing behind.
+
+| Flag | Effect |
+| --- | --- |
+| `--log-file FILE` | Where to write it. Default `netops-debug.log` [`$NETOPS_LOG_FILE`]. |
+| `--no-log-file` | Do not record it. The terminal stays one-line-per-device either way. |
+| `--debug` | Print the tracebacks as well, and log the full SSH transcript (netmiko/paramiko at DEBUG) -- the thing to reach for when "timed out" is not enough. |
+
+Ctrl-C during a run stops without a traceback and exits 130.
 
 ---
 
@@ -394,7 +453,7 @@ pip install pytest
 pytest
 ```
 
-192 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+219 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
@@ -407,5 +466,8 @@ the device and never the terminal, the report, or the logs.
 - Addresses, usernames, interface names and passwords are validated before they
   reach a template, so nothing can smuggle a second command onto a line.
 - One device failing does not stop the others; it is reported and the run exits 1.
-- `.env` and `inventory/hosts.csv` are gitignored. Keep real credentials in AWS
-  Secrets Manager where you can.
+- `.env`, `inventory/hosts.csv` and `netops-debug.log` are gitignored. Keep real
+  credentials in AWS Secrets Manager where you can.
+- The debug log records device names, addresses and command output. Passwords
+  are scrubbed from it the same way they are from the terminal, but treat it as
+  you would any operational log.

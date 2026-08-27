@@ -11,11 +11,14 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub
+from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
+from .errors import summarize
 from .credentials import (
     AwsSecretSpec,
     CredentialError,
@@ -32,6 +35,18 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_DIFF = 2
 EXIT_USAGE = 3
+EXIT_INTERRUPTED = 130  # what a shell expects from Ctrl-C
+
+#: Report order: the quiet devices first, the ones needing attention last, so
+#: what matters is next to the summary rather than scrolled off the top.
+STATUS_ORDER = {
+    "ok": 0,
+    "skipped": 1,
+    "pending": 2,
+    "changed": 3,
+    "unverified": 4,
+    "failed": 5,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +85,20 @@ def bootstrap_env(argv: List[str]) -> Optional[str]:
         return None
     count = load_env_file(path)
     return f"{path} ({count} variable(s))"
+
+
+def bootstrap_log(argv: List[str]) -> DebugLog:
+    """Open the debug log before the real parser runs.
+
+    Same trick as the .env: doing it first means a crash in argument parsing or
+    inventory loading is logged too, not just a device failure.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--log-file", default=os.environ.get("NETOPS_LOG_FILE", DEFAULT_LOG_FILE))
+    pre.add_argument("--no-log-file", action="store_true")
+    pre.add_argument("--debug", action="store_true")
+    known, _ = pre.parse_known_args(argv)
+    return configure_log(None if known.no_log_file else known.log_file, known.debug)
 
 
 def _common_arguments() -> argparse.ArgumentParser:
@@ -116,6 +145,13 @@ def _common_arguments() -> argparse.ArgumentParser:
     )
     auth.add_argument(
         "--port", type=int, default=int(os.environ.get("NET_PORT", "22")), help="SSH port"
+    )
+    auth.add_argument(
+        "--conn-timeout",
+        type=float,
+        default=float(os.environ.get("NET_CONN_TIMEOUT", "10")),
+        metavar="SECONDS",
+        help="how long to wait for the TCP connection before giving up on a device",
     )
     auth.add_argument("--env-file", help="path to the .env (default: ./.env, then <project>/.env)")
     auth.add_argument("--no-env-file", action="store_true", help="ignore any .env file")
@@ -202,6 +238,18 @@ def _common_arguments() -> argparse.ArgumentParser:
     out.add_argument(
         "-v", "--verbose", action="store_true", help="show current state and device output"
     )
+    out.add_argument(
+        "--log-file",
+        default=os.environ.get("NETOPS_LOG_FILE", DEFAULT_LOG_FILE),
+        metavar="FILE",
+        help="where full errors and tracebacks are written [$NETOPS_LOG_FILE]",
+    )
+    out.add_argument("--no-log-file", action="store_true", help="do not write a debug log")
+    out.add_argument(
+        "--debug",
+        action="store_true",
+        help="print full tracebacks, and log the SSH transcript to the log file",
+    )
     return parent
 
 
@@ -269,9 +317,9 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
     status = record["status"]
 
     if status == "failed":
-        print(f"{header} {style.bad('FAILED')}")
-        for line in str(record["error"]).strip().splitlines():
-            print(f"    {line}")
+        print(f"{header} {style.bad('FAILED')} -- {record['error']}")
+        for line in str(record.get("traceback") or "").rstrip().splitlines():
+            print(style.dim(f"    {line}"))
         return
 
     if status == "skipped":
@@ -316,7 +364,7 @@ def _print_report(
     style: Style, records: Dict[str, Dict[str, Any]], dry_run: bool, verbose: bool
 ) -> None:
     print()
-    for name in sorted(records):
+    for name in sorted(records, key=lambda n: (STATUS_ORDER[records[n]["status"]], n)):
         _print_host(style, name, records[name], verbose)
         print()
 
@@ -443,9 +491,33 @@ def _confirm(style: Style, count: int, feature: str, mode: str) -> bool:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Thin wrapper: however a run ends, the terminal gets one line about it.
+
+    A traceback is a debugging aid for whoever wrote this, not for whoever is
+    pushing config to 200 switches. It goes to the log; the operator gets a
+    sentence and a path.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     style = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+    log = bootstrap_log(argv)
+    try:
+        return _run(argv, style, log)
+    except KeyboardInterrupt:
+        print(style.warn("interrupted -- anything already applied is above"), file=sys.stderr)
+        return EXIT_INTERRUPTED
+    except Exception as exc:  # noqa: BLE001 - the whole point is to not leak it
+        summary = summarize(exc)
+        print(style.bad(f"error: {summary}"), file=sys.stderr)
+        log.failure("run", summary, exc)
+        if log.debug or log.logger is None:
+            traceback.print_exc()  # asked for it, or nowhere else to put it
+        return EXIT_FAILED
+    finally:
+        if log.used and log.path:
+            print(style.dim(f"full detail in {log.path}"))
 
+
+def _run(argv: List[str], style: Style, log: DebugLog) -> int:
     try:
         env_note = bootstrap_env(argv)
     except CredentialError as exc:
@@ -506,6 +578,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             key_file=args.key_file,
             port=args.port,
             workers=args.workers,
+            conn_timeout=args.conn_timeout,
         )
         targets = _apply_filters(nr, args)
     except (InventoryError, ValueError) as exc:
@@ -537,7 +610,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if dry_run
         else style.bad("APPLYING CHANGES")
     )
-    print(f"{banner}  |  {feature.name}, mode={args.mode}, {count} device(s)")
+    print(
+        f"{banner}  |  {feature.name}, mode={args.mode}, {count} device(s), "
+        f"{min(args.workers, count)} at a time"
+    )
+    log.note(
+        "run: feature=%s mode=%s devices=%d workers=%d apply=%s",
+        feature.name, args.mode, count, args.workers, args.apply,
+    )
     if env_note:
         print(style.dim(f"env file: {env_note}"))
     print(style.dim(f"credentials: {credentials.describe()}"))
@@ -566,7 +646,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"detecting platform on {len(unknown.inventory.hosts)} device(s)...")
         for name, result in unknown.run(task=detect_platform).items():
             if result.failed:
-                records[name]["error"] = f"platform detection failed: {_error_of(result)}"
+                _record_failure(
+                    records, name, result, log, args.debug, "platform detection failed: "
+                )
             else:
                 records[name]["platform"] = result.result
 
@@ -585,7 +667,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         for name, result in results.items():
             if result.failed:
-                records[name]["error"] = _error_of(result)
+                _record_failure(records, name, result, log, args.debug)
                 continue
             payload = result[0].result
             payload["hostname"] = targets.inventory.hosts[name].hostname
@@ -616,12 +698,33 @@ def _status_of(payload: Dict[str, Any]) -> str:
     return "changed" if payload["applied"] else "pending"
 
 
-def _error_of(result) -> str:
-    """The useful part of a failed MultiResult: the deepest exception."""
+def _exception_of(result) -> Optional[BaseException]:
+    """The deepest exception in a failed MultiResult -- the one that actually
+    went wrong, rather than the nornir wrapper around it."""
     for item in reversed(list(result)):
         if item.exception is not None:
-            return f"{type(item.exception).__name__}: {item.exception}"
-    return "unknown error"
+            return item.exception
+    return None
+
+
+def _record_failure(
+    records: Dict[str, Dict[str, Any]],
+    name: str,
+    result,
+    log: DebugLog,
+    debug: bool,
+    prefix: str = "",
+) -> None:
+    """One readable line for the terminal; the whole story for the log."""
+    exc = _exception_of(result)
+    summary = prefix + (summarize(exc) if exc is not None else "unknown error")
+    records[name]["error"] = summary
+    records[name]["status"] = "failed"
+    if debug and exc is not None:
+        records[name]["traceback"] = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+    log.failure(name, summary, exc)
 
 
 def _write_report(

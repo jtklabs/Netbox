@@ -6,7 +6,9 @@ faked, so these tests catch wiring mistakes a unit test would not.
 """
 
 import json
+import os
 import re
+from pathlib import Path
 
 import pytest
 from nornir.core.task import Result
@@ -595,3 +597,184 @@ def test_only_missing_still_removes_an_ssh_key(device, csv_file, login, user_pas
     lines = device["devices"]["leaf1"].lines
     assert not any("ssh-key" in line for line in lines)
     assert "username admin privilege 15 role network-admin secret sha512 $6$saLt$abc" in lines
+
+
+# --------------------------------------------------------------------------- #
+# error handling -- one line on the terminal, the detail in the log
+# --------------------------------------------------------------------------- #
+
+
+NETMIKO_TIMEOUT = """\
+Connection to device timed-out: cisco_ios 10.1.1.1:22
+
+TCP connection to device failed.
+
+Common causes of this problem are:
+1. Incorrect hostname or IP address.
+2. Wrong TCP port.
+3. Intermediate firewall blocking access.
+
+Device settings: cisco_ios 10.1.1.1:22
+"""
+
+
+class NetmikoTimeoutException(Exception):
+    pass
+
+
+@pytest.fixture
+def log_file():
+    """conftest points every run at a throwaway log."""
+    return Path(os.environ["NETOPS_LOG_FILE"])
+
+
+@pytest.fixture
+def timing_out(monkeypatch):
+    """sw1 times out the way netmiko really does; leaf1 is fine."""
+
+    def flaky(task, command_string, **kwargs):
+        if task.host.name == "sw1":
+            raise NetmikoTimeoutException(NETMIKO_TIMEOUT)
+        return Result(host=task.host, result="ntp server 10.10.10.1 iburst")
+
+    monkeypatch.setattr(runner, "netmiko_send_command", flaky)
+
+
+def test_a_timeout_is_one_line_not_a_wall_of_text(device, csv_file, login, timing_out, capsys):
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_FAILED
+    captured = capsys.readouterr()
+    out = captured.out
+
+    assert "FAILED -- timed out connecting -- unreachable, filtered, or wrong port" in out
+    assert "Common causes" not in out
+    # nornir logs a traceback per failed task; unhandled, those reach stderr
+    assert "Traceback" not in out + captured.err
+    assert "Common causes" not in captured.err
+    # the whole failure is one line, not nine
+    assert len([line for line in out.splitlines() if "sw1" in line]) == 1
+
+
+def test_nornirs_own_task_tracebacks_go_to_the_log_not_the_terminal(
+    device, csv_file, login, timing_out, log_file, capsys
+):
+    run(csv_file, "-s", "10.99.99.1")
+    captured = capsys.readouterr()
+    assert "failed with traceback" not in captured.out + captured.err
+    assert "NornirSubTaskError" not in captured.out + captured.err
+    # ...but the detail is still recoverable
+    assert "Traceback" in log_file.read_text()
+
+
+def test_no_log_file_still_silences_the_libraries(
+    device, csv_file, login, timing_out, capsys
+):
+    """--no-log-file means 'do not record it', not 'dump it on me instead'."""
+    run(csv_file, "-s", "10.99.99.1", "--no-log-file")
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    assert "failed with traceback" not in captured.out + captured.err
+
+
+def test_the_full_error_goes_to_the_log(device, csv_file, login, timing_out, log_file, capsys):
+    run(csv_file, "-s", "10.99.99.1")
+    assert "full detail in" in capsys.readouterr().out
+
+    logged = log_file.read_text()
+    assert "sw1 -- timed out connecting" in logged
+    assert "Common causes" in logged  # the part the terminal spared you
+    assert "Traceback (most recent call last)" in logged
+    assert "NetmikoTimeoutException" in logged
+
+
+def test_a_clean_run_leaves_no_log_file(device, csv_file, login, log_file, capsys):
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_OK
+    assert not log_file.exists()
+    assert "full detail in" not in capsys.readouterr().out
+
+
+def test_debug_prints_the_traceback_as_well(device, csv_file, login, timing_out, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--debug")
+    out = capsys.readouterr().out
+    assert "Traceback (most recent call last)" in out
+    assert "NetmikoTimeoutException" in out
+
+
+def test_no_log_file_writes_nothing(device, csv_file, login, timing_out, log_file, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--no-log-file") == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert not log_file.exists()
+    assert "timed out connecting" in out  # still readable, just not recorded
+    assert "full detail in" not in out
+
+
+def test_one_device_failing_does_not_hide_the_others(
+    device, csv_file, login, timing_out, capsys
+):
+    run(csv_file, "-s", "10.99.99.1")
+    out = capsys.readouterr().out
+    assert "ntp server 10.99.99.1 iburst" in out  # leaf1 still planned
+    assert "1 failed" in out
+
+
+def test_problem_devices_are_reported_last(device, csv_file, login, timing_out, capsys):
+    """So the thing needing attention sits next to the summary, not scrolled off."""
+    run(csv_file, "-s", "10.99.99.1")
+    out = capsys.readouterr().out
+    assert out.index("leaf1") < out.index("sw1")
+
+
+def test_platform_detection_failure_is_also_one_line(
+    device, tmp_path, login, monkeypatch, log_file, capsys
+):
+    path = tmp_path / "unknown.csv"
+    path.write_text("host,name,platform\n10.1.1.9,mystery,\n", encoding="utf-8")
+
+    class FakeDetect:
+        def __init__(self, **kwargs):
+            raise NetmikoTimeoutException(NETMIKO_TIMEOUT)
+
+    monkeypatch.setattr("netmiko.ssh_autodetect.SSHDetect", FakeDetect)
+    assert run(str(path), "-s", "10.99.99.1") == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "platform detection failed: timed out connecting" in out
+    assert "Common causes" not in out
+    assert "Common causes" in log_file.read_text()
+
+
+def test_ctrl_c_does_not_print_a_traceback(monkeypatch, capsys):
+    def interrupted(argv, style, log):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_run", interrupted)
+    assert cli.main(["ntp", "-s", "10.1.1.1"]) == cli.EXIT_INTERRUPTED
+    captured = capsys.readouterr()
+    assert "interrupted" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
+def test_an_unexpected_crash_is_one_line_and_logged(monkeypatch, log_file, capsys):
+    def explode(argv, style, log):
+        raise RuntimeError("something nobody anticipated")
+
+    monkeypatch.setattr(cli, "_run", explode)
+    assert cli.main(["ntp", "-s", "10.1.1.1"]) == cli.EXIT_FAILED
+    captured = capsys.readouterr()
+    assert "error: RuntimeError: something nobody anticipated" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback (most recent call last)" in log_file.read_text()
+
+
+def test_the_banner_says_how_many_run_at_once(device, csv_file, login, capsys):
+    run(csv_file, "-s", "10.99.99.1", "--workers", "25")
+    # 2 devices, 25 workers -> 2 at a time, not a misleading 25
+    assert "2 device(s), 2 at a time" in capsys.readouterr().out
+
+
+def test_conn_timeout_reaches_netmiko(tmp_path, login):
+    from netops.inventory import init_nornir
+
+    csv_path = tmp_path / "h.csv"
+    csv_path.write_text("host,name\n10.1.1.1,sw1\n", encoding="utf-8")
+    nr = init_nornir(str(csv_path), "u", "p", None, None, 22, 1, conn_timeout=3.5)
+    extras = nr.inventory.hosts["sw1"].get_connection_parameters("netmiko").extras
+    assert extras["conn_timeout"] == 3.5

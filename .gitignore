@@ -32,6 +32,7 @@ scripts/nornir-netops/.env
 scripts/nornir-netops/inventory/hosts.csv
 scripts/nornir-netops/*.report.json
 scripts/nornir-netops/reports/
+scripts/nornir-netops/*.log
 scripts/nornir-netops/.venv/
 scripts/nornir-netops/.pytest_cache/
 
