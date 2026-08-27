@@ -49,6 +49,9 @@ KNOWN_SECTIONS = {
     "banner": {"motd", "login", "delimiter"},
     "acls": None,  # a list, not a mapping
     "local_accounts": {"names", "privilege", "role"},
+    # Passthrough to ServiceNow change fields. change_request has hundreds of
+    # valid columns, so warning about an unrecognised one would be noise.
+    "change": None,
 }
 
 _DOTTED_PATH = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)+$", re.IGNORECASE)

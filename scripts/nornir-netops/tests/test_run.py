@@ -1038,3 +1038,175 @@ def test_selftest_checks_the_shipped_standards_file(capsys):
 def test_selftest_needs_no_credentials_or_network(capsys, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert cli.main(["selftest"]) == cli.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# ServiceNow change records, end to end through the CLI
+# --------------------------------------------------------------------------- #
+
+
+class FakeSnow:
+    """Stands in for the ServiceNow client; records every call."""
+
+    def __init__(self, state="-2"):
+        from netops.servicenow import Settings
+
+        self.settings = Settings(instance="acme", username="u", password="p")
+        self.state = state
+        self.created = None
+        self.updates = []
+        self.notes = []
+        self.attachments = []
+
+    def get_change(self, number):
+        return {"number": number, "sys_id": "sys-abc", "state": self.state}
+
+    def create_change(self, fields):
+        self.created = fields
+        return {"number": "CHG0099999", "sys_id": "sys-new", "state": fields["state"]}
+
+    def update_change(self, sys_id, fields):
+        self.updates.append((sys_id, fields))
+        return {}
+
+    def add_work_note(self, sys_id, text):
+        self.notes.append(text)
+
+    def attach(self, sys_id, filename, payload, content_type):
+        self.attachments.append((sys_id, filename, payload.decode()))
+
+
+@pytest.fixture
+def snow(monkeypatch):
+    fake = FakeSnow()
+    monkeypatch.setattr(cli, "_servicenow_client", lambda args, style: fake)
+    return fake
+
+
+def test_open_change_records_the_plan_and_touches_no_device(
+    device, csv_file, login, snow, capsys
+):
+    assert run(csv_file, "-s", "10.99.99.1", "--open-change") == cli.EXIT_OK
+    out = capsys.readouterr().out
+
+    assert device["config"] == {}  # dry run: nothing was sent
+    assert snow.created["state"] == "-5"  # opened in New, not approved
+    assert "ntp server 10.99.99.1" in snow.created["implementation_plan"]
+    assert "sw1" in snow.created["implementation_plan"]
+    assert "opened CHG0099999" in out
+    assert "--change CHG0099999" in out  # tells you the next step
+
+
+def test_open_change_attaches_the_report(device, csv_file, login, snow):
+    run(csv_file, "-s", "10.99.99.1", "--open-change")
+    sys_id, filename, body = snow.attachments[0]
+    assert (sys_id, filename) == ("sys-new", "netops-ntp-plan.json")
+    assert json.loads(body)["dry_run"] is True
+
+
+def test_open_change_refuses_to_be_combined_with_apply(device, csv_file, login, snow, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--open-change", "--apply", "-y") == cli.EXIT_USAGE
+    assert "dry-run action" in capsys.readouterr().err
+    assert snow.created is None
+
+
+def test_an_unapproved_change_is_refused_before_any_device_is_touched(
+    device, csv_file, login, snow, capsys
+):
+    snow.state = "-5"  # New
+    code = run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345")
+    assert code == cli.EXIT_USAGE
+    assert device["config"] == {}  # nothing was pushed
+    assert device["commands"] == {}  # nothing was even read
+    err = capsys.readouterr().err
+    assert "cannot be implemented" in err
+    assert "Approve it in ServiceNow" in err
+
+
+def test_an_approved_change_is_implemented_and_closed(device, csv_file, login, snow, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345") == (
+        cli.EXIT_OK
+    )
+    assert device["config"]["sw1"] == ["ntp server 10.99.99.1"]
+
+    sys_id, fields = snow.updates[-1]
+    assert sys_id == "sys-abc"
+    assert fields["state"] == "3"  # closed
+    assert fields["close_code"] == "successful"
+    assert "sw1: changed" in snow.notes[0]
+    assert snow.attachments[0][1] == "netops-ntp-result.json"
+    assert "closed CHG0012345 as successful" in capsys.readouterr().out
+
+
+def test_a_partial_failure_closes_as_successful_with_issues(
+    device, csv_file, login, snow, monkeypatch, capsys
+):
+    def flaky(task, command_string, **kwargs):
+        if task.host.name == "sw1":
+            raise OSError("connection refused")
+        # leaf1 behaves normally, so it really does change and verify
+        return Result(
+            host=task.host,
+            result=device["devices"][task.host.name].show(command_string),
+        )
+
+    monkeypatch.setattr(runner, "netmiko_send_command", flaky)
+    code = run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345")
+
+    _, fields = snow.updates[-1]
+    assert code == cli.EXIT_FAILED  # the device failure still shows in the exit code
+    assert fields["close_code"] == "successful_issues"
+    assert "sw1: FAILED" in snow.notes[0]
+    assert "connection refused" in snow.notes[0]
+
+
+def test_a_total_failure_closes_as_unsuccessful(
+    device, csv_file, login, snow, monkeypatch
+):
+    def dead(task, command_string, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(runner, "netmiko_send_command", dead)
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345")
+    assert snow.updates[-1][1]["close_code"] == "unsuccessful"
+
+
+def test_the_change_number_is_recorded_in_the_report(
+    device, csv_file, login, snow, tmp_path
+):
+    report = tmp_path / "r.json"
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345",
+        "--report", str(report))
+    assert json.loads(report.read_text())["change"] == "CHG0012345"
+
+
+def test_a_servicenow_failure_after_the_push_is_reported_loudly(
+    device, csv_file, login, snow, monkeypatch, capsys
+):
+    """The devices are done; the operator has to know the change is still open."""
+    from netops.servicenow import ServiceNowError
+
+    def refuse(sys_id, fields):
+        raise ServiceNowError("Insufficient rights to close")
+
+    monkeypatch.setattr(snow, "update_change", refuse)
+    code = run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--change", "CHG0012345")
+
+    err = capsys.readouterr().err
+    assert code == cli.EXIT_FAILED
+    assert "Insufficient rights" in err
+    assert "was not closed -- close it by hand" in err
+    assert device["config"]["sw1"] == ["ntp server 10.99.99.1"]  # the push did happen
+
+
+def test_open_change_and_change_together_is_a_usage_error(
+    device, csv_file, login, snow, capsys
+):
+    code = run(csv_file, "-s", "10.99.99.1", "--open-change", "--change", "CHG1")
+    assert code == cli.EXIT_USAGE
+    assert "Use one or the other" in capsys.readouterr().err
+
+
+def test_no_servicenow_call_without_the_flags(device, csv_file, login, snow):
+    run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
+    assert snow.created is None and snow.updates == []

@@ -29,6 +29,7 @@ from .credentials import (
 )
 from .features import FEATURES
 from .standards import Standards, StandardsError, load as load_standards
+from . import servicenow
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -263,6 +264,37 @@ def _common_arguments() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="print full tracebacks, and log the SSH transcript to the log file",
+    )
+
+    snow = parent.add_argument_group(
+        "servicenow",
+        "Open a change from a dry run, and close one after applying. The tool "
+        "never approves a change: one that has not reached Scheduled or "
+        "Implement is refused before any device is touched.",
+    )
+    snow.add_argument(
+        "--open-change",
+        action="store_true",
+        help="create a Normal change from this dry run -- the plan, the device "
+        "list and the report -- and print its number. Changes nothing on any device.",
+    )
+    snow.add_argument(
+        "--change",
+        metavar="CHG0012345",
+        help="implement against this change: verify it is approved, apply, then "
+        "add work notes, attach the report and close it",
+    )
+    snow.add_argument(
+        "--snow-instance",
+        metavar="NAME_OR_URL",
+        help="ServiceNow instance [$SNOW_INSTANCE, or change.instance in the "
+        "standards file]",
+    )
+    snow.add_argument(
+        "--snow-secret",
+        metavar="NAME_OR_ARN",
+        default=os.environ.get("SNOW_SECRET"),
+        help="AWS secret holding the ServiceNow credentials [$SNOW_SECRET]",
     )
     return parent
 
@@ -682,6 +714,39 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         return EXIT_USAGE
 
     dry_run = not args.apply
+
+    if args.open_change and args.change:
+        print(
+            style.bad("error: --open-change opens a new change; --change implements "
+                      "an existing one. Use one or the other."),
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.open_change and args.apply:
+        print(
+            style.bad("error: --open-change is a dry-run action -- it records what "
+                      "would be done so somebody can approve it. Drop --apply."),
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    snow: Optional[servicenow.Client] = None
+    change: Dict[str, Any] = {}
+    if args.open_change or args.change:
+        try:
+            snow = _servicenow_client(args, style)
+            if args.change:
+                # Before anything is pushed: is this change actually approved?
+                change = snow.get_change(args.change)
+                servicenow.ensure_implementable(change, snow.settings)
+        except servicenow.ChangeNotApprovedError as exc:
+            print(style.bad(f"error: {exc}"), file=sys.stderr)
+            return EXIT_USAGE
+        except servicenow.ServiceNowError as exc:
+            print(style.bad(f"error: ServiceNow: {exc}"), file=sys.stderr)
+            log.failure("servicenow", str(exc), exc)
+            return EXIT_USAGE
+
     count = len(targets.inventory.hosts)
     banner = (
         style.warn("DRY RUN -- no configuration will be changed")
@@ -692,6 +757,13 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         f"{banner}  |  {feature.name}, mode={args.mode}, {count} device(s), "
         f"{min(args.workers, count)} at a time"
     )
+    if change:
+        print(
+            style.dim(
+                f"change: {change.get('number')} "
+                f"({snow.settings.state_name(change.get('state'))})"
+            )
+        )
     log.note(
         "run: feature=%s mode=%s devices=%d workers=%d apply=%s",
         feature.name, args.mode, count, args.workers, args.apply,
@@ -757,10 +829,32 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
 
     _print_report(style, records, dry_run, args.verbose)
 
+    number = change.get("number") if change else None
+    report = _report_text(args, feature, desired, dry_run, records, number)
     if args.report:
-        _write_report(args, feature, desired, dry_run, records)
+        with open(args.report, "w", encoding="utf-8") as handle:
+            handle.write(report)
         print(f"report written to {args.report}")
 
+    snow_failed = False
+    if snow is not None:
+        try:
+            number = _record_change(snow, args, feature, records, report, change, style)
+        except servicenow.ServiceNowError as exc:
+            snow_failed = True
+            print(style.bad(f"ServiceNow: {exc}"), file=sys.stderr)
+            log.failure("servicenow", str(exc), exc)
+            if args.change:
+                print(
+                    style.bad(
+                        f"the devices are done, but {args.change} was not closed -- "
+                        f"close it by hand"
+                    ),
+                    file=sys.stderr,
+                )
+
+    if snow_failed:
+        return EXIT_FAILED
     if any(r["status"] in ("failed", "unverified") for r in records.values()):
         return EXIT_FAILED
     if any(r["status"] == "attention" for r in records.values()):
@@ -770,6 +864,87 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
     if args.fail_on_diff and any(r["status"] == "pending" for r in records.values()):
         return EXIT_DIFF
     return EXIT_OK
+
+
+def _servicenow_client(args: argparse.Namespace, style: Style) -> servicenow.Client:
+    settings = servicenow.settings_from(args.standards, args)
+    if args.snow_secret:
+        servicenow.load_secret(args.snow_secret, args.aws_region, settings)
+    return servicenow.Client(settings)
+
+
+def _record_change(
+    snow: servicenow.Client,
+    args: argparse.Namespace,
+    feature: Feature,
+    records: Dict[str, Dict[str, Any]],
+    report: str,
+    change: Dict[str, Any],
+    style: Style,
+) -> Optional[str]:
+    """Open a change from a dry run, or close the one we just implemented."""
+    counts: Dict[str, int] = {}
+    for record in records.values():
+        counts[record["status"]] = counts.get(record["status"], 0) + 1
+    plan = servicenow.describe_plan(feature.name, args.mode, records)
+
+    if args.open_change:
+        pending = counts.get("pending", 0)
+        created = snow.create_change(
+            {
+                "short_description": (
+                    f"netops: converge {feature.name} on {pending} device(s)"
+                ),
+                "description": plan,
+                "implementation_plan": plan,
+                # Not a backout procedure -- an honest statement of what exists.
+                "backout_plan": (
+                    "The configuration read from each device before the change is "
+                    "recorded in the attached report, under devices.*.current."
+                ),
+                "test_plan": (
+                    f"Re-run `configure.py {feature.name} --fail-on-diff`. Exit 0 "
+                    f"means every device matches the standard."
+                ),
+                "state": snow.settings.state("new"),
+                **snow.settings.fields,
+            }
+        )
+        number = created.get("number")
+        snow.attach(
+            created["sys_id"],
+            f"netops-{feature.name}-plan.json",
+            report.encode("utf-8"),
+            "application/json",
+        )
+        print(style.ok(f"opened {number} in {snow.settings.state_name(created.get('state'))}"))
+        print(
+            style.dim(
+                f"approve it, then: configure.py {feature.name} --apply --change {number}"
+            )
+        )
+        return number
+
+    # Implementing: note what happened, attach the evidence, close it.
+    sys_id = change["sys_id"]
+    close_code, reason = servicenow.close_code_for(counts)
+    snow.add_work_note(sys_id, servicenow.summarize_outcome(records))
+    snow.attach(
+        sys_id,
+        f"netops-{feature.name}-result.json",
+        report.encode("utf-8"),
+        "application/json",
+    )
+    snow.update_change(
+        sys_id,
+        {
+            "state": snow.settings.state("closed"),
+            "close_code": close_code,
+            "close_notes": f"netops {feature.name}: {reason}.",
+        },
+    )
+    print(style.ok(f"closed {change.get('number')} as {close_code} ({reason})"))
+    return change.get("number")
 
 
 def _status_of(payload: Dict[str, Any]) -> str:
@@ -813,18 +988,21 @@ def _record_failure(
     log.failure(name, summary, exc)
 
 
-def _write_report(
+def _report_text(
     args: argparse.Namespace,
     feature: Feature,
     desired: Desired,
     dry_run: bool,
     records: Dict[str, Dict[str, Any]],
-) -> None:
+    change: Optional[str] = None,
+) -> str:
+    """The JSON report, scrubbed. Written by --report and attached to a change."""
     document = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "feature": feature.name,
         "mode": args.mode,
         "dry_run": dry_run,
+        "change": change,
         "desired": desired.keys,
         "variables": desired.variables,
         "devices": records,
@@ -833,6 +1011,4 @@ def _write_report(
     # form -- a password containing a quote or a backslash is written escaped.
     text = json.dumps(document, indent=2, sort_keys=True, default=str)
     escaped = [json.dumps(secret)[1:-1] for secret in desired.secrets]
-    text = scrub(text, list(desired.secrets) + escaped)
-    with open(args.report, "w", encoding="utf-8") as handle:
-        handle.write(text + "\n")
+    return scrub(text, list(desired.secrets) + escaped) + "\n"

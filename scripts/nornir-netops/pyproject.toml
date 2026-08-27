@@ -19,6 +19,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Nothing here is imported at module import time; each integration is loaded
+# lazily with a clear message if the package is missing.
+servicenow = ["requests>=2.31"]
+aws = ["boto3>=1.34"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

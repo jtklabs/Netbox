@@ -243,6 +243,7 @@ instead of a password.
 | `--no-save` | Skip `write memory` after a successful change. |
 | `--no-verify` | Skip the read-back that confirms the change landed. |
 | `--standards FILE` | The desired state file. `--no-standards` ignores it. |
+| `--open-change` / `--change` | [ServiceNow change records](#servicenow-change-records). |
 | `--fail-on-diff` | Exit 2 if anything is out of compliance. For a cron drift check. |
 | `-v` | Also show current state and raw device output. |
 | `-w, --workers` | How many devices to work on at once. Default 10. |
@@ -603,6 +604,102 @@ your release does have an equivalent, add a template and a parser and drop the
 
 ---
 
+## ServiceNow change records
+
+Two halves of one flow. **The tool never approves a change.**
+
+```bash
+# 1. dry run raises a Normal change with the plan attached, and stops
+./configure.py ntp --open-change
+
+# 2. you approve it in ServiceNow, as usual
+
+# 3. implement against it: apply, work-note, attach, close
+./configure.py ntp --apply --change CHG0099999
+```
+
+```console
+$ ./configure.py ntp --open-change
+...
+summary: 2 device(s), 0 compliant, 2 with pending changes
+opened CHG0099999 in new
+approve it, then: configure.py ntp --apply --change CHG0099999
+```
+
+`--open-change` is a dry-run action and refuses to be combined with `--apply`:
+its whole job is to record what *would* be done so somebody can approve it. The
+change is created in **New** with the exact commands as the implementation
+plan, the device list, and the JSON report attached as evidence. The backout
+plan states plainly what exists -- the pre-change configuration of every device
+is in the attached report -- rather than pretending to be a procedure.
+
+`--change` checks the state **before reading or writing a single device**:
+
+```console
+$ ./configure.py ntp --apply --change CHG0012345
+error: CHG0012345 is in assess and cannot be implemented from there -- it needs
+to reach scheduled or implement first. Approve it in ServiceNow, then re-run.
+```
+
+Afterwards it adds work notes naming every device and what happened to it,
+attaches the report, and closes the change:
+
+| Outcome | Close code |
+| --- | --- |
+| Everything changed or already compliant | `successful` |
+| Some devices changed, some failed or could not be verified | `successful_issues` |
+| Nothing succeeded | `unsuccessful` |
+
+A partial failure is reported as what it was: closing it as wholly successful
+or wholly failed would both be false. The device-level exit code is unaffected
+-- a run with a failed device still exits 1.
+
+If ServiceNow rejects the close *after* the devices are done, that is said
+loudly and the run exits 1, because the change is still open and only a human
+can fix that:
+
+```console
+ServiceNow: PATCH /api/sn_chg_rest/change/... failed (403): Insufficient rights
+the devices are done, but CHG0012345 was not closed -- close it by hand
+```
+
+### Configuration
+
+Static fields live in the `change:` section of the standards file; anything
+other than `states`, `instance` and `verify_tls` is passed straight through as
+a field on the change record:
+
+```yaml
+change:
+  instance: acme
+  assignment_group: Network Engineering
+  category: Network
+  risk: "3"
+```
+
+Credentials never go there -- `$SNOW_USER`/`$SNOW_PASS`, an OAuth
+client-credentials pair in `$SNOW_CLIENT_ID`/`$SNOW_CLIENT_SECRET`, or
+`--snow-secret` for AWS Secrets Manager.
+
+Everything goes through the Change Management API (`/api/sn_chg_rest/change`)
+rather than the `change_request` table, because that API validates the state
+model. **The state values are instance-specific** -- the defaults are the
+out-of-the-box Normal change model, and instances customise it constantly.
+Check `sys_choice` for `change_request.state` on yours and override any that
+differ under `change.states`.
+
+Needs `requests` (`pip install requests`); nothing imports it unless one of the
+two flags is used.
+
+### On standard changes
+
+None of this needs a Standard Change Template, which is why it works today. But
+the recurring low-risk features -- ntp, syslog, banner, snmp -- are exactly what
+those templates exist for: a standard change is pre-approved by definition, so
+the approval gate disappears and the whole thing can run unattended. Proposing
+one is a one-off ServiceNow admin task. Worth doing once this flow has proven
+itself on a few real changes.
+
 ## How it decides
 
 1. Read the current state with a narrow `show ... | include` so the feature can
@@ -693,7 +790,7 @@ pip install pytest
 pytest
 ```
 
-351 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+394 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

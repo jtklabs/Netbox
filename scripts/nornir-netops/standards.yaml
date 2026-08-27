@@ -126,3 +126,36 @@ local_accounts:
     - netauto
   privilege: 15
   # role: network-admin  # EOS
+
+# --------------------------------------------------------------------------
+# ServiceNow  ->  configure.py <feature> --open-change / --change CHG0012345
+#
+# --open-change raises a Normal change from a dry run, with the plan and the
+# report attached, and stops. Approve it as usual, then --change implements it
+# and closes it. The tool never approves anything: a change that has not
+# reached Scheduled or Implement is refused before a device is touched.
+#
+# Credentials are NOT here -- $SNOW_USER/$SNOW_PASS, $SNOW_CLIENT_ID/
+# $SNOW_CLIENT_SECRET, or --snow-secret for AWS Secrets Manager.
+#
+# Anything other than `states`, `instance` and `verify_tls` is passed straight
+# through as a field on the change record.
+# --------------------------------------------------------------------------
+#change:
+#  instance: acme                 # or the full https:// URL
+#  assignment_group: Network Engineering
+#  category: Network
+#  risk: "3"                      # Moderate
+#  impact: "3"                    # Low
+#
+#  # The out-of-the-box Normal change model. Instances customise this
+#  # constantly -- check sys_choice for change_request.state on yours and
+#  # override any that differ.
+#  states:
+#    new: "-5"
+#    assess: "-4"
+#    authorize: "-3"
+#    scheduled: "-2"
+#    implement: "-1"
+#    review: "0"
+#    closed: "3"
