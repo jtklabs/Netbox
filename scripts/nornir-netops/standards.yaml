@@ -68,29 +68,35 @@ snmp:
       oid: iso
       action: included
 
+  # One group per account, so the ACL that says where an account may be used
+  # lives on the group. A group is written into the running config, so that
+  # binding is readable and drift on it is detected; a per-user `acl:` is
+  # accepted but IOS never reports it back, so it can never be verified.
   groups:
     - name: NMS-RO
       security: priv     # noauth | auth | priv
       read: NMS-VIEW
+      acl: SNMP-NMS
 
-  # Each user may name its own ACL, so one account is usable only from the NMS
-  # and another only from the monitoring VLAN. Without `acl:` a user gets
-  # `snmp.acl` above.
+    - name: MON-RO
+      security: priv
+      read: NMS-VIEW
+      acl: SNMP-MONITORING
+
+  # Each account sits in its own group and inherits that group's ACL.
   #
-  # A user's ACL cannot be read back from a device -- `show snmp user` reports
-  # the group and the protocols and nothing else -- so changing one here does
+  # A passphrase cannot be read back from a device, so changing one here does
   # not show up as drift. Push it with `configure.py snmp --rewrite-users`.
   users:
     - name: nmsuser
       group: NMS-RO
       auth: sha
       priv: aes 128
-      acl: SNMP-NMS
+
     - name: monuser
-      group: NMS-RO
+      group: MON-RO
       auth: sha
       priv: aes 128
-      acl: SNMP-MONITORING
 
   hosts:
     - host: 10.1.1.50
@@ -129,7 +135,7 @@ acls:
     deny_log: true       # trailing `deny any log`, so denied polls are visible
     rebuild: true        # a missed poll is an acceptable cost here
 
-  - name: SNMP-NMS       # the NMS account, usable only from the NMS itself
+  - name: SNMP-NMS       # the NMS group, usable only from the NMS itself
     type: standard
     permit:
       - 10.1.1.50/32

@@ -1212,29 +1212,48 @@ def test_no_servicenow_call_without_the_flags(device, csv_file, login, snow):
     assert snow.created is None and snow.updates == []
 
 
-def test_rewrite_users_pushes_a_changed_per_user_acl(
-    device, csv_file, login, tmp_path, snmp_passphrases
+def test_rewrite_users_pushes_what_cannot_be_read_back(
+    device, csv_file, login, standards, snmp_passphrases
 ):
-    """The device cannot report a user's ACL, so only --rewrite-users pushes it."""
-    (tmp_path / "standards.yaml").write_text(
-        STANDARDS.replace("      priv: aes 128", "      priv: aes 128\n      acl: SNMP-NMS")
-        + "  - name: SNMP-NMS\n    permit: [10.1.1.50/32]\n",
-        encoding="utf-8",
-    )
+    """A passphrase is invisible from the device, so nothing else triggers it."""
     box = device["devices"]["sw1"]
+    box.lines.append("snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS")
     box.extra["show snmp user"] = (
         "User name: nmsuser\n"
         "Authentication Protocol: SHA\n"
         "Privacy Protocol: AES128\n"
         "Group-name: NMS-RO\n"
     )
-    # Everything the device can report already matches, so nothing is rewritten...
+    # Everything the device can report already matches, so the user is left alone...
     run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1")
-    assert not any("snmp-server user" in c for c in device["config"].get("sw1", []))
+    assert not any("no snmp-server user" in c for c in device["config"].get("sw1", []))
 
     # ...until asked.
     device["config"].clear()
     run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1", "--rewrite-users")
     pushed = device["config"]["sw1"]
     assert "no snmp-server user nmsuser NMS-RO v3" in pushed
-    assert any(c.endswith("access SNMP-NMS") for c in pushed)
+    assert any("snmp-server user nmsuser NMS-RO v3 auth sha" in c for c in pushed)
+
+
+def test_a_changed_group_acl_is_detected_and_takes_its_user_with_it(
+    device, csv_file, login, standards, snmp_passphrases
+):
+    """Unlike a user's, a group's ACL is in the running config -- so it is
+    comparable, and a change to it is ordinary detected drift."""
+    box = device["devices"]["sw1"]
+    box.lines.append("snmp-server group NMS-RO v3 priv read NMS-VIEW access WRONG-ACL")
+    box.extra["show snmp user"] = (
+        "User name: nmsuser\n"
+        "Authentication Protocol: SHA\n"
+        "Privacy Protocol: AES128\n"
+        "Group-name: NMS-RO\n"
+    )
+    run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1")
+    pushed = device["config"]["sw1"]
+
+    assert pushed.index("no snmp-server user nmsuser NMS-RO v3") < pushed.index(
+        "no snmp-server group NMS-RO v3 priv read NMS-VIEW access WRONG-ACL"
+    )
+    assert "snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS" in pushed
+    assert any("snmp-server user nmsuser NMS-RO v3 auth sha" in c for c in pushed)

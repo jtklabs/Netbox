@@ -15,14 +15,18 @@ community exists, so any community found on a device is removed -- in `--add`
 mode too, because "there must be none" is not an extra to be left alone. If the
 standards file says nothing about communities, none are touched.
 
-**Each user may name its own ACL.** `snmp.acl` is the default for everything;
-a `acl:` on an individual user or group overrides it, which is how one poller
-gets one allow list and another gets a different one. A group's ACL is written
-into the running config and is therefore compared like any other field. A
-*user's* is not: `show snmp user` reports the group and the protocols and
-nothing else, so on IOS the binding can be set but never read back. It is
-written whenever the user is written, and `--rewrite-users` is the way to push
-a changed one without waiting for some other field to differ.
+**The ACL belongs on the group.** `snmp.acl` is the default; a `acl:` on an
+individual group overrides it, so giving each account its own group gives each
+account its own allow list -- and because a group is written into the running
+config, that binding is readable and drift on it is detected like anything
+else. A `acl:` on a *user* is also accepted, but IOS never reports it back
+(`show snmp user` gives the group and the protocols and nothing else), so it
+can be set and never verified. Prefer the group.
+
+Rebuilding a group therefore rewrites the users in it. A user names its group,
+and a group that is removed and recreated leaves its members referring to
+something that no longer exists for a moment; recreating them alongside is
+cheap and removes the question.
 """
 
 from __future__ import annotations
@@ -265,6 +269,10 @@ def parse_snmp(output: str) -> List[Entry]:
 # planning
 # --------------------------------------------------------------------------- #
 
+#: Removal order. The reverse of the order things are created in, so a group is
+#: never negated while a user still refers to it.
+REMOVE_ORDER = {"user": 0, "host": 1, "group": 2, "view": 3}
+
 #: Which fields have to match for an existing item to be left alone. Only the
 #: fields the standard actually states are compared, so a device attribute this
 #: tool does not manage never forces a rewrite.
@@ -320,6 +328,23 @@ def plan_snmp(
             to_remove.append(entry)
             to_add.append(key)
 
+    # A group being rebuilt takes its users with it: they name the group, and
+    # for the moment between the negation and the rewrite it does not exist.
+    rebuilt = {
+        wanted[key]["name"] for key in to_add if wanted[key]["kind"] == "group"
+    }
+    if rebuilt:
+        for key in desired:
+            record = wanted[key]
+            if record["kind"] != "user" or record.get("group") not in rebuilt:
+                continue
+            if key in to_add:
+                continue
+            entry = configured.get(key)
+            if entry is not None:
+                to_remove.append(entry)
+            to_add.append(key)
+
     # "There must be no community" is a standard, not an extra to leave alone.
     if variables.get("forbid_communities"):
         to_remove.extend(e for e in current if e.data.get("kind") == "community")
@@ -331,6 +356,7 @@ def plan_snmp(
                 continue
             to_remove.append(entry)
 
+    to_remove.sort(key=lambda entry: REMOVE_ORDER.get(entry.data.get("kind"), 9))
     return to_add, to_remove
 
 
@@ -458,9 +484,17 @@ def build_desired(args: argparse.Namespace) -> Desired:
 
     known_acls = _acl_names(standards)
 
-    def acl_for(item: Mapping[str, Any], what: str) -> Optional[str]:
-        """This item's own ACL, else the section default, else nothing."""
-        name = item.get("acl", section.get("acl"))
+    def acl_for(
+        item: Mapping[str, Any], what: str, default: Optional[str] = None
+    ) -> Optional[str]:
+        """This item's own ACL, else the given default, else nothing.
+
+        The section default is offered to groups but never to users: a
+        user-level ACL *overrides* its group's on IOS, so a user quietly
+        inheriting the default would defeat the very restriction its group
+        exists to impose. A user gets one only by asking for it by name.
+        """
+        name = item.get("acl") or default
         if not name:
             return None
         name = validate_word(str(name), "ACL name")
@@ -513,7 +547,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
                 "write": validate_word(str(item["write"]), "view name")
                 if item.get("write")
                 else None,
-                "access": acl_for(item, f"snmp group {name}"),
+                "access": acl_for(item, f"snmp group {name}", default=section.get("acl")),
             },
         )
 

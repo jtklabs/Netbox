@@ -250,9 +250,10 @@ def test_renders_ios_in_dependency_order(passphrases):
     assert commands[1] == (
         "snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS"
     )
+    # No `access` on the user: it inherits its group's, and a user-level ACL
+    # would override that.
     assert commands[2] == (
-        f"snmp-server user nmsuser NMS-RO v3 auth sha {AUTH} "
-        f"priv aes 128 {PRIV} access SNMP-POLLERS"
+        f"snmp-server user nmsuser NMS-RO v3 auth sha {AUTH} priv aes 128 {PRIV}"
     )
     assert "snmp-server host 10.1.1.50 version 3 priv nmsuser" in commands
     assert "snmp-server location ATL DC1 - row 4" in commands
@@ -319,9 +320,12 @@ def test_each_user_gets_its_own_acl(multi_passphrases):
     assert entries["user:monuser"]["access"] == "SNMP-MONITORING"
 
 
-def test_a_user_without_its_own_acl_gets_the_default(multi_passphrases):
+def test_a_user_never_inherits_the_default_acl(multi_passphrases):
+    """A user-level ACL overrides its group's on IOS, so a user quietly
+    inheriting snmp.acl would defeat the restriction its group imposes."""
     entries = FEATURE.build_desired(parse_args((), MULTI_ACL)).variables["entries"]
-    assert entries["user:plainuser"]["access"] == "SNMP-POLLERS"
+    assert entries["user:plainuser"]["access"] is None
+    assert entries["group:NMS-RO"]["access"] == "SNMP-POLLERS"  # the group does get it
 
 
 def test_the_group_keeps_the_default_acl(multi_passphrases):
@@ -346,7 +350,8 @@ def test_each_user_renders_with_its_own_acl(multi_passphrases):
     commands = render("snmp", "cisco_ios", desired.keys, [], desired.variables)
     assert any(c.endswith("access SNMP-NMS") and "nmsuser" in c for c in commands)
     assert any(c.endswith("access SNMP-MONITORING") and "monuser" in c for c in commands)
-    assert any(c.endswith("access SNMP-POLLERS") and "plainuser" in c for c in commands)
+    plain = [c for c in commands if "plainuser" in c][0]
+    assert "access" not in plain
 
 
 def test_a_typo_in_an_acl_name_is_caught(multi_passphrases):
@@ -409,3 +414,33 @@ def test_selftest_placeholders_come_from_the_standards_file():
     assert "NETOPS_SNMP_AUTH_MONUSER" in placeholders
     assert "NETOPS_SNMP_PRIV_PLAINUSER" in placeholders
     assert all(len(value) >= 8 for value in placeholders.values())
+
+
+
+def test_the_group_dependency_rebuilds_its_users(multi_passphrases):
+    """A user names its group. Recreating the group without recreating the user
+    leaves the user pointing at something that briefly did not exist."""
+    desired, ctx = context(document=MULTI_ACL, args=())
+    current = parse_snmp(
+        "snmp-server group NMS-RO v3 priv read NMS-VIEW access WRONG-ACL\n"
+        "snmp-server user nmsuser NMS-RO v3 auth sha x priv aes128 y\n"
+    )
+    add, remove = plan_snmp(current, desired.keys, MODE_ADD, ctx)
+
+    assert "group:NMS-RO" in add
+    assert "user:nmsuser" in add  # dragged along by its group
+    # ...and the user is negated before the group it belongs to
+    kinds = [entry.data["kind"] for entry in remove]
+    assert kinds.index("user") < kinds.index("group")
+
+
+def test_a_user_in_an_untouched_group_is_left_alone(multi_passphrases):
+    desired, ctx = context(document=MULTI_ACL, args=())
+    current = parse_snmp(
+        # matches what MULTI_ACL asks for: the group takes the section default
+        "snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS\n"
+        "snmp-server user nmsuser NMS-RO v3 auth sha x priv aes128 y\n"
+    )
+    add, _ = plan_snmp(current, desired.keys, MODE_ADD, ctx)
+    assert "group:NMS-RO" not in add
+    assert "user:nmsuser" not in add

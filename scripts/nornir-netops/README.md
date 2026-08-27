@@ -541,9 +541,9 @@ no snmp-server user nmsuser NMS-RO v3
 snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-POLLERS
 ```
 
-A passphrase change alone therefore looks like no change at all. `--rewrite-users`
-pushes it anyway -- see [An ACL per user](#an-acl-per-user) below, which has the
-same problem for the same reason.
+A passphrase change alone therefore looks like no change at all.
+`--rewrite-users` negates and recreates every managed user regardless of what
+the device reports, which is the way to push one.
 
 **Passphrases** come from `$NETOPS_SNMP_AUTH_<USER>` and
 `$NETOPS_SNMP_PRIV_<USER>`, or from a `--passphrase-secret` AWS secret shaped
@@ -563,26 +563,29 @@ flags it and the command is redacted everywhere it is shown:
 no snmp-server community <redacted>
 ```
 
-### An ACL per user
+### An ACL per account
 
-`snmp.acl` is the default for everything. A user or a group may name its own,
-which is how one account is usable only from the NMS and another only from the
-monitoring VLAN:
+**The ACL goes on the group**, and each account gets its own group:
 
 ```yaml
 snmp:
-  acl: SNMP-POLLERS          # the default
+  acl: SNMP-POLLERS          # default for any group that does not name one
+
+  groups:
+    - name: NMS-RO
+      security: priv
+      read: NMS-VIEW
+      acl: SNMP-NMS          # this account, only from the NMS itself
+    - name: MON-RO
+      security: priv
+      read: NMS-VIEW
+      acl: SNMP-MONITORING
+
   users:
     - name: nmsuser
       group: NMS-RO
-      auth: sha
-      priv: aes 128
-      acl: SNMP-NMS          # only from the NMS itself
     - name: monuser
-      group: NMS-RO
-      auth: sha
-      priv: aes 128
-      acl: SNMP-MONITORING
+      group: MON-RO
 
 acls:
   - name: SNMP-NMS
@@ -592,27 +595,39 @@ acls:
 ```
 
 ```
-snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-NMS
-snmp-server user monuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-MONITORING
+snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-NMS
+snmp-server group MON-RO v3 priv read NMS-VIEW access SNMP-MONITORING
+snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted>
+snmp-server user monuser MON-RO v3 auth sha <redacted> priv aes 128 <redacted>
 ```
 
-An ACL named here must be defined in `acls:`, or the run stops and says which
-ones are -- binding SNMP to an access list that does not exist is worse than
-not binding it. If the file has no `acls:` section at all, the ACLs are managed
-elsewhere and the name is taken on trust.
+This is the shape to prefer, because **a group is written into the running
+config**: the binding is readable, so drift on it is detected like any other
+field. Change an ACL in the file and the next run notices.
 
-**A group's ACL is compared; a user's cannot be.** The group is written into
-the running config, so drift on it is visible. `show snmp user` reports the
-group and the protocols and nothing else, so on IOS a user's ACL can be set but
-never read back -- changing one in the file will not show up as drift. Push it
-with:
+A `acl:` on an individual *user* is also accepted, but IOS never reports it
+back -- `show snmp user` gives the group and the protocols and nothing else --
+so it can be set and never verified. **A user never inherits `snmp.acl`**: a
+user-level ACL overrides its group's, so a user quietly picking up the default
+would defeat the restriction its group exists to impose. It gets one only by
+naming it.
 
-```bash
-./configure.py snmp --apply --rewrite-users
+An ACL named in the snmp section must be defined in `acls:`, or the run stops
+and says which ones are -- binding SNMP to an access list that does not exist
+is worse than not binding it. If the file has no `acls:` section at all, they
+are managed elsewhere and the name is taken on trust.
+
+**Rebuilding a group rewrites the users in it.** A user names its group, and a
+group that is negated and recreated leaves its members pointing at something
+that briefly did not exist. So the plan negates the users first, then the
+group, then writes both back:
+
 ```
-
-which negates and recreates every managed user regardless of what the device
-reports. It is also how a changed passphrase gets pushed, for the same reason.
+no snmp-server user nmsuser NMS-RO v3
+no snmp-server group NMS-RO v3 priv read NMS-VIEW access WRONG-ACL
+snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-NMS
+snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted>
+```
 
 Run `configure.py acl` before `configure.py snmp` on a device that does not
 have the ACLs yet -- SNMP will happily reference one that does not exist.
@@ -845,7 +860,7 @@ pip install pytest
 pytest
 ```
 
-406 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+409 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
