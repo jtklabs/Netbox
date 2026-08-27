@@ -2,8 +2,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import pytest
-
 from netops import platform_cache
 from netops.platform_cache import MAX_AGE, PlatformCache, cache_path, load
 
