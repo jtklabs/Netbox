@@ -202,3 +202,52 @@ def test_an_injected_origin_id_is_rejected():
                            "origin_id": "DC1\nlogging host 10.6.6.6"}}
     with pytest.raises(InvalidValue):
         FEATURE.build_desired(parse_args([], document))
+
+
+# --------------------------------------------------------------------------- #
+# defaults are invisible in a plain `show running-config`
+# --------------------------------------------------------------------------- #
+
+
+def test_the_show_command_asks_for_defaults():
+    for support in FEATURE.platforms.values():
+        assert support.show_command == "show running-config all | include ^logging"
+
+
+def test_a_severity_already_at_the_default_is_compliant():
+    """The bug this exists for: `logging trap informational` is IOS's default
+    and is absent from a plain `show running-config`. Read without `all`, the
+    tool sets it, reads back, still cannot see it, and reports it unverified --
+    every run, forever."""
+    current = parse_logging(EOS_SAMPLE)  # rendered with the default present
+    add, remove = plan_syslog(current, ["trap:informational"], MODE_ADD)
+    assert (add, remove) == ([], [])
+
+
+def test_the_default_port_renders_the_same_key_either_way():
+    """`show running-config` writes `logging host 10.1.1.50`; `all` writes
+    `... transport udp port 514`. They are the same collector."""
+    plain = parse_logging("logging host 10.1.1.50")[0]
+    explicit = parse_logging("logging host 10.1.1.50 transport udp port 514")[0]
+    assert plain.key == explicit.key == "host:10.1.1.50:514"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "logging exception 4096",
+        "logging count",
+        "logging facility local7",
+        "logging buffered 32768 debugging",
+        "logging console debugging",
+    ],
+)
+def test_the_extra_defaults_are_ignored(line):
+    """`all` returns far more lines. Anything not parsed cannot be removed."""
+    assert parse_logging(line) == []
+
+
+def test_replace_still_removes_only_collectors_from_the_fuller_output():
+    current = parse_logging(IOS_SAMPLE)
+    _, remove = plan_syslog(current, ["host:10.1.1.50:514"], MODE_REPLACE)
+    assert [e.data["kind"] for e in remove] == ["host"]

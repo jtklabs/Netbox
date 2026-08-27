@@ -89,3 +89,17 @@ def test_an_unknown_platform_is_still_unsupported():
 
     with pytest.raises(UnsupportedPlatform):
         FEATURE.support_for("juniper_junos")
+
+
+def test_the_show_command_asks_for_defaults():
+    """1500 is the platform default and is not written to the running config,
+    so a plain `show running-config` cannot tell unset from set-to-1500."""
+    support = FEATURE.platforms["cisco_ios"]
+    assert support.show_command == (
+        "show running-config all | include ^snmp-server packetsize"
+    )
+
+
+def test_a_size_already_at_the_default_is_compliant():
+    current = parse_packetsize("snmp-server packetsize 1500")
+    assert plan_packetsize(current, ["1500"], MODE_ADD) == ([], [])

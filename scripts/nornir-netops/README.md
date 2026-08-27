@@ -390,8 +390,13 @@ that have it; only a file that declares the section manages those lines.
 
 Manages four kinds of line -- `logging host`, `logging trap`,
 `logging source-interface` and `logging origin-id` -- and deliberately parses
-nothing else, so `logging buffered` and `logging console` can never be removed
-by `--replace`.
+nothing else, so the many other lines `show running-config all` returns
+(`logging buffered`, `logging console`, `logging facility`) can never be
+removed by `--replace`.
+
+Reads `show running-config all`, because a severity at the platform default is
+otherwise invisible -- see
+[Settings that sit at their default](#settings-that-sit-at-their-default).
 
 ```yaml
 syslog:
@@ -841,10 +846,52 @@ the approval gate disappears and the whole thing can run unattended. Proposing
 one is a one-off ServiceNow admin task. Worth doing once this flow has proven
 itself on a few real changes.
 
+## Settings that sit at their default
+
+**A setting at its platform default is not written to the running config.**
+`logging trap informational` is IOS's default and simply does not appear, so a
+plain `show running-config` cannot tell "not configured" from "configured to
+the default". Read that way, the tool sets the severity, reads back, still
+cannot see it, reports the device unverified and refuses to save -- and does
+the same again on the next run, forever.
+
+So the features whose values can legitimately *be* the default read
+`show running-config all`, which renders them explicitly:
+
+| Feature | Command |
+| --- | --- |
+| `syslog` | `show running-config all \| include ^logging` |
+| `snmp-packetsize` | `show running-config all \| include ^snmp-server packetsize` |
+
+The `| include` runs on the device, so the transfer stays small even though the
+device generates more. Everything else reads a plain `show running-config`:
+an NTP server, an ACL entry or a local account is never a default, so there is
+nothing to make visible.
+
+Worth knowing when adding a feature: if a value could plausibly equal the
+platform default, it needs `all` or it will be pushed on every run.
+
+**A device that rejects a command fails loudly.** `show running-config all` is
+not universal, and a device that does not understand it answers with an error
+*string* rather than an error -- which, parsed as state, reads as "nothing is
+configured". The tool would then configure everything on the strength of it. So
+show output is checked for CLI error text and the device is failed instead:
+
+```
+atl-core-sw1 (10.1.10.11) [cisco_ios] FAILED -- the device did not accept
+'show running-config all | include ^logging': % Invalid input detected at '^' marker.
+```
+
+If a platform of yours cannot do `all`, change that feature's `show_command`
+for it -- it is per-platform already.
+
 ## How it decides
 
 1. Read the current state with a narrow `show ... | include` so the feature can
    only ever see -- and therefore only ever remove -- its own configuration.
+   Some features ask for `all`, so that a value sitting at its platform default
+   is visible rather than looking unset -- see
+   [Settings that sit at their default](#settings-that-sit-at-their-default).
 2. Compare. Most features compare on the **normalized** value, so `010.1.1.1`,
    `10.1.1.1` and `TIME.example.net` do not push a duplicate every run. A
    feature can supply its own planner instead: `users` rewrites unconditionally,
@@ -931,7 +978,7 @@ pip install pytest
 pytest
 ```
 
-444 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+458 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

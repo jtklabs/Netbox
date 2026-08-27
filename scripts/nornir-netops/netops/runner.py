@@ -24,6 +24,31 @@ from .core import (
 SHOW_TIMEOUT = 60
 SAVE_TIMEOUT = 120
 
+#: A device that does not understand a command answers with an error *string*,
+#: not an error. Parsed as state, that reads as "nothing is configured" -- so
+#: the tool would cheerfully configure everything, and a --replace would think
+#: there was nothing to remove. Specific enough not to fire on a banner body
+#: that happens to contain a percent sign.
+CLI_ERRORS = (
+    "% invalid input",
+    "% incomplete command",
+    "% ambiguous command",
+    "% unknown command",
+    "% authorization failed",
+    "% permission denied",
+    "invalid input detected",
+)
+
+
+def _check_understood(command: str, output: str) -> None:
+    lowered = (output or "").lower()
+    for marker in CLI_ERRORS:
+        if marker in lowered:
+            raise ValueError(
+                f"the device did not accept {command!r}: "
+                f"{output.strip().splitlines()[0][:120]}"
+            )
+
 
 def detect_platform(task: Task) -> Result:
     """Fill in a blank platform column by asking the device what it is.
@@ -73,6 +98,7 @@ def _read_state(task: Task, support) -> List:
             enable=True,
             read_timeout=SHOW_TIMEOUT,
         )
+        _check_understood(command, shown.result or "")
         output.append(shown.result or "")
     return support.parse("\n".join(output))
 

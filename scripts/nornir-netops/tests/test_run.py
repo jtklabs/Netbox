@@ -1268,3 +1268,51 @@ def test_a_changed_group_acl_is_detected_and_takes_its_user_with_it(
     )
     assert "snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS" in pushed
     assert any("snmp-server user nmsuser NMS-RO v3 auth sha" in c for c in pushed)
+
+
+def test_a_syslog_setting_at_its_default_is_not_pushed_every_run(
+    device, csv_file, login, standards, capsys
+):
+    """The `show running-config all` case, end to end: a device whose trap
+    severity is already informational -- a value a plain `show running-config`
+    would not show at all -- needs no command and stays compliant."""
+    device["devices"]["sw1"].lines.extend(
+        ["logging trap informational", "logging host 10.1.1.50 transport udp port 514"]
+    )
+    assert run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1") == cli.EXIT_OK
+    assert device["config"] == {}
+    assert "already compliant" in capsys.readouterr().out
+
+
+def test_a_command_the_device_rejects_is_not_read_as_empty_state(
+    device, csv_file, login, standards, monkeypatch, capsys
+):
+    """`show running-config all` is not universal. A device that rejects it
+    answers with an error string, and parsing that as state would read as
+    'nothing configured' -- so the tool would configure everything."""
+
+    def unsupported(task, command_string, **kwargs):
+        if "all" in command_string:
+            return Result(
+                host=task.host, result="% Invalid input detected at '^' marker."
+            )
+        return Result(host=task.host, result="")
+
+    monkeypatch.setattr(runner, "netmiko_send_command", unsupported)
+    code = run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1")
+
+    assert code == cli.EXIT_FAILED
+    assert device["config"] == {}  # nothing was pushed on the strength of it
+    out = capsys.readouterr().out
+    assert "did not accept 'show running-config all | include ^logging'" in out
+    assert "Invalid input detected" in out
+
+
+def test_a_banner_containing_a_percent_sign_is_not_mistaken_for_an_error(
+    device, csv_file, login, standards
+):
+    """The check is specific to CLI error text, not to '%'."""
+    device["devices"]["sw1"].lines.extend(
+        ["banner motd ^C", "  Uptime target is 99.99% -- do not reboot", "^C"]
+    )
+    assert run_feature("banner", csv_file, "--limit", "sw1") == cli.EXIT_OK

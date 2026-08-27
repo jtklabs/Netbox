@@ -9,6 +9,15 @@ The scalars never take part in removal. `no logging trap notifications` clears
 the setting whatever argument it is given, so negating a stale one after
 setting the new one would undo the change; setting the new value replaces the
 old by itself.
+
+**This reads `show running-config all`.** A setting sitting at its platform
+default is not written to the running config -- `logging trap informational` is
+IOS's default and simply does not appear -- so a plain `show running-config`
+cannot tell "not configured" from "configured to the default". That would make
+the severity look missing on every run: set it, read back, still not there,
+report it unverified, and do the same again tomorrow. `all` renders the
+defaults explicitly, and the `| include` keeps the transfer small even though
+the device generates more.
 """
 
 from __future__ import annotations
@@ -20,7 +29,7 @@ from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, norma
 from ..core import validate_address, validate_text, validate_word
 from ..standards import host_and_port, of as standards_of
 
-SHOW_COMMAND = "show running-config | include ^logging"
+SHOW_COMMAND = "show running-config all | include ^logging"
 
 DEFAULT_PORT = 514
 
@@ -39,16 +48,24 @@ SEVERITIES = (
     "debugging",
 )
 
+# As `show running-config all` renders it: the defaults are present too, which
+# is the whole point of asking for them.
 IOS_SAMPLE = """\
+logging exception 4096
+logging count
 logging trap notifications
+logging facility local7
+logging buffered 32768 debugging
+logging console debugging
 logging source-interface Loopback0
-logging host 10.1.1.50
+logging host 10.1.1.50 transport udp port 514
 logging host 10.9.9.9 transport udp port 1514
-logging buffered 32768
 logging origin-id string OLD-NAME
 """
 
 EOS_SAMPLE = """\
+logging buffered 16384 informational
+logging console errors
 logging trap informational
 logging source-interface Management1
 logging host 10.1.1.50

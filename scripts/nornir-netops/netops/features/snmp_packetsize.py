@@ -16,10 +16,14 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from ..core import Desired, Entry, Feature, PlatformSupport
 
-SHOW_COMMAND = "show running-config | include ^snmp-server packetsize"
+# `all`, because the platform default is not written to the running config: a
+# plain `show running-config` cannot tell "unset" from "set to 1500", so asking
+# for 1500 would push it on every run forever.
+SHOW_COMMAND = "show running-config all | include ^snmp-server packetsize"
 
-#: IOS accepts 484-17940. The platform default is 1500 and is not written to
-#: the running config, so a default device parses as having nothing set.
+#: IOS accepts 484-17940. The platform default is 1500; `show running-config
+#: all` renders it explicitly, so a default device parses as 1500 rather than
+#: as nothing.
 MIN_SIZE = 484
 MAX_SIZE = 17940
 DEFAULT_SIZE = 1300
