@@ -38,6 +38,7 @@ re-run with --apply to push the commands above
 | [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
 | [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
 | [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
+| `discover` | Detect each device's platform and remember it; changes nothing | -- |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
 What each of them should converge on comes from
@@ -94,10 +95,50 @@ The `platform` value is both the netmiko `device_type` used to connect **and**
 the `templates/<platform>/` directory used to render, which is why aliases are
 normalized to netmiko's spelling. Blank means autodetect: before anything is
 pushed, netmiko's `SSHDetect` logs in, fingerprints the device, and writes the
-answer onto the host. That costs an extra login per device, so fill the column
-in for large runs. A device that detects as something with no template fails
+answer onto the host. A device that detects as something with no template fails
 with `platform 'cisco_nxos' has no 'ntp' support` rather than being sent IOS
 syntax.
+
+Autodetection is the slow part of a run -- `SSHDetect` opens a whole extra SSH
+session per device, before the real task connects again -- so the answer is
+remembered for 24 hours:
+
+```console
+$ ./configure.py discover
+
+detecting platform on 3 device(s), 3 at a time...
+
+  atl-core-sw1   cisco_ios      from the CSV
+  atl-dc-leaf1   arista_eos     detected
+  rdu-edge-rtr1  cisco_ios      detected
+  rdu-old-box    unknown        could not autodetect the platform; set the platform column in the CSV
+
+summary: 4 device(s), 1 from the CSV, 2 detected, 1 unidentified
+remembered in .platform-cache.json for 24h
+```
+
+`discover` connects, works out what each device is, writes the cache and
+changes nothing -- it does not even read a device's configuration. Run it once
+after adding devices to the CSV and every feature run afterwards starts warm.
+Ordinary runs populate the cache too; `discover` just does it deliberately.
+
+| Flag | Effect |
+| --- | --- |
+| `--platform-cache-ttl HOURS` | How long an answer stays good. Default 24. |
+| `--no-platform-cache` | Ignore what was remembered and detect again. |
+| `--platform-cache FILE` | Where to keep it [`$NETOPS_PLATFORM_CACHE`], default `.platform-cache.json` (gitignored). |
+| `discover --refresh` | Detect again even for devices already remembered. |
+
+Two things it deliberately does not do. **A `platform` column always wins** --
+an explicit statement is not something to second-guess, and those devices are
+never detected or cached at all. And **the cache only ever fills a blank**, so
+it can never override the CSV.
+
+The staleness window is the trade: a device whose platform genuinely changes --
+re-purposed hardware, an IOS box swapped for EOS -- is wrong until the entry
+expires. That fails loudly rather than quietly, because the device rejects the
+show command and the run stops there; `--no-platform-cache` or
+`discover --refresh` fixes it immediately.
 
 ## The standards file
 
@@ -978,7 +1019,7 @@ pip install pytest
 pytest
 ```
 
-458 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+484 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
@@ -994,7 +1035,8 @@ the device and never the terminal, the report, or the logs.
 - `standards.yaml` must never hold a credential:
   SNMPv3 passphrases, community strings and account passwords all come from the
   environment or AWS.
-- `.env`, `inventory/hosts.csv` and `netops-debug.log` are gitignored. Keep real
+- `.env`, `inventory/hosts.csv`, `standards.yaml`, `netops-debug.log` and
+  `.platform-cache.json` are gitignored. Keep real
   credentials in AWS Secrets Manager where you can.
 - The debug log records device names, addresses and command output. Passwords
   are scrubbed from it the same way they are from the terminal, but treat it as

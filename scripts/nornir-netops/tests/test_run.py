@@ -1316,3 +1316,137 @@ def test_a_banner_containing_a_percent_sign_is_not_mistaken_for_an_error(
         ["banner motd ^C", "  Uptime target is 99.99% -- do not reboot", "^C"]
     )
     assert run_feature("banner", csv_file, "--limit", "sw1") == cli.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# the platform cache, and `discover`
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def detector(monkeypatch):
+    """Counts autodetections, so 'did it ask the device again?' is testable."""
+    calls = []
+
+    class FakeDetect:
+        def __init__(self, **kwargs):
+            calls.append(kwargs["host"])
+
+        def autodetect(self):
+            return "cisco_ios"
+
+    monkeypatch.setattr("netmiko.ssh_autodetect.SSHDetect", FakeDetect)
+    return calls
+
+
+@pytest.fixture
+def blank_csv(tmp_path):
+    path = tmp_path / "blank.csv"
+    path.write_text("host,name,platform\n10.1.1.9,mystery,\n", encoding="utf-8")
+    return str(path)
+
+
+def test_a_detected_platform_is_remembered(device, blank_csv, login, detector, capsys):
+    assert run(blank_csv, "-s", "10.99.99.1") == cli.EXIT_OK
+    assert len(detector) == 1
+    capsys.readouterr()
+
+    # Second run: the answer is already known, so the device is not asked again.
+    assert run(blank_csv, "-s", "10.99.99.1") == cli.EXIT_OK
+    assert len(detector) == 1
+    out = capsys.readouterr().out
+    assert "1 remembered" in out
+    assert "detecting platform" not in out
+
+
+def test_no_platform_cache_asks_again(device, blank_csv, login, detector):
+    run(blank_csv, "-s", "10.99.99.1")
+    run(blank_csv, "-s", "10.99.99.1", "--no-platform-cache")
+    assert len(detector) == 2
+
+
+def test_an_expired_entry_is_detected_again(device, blank_csv, login, detector):
+    run(blank_csv, "-s", "10.99.99.1")
+    run(blank_csv, "-s", "10.99.99.1", "--platform-cache-ttl", "0")
+    assert len(detector) == 2
+
+
+def test_a_csv_platform_is_never_detected_or_cached(device, csv_file, login, detector):
+    """An explicit column is a statement; there is nothing to work out."""
+    run(csv_file, "-s", "10.99.99.1")
+    assert detector == []
+    assert not Path(os.environ["NETOPS_PLATFORM_CACHE"]).exists()
+
+
+def test_discover_builds_the_cache_without_touching_anything(
+    device, blank_csv, login, detector, capsys
+):
+    assert cli.main(["discover", "--no-env-file", "--csv", blank_csv]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+
+    assert len(detector) == 1
+    assert "mystery" in out and "cisco_ios" in out and "detected" in out
+    assert device["config"] == {}  # nothing was configured
+    assert device["commands"] == {}  # nothing was even read
+
+    remembered = json.loads(Path(os.environ["NETOPS_PLATFORM_CACHE"]).read_text())
+    assert remembered["devices"]["10.1.1.9:22"]["platform"] == "cisco_ios"
+
+
+def test_a_feature_run_then_uses_what_discover_found(
+    device, blank_csv, login, detector, capsys
+):
+    cli.main(["discover", "--no-env-file", "--csv", blank_csv])
+    capsys.readouterr()
+    assert run(blank_csv, "-s", "10.99.99.1") == cli.EXIT_OK
+    assert len(detector) == 1  # discover did the asking; the run did not
+
+
+def test_discover_reports_what_it_did_not_have_to_ask(
+    device, blank_csv, login, detector, capsys
+):
+    cli.main(["discover", "--no-env-file", "--csv", blank_csv])
+    capsys.readouterr()
+    cli.main(["discover", "--no-env-file", "--csv", blank_csv])
+    out = capsys.readouterr().out
+    assert "remembered" in out
+    assert len(detector) == 1
+
+
+def test_discover_refresh_asks_again(device, blank_csv, login, detector, capsys):
+    cli.main(["discover", "--no-env-file", "--csv", blank_csv])
+    cli.main(["discover", "--no-env-file", "--csv", blank_csv, "--refresh"])
+    assert len(detector) == 2
+
+
+def test_discover_shows_devices_whose_platform_the_csv_states(
+    device, csv_file, login, detector, capsys
+):
+    assert cli.main(["discover", "--no-env-file", "--csv", csv_file]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "from the CSV" in out
+    assert detector == []
+
+
+def test_discover_reports_a_device_it_cannot_identify(
+    device, blank_csv, login, monkeypatch, capsys
+):
+    class Undetectable:
+        def __init__(self, **kwargs):
+            pass
+
+        def autodetect(self):
+            return None
+
+    monkeypatch.setattr("netmiko.ssh_autodetect.SSHDetect", Undetectable)
+    code = cli.main(["discover", "--no-env-file", "--csv", blank_csv])
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_FAILED
+    assert "unknown" in out
+    assert "1 unidentified" in out
+
+
+def test_discover_has_no_change_flags():
+    """It changes nothing, so it should not accept flags that say otherwise."""
+    with pytest.raises(SystemExit):
+        cli.main(["discover", "--apply"])

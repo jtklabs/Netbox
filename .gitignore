@@ -31,6 +31,7 @@ scripts/snmp-inventory/*.log
 scripts/nornir-netops/.env
 scripts/nornir-netops/inventory/hosts.csv
 scripts/nornir-netops/standards.yaml
+scripts/nornir-netops/.platform-cache.json
 scripts/nornir-netops/*.report.json
 scripts/nornir-netops/reports/
 scripts/nornir-netops/*.log

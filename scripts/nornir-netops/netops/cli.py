@@ -14,10 +14,13 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub
 from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
+from .platform_cache import DEFAULT_FILENAME as DEFAULT_CACHE_FILE
+from .platform_cache import DEFAULT_TTL_HOURS
+from .platform_cache import load as load_platform_cache
 from .errors import summarize
 from .credentials import (
     AwsSecretSpec,
@@ -104,10 +107,8 @@ def bootstrap_log(argv: List[str]) -> DebugLog:
     return configure_log(None if known.no_log_file else known.log_file, known.debug)
 
 
-def _common_arguments() -> argparse.ArgumentParser:
-    """Options shared by every feature subcommand."""
-    parent = argparse.ArgumentParser(add_help=False)
-
+def _connection_arguments(parent: argparse.ArgumentParser) -> None:
+    """How to reach the devices. Shared by the features and by `discover`."""
     inv = parent.add_argument_group("inventory")
     inv.add_argument(
         "-c",
@@ -125,17 +126,29 @@ def _common_arguments() -> argparse.ArgumentParser:
         metavar="COLUMN=VALUE",
         help="only devices whose CSV column matches (repeatable, ANDed)",
     )
-    inv.add_argument(
-        "--standards",
-        metavar="FILE",
-        default=os.environ.get("NETOPS_STANDARDS"),
-        help="the desired state file (default: ./standards.yaml, then "
-        "<project>/standards.yaml) [$NETOPS_STANDARDS]",
+    cache = parent.add_argument_group(
+        "platform cache",
+        "Autodetecting a platform costs an extra SSH login per device, and the "
+        "answer almost never changes, so it is remembered. A platform column in "
+        "the CSV always wins over the cache.",
     )
-    inv.add_argument(
-        "--no-standards",
+    cache.add_argument(
+        "--platform-cache",
+        metavar="FILE",
+        help=f"where detected platforms are remembered "
+        f"(default: <project>/{DEFAULT_CACHE_FILE}) [$NETOPS_PLATFORM_CACHE]",
+    )
+    cache.add_argument(
+        "--platform-cache-ttl",
+        type=float,
+        default=float(os.environ.get("NETOPS_PLATFORM_CACHE_TTL", DEFAULT_TTL_HOURS)),
+        metavar="HOURS",
+        help="how long a remembered platform stays good",
+    )
+    cache.add_argument(
+        "--no-platform-cache",
         action="store_true",
-        help="ignore the standards file; take everything from flags",
+        help="ignore what was remembered and detect again",
     )
 
     auth = parent.add_argument_group(
@@ -203,6 +216,44 @@ def _common_arguments() -> argparse.ArgumentParser:
         help="JSON key holding the enable secret, if any [$NET_AWS_ENABLE_KEY]",
     )
 
+    out = parent.add_argument_group("output")
+    out.add_argument("-w", "--workers", type=int, default=10, help="devices in parallel")
+    out.add_argument(
+        "-v", "--verbose", action="store_true", help="show current state and device output"
+    )
+    out.add_argument(
+        "--log-file",
+        default=os.environ.get("NETOPS_LOG_FILE", DEFAULT_LOG_FILE),
+        metavar="FILE",
+        help="where full errors and tracebacks are written [$NETOPS_LOG_FILE]",
+    )
+    out.add_argument("--no-log-file", action="store_true", help="do not write a debug log")
+    out.add_argument(
+        "--debug",
+        action="store_true",
+        help="print full tracebacks, and log the SSH transcript to the log file",
+    )
+
+
+def _common_arguments() -> argparse.ArgumentParser:
+    """Options shared by every feature subcommand."""
+    parent = argparse.ArgumentParser(add_help=False)
+    _connection_arguments(parent)
+
+    desired = parent.add_argument_group("desired state")
+    desired.add_argument(
+        "--standards",
+        metavar="FILE",
+        default=os.environ.get("NETOPS_STANDARDS"),
+        help="the desired state file (default: ./standards.yaml, then "
+        "<project>/standards.yaml) [$NETOPS_STANDARDS]",
+    )
+    desired.add_argument(
+        "--no-standards",
+        action="store_true",
+        help="ignore the standards file; take everything from flags",
+    )
+
     run = parent.add_argument_group("what to do")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument(
@@ -242,28 +293,12 @@ def _common_arguments() -> argparse.ArgumentParser:
         help="do not read the config back after applying to confirm the change landed",
     )
 
-    out = parent.add_argument_group("output")
-    out.add_argument("-w", "--workers", type=int, default=10, help="devices in parallel")
-    out.add_argument("--report", metavar="FILE", help="write a JSON report of the run")
-    out.add_argument(
+    report = parent.add_argument_group("reporting")
+    report.add_argument("--report", metavar="FILE", help="write a JSON report of the run")
+    report.add_argument(
         "--fail-on-diff",
         action="store_true",
         help=f"exit {EXIT_DIFF} if any device is out of compliance (for CI drift checks)",
-    )
-    out.add_argument(
-        "-v", "--verbose", action="store_true", help="show current state and device output"
-    )
-    out.add_argument(
-        "--log-file",
-        default=os.environ.get("NETOPS_LOG_FILE", DEFAULT_LOG_FILE),
-        metavar="FILE",
-        help="where full errors and tracebacks are written [$NETOPS_LOG_FILE]",
-    )
-    out.add_argument("--no-log-file", action="store_true", help="do not write a debug log")
-    out.add_argument(
-        "--debug",
-        action="store_true",
-        help="print full tracebacks, and log the SSH transcript to the log file",
     )
 
     snow = parent.add_argument_group(
@@ -299,6 +334,14 @@ def _common_arguments() -> argparse.ArgumentParser:
     return parent
 
 
+def _discover_arguments() -> argparse.ArgumentParser:
+    """`discover` needs to reach the devices and nothing else -- no desired
+    state, no change flags, because it changes nothing."""
+    parent = argparse.ArgumentParser(add_help=False)
+    _connection_arguments(parent)
+    return parent
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="configure.py",
@@ -318,6 +361,21 @@ def build_parser() -> argparse.ArgumentParser:
         )
         feature.add_arguments(sub)
         sub.set_defaults(feature=feature)
+
+    found = subs.add_parser(
+        "discover",
+        parents=[_discover_arguments()],
+        help="detect each device's platform and remember it; changes nothing",
+        description="Connect to every device whose CSV platform column is blank, "
+        "work out what it is, and write that to the platform cache so later runs "
+        "do not have to. Reads nothing but the login banner and changes nothing.",
+        formatter_class=HelpFormatter,
+    )
+    found.add_argument(
+        "--refresh",
+        action="store_true",
+        help="detect again even for devices already remembered",
+    )
 
     subs.add_parser(
         "selftest",
@@ -629,6 +687,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
 
     if args.command == "selftest":
         return selftest()
+    if args.command == "discover":
+        return _discover(args, style, log)
 
     feature: Feature = args.feature
     try:
@@ -659,67 +719,9 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
             )
         parser.error(str(exc))
 
-    aws = (
-        AwsSecretSpec(
-            name=args.aws_secret,
-            region=args.aws_region,
-            username_key=args.aws_username_key,
-            password_key=args.aws_password_key,
-            enable_key=args.aws_enable_key,
-        )
-        if args.aws_secret
-        else None
-    )
-    try:
-        credentials: Credentials = resolve_credentials(
-            username=args.username,
-            password=args.password,
-            secret=args.secret,
-            aws=aws,
-            prompt=sys.stdin.isatty(),
-            key_file=args.key_file,
-        )
-    except CredentialError as exc:
-        print(style.bad(f"error: {exc}"), file=sys.stderr)
-        return EXIT_USAGE
-
-    # nornir is imported here so `selftest` and --help work without it installed.
-    from .inventory import InventoryError, init_nornir, missing_credentials
-    from .runner import configure_feature, detect_platform
-
-    try:
-        nr = init_nornir(
-            csv_file=args.csv,
-            username=credentials.username,
-            password=credentials.password,
-            secret=credentials.secret,
-            key_file=args.key_file,
-            port=args.port,
-            workers=args.workers,
-            conn_timeout=args.conn_timeout,
-        )
-        targets = _apply_filters(nr, args)
-    except (InventoryError, ValueError) as exc:
-        print(style.bad(f"error: {exc}"), file=sys.stderr)
-        return EXIT_USAGE
-
-    if not targets.inventory.hosts:
-        print(style.bad("error: no devices matched --limit/--filter"), file=sys.stderr)
-        return EXIT_USAGE
-
-    incomplete = missing_credentials(targets, key_file=args.key_file)
-    if incomplete:
-        shown = ", ".join(incomplete[:10]) + ("..." if len(incomplete) > 10 else "")
-        print(
-            style.bad(f"error: no credentials for: {shown}"),
-            file=sys.stderr,
-        )
-        print(
-            "set them in the .env (NET_USER/NET_PASS), in AWS Secrets Manager "
-            "(--aws-secret), or per device in the CSV",
-            file=sys.stderr,
-        )
-        return EXIT_USAGE
+    targets, credentials, code = _connect(args, style)
+    if targets is None:
+        return code
 
     dry_run = not args.apply
 
@@ -800,7 +802,27 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
     }
 
     # Devices with a blank platform column get one detection pass up front, so a
-    # box we cannot identify fails before anything is pushed anywhere.
+    # box we cannot identify fails before anything is pushed anywhere. What was
+    # detected last time is reused first: it is an extra login per device, and
+    # the answer almost never changes.
+    from .runner import detect_platform
+
+    cache = load_platform_cache(
+        args.platform_cache,
+        PROJECT_ROOT,
+        args.platform_cache_ttl,
+        enabled=not args.no_platform_cache,
+    )
+    for host in targets.inventory.hosts.values():
+        if host.platform:
+            continue
+        remembered = cache.get(host)
+        if remembered:
+            host.platform = remembered
+            records[host.name]["platform"] = remembered
+    if cache.hits:
+        print(style.dim(f"platform: {cache.hits} remembered, {cache.path}"))
+
     unknown = targets.filter(filter_func=lambda h: not h.platform)
     if unknown.inventory.hosts:
         print(f"detecting platform on {len(unknown.inventory.hosts)} device(s)...")
@@ -811,6 +833,10 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
                 )
             else:
                 records[name]["platform"] = result.result
+                cache.put(targets.inventory.hosts[name], result.result)
+        cache.save()
+
+    from .runner import configure_feature
 
     ready = targets.filter(filter_func=lambda h: bool(h.platform))
     if ready.inventory.hosts:
@@ -872,6 +898,149 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
     if args.fail_on_diff and any(r["status"] == "pending" for r in records.values()):
         return EXIT_DIFF
     return EXIT_OK
+
+
+def _discover(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
+    """Work out what each device is and remember it, changing nothing."""
+    targets, _, code = _connect(args, style)
+    if targets is None:
+        return code
+
+    from .runner import detect_platform
+
+    cache = load_platform_cache(
+        args.platform_cache,
+        PROJECT_ROOT,
+        args.platform_cache_ttl,
+        enabled=not args.no_platform_cache,
+    )
+
+    stated: List[Tuple[str, str]] = []
+    remembered: List[Tuple[str, str]] = []
+    pending: List[str] = []
+    for name, host in sorted(targets.inventory.hosts.items()):
+        if host.platform:
+            stated.append((name, host.platform))  # the CSV said so; never detect
+            continue
+        known = None if args.refresh else cache.get(host)
+        if known:
+            remembered.append((name, known))
+        else:
+            pending.append(name)
+
+    detected: List[Tuple[str, str]] = []
+    failed: List[Tuple[str, str]] = []
+    if pending:
+        wanted = set(pending)
+        print(
+            f"detecting platform on {len(pending)} device(s), "
+            f"{min(args.workers, len(pending))} at a time..."
+        )
+        todo = targets.filter(filter_func=lambda h, w=wanted: h.name in w)
+        for name, result in todo.run(task=detect_platform).items():
+            if result.failed:
+                exception = _exception_of(result)
+                message = summarize(exception) if exception else "unknown error"
+                failed.append((name, message))
+                log.failure(name, message, exception)
+            else:
+                detected.append((name, result.result))
+                cache.put(targets.inventory.hosts[name], result.result)
+        cache.save()
+
+    width = max((len(name) for name, _ in stated + remembered + detected + failed), default=0)
+    print()
+    for name, platform in sorted(stated):
+        print(f"  {name:<{width}}  {platform:<14} {style.dim('from the CSV')}")
+    for name, platform in sorted(remembered):
+        print(f"  {name:<{width}}  {platform:<14} {style.dim('remembered')}")
+    for name, platform in sorted(detected):
+        print(f"  {name:<{width}}  {style.ok(platform.ljust(14))} detected")
+    for name, message in sorted(failed):
+        print(f"  {name:<{width}}  {style.bad('unknown'.ljust(14))} {message}")
+
+    summary = [f"{len(targets.inventory.hosts)} device(s)"]
+    if stated:
+        summary.append(f"{len(stated)} from the CSV")
+    if remembered:
+        summary.append(f"{len(remembered)} remembered")
+    if detected:
+        summary.append(style.ok(f"{len(detected)} detected"))
+    if failed:
+        summary.append(style.bad(f"{len(failed)} unidentified"))
+    print()
+    print(style.bold("summary: ") + ", ".join(summary))
+    if cache.writes and cache.path:
+        print(style.dim(f"remembered in {cache.path} for {args.platform_cache_ttl:g}h"))
+
+    return EXIT_FAILED if failed else EXIT_OK
+
+
+def _connect(args: argparse.Namespace, style: Style):
+    """Resolve credentials, read the CSV, apply the filters.
+
+    Shared by a feature run and by `discover`, which need exactly the same
+    setup and differ only in what they do once connected.
+    """
+    aws = (
+        AwsSecretSpec(
+            name=args.aws_secret,
+            region=args.aws_region,
+            username_key=args.aws_username_key,
+            password_key=args.aws_password_key,
+            enable_key=args.aws_enable_key,
+        )
+        if args.aws_secret
+        else None
+    )
+    try:
+        credentials: Credentials = resolve_credentials(
+            username=args.username,
+            password=args.password,
+            secret=args.secret,
+            aws=aws,
+            prompt=sys.stdin.isatty(),
+            key_file=args.key_file,
+        )
+    except CredentialError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return None, None, EXIT_USAGE
+
+    # nornir is imported here so `selftest` and --help work without it installed.
+    from .inventory import InventoryError, init_nornir, missing_credentials
+
+    try:
+        nr = init_nornir(
+            csv_file=args.csv,
+            username=credentials.username,
+            password=credentials.password,
+            secret=credentials.secret,
+            key_file=args.key_file,
+            port=args.port,
+            workers=args.workers,
+            conn_timeout=args.conn_timeout,
+        )
+        targets = _apply_filters(nr, args)
+    except (InventoryError, ValueError) as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return None, None, EXIT_USAGE
+
+    if not targets.inventory.hosts:
+        print(style.bad("error: no devices matched --limit/--filter"), file=sys.stderr)
+        return None, None, EXIT_USAGE
+
+    incomplete = missing_credentials(targets, key_file=args.key_file)
+    if incomplete:
+        shown = ", ".join(incomplete[:10]) + ("..." if len(incomplete) > 10 else "")
+        print(style.bad(f"error: no credentials for: {shown}"), file=sys.stderr)
+        print(
+            "set them in the .env (NET_USER/NET_PASS), in AWS Secrets Manager "
+            "(--aws-secret), or per device in the CSV",
+            file=sys.stderr,
+        )
+        return None, None, EXIT_USAGE
+
+    return targets, credentials, EXIT_OK
 
 
 def _servicenow_client(args: argparse.Namespace, style: Style) -> servicenow.Client:

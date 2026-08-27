@@ -19,10 +19,12 @@ def isolated_environment(tmp_path_factory):
     for key in list(os.environ):
         if key.startswith(("NET_", "NETOPS_", "AWS_")):
             del os.environ[key]
-    # The debug log is still exercised, just never in the working directory.
-    os.environ["NETOPS_LOG_FILE"] = str(
-        tmp_path_factory.mktemp("netops-log") / "netops-debug.log"
-    )
+    # The debug log and the platform cache are still exercised, just never in
+    # the working directory -- and never shared between tests, which would let
+    # one test's detected platform satisfy another test's detection.
+    scratch = tmp_path_factory.mktemp("netops-state")
+    os.environ["NETOPS_LOG_FILE"] = str(scratch / "netops-debug.log")
+    os.environ["NETOPS_PLATFORM_CACHE"] = str(scratch / "platform-cache.json")
     yield
     os.environ.clear()
     os.environ.update(saved)
