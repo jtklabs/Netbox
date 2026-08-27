@@ -693,7 +693,7 @@ pip install pytest
 pytest
 ```
 
-347 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+351 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

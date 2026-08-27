@@ -1003,3 +1003,38 @@ def test_snmp_is_idempotent_once_applied(
 def test_snmp_without_passphrases_is_a_usage_error(device, csv_file, login, standards, capsys):
     assert run_feature("snmp", csv_file) == cli.EXIT_USAGE
     assert "NETOPS_SNMP_AUTH_NMSUSER" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# selftest -- it renders every template against the real standards file, so a
+# broken template or an unrenderable value fails here rather than on a device
+# --------------------------------------------------------------------------- #
+
+
+def test_selftest_runs_clean(capsys):
+    assert cli.main(["selftest"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "all templates rendered" in out
+    assert "RENDER FAILED" not in out
+
+
+def test_selftest_covers_every_feature_and_platform(capsys):
+    cli.main(["selftest"])
+    out = capsys.readouterr().out
+    for name, feature in cli.FEATURES.items():
+        assert f"### {name}" in out
+        for platform in feature.platforms:
+            assert platform in out
+
+
+def test_selftest_checks_the_shipped_standards_file(capsys):
+    """It renders against the real file, which makes it a check of the file."""
+    cli.main(["selftest"])
+    out = capsys.readouterr().out
+    assert "standards:" in out
+    assert "warning:" not in out
+
+
+def test_selftest_needs_no_credentials_or_network(capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert cli.main(["selftest"]) == cli.EXIT_OK

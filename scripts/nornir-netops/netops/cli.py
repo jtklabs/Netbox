@@ -478,6 +478,7 @@ def selftest() -> int:
                 f"  parsed: {', '.join(e.key for e in current) or '(nothing)'}"
             )
             for mode in (MODE_ADD, MODE_REPLACE):
+                advisories: List[str] = []
                 # the feature's own planner, so a rotation or a scalar setting
                 # renders here exactly as it would against a device
                 add, remove = feature.plan(
