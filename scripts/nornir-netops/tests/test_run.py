@@ -165,7 +165,7 @@ def test_dry_run_is_the_default_and_changes_nothing(device, csv_file, login, cap
     assert "ntp server 10.99.99.1" in out  # the IOS form
     assert "ntp server 10.99.99.1 iburst" in out  # the EOS form
     assert device["config"] == {}  # nothing was pushed
-    assert device["commands"]["sw1"] == ["show running-config | include ^ntp server"]
+    assert device["commands"]["sw1"] == ["show running-config | include ^ntp"]
 
 
 def test_dry_run_shows_the_save_command_it_would_run(device, csv_file, login, capsys):
@@ -323,7 +323,7 @@ def test_json_report(device, csv_file, login, tmp_path):
     assert document["feature"] == "ntp"
     assert document["mode"] == "replace"
     assert document["dry_run"] is True
-    assert document["desired"] == ["10.99.99.1"]
+    assert document["desired"] == ["server:10.99.99.1"]
 
     sw1 = document["devices"]["sw1"]
     assert sw1["status"] == "pending"
@@ -433,12 +433,12 @@ def test_apply_is_verified_against_a_read_back(device, csv_file, login, tmp_path
     assert sw1["verified"] is True
     assert sw1["missing_after"] == []
     # show, config, show (read back), write memory
-    assert device["commands"]["sw1"].count("show running-config | include ^ntp server") == 2
+    assert device["commands"]["sw1"].count("show running-config | include ^ntp") == 2
 
 
 def test_no_verify_skips_the_read_back(device, csv_file, login):
     run(csv_file, "-s", "10.99.99.1", "--apply", "-y", "--no-verify")
-    assert device["commands"]["sw1"].count("show running-config | include ^ntp server") == 1
+    assert device["commands"]["sw1"].count("show running-config | include ^ntp") == 1
 
 
 def test_a_change_that_does_not_take_is_reported_and_not_saved(
@@ -454,7 +454,7 @@ def test_a_change_that_does_not_take_is_reported_and_not_saved(
 
     out = capsys.readouterr().out
     assert "APPLIED BUT NOT VERIFIED" in out
-    assert "still missing after the change: 10.99.99.1" in out
+    assert "still missing after the change: server:10.99.99.1" in out
     assert "startup-config was NOT saved" in out
     assert "write memory" not in device["commands"]["sw1"]  # not persisted
     assert "2 unverified" in out

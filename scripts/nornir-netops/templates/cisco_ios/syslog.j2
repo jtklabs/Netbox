@@ -4,11 +4,12 @@
     logging host [vrf NAME] <addr> [transport udp port <port>]
     logging trap <severity>
     logging source-interface <interface>
+    logging origin-id {hostname | ip | ipv6 | string <text>}
 
   Available variables:
     add      list[str]    keys to configure; index into `entries`
     remove   list[Entry]  collectors to negate
-    entries  {key: {kind, host, port, severity, source}}
+    entries  {key: {kind, host, port, severity, source, arguments}}
     vrf      str|None
 -#}
 {% for key in add %}
@@ -19,6 +20,8 @@ logging host {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.port
 logging trap {{ item.severity }}
 {% elif item.kind == 'source' %}
 logging source-interface {{ item.source }}
+{% elif item.kind == 'origin' %}
+logging origin-id {{ item.arguments }}
 {% endif %}
 {% endfor %}
 {% for entry in remove %}

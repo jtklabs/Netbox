@@ -101,11 +101,27 @@ def test_plan_replace_dedupes_identical_lines():
     assert len(remove) == 1
 
 
-VARIABLES = {"vrf": None, "prefer": None, "source": None, "iburst": True}
+def variables(**overrides):
+    """The shape the ntp template expects, for exercising render() itself."""
+    base = {
+        "entries": {
+            "server:10.1.1.1": {"kind": "server", "host": "10.1.1.1", "key": None},
+            "server:10.1.1.2": {"kind": "server", "host": "10.1.1.2", "key": None},
+        },
+        "vrf": None,
+        "prefer": None,
+        "source": None,
+        "iburst": True,
+    }
+    base.update(overrides)
+    return base
+
+
+VARIABLES = variables()
 
 
 def test_render_ios_plain():
-    assert render("ntp", "cisco_ios", ["10.1.1.1"], [], VARIABLES) == [
+    assert render("ntp", "cisco_ios", ["server:10.1.1.1"], [], VARIABLES) == [
         "ntp server 10.1.1.1"
     ]
 
@@ -114,9 +130,9 @@ def test_render_ios_options_and_removal():
     commands = render(
         "ntp",
         "cisco_ios",
-        ["10.1.1.1", "10.1.1.2"],
-        [Entry("10.9.9.9", "ntp server vrf MGMT 10.9.9.9 source Vlan10")],
-        {"vrf": "MGMT", "prefer": "10.1.1.2", "source": "Vlan10", "iburst": True},
+        ["server:10.1.1.1", "server:10.1.1.2"],
+        [Entry("server:10.9.9.9", "ntp server vrf MGMT 10.9.9.9 source Vlan10")],
+        variables(vrf="MGMT", prefer="10.1.1.2", source="Vlan10"),
     )
     assert commands == [
         "ntp server vrf MGMT 10.1.1.1 source Vlan10",
@@ -127,16 +143,16 @@ def test_render_ios_options_and_removal():
 
 
 def test_render_eos_uses_iburst():
-    assert render("ntp", "arista_eos", ["10.1.1.1"], [], VARIABLES) == [
+    assert render("ntp", "arista_eos", ["server:10.1.1.1"], [], VARIABLES) == [
         "ntp server 10.1.1.1 iburst"
     ]
-    assert render("ntp", "arista_eos", ["10.1.1.1"], [], {**VARIABLES, "iburst": False}) == [
-        "ntp server 10.1.1.1"
-    ]
+    assert render(
+        "ntp", "arista_eos", ["server:10.1.1.1"], [], variables(iburst=False)
+    ) == ["ntp server 10.1.1.1"]
 
 
 def test_render_emits_no_blank_lines():
-    commands = render("ntp", "cisco_ios", ["10.1.1.1"], [], VARIABLES)
+    commands = render("ntp", "cisco_ios", ["server:10.1.1.1"], [], VARIABLES)
     assert all(command.strip() for command in commands)
 
 
@@ -144,7 +160,7 @@ def test_render_unknown_platform_raises():
     from jinja2 import TemplateNotFound
 
     with pytest.raises(TemplateNotFound):
-        render("ntp", "juniper_junos", ["10.1.1.1"], [], VARIABLES)
+        render("ntp", "juniper_junos", ["server:10.1.1.1"], [], VARIABLES)
 
 
 def test_template_dir_can_be_overridden(tmp_path, monkeypatch):

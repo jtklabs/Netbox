@@ -1,13 +1,26 @@
 {#-
-  Arista EOS -- NTP servers.
+  Arista EOS -- NTP servers and authentication.
 
-  Syntax: ntp server [vrf NAME] <host> [prefer] [iburst] [source INTERFACE]
+    ntp authentication-key <id> md5 <key>
+    ntp trusted-key <id>
+    ntp server [vrf NAME] <host> [key <id>] [prefer] [iburst] [source INTERFACE]
+    ntp authenticate
 
   Same variables as the IOS template; `iburst` is honoured here and defaults to
-  on (--no-iburst turns it off).
+  on (--no-iburst turns it off). EOS is flexible about the order of a server
+  line's keywords -- verify against your release if you change it.
 -#}
-{% for server in add %}
-ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ server }}{% if prefer and server == prefer %} prefer{% endif %}{% if iburst %} iburst{% endif %}{% if source %} source {{ source }}{% endif %}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'key' %}
+ntp authentication-key {{ item.id }} {{ item.type }} {{ item.material }}
+{% elif item.kind == 'trusted-key' %}
+ntp trusted-key {{ item.id }}
+{% elif item.kind == 'authenticate' %}
+ntp authenticate
+{% else %}
+ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if iburst %} iburst{% endif %}{% if source %} source {{ source }}{% endif %}
+{% endif %}
 {% endfor %}
 {% for entry in remove %}
 no {{ entry.line }}

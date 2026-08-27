@@ -27,6 +27,19 @@ ntp:
   # vrf: MGMT
   # source: Loopback0
 
+  # Authentication. The key material is NOT here: it comes from
+  # $NETOPS_NTP_KEY_<id> or --key-secret, and cannot be read back off a device
+  # (IOS stores it encrypted), so a changed key needs `--rewrite-keys`.
+  #
+  # Written in the order that keeps a device from demanding authentication it
+  # cannot satisfy: the key, then trusted-key, then the servers that reference
+  # it, and `ntp authenticate` last.
+  #authentication:
+  #  key_id: 1
+  #  type: md5
+  #  trusted: true      # ntp trusted-key <id>
+  #  enable: true       # ntp authenticate
+
 # --------------------------------------------------------------------------
 # Syslog  ->  configure.py syslog
 # A bare address means the default port, 514; use the host/port form for
@@ -40,6 +53,11 @@ syslog:
   severity: informational
   # source: Loopback0
   # vrf: MGMT
+
+  # Identifier prepended to every message sent to a collector, so the source is
+  # obvious in the aggregator. `hostname`, `ip`, `ipv6`, or any other text to
+  # send it as a string. Cisco only -- EOS has no equivalent and is skipped.
+  origin_id: hostname
 
 # --------------------------------------------------------------------------
 # SNMP  ->  configure.py snmp

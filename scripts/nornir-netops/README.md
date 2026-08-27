@@ -334,10 +334,52 @@ Ctrl-C during a run stops without a traceback and exits 130.
 
 `--vrf MGMT`, `--prefer 10.50.0.10`, `--source Loopback0`, `--no-iburst` (Arista).
 
-Reads `show running-config | include ^ntp server`, which deliberately cannot
-see `ntp source`, `ntp authenticate` or `ntp access-group`, so `--replace` can
-never remove those. Removal negates the device's own line, so a server
-configured with options this tool does not model still goes away cleanly.
+Removal negates the device's own line, so a server configured with options this
+tool does not model still goes away cleanly. `ntp source`, `ntp master` and
+`ntp access-group` are never parsed, so `--replace` can never remove them.
+
+### Authentication
+
+```yaml
+ntp:
+  servers: [10.50.0.10, 10.50.0.11]
+  authentication:
+    key_id: 1
+    type: md5
+    trusted: true      # ntp trusted-key <id>
+    enable: true       # ntp authenticate
+```
+
+```
+ntp authentication-key 1 md5 <redacted>
+ntp trusted-key 1
+ntp server 10.50.0.10 key 1
+ntp server 10.50.0.11 key 1
+ntp authenticate
+```
+
+**The order is the point.** The key and its trusted-key entry go first, then
+the servers that reference it, and `ntp authenticate` last -- so a device is
+never told to demand authentication it cannot yet satisfy.
+
+The key binding is part of a server's identity: a server configured without its
+key is not the same as one with it, so the line is re-issued. It is *not*
+negated first -- re-issuing replaces it, and negating afterwards would delete
+the server that had just been corrected.
+
+The key material never goes in the standards file. It comes from
+`$NETOPS_NTP_KEY_<id>` or a `--key-secret` AWS secret shaped `{"1": "..."}`,
+and is scrubbed from every command list, report and device echo. **It cannot be
+read back** -- IOS stores it type-7 encrypted -- so only the key id and
+algorithm are compared, and a changed key is invisible. Push one with:
+
+```bash
+./configure.py ntp --apply --rewrite-keys
+```
+
+**Silence is not a statement.** A standards file that says nothing about
+`authentication:` will not have `--replace` tear authentication off devices
+that have it; only a file that declares the section manages those lines.
 
 ## Syslog
 
@@ -346,9 +388,24 @@ configured with options this tool does not model still goes away cleanly.
 ./configure.py syslog -d 10.9.9.9:1514 --apply      # one-off collector
 ```
 
-Manages three kinds of line -- `logging host`, `logging trap`,
-`logging source-interface` -- and deliberately parses nothing else, so
-`logging buffered` and `logging console` can never be removed by `--replace`.
+Manages four kinds of line -- `logging host`, `logging trap`,
+`logging source-interface` and `logging origin-id` -- and deliberately parses
+nothing else, so `logging buffered` and `logging console` can never be removed
+by `--replace`.
+
+```yaml
+syslog:
+  destinations: [10.1.1.50]
+  severity: informational
+  origin_id: hostname     # or ip, ipv6, or any other text -> `string <text>`
+```
+
+`origin_id` prepends an identifier to every message sent to a collector, so the
+source is obvious in the aggregator. **Cisco only** -- EOS has no
+`logging origin-id`, and its nearest relative (`logging format hostname ...`)
+is a different setting rather than a spelling of this one. EOS devices simply
+do not get the line, rather than being reported out of compliance forever over
+something they cannot have.
 
 The severity is compared *by value*: a device on `notifications` and a standard
 of `informational` are different, which is what makes the change appear. But
@@ -874,7 +931,7 @@ pip install pytest
 pytest
 ```
 
-412 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+444 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

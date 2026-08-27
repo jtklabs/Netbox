@@ -1,20 +1,37 @@
 {#-
-  Cisco IOS / IOS-XE -- NTP servers.
+  Cisco IOS / IOS-XE -- NTP servers and authentication.
 
-  Syntax: ntp server [vrf NAME] <host> [source INTERFACE] [prefer]
+    ntp authentication-key <id> md5 <key>
+    ntp trusted-key <id>
+    ntp server [vrf NAME] <host> [key <id>] [source INTERFACE] [prefer]
+    ntp authenticate
 
   Available variables:
-    add     list[str]   server addresses to add (already normalized)
-    remove  list[Entry] lines to negate; entry.line is the device's own text
-    vrf     str|None
-    prefer  str|None    one of `add`, marked preferred
-    source  str|None    source interface
-    iburst  bool        not used on IOS; declared by the feature for Arista
+    add      list[str]    keys to configure; index into `entries`
+    remove   list[Entry]  lines to negate; entry.line is the device's own text
+    entries  {key: {kind, host, key, id, type, material}}
+    vrf      str|None
+    prefer   str|None     one of the servers, marked preferred
+    source   str|None     source interface
+    iburst   bool         not used on IOS; declared by the feature for Arista
+
+  Order matters and is set by the feature: the key and trusted-key first, the
+  servers that reference it next, and `ntp authenticate` last -- so the device
+  never demands authentication it cannot yet satisfy.
 
   Blank lines are dropped by the renderer, so lay this out for readability.
 -#}
-{% for server in add %}
-ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ server }}{% if source %} source {{ source }}{% endif %}{% if prefer and server == prefer %} prefer{% endif %}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'key' %}
+ntp authentication-key {{ item.id }} {{ item.type }} {{ item.material }}
+{% elif item.kind == 'trusted-key' %}
+ntp trusted-key {{ item.id }}
+{% elif item.kind == 'authenticate' %}
+ntp authenticate
+{% else %}
+ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if source %} source {{ source }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}
+{% endif %}
 {% endfor %}
 {#- Negate the device's own line so options we do not model (key, version,
     source, a vrf) are removed with it instead of being left behind. -#}

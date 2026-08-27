@@ -27,6 +27,7 @@ def test_parses_the_three_kinds_of_line():
         "source:Loopback0",
         "host:10.1.1.50:514",
         "host:10.9.9.9:1514",
+        "origin:string OLD-NAME",
     ]
 
 
@@ -136,3 +137,68 @@ def test_vrf_from_the_file():
     assert render("syslog", "cisco_ios", desired.keys, [], desired.variables) == [
         "logging host vrf MGMT 10.1.1.50"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# origin-id -- Cisco only
+# --------------------------------------------------------------------------- #
+
+
+def test_origin_id_keyword_from_the_standards_file():
+    document = {"syslog": {"destinations": ["10.1.1.50"], "origin_id": "hostname"}}
+    desired = FEATURE.build_desired(parse_args([], document))
+    assert "origin:hostname" in desired.keys
+    assert render("syslog", "cisco_ios", desired.keys, [], desired.variables) == [
+        "logging host 10.1.1.50",
+        "logging origin-id hostname",
+    ]
+
+
+def test_any_other_text_is_sent_as_a_string():
+    document = {"syslog": {"destinations": ["10.1.1.50"], "origin_id": "ATL-DC1"}}
+    desired = FEATURE.build_desired(parse_args([], document))
+    assert "origin:string ATL-DC1" in desired.keys
+    assert "logging origin-id string ATL-DC1" in render(
+        "syslog", "cisco_ios", desired.keys, [], desired.variables
+    )
+
+
+def test_a_changed_origin_id_is_detected():
+    """The key carries the value, so a different one is a different key."""
+    document = {"syslog": {"destinations": ["10.1.1.50"], "origin_id": "hostname"}}
+    desired = FEATURE.build_desired(parse_args([], document))
+    add, _ = plan_syslog(parse_logging(IOS_SAMPLE), desired.keys, MODE_ADD,
+                         {"variables": desired.variables})
+    assert "origin:hostname" in add
+
+
+def test_origin_id_is_never_negated():
+    """Like the other scalars: setting it replaces the old value."""
+    document = {"syslog": {"destinations": ["10.1.1.50"], "origin_id": "hostname"}}
+    desired = FEATURE.build_desired(parse_args([], document))
+    _, remove = plan_syslog(parse_logging(IOS_SAMPLE), desired.keys, MODE_REPLACE,
+                            {"variables": desired.variables})
+    assert not any("origin-id" in e.line for e in remove)
+
+
+def test_eos_never_sees_it():
+    """EOS has no `logging origin-id`. Leaving it in the desired set would make
+    every EOS device look out of compliance forever."""
+    document = {"syslog": {"destinations": ["10.1.1.50"], "origin_id": "hostname"}}
+    desired = FEATURE.build_desired(parse_args([], document))
+    add, _ = plan_syslog(
+        parse_logging(EOS_SAMPLE),
+        desired.keys,
+        MODE_ADD,
+        {"variables": desired.variables, "ignores": ("origin",)},
+    )
+    assert not any(key.startswith("origin:") for key in add)
+
+
+def test_an_injected_origin_id_is_rejected():
+    from netops.core import InvalidValue
+
+    document = {"syslog": {"destinations": ["10.1.1.50"],
+                           "origin_id": "DC1\nlogging host 10.6.6.6"}}
+    with pytest.raises(InvalidValue):
+        FEATURE.build_desired(parse_args([], document))

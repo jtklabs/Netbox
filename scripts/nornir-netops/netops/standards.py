@@ -37,8 +37,8 @@ EXAMPLE_FILENAME = "standards.yaml.example"
 #: Sections this tool understands. A typo would otherwise read as "that
 #: standard is not defined", which looks compliant while enforcing nothing.
 KNOWN_SECTIONS = {
-    "ntp": {"servers", "vrf", "source", "prefer", "iburst"},
-    "syslog": {"destinations", "severity", "source", "vrf", "facility"},
+    "ntp": {"servers", "vrf", "source", "prefer", "iburst", "authentication"},
+    "syslog": {"destinations", "severity", "source", "vrf", "facility", "origin_id"},
     "snmp": {
         "allow",
         "acl",
