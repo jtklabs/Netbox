@@ -138,12 +138,28 @@ def test_of_tolerates_a_namespace_without_standards():
     assert of(argparse.Namespace()).loaded is False
 
 
-def test_the_shipped_standards_file_parses():
-    """The file committed beside this tool must always be valid."""
+def test_the_shipped_example_parses():
+    """The example is what ships, so it must always be valid."""
     from netops.cli import PROJECT_ROOT
 
-    standards = load(None, PROJECT_ROOT)
-    assert standards.loaded, "standards.yaml should ship with the tool"
+    standards = load(None, PROJECT_ROOT, allow_example=True)
+    assert standards.loaded, "standards.yaml.example should ship with the tool"
+    assert standards.path.name == "standards.yaml.example"
     assert standards.warnings == []
     assert standards.entries("ntp.servers")
     assert standards.defined("snmp.communities")
+
+
+def test_a_real_run_never_falls_back_to_the_example(tmp_path):
+    """Its addresses are placeholders. Converging a fleet onto them would be a
+    great deal worse than stopping."""
+    from netops.cli import PROJECT_ROOT
+
+    assert find_standards(None, PROJECT_ROOT) is None
+    assert load(None, PROJECT_ROOT).loaded is False
+
+
+def test_the_example_is_found_only_when_asked_for():
+    from netops.cli import PROJECT_ROOT
+
+    assert find_standards(None, PROJECT_ROOT, allow_example=True) is not None

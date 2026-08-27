@@ -28,6 +28,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 #: Looked for, in order, when --standards is not given.
 DEFAULT_FILENAMES = ("standards.yaml", "standards.yml", "standards.json")
 
+#: What ships with the tool. Never used for a real run -- its addresses are
+#: placeholders, and converging a fleet onto them would be worse than failing.
+#: `configure.py selftest` may fall back to it, because that renders templates
+#: offline and touches nothing.
+EXAMPLE_FILENAME = "standards.yaml.example"
+
 #: Sections this tool understands. A typo would otherwise read as "that
 #: standard is not defined", which looks compliant while enforcing nothing.
 KNOWN_SECTIONS = {
@@ -61,13 +67,19 @@ class StandardsError(Exception):
     """The standards file is missing, unreadable, or shaped wrongly."""
 
 
-def find_standards(explicit: Optional[str], project_root: Path) -> Optional[Path]:
+def find_standards(
+    explicit: Optional[str], project_root: Path, allow_example: bool = False
+) -> Optional[Path]:
     """Locate the standards file.
 
     Checked in order: what was asked for, the working directory, then this
     tool's own directory. Deliberately not any directory above: this tool is
     self-contained, and reaching up into a shared file would couple it to
     whatever else lives in the tree.
+
+    `allow_example` falls back to the shipped example. Only the offline
+    selftest passes it: a real run against placeholder addresses would be a
+    great deal worse than a run that stops and says the file is missing.
     """
     if explicit:
         path = Path(explicit).expanduser()
@@ -79,6 +91,10 @@ def find_standards(explicit: Optional[str], project_root: Path) -> Optional[Path
             candidate = directory / name
             if candidate.is_file():
                 return candidate
+    if allow_example:
+        candidate = project_root / EXAMPLE_FILENAME
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -177,10 +193,12 @@ class Standards:
         return node is not None
 
 
-def load(explicit: Optional[str], project_root: Path) -> Standards:
+def load(
+    explicit: Optional[str], project_root: Path, allow_example: bool = False
+) -> Standards:
     """Find and read the standards file. Absent is not an error -- the flags
     still work without it."""
-    path = find_standards(explicit, project_root)
+    path = find_standards(explicit, project_root, allow_example)
     if path is None:
         return Standards()
 

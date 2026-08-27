@@ -134,9 +134,23 @@ local_accounts:
   names: [admin, netauto]
 ```
 
-It is meant to be committed -- the standard belongs in version control -- and
-there are no credentials in it. YAML or JSON; `--standards FILE` or
-`$NETOPS_STANDARDS` names a different one, `--no-standards` ignores it.
+**`standards.yaml.example` is what ships; the real `standards.yaml` is
+gitignored**, so pulling this tool never overwrites yours:
+
+```bash
+cp standards.yaml.example standards.yaml
+```
+
+Keep your real one under version control somewhere -- the standard belongs
+under change control -- but not here. There are no credentials in it either
+way. YAML or JSON; `--standards FILE` or `$NETOPS_STANDARDS` names a different
+one, `--no-standards` ignores it.
+
+A real run **never** falls back to the example: its addresses are placeholders,
+and converging a fleet onto them would be far worse than stopping with a
+message. `configure.py selftest` is the one exception, because it renders
+templates offline and touches nothing -- so a fresh clone can still check
+itself.
 
 Three things worth knowing:
 
@@ -860,7 +874,7 @@ pip install pytest
 pytest
 ```
 
-409 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+412 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
@@ -873,7 +887,7 @@ the device and never the terminal, the report, or the logs.
 - Addresses, usernames, interface names and passwords are validated before they
   reach a template, so nothing can smuggle a second command onto a line.
 - One device failing does not stop the others; it is reported and the run exits 1.
-- `standards.yaml` is committed on purpose and must never hold a credential:
+- `standards.yaml` must never hold a credential:
   SNMPv3 passphrases, community strings and account passwords all come from the
   environment or AWS.
 - `.env`, `inventory/hosts.csv` and `netops-debug.log` are gitignored. Keep real

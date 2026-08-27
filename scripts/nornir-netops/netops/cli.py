@@ -465,7 +465,7 @@ def selftest() -> int:
     # too: a value the templates cannot render fails here rather than on a
     # device.
     try:
-        standards = load_standards(None, PROJECT_ROOT)
+        standards = load_standards(None, PROJECT_ROOT, allow_example=True)
     except StandardsError as exc:
         print(f"standards file: {exc}")
         return EXIT_FAILED
@@ -652,6 +652,11 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return EXIT_USAGE
     except ValueError as exc:
+        if not args.standards.loaded and "standards file" in str(exc):
+            parser.error(
+                f"{exc} -- there is no standards file here; copy "
+                f"{PROJECT_ROOT / 'standards.yaml.example'} to standards.yaml"
+            )
         parser.error(str(exc))
 
     aws = (

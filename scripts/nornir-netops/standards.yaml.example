@@ -1,3 +1,6 @@
+# Copy to standards.yaml and edit. The real file is gitignored -- this example
+# is what ships, so it never overwrites yours.
+#
 # Our network standards, in one platform-neutral file.
 #
 # These values are the same for every device and every platform -- the same NTP
@@ -5,8 +8,8 @@
 # written once, generically, and each template maps them onto that platform's
 # own configuration syntax.
 #
-# This file is meant to be committed: the standard itself belongs in version
-# control. There are no credentials here. Device logins live in .env or AWS
+# Your standards.yaml is worth keeping in version control somewhere -- the
+# standard itself belongs under change control. There are no credentials here. Device logins live in .env or AWS
 # Secrets Manager, and SNMPv3 auth/priv passwords are resolved the same way
 # (see the snmp.users section below).
 #

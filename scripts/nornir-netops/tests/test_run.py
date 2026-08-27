@@ -1027,12 +1027,23 @@ def test_selftest_covers_every_feature_and_platform(capsys):
             assert platform in out
 
 
-def test_selftest_checks_the_shipped_standards_file(capsys):
-    """It renders against the real file, which makes it a check of the file."""
+def test_selftest_checks_the_standards_file(capsys):
+    """It renders against the real file when there is one, and the shipped
+    example when there is not -- so a fresh clone can still check itself."""
     cli.main(["selftest"])
     out = capsys.readouterr().out
     assert "standards:" in out
     assert "warning:" not in out
+
+
+def test_a_run_with_no_standards_file_says_where_the_example_is(
+    device, csv_file, login, capsys
+):
+    with pytest.raises(SystemExit):
+        cli.main(["ntp", "--no-env-file", "--csv", csv_file])
+    err = capsys.readouterr().err
+    assert "no standards file here" in err
+    assert "standards.yaml.example" in err
 
 
 def test_selftest_needs_no_credentials_or_network(capsys, monkeypatch):
