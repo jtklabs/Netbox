@@ -32,12 +32,17 @@ re-run with --apply to push the commands above
 | Subcommand | What it does | Platforms |
 | --- | --- | --- |
 | [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `arista_eos` |
-| [`users`](#local-users) | Set local accounts and rotate their passwords | `cisco_ios`, `arista_eos` |
-| [`snmp-packetsize`](#snmp-packet-size) | Set the SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
-| `selftest` | Render every template offline against sample output | -- |
+| [`syslog`](#syslog) | Collectors, trap severity, source interface | `cisco_ios`, `arista_eos` |
+| [`banner`](#banner) | Login and MOTD banners | `cisco_ios`, `arista_eos` |
+| [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
+| [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
+| [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
+| [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
+| `selftest` | Render every template offline, and check the standards file | -- |
 
-Syslog and the rest slot in beside these without touching the engine -- see
-[Adding a feature](#adding-a-feature).
+What each of them should converge on comes from
+[the standards file](#the-standards-file); flags override it. A new domain is a
+feature module plus two templates -- see [Adding a feature](#adding-a-feature).
 
 ### How this relates to the other tools here
 
@@ -93,6 +98,62 @@ answer onto the host. That costs an extra login per device, so fill the column
 in for large runs. A device that detects as something with no template fails
 with `platform 'cisco_nxos' has no 'ntp' support` rather than being sent IOS
 syntax.
+
+## The standards file
+
+The CSV says *which* devices. `standards.yaml` beside this tool says *what*:
+
+```yaml
+ntp:
+  servers: [10.50.0.10, 10.50.0.11]
+
+syslog:
+  destinations:
+    - 10.1.1.50          # port 514
+    - host: 10.1.1.51    # or a non-default port
+      port: 1514
+  severity: informational
+
+snmp:
+  allow: [10.1.1.0/24, 10.2.0.0/16]   # networks allowed to poll
+  acl: SNMP-POLLERS                   # the ACL that enforces `allow`
+  communities: []                     # v2c: none permitted, remove any found
+  location: "ATL DC1 - row 4"
+  users:
+    - name: nmsuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+
+acls:
+  - name: SNMP-POLLERS
+    permit: snmp.allow    # points at the networks above, not a second copy
+    deny_log: true
+
+local_accounts:
+  names: [admin, netauto]
+```
+
+It is meant to be committed -- the standard belongs in version control -- and
+there are no credentials in it. YAML or JSON; `--standards FILE` or
+`$NETOPS_STANDARDS` names a different one, `--no-standards` ignores it.
+
+Three things worth knowing:
+
+- **A flag always wins.** `./configure.py ntp --servers 10.9.9.9` ignores
+  `ntp.servers`, so a one-off run never needs the file edited.
+- **An empty list is a statement.** `communities: []` means *there must be no
+  v2c community*, and any found on a device is removed. Saying nothing about
+  communities leaves them alone. The two are different, and the file can say
+  either.
+- **A dotted path is a reference.** `permit: snmp.allow` resolves to the
+  networks under `snmp.allow`, so adding a poller subnet is one edit in one
+  place rather than two that can drift apart. A value that merely looks like a
+  path but does not resolve -- `time.example.net` -- stays a string.
+
+An unknown section warns rather than fails, so the file can carry a section
+this tool does not own yet. `./configure.py selftest` renders every template
+against the real file, which makes it a check of the file itself.
 
 ## Credentials
 
@@ -181,6 +242,7 @@ instead of a password.
 | `--apply` | Actually push. Prompts once on a terminal; `-y` skips the prompt. |
 | `--no-save` | Skip `write memory` after a successful change. |
 | `--no-verify` | Skip the read-back that confirms the change landed. |
+| `--standards FILE` | The desired state file. `--no-standards` ignores it. |
 | `--fail-on-diff` | Exit 2 if anything is out of compliance. For a cron drift check. |
 | `-v` | Also show current state and raw device output. |
 | `-w, --workers` | How many devices to work on at once. Default 10. |
@@ -260,6 +322,81 @@ Reads `show running-config | include ^ntp server`, which deliberately cannot
 see `ntp source`, `ntp authenticate` or `ntp access-group`, so `--replace` can
 never remove those. Removal negates the device's own line, so a server
 configured with options this tool does not model still goes away cleanly.
+
+## Syslog
+
+```bash
+./configure.py syslog --apply                       # from the standards file
+./configure.py syslog -d 10.9.9.9:1514 --apply      # one-off collector
+```
+
+Manages three kinds of line -- `logging host`, `logging trap`,
+`logging source-interface` -- and deliberately parses nothing else, so
+`logging buffered` and `logging console` can never be removed by `--replace`.
+
+The severity is compared *by value*: a device on `notifications` and a standard
+of `informational` are different, which is what makes the change appear. But
+the severity and source interface are never negated. `no logging trap
+notifications` clears the setting whatever argument it is given, so negating a
+stale one after setting the new value would undo the change -- setting it
+replaces the old value by itself. Only collectors are removed by `--replace`.
+
+## Banner
+
+```bash
+./configure.py banner --apply
+```
+
+**The text lives in `templates/<platform>/banner.j2`** -- edit it there, where
+it is reviewed in the same diff as everything else. The standards file only
+says which banners are managed (`banner.motd: true`).
+
+Comparing is not a set difference, so this feature renders the template, pulls
+the body back out of the rendered block, and compares it with the body read off
+the device. Blank lines *inside* the text are content and are preserved;
+whitespace at either end is not, so a device that stores it slightly
+differently does not look like a change on every run.
+
+IOS is wrapped in a `^C` delimiter and EOS terminated with `EOF`; both are the
+template's business. The config push runs with netmiko's `cmd_verify` off,
+because the device stops offering a prompt between the delimiters.
+
+## ACLs
+
+```bash
+./configure.py acl --apply              # every ACL in the standards file
+./configure.py acl -a SNMP-POLLERS      # just this one
+```
+
+**Order is enforced.** An ACL is an ordered list, not a set: `permit
+10.1.1.0/24` before `deny any` and after it mean different things. Entries are
+compared positionally, and a device whose entries differ in content *or order*
+has that ACL rebuilt:
+
+```
+no ip access-list standard SNMP-POLLERS
+ip access-list standard SNMP-POLLERS
+ permit 10.1.1.0 0.0.0.255
+ permit 10.2.0.0 0.0.255.255
+ deny any log
+```
+
+The negation and the rebuild go out in the same config push. **There is a real
+gap between them** -- a few milliseconds inside one session during which the
+ACL does not exist, and anything referencing it behaves as that platform
+behaves with a missing ACL. There is no reordering that is safer.
+
+The file states networks once, platform-neutrally, and each template writes
+them the way its platform does: IOS gets wildcard masks (`10.1.1.0 0.0.0.255`,
+and `host 10.1.1.5` for a /32), EOS gets prefix lengths (`10.1.1.0/24`). The
+parser normalizes both back to CIDR, so the two spellings of the same rule
+compare equal.
+
+`--replace` deliberately does nothing extra here. Making a device's ACLs
+exactly the file's list would delete every ACL the file does not mention --
+VTY, NAT, route-map -- which is not a thing to offer as a flag. Only ACLs named
+in the file are ever touched. Standard ACLs only for now; an extended ACL is
+refused rather than guessed at.
 
 ## Local users
 
@@ -344,6 +481,64 @@ Safety rails, all covered by tests:
   account still exists, then `no username x`. That holds whether or not EOS
   cascades the account removal to the key line, and it applies even under
   `--only-missing`, where the account's password is otherwise left alone.
+
+## SNMP
+
+```bash
+./configure.py snmp --apply
+```
+
+Manages v3 users, groups, views and trap hosts, sets location/contact, and
+removes v2c communities.
+
+**SNMPv3 users are not in the running config on IOS.** `show running-config`
+never shows `snmp-server user`, so this feature reads `show snmp user` as well
+and takes users from whichever command produced them (EOS does write them into
+the config). That is why the IOS entry in the feature table reads two commands.
+
+`show snmp user` reports the group and the auth/privacy protocols but **never
+the passphrases**, so a passphrase change cannot be detected. An existing user
+is therefore rewritten when its group or its protocols differ from the
+standard, and left alone when they match:
+
+```
+no snmp-server user nmsuser NMS-RO v3
+snmp-server user nmsuser NMS-RO v3 auth sha <redacted> priv aes 128 <redacted> access SNMP-POLLERS
+```
+
+If you need to rotate a passphrase without a protocol change, remove the user
+by hand -- the next run recreates it. (`--rotate`, mirroring the local-accounts
+behaviour, would be a small addition if that turns out to be routine.)
+
+**Passphrases** come from `$NETOPS_SNMP_AUTH_<USER>` and
+`$NETOPS_SNMP_PRIV_<USER>`, or from a `--passphrase-secret` AWS secret shaped
+`{"nmsuser": {"auth": "...", "priv": "..."}}`, or a prompt. They are scrubbed
+from every command list, report and device echo. They are resolved for every
+managed user up front, because which devices are missing which user is not
+known until each one has been read -- so a run needs them even if nothing turns
+out to need changing.
+
+**`communities: []` is enforced in `--add` mode too.** "There must be none" is
+a standard, not an extra to be left alone, so a community found on a device is
+removed even without `--replace`. The string has to be named to remove it
+(`no snmp-server community <string>`), and it is a credential, so the parser
+flags it and the command is redacted everywhere it is shown:
+
+```
+no snmp-server community <redacted>
+```
+
+Two platform differences the templates carry: IOS writes the privacy protocol
+as two tokens (`aes 128`) and EOS as one (`aes128`); and **EOS has no `access
+<acl>` clause on a group**, so an EOS device gets the users, groups and views
+but not the poller restriction -- EOS does that with a control-plane ACL, which
+this tool does not manage. Apply it separately. The platform declares `access`
+as a field it cannot express, so it is never compared there; without that the
+group would be rebuilt on every run forever.
+
+Views are written before groups and groups before users, because a group naming
+a view that does not exist yet is rejected, as is a user in a group that does
+not exist yet.
 
 ## SNMP packet size
 
@@ -434,17 +629,28 @@ devices are skipped and reported, not failed.
 
 ## Adding a feature
 
-Syslog, for example:
-
-1. `netops/features/syslog.py` -- a `parse` for `show run | include ^logging host`,
-   the CLI flags, a `build_desired`, and a `FEATURE = Feature(...)`. Add a
-   `plan=` only if the change is not a set difference.
-2. `templates/cisco_ios/syslog.j2` and `templates/arista_eos/syslog.j2`.
+1. `netops/features/<name>.py` -- a `parse` for the show command, the CLI flags,
+   a `build_desired`, and a `FEATURE = Feature(...)`.
+2. `templates/cisco_ios/<name>.j2` and `templates/arista_eos/<name>.j2`.
 3. Add it to `FEATURES` in [`netops/features/__init__.py`](netops/features/__init__.py).
 
-It gets `configure.py syslog` with the same dry run, `--add`/`--replace`,
-credential handling, filtering, verification, secret scrubbing and reporting --
-none of which lives in the feature.
+It gets its subcommand with the same dry run, `--add`/`--replace`, standards
+file, credential handling, filtering, verification, secret scrubbing and
+reporting -- none of which lives in the feature.
+
+`Feature` carries an option for each way a domain has turned out not to be a
+plain set of lines. Reach for one only when the domain needs it:
+
+| Option | For |
+| --- | --- |
+| `plan=` | The change is not a set difference: a rotation that always rewrites (`users`), a scalar (`snmp-packetsize`), an ordered list (`acl`), a text blob (`banner`). |
+| `Desired.secrets` | Values that must never be printed. Scrubbed from commands, output and the report. |
+| `Entry.data["secret_value"]` | A credential *read off the device* that has to appear in a command to be removed -- an SNMP community. |
+| `not_applicable=` | The platform has no equivalent setting. Those devices are skipped and reported, not failed. |
+| `PlatformSupport(ignores=...)` | A field this platform cannot express. Never compared, so it cannot cause a rebuild every run. |
+| `PlatformSupport(extra_commands=...)` | State that is not in the running config -- `show snmp user`. |
+| `config_options=` | netmiko keywords for the push, e.g. `cmd_verify=False` for a banner. |
+| `keep_blank_lines=` | A blank line in the template is content, not layout. |
 
 ## Tests
 
@@ -453,7 +659,7 @@ pip install pytest
 pytest
 ```
 
-219 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+342 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
@@ -466,6 +672,9 @@ the device and never the terminal, the report, or the logs.
 - Addresses, usernames, interface names and passwords are validated before they
   reach a template, so nothing can smuggle a second command onto a line.
 - One device failing does not stop the others; it is reported and the run exits 1.
+- `standards.yaml` is committed on purpose and must never hold a credential:
+  SNMPv3 passphrases, community strings and account passwords all come from the
+  environment or AWS.
 - `.env`, `inventory/hosts.csv` and `netops-debug.log` are gitignored. Keep real
   credentials in AWS Secrets Manager where you can.
 - The debug log records device names, addresses and command output. Passwords

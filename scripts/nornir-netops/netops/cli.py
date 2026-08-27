@@ -28,6 +28,7 @@ from .credentials import (
     resolve as resolve_credentials,
 )
 from .features import FEATURES
+from .standards import Standards, StandardsError, load as load_standards
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -121,6 +122,18 @@ def _common_arguments() -> argparse.ArgumentParser:
         default=[],
         metavar="COLUMN=VALUE",
         help="only devices whose CSV column matches (repeatable, ANDed)",
+    )
+    inv.add_argument(
+        "--standards",
+        metavar="FILE",
+        default=os.environ.get("NETOPS_STANDARDS"),
+        help="the desired state file (default: ./standards.yaml, then "
+        "<project>/standards.yaml) [$NETOPS_STANDARDS]",
+    )
+    inv.add_argument(
+        "--no-standards",
+        action="store_true",
+        help="ignore the standards file; take everything from flags",
     )
 
     auth = parent.add_argument_group(
@@ -397,6 +410,19 @@ def selftest() -> int:
     """Render every template offline. No nornir, no network, no credentials."""
     from .core import render
 
+    # Rendering against the real standards file makes this a check of the file
+    # too: a value the templates cannot render fails here rather than on a
+    # device.
+    try:
+        standards = load_standards(None, PROJECT_ROOT)
+    except StandardsError as exc:
+        print(f"standards file: {exc}")
+        return EXIT_FAILED
+    if standards.loaded:
+        print(f"standards: {standards.path}\n")
+    for warning in standards.warnings:
+        print(f"warning: {warning}")
+
     failures = 0
     for feature in FEATURES.values():
         sub = argparse.ArgumentParser(prog=f"selftest {feature.name}")
@@ -405,7 +431,9 @@ def selftest() -> int:
         # placeholders here rather than putting them on a command line.
         for key, value in feature.selftest_env.items():
             os.environ.setdefault(key, value)
-        desired = feature.build_desired(sub.parse_args(feature.selftest_args))
+        namespace = sub.parse_args(feature.selftest_args)
+        namespace.standards = standards
+        desired = feature.build_desired(namespace)
         print(f"### {feature.name}  {' '.join(feature.selftest_args)}")
         print()
 
@@ -415,8 +443,16 @@ def selftest() -> int:
 
         for platform, support in sorted(feature.platforms.items()):
             current = support.parse(support.sample)
+            # Same rule as a real run: a value the parser read off the device
+            # and flagged as sensitive is scrubbed from what gets printed.
+            shown_secrets = list(desired.secrets) + [
+                entry.data["secret_value"]
+                for entry in current
+                if entry.data.get("secret_value")
+            ]
             print(f"--- {platform} ---")
-            print(f"  {support.show_command}")
+            for command in support.commands:
+                print(f"  {command}")
             for entry in current:
                 print(f"    {entry.shown}")
             print(
@@ -433,11 +469,17 @@ def selftest() -> int:
                         "login_user": None,
                         "platform": platform,
                         "variables": desired.variables,
+                        "ignores": support.ignores,
                     },
                 )
                 try:
                     commands = render(
-                        feature.name, platform, add, remove, desired.variables
+                        feature.name,
+                        platform,
+                        add,
+                        remove,
+                        desired.variables,
+                        feature.keep_blank_lines,
                     )
                 except Exception as exc:  # a template bug: report it, keep testing
                     failures += 1
@@ -445,7 +487,7 @@ def selftest() -> int:
                     continue
                 print(f"  --{mode}:")
                 for command in commands:
-                    print(f"    {scrub(command, desired.secrets)}")
+                    print(f"    {scrub(command, shown_secrets)}")
                 if not commands:
                     print("    (no changes)")
             print()
@@ -532,7 +574,20 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
 
     feature: Feature = args.feature
     try:
+        args.standards = (
+            Standards() if args.no_standards else load_standards(args.standards, PROJECT_ROOT)
+        )
+    except StandardsError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
+    for warning in args.standards.warnings:
+        print(style.warn(f"warning: {warning}"), file=sys.stderr)
+
+    try:
         desired: Desired = feature.build_desired(args)
+    except StandardsError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
     except CredentialError as exc:
         # A password the feature needed could not be found or read -- same
         # class of problem as a missing device login, so same exit code.
@@ -620,6 +675,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
     )
     if env_note:
         print(style.dim(f"env file: {env_note}"))
+    if args.standards.loaded:
+        print(style.dim(f"standards: {args.standards.path}"))
     print(style.dim(f"credentials: {credentials.describe()}"))
 
     if not dry_run and not args.yes and not _confirm(style, count, feature.name, args.mode):

@@ -1,0 +1,32 @@
+{#-
+  Cisco IOS / IOS-XE -- SNMP.
+
+    snmp-server view NAME <oid> included
+    snmp-server group NAME v3 priv read VIEW access ACL
+    snmp-server user NAME GROUP v3 auth sha <pass> priv aes 128 <pass> access ACL
+    snmp-server host <addr> version 3 priv NAME
+    snmp-server location|contact|chassis-id <text>
+
+  Views come first, then groups, then users: IOS rejects a group naming a view
+  that does not exist yet, and a user whose group does not exist yet. The
+  standards file's order is preserved within each kind.
+
+  IOS writes the privacy protocol as `aes 128`, two tokens.
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'view' %}
+snmp-server view {{ item.name }} {{ item.oid }} {{ item.action }}
+{% elif item.kind == 'group' %}
+snmp-server group {{ item.name }} v3 {{ item.security }}{% if item.read %} read {{ item.read }}{% endif %}{% if item.write %} write {{ item.write }}{% endif %}{% if item.access %} access {{ item.access }}{% endif %}
+{% elif item.kind == 'user' %}
+snmp-server user {{ item.name }} {{ item.group }} v3{% if item.auth %} auth {{ item.auth }} {{ item.passphrases.auth }}{% endif %}{% if item.priv %} priv {{ item.priv | replace('aes', 'aes ') }} {{ item.passphrases.priv }}{% endif %}{% if item.access %} access {{ item.access }}{% endif %}
+{% elif item.kind == 'host' %}
+snmp-server host {{ item.host }} version {{ item.version }} {{ item.security }}{% if item.user %} {{ item.user }}{% endif %}
+{% else %}
+snmp-server {{ item.kind }} {{ item.value }}
+{% endif %}
+{% endfor %}

@@ -1,0 +1,120 @@
+# Our network standards, in one platform-neutral file.
+#
+# These values are the same for every device and every platform -- the same NTP
+# sources, the same syslog collectors, the same SNMP pollers -- so they are
+# written once, generically, and each template maps them onto that platform's
+# own configuration syntax.
+#
+# This file is meant to be committed: the standard itself belongs in version
+# control. There are no credentials here. Device logins live in .env or AWS
+# Secrets Manager, and SNMPv3 auth/priv passwords are resolved the same way
+# (see the snmp.users section below).
+#
+# Command line flags override anything here, so a one-off run never needs the
+# file edited. Replace the placeholder addresses with the real ones.
+
+# --------------------------------------------------------------------------
+# NTP  ->  configure.py ntp
+# --------------------------------------------------------------------------
+ntp:
+  servers:
+    - 10.50.0.10         # primary
+    - 10.50.0.11         # secondary
+  # prefer: 10.50.0.10
+  # vrf: MGMT
+  # source: Loopback0
+
+# --------------------------------------------------------------------------
+# Syslog  ->  configure.py syslog
+# A bare address means the default port, 514; use the host/port form for
+# anything else.
+# --------------------------------------------------------------------------
+syslog:
+  destinations:
+    - 10.1.1.50          # primary collector, port 514
+    - host: 10.1.1.51    # secondary collector on a non-default port
+      port: 1514
+  severity: informational
+  # source: Loopback0
+  # vrf: MGMT
+
+# --------------------------------------------------------------------------
+# SNMP  ->  configure.py snmp
+#
+# v3 only. `communities: []` is a statement, not an omission: it means no v2c
+# community may exist, and any found on a device is removed.
+#
+# SNMPv3 auth/priv passwords are never written here. Each user's passwords come
+# from the environment or AWS Secrets Manager, the same way local account
+# passwords do -- see the README.
+# --------------------------------------------------------------------------
+snmp:
+  # Networks allowed to poll. Stated once here and referenced by the ACL below,
+  # so there is one place to add a new poller.
+  allow:
+    - 10.1.1.0/24        # NMS / poller subnet
+    - 10.2.0.0/16        # monitoring VLANs
+
+  # The ACL that enforces `allow`, applied to the groups and hosts below.
+  acl: SNMP-POLLERS
+
+  communities: []        # v2c: none permitted, remove any found
+
+  location: "ATL DC1 - row 4"
+  contact: "netops@example.com"
+
+  views:
+    - name: NMS-VIEW
+      oid: iso
+      action: included
+
+  groups:
+    - name: NMS-RO
+      security: priv     # noauth | auth | priv
+      read: NMS-VIEW
+
+  users:
+    - name: nmsuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+
+  hosts:
+    - host: 10.1.1.50
+      user: nmsuser
+      security: priv
+
+  packetsize: 1300       # cisco only; EOS has no equivalent
+
+# --------------------------------------------------------------------------
+# Banner  ->  configure.py banner
+# The text itself lives in templates/<platform>/banner.j2 so it can differ per
+# platform where it has to; this only says which banners are managed.
+# --------------------------------------------------------------------------
+banner:
+  motd: true
+  login: false
+
+# --------------------------------------------------------------------------
+# ACLs  ->  configure.py acl
+# Entries are applied in the order written, and a device whose entries are in a
+# different order is rebuilt to match -- order is the whole meaning of an ACL.
+#
+# `permit: snmp.allow` points at the networks above rather than repeating them.
+# --------------------------------------------------------------------------
+acls:
+  - name: SNMP-POLLERS
+    type: standard
+    permit: snmp.allow
+    deny_log: true       # trailing `deny any log`, so denied polls are visible
+
+# --------------------------------------------------------------------------
+# Local accounts  ->  configure.py users
+# Names only. Passwords come from $NETOPS_PW_<ACCOUNT> or --password-secret.
+# --------------------------------------------------------------------------
+local_accounts:
+  names:
+    - admin
+    - netauto
+  privilege: 15
+  # role: network-admin  # EOS

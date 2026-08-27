@@ -26,3 +26,14 @@ def isolated_environment(tmp_path_factory):
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def isolated_cwd(tmp_path, monkeypatch):
+    """Run every test in a scratch directory.
+
+    Several defaults resolve against the working directory -- ./.env,
+    ./standards.yaml, the debug log. Without this a test would quietly read the
+    real files sitting beside the tool, and pass for the wrong reason.
+    """
+    monkeypatch.chdir(tmp_path)

@@ -1,0 +1,23 @@
+{#-
+  Cisco IOS / IOS-XE -- standard access lists.
+
+    ip access-list standard NAME
+     permit 10.1.1.0 0.0.0.255
+     deny   any log
+
+  IOS matches on a wildcard mask, so the CIDR from the standards file is
+  converted by the `wildcard` filter (a /32 becomes `host 10.1.1.5`).
+
+  The negation comes first: an ACL whose entries are in the wrong order is
+  removed and written back, because there is no reordering that is safer.
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for name in add %}
+{% set acl = acls[name] %}
+ip access-list standard {{ name }}
+{% for item in acl.entries %}
+ {{ item.action }} {% if item.target == 'any' %}any{% else %}{{ item.target | wildcard }}{% endif %}{% if item.log %} log{% endif %}
+{% endfor %}
+{% endfor %}

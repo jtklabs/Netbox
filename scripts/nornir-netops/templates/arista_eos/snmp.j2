@@ -1,0 +1,34 @@
+{#-
+  Arista EOS -- SNMP.
+
+    snmp-server view NAME <oid> included
+    snmp-server group NAME v3 priv read VIEW
+    snmp-server user NAME GROUP v3 auth sha <pass> priv aes128 <pass>
+    snmp-server host <addr> version 3 priv NAME
+    snmp-server location|contact|chassis-id <text>
+
+  Two differences from IOS worth knowing:
+
+  * EOS writes the privacy protocol as one token, `aes128`.
+  * There is no `access <acl>` clause on a group. EOS restricts SNMP through a
+    control-plane ACL instead, which this tool does not manage -- so an EOS
+    device gets the users, groups and views but not the poller restriction.
+    Apply that separately until this template learns how.
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'view' %}
+snmp-server view {{ item.name }} {{ item.oid }} {{ item.action }}
+{% elif item.kind == 'group' %}
+snmp-server group {{ item.name }} v3 {{ item.security }}{% if item.read %} read {{ item.read }}{% endif %}{% if item.write %} write {{ item.write }}{% endif %}
+{% elif item.kind == 'user' %}
+snmp-server user {{ item.name }} {{ item.group }} v3{% if item.auth %} auth {{ item.auth }} {{ item.passphrases.auth }}{% endif %}{% if item.priv %} priv {{ item.priv }} {{ item.passphrases.priv }}{% endif %}
+{% elif item.kind == 'host' %}
+snmp-server host {{ item.host }} version {{ item.version }} {{ item.security }}{% if item.user %} {{ item.user }}{% endif %}
+{% else %}
+snmp-server {{ item.kind }} {{ item.value }}
+{% endif %}
+{% endfor %}

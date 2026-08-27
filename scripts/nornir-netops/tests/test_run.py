@@ -29,13 +29,45 @@ class FakeDevice:
     look like it failed -- and would hide idempotence bugs.
     """
 
-    def __init__(self, lines):
+    def __init__(self, lines, extra=None):
         self.lines = list(lines)
+        #: Commands that are not config filters -- `show snmp user` and friends.
+        self.extra = dict(extra or {})
 
     def show(self, command):
-        """Emulate `show running-config | include <regex>`."""
-        _, _, pattern = command.partition("include ")
-        return "\n".join(line for line in self.lines if re.search(pattern.strip(), line))
+        """Emulate `show running-config | include|section <regex>`.
+
+        `section` has to return the whole block, not just the matching line --
+        an ACL's entries and a banner's body are the part that matters.
+        """
+        if command in self.extra:
+            return self.extra[command]
+        if "section " in command:
+            return self._section(command.split("section ", 1)[1].strip())
+        if "include " in command:
+            pattern = command.split("include ", 1)[1].strip()
+            return "\n".join(line for line in self.lines if re.search(pattern, line))
+        return "\n".join(self.lines)
+
+    def _section(self, pattern):
+        out, inside, banner = [], False, False
+        for line in self.lines:
+            if re.search(pattern, line):
+                out.append(line)
+                inside = True
+                banner = line.strip().startswith("banner ")
+                continue
+            if not inside:
+                continue
+            if banner:
+                out.append(line)
+                if line.strip() and not line.startswith((" ", "\t")):
+                    inside = banner = False  # the delimiter line closes it
+            elif line.startswith((" ", "\t")) or not line.strip():
+                out.append(line)
+            else:
+                inside = False
+        return "\n".join(out)
 
     def apply(self, commands):
         for command in commands:
@@ -778,3 +810,174 @@ def test_conn_timeout_reaches_netmiko(tmp_path, login):
     nr = init_nornir(str(csv_path), "u", "p", None, None, 22, 1, conn_timeout=3.5)
     extras = nr.inventory.hosts["sw1"].get_connection_parameters("netmiko").extras
     assert extras["conn_timeout"] == 3.5
+
+
+# --------------------------------------------------------------------------- #
+# the other features, end to end
+# --------------------------------------------------------------------------- #
+
+
+STANDARDS = """
+ntp:
+  servers: [10.50.0.10]
+syslog:
+  destinations: [10.1.1.50]
+  severity: informational
+snmp:
+  allow: [10.1.1.0/24]
+  acl: SNMP-POLLERS
+  communities: []
+  location: ATL DC1
+  users:
+    - name: nmsuser
+      group: NMS-RO
+      auth: sha
+      priv: aes 128
+  groups:
+    - name: NMS-RO
+      security: priv
+      read: NMS-VIEW
+  views:
+    - name: NMS-VIEW
+      oid: iso
+      action: included
+banner:
+  motd: true
+acls:
+  - name: SNMP-POLLERS
+    permit: snmp.allow
+    deny_log: true
+"""
+
+SNMP_AUTH = "snmp-auth-passphrase"
+SNMP_PRIV = "snmp-priv-passphrase"
+
+
+@pytest.fixture
+def standards(tmp_path):
+    """isolated_cwd already puts us in tmp_path, so this is discovered."""
+    (tmp_path / "standards.yaml").write_text(STANDARDS, encoding="utf-8")
+    return tmp_path / "standards.yaml"
+
+
+@pytest.fixture
+def snmp_passphrases(monkeypatch):
+    monkeypatch.setenv("NETOPS_SNMP_AUTH_NMSUSER", SNMP_AUTH)
+    monkeypatch.setenv("NETOPS_SNMP_PRIV_NMSUSER", SNMP_PRIV)
+
+
+def test_ntp_reads_the_standards_file(device, csv_file, login, standards, capsys):
+    """No --servers: the values come from the file."""
+    assert cli.main(["ntp", "--no-env-file", "--csv", csv_file]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "standards:" in out
+    assert "ntp server 10.50.0.10" in out
+
+
+def test_syslog_applies_and_is_then_compliant(device, csv_file, login, standards, capsys):
+    assert run_feature("syslog", csv_file, "--apply", "-y") == cli.EXIT_OK
+    assert device["config"]["sw1"] == [
+        "logging host 10.1.1.50",
+        "logging trap informational",
+    ]
+    capsys.readouterr()
+    assert run_feature("syslog", csv_file) == cli.EXIT_OK
+    assert "2 compliant" in capsys.readouterr().out
+
+
+def test_banner_is_pushed_with_its_blank_lines(device, csv_file, login, standards):
+    run_feature("banner", csv_file, "--apply", "-y", "--limit", "sw1")
+    pushed = device["config"]["sw1"]
+    assert pushed[0] == "banner motd ^C"
+    assert pushed[-1] == "^C"
+    assert "" in pushed
+
+
+def test_banner_is_idempotent(device, csv_file, login, standards, capsys):
+    run_feature("banner", csv_file, "--apply", "-y")
+    capsys.readouterr()
+    assert run_feature("banner", csv_file) == cli.EXIT_OK
+    assert "2 compliant" in capsys.readouterr().out
+
+
+def test_acl_is_built_in_order_and_is_then_compliant(
+    device, csv_file, login, standards, capsys
+):
+    assert run_feature("acl", csv_file, "--apply", "-y", "--limit", "sw1") == cli.EXIT_OK
+    assert device["config"]["sw1"] == [
+        "ip access-list standard SNMP-POLLERS",
+        " permit 10.1.1.0 0.0.0.255",
+        " deny any log",
+    ]
+    capsys.readouterr()
+    assert run_feature("acl", csv_file, "--limit", "sw1") == cli.EXIT_OK
+    assert "already compliant" in capsys.readouterr().out
+
+
+def test_acl_out_of_order_on_the_device_is_rebuilt(device, csv_file, login, standards):
+    device["devices"]["sw1"].lines.extend(
+        [
+            "ip access-list standard SNMP-POLLERS",
+            " 10 deny any log",
+            " 20 permit 10.1.1.0 0.0.0.255",
+        ]
+    )
+    run_feature("acl", csv_file, "--apply", "-y", "--limit", "sw1")
+    assert device["config"]["sw1"][0] == "no ip access-list standard SNMP-POLLERS"
+
+
+def test_snmp_removes_a_community_and_rewrites_a_weak_user(
+    device, csv_file, login, standards, snmp_passphrases, capsys
+):
+    box = device["devices"]["sw1"]
+    box.lines.append("snmp-server community public RO")
+    box.extra["show snmp user"] = (
+        "User name: nmsuser\n"
+        "Authentication Protocol: MD5\n"
+        "Privacy Protocol: DES\n"
+        "Group-name: NMS-RO\n"
+    )
+    assert run_feature("snmp", csv_file, "--apply", "-y", "--limit", "sw1") == cli.EXIT_OK
+
+    pushed = device["config"]["sw1"]
+    assert "no snmp-server community public" in pushed
+    assert "no snmp-server user nmsuser NMS-RO v3" in pushed
+    assert any("snmp-server user nmsuser NMS-RO v3 auth sha" in c for c in pushed)
+
+
+def test_snmp_passphrases_never_reach_the_terminal_or_report(
+    device, csv_file, login, standards, snmp_passphrases, tmp_path, capsys
+):
+    report = tmp_path / "snmp.json"
+    run_feature("snmp", csv_file, "--apply", "-y", "-v", "--report", str(report))
+    out = capsys.readouterr().out
+    assert SNMP_AUTH not in out and SNMP_PRIV not in out
+    assert "<redacted>" in out
+
+    text = report.read_text()
+    assert SNMP_AUTH not in text and SNMP_PRIV not in text
+
+
+def test_a_community_string_read_off_the_device_is_redacted(
+    device, csv_file, login, standards, snmp_passphrases, capsys
+):
+    """It has to be named to be removed, but it is still a credential."""
+    device["devices"]["sw1"].lines.append("snmp-server community s3cr3t-community RO")
+    run_feature("snmp", csv_file, "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "s3cr3t-community" not in out
+    assert "no snmp-server community <redacted>" in out
+
+
+def test_snmp_is_idempotent_once_applied(
+    device, csv_file, login, standards, snmp_passphrases, capsys
+):
+    run_feature("snmp", csv_file, "--apply", "-y", "--limit", "leaf1")
+    capsys.readouterr()
+    assert run_feature("snmp", csv_file, "--limit", "leaf1") == cli.EXIT_OK
+    assert "already compliant" in capsys.readouterr().out
+
+
+def test_snmp_without_passphrases_is_a_usage_error(device, csv_file, login, standards, capsys):
+    assert run_feature("snmp", csv_file) == cli.EXIT_USAGE
+    assert "NETOPS_SNMP_AUTH_NMSUSER" in capsys.readouterr().err

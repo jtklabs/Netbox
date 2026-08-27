@@ -9,8 +9,16 @@ from __future__ import annotations
 from typing import Dict
 
 from ..core import Feature
-from . import ntp, snmp_packetsize, users
+from . import acl, banner, ntp, snmp, snmp_packetsize, syslog, users
 
 FEATURES: Dict[str, Feature] = {
-    f.name: f for f in (ntp.FEATURE, users.FEATURE, snmp_packetsize.FEATURE)
+    f.name: f for f in (
+        ntp.FEATURE,
+        syslog.FEATURE,
+        banner.FEATURE,
+        acl.FEATURE,
+        users.FEATURE,
+        snmp.FEATURE,
+        snmp_packetsize.FEATURE,
+    )
 }

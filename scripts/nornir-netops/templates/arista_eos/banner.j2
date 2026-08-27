@@ -1,0 +1,24 @@
+{#-
+  Arista EOS -- banners.  **Edit the text below.**
+
+    banner motd
+    <text>
+    EOF
+
+  EOS takes no delimiter on the command line and ends the body with EOF, so the
+  text must not contain a line that is exactly `EOF`.
+-#}
+{% for kind in add %}banner {{ kind }}{% if kind == 'login' %}
+
+  Authorised access only.
+
+{% else %}
+
+  This system is for the use of authorised users only. Activity on this system
+  is monitored and recorded. Anyone using it consents to that monitoring.
+
+  Disconnect immediately if you are not an authorised user.
+
+{% endif %}EOF
+{% endfor %}{% for entry in remove %}no {{ entry.line }}
+{% endfor %}

@@ -4,6 +4,7 @@ nornir>=3.4.1
 nornir-netmiko>=1.0.0
 netmiko>=4.2.0
 Jinja2>=3.1.2
+PyYAML>=6.0
 
 # Only needed to run the test suite:
 #   pip install pytest

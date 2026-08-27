@@ -1,0 +1,23 @@
+{#-
+  Arista EOS -- syslog.
+
+    logging [vrf NAME] host <addr> [<port>]
+    logging trap <severity>
+    logging source-interface <interface>
+
+  EOS takes the port as a bare positional argument rather than IOS's
+  `transport udp port` phrasing.
+-#}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'host' %}
+logging {% if vrf %}vrf {{ vrf }} {% endif %}host {{ item.host }}{% if item.port != 514 %} {{ item.port }}{% endif %}
+{% elif item.kind == 'trap' %}
+logging trap {{ item.severity }}
+{% elif item.kind == 'source' %}
+logging source-interface {{ item.source }}
+{% endif %}
+{% endfor %}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}

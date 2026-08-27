@@ -1,0 +1,19 @@
+{#-
+  Arista EOS -- standard access lists.
+
+    ip access-list standard NAME
+       permit 10.1.1.0/24
+       deny any log
+
+  EOS takes prefix-length notation, so the CIDR is written as it stands.
+-#}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}
+{% for name in add %}
+{% set acl = acls[name] %}
+ip access-list standard {{ name }}
+{% for item in acl.entries %}
+ {{ item.action }} {{ item.target }}{% if item.log %} log{% endif %}
+{% endfor %}
+{% endfor %}

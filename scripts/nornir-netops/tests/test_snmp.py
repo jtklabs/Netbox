@@ -2,90 +2,280 @@ import argparse
 
 import pytest
 
-from netops.core import MODE_ADD, MODE_REPLACE, NotApplicable, render
-from netops.features.snmp_packetsize import (
-    DEFAULT_SIZE,
+from netops.core import MODE_ADD, MODE_REPLACE, render, scrub
+from netops.credentials import CredentialError
+from netops.features.snmp import (
+    EOS_SAMPLE,
     FEATURE,
     IOS_SAMPLE,
-    MAX_SIZE,
-    MIN_SIZE,
-    parse_packetsize,
-    plan_packetsize,
+    parse_snmp,
+    passphrase_variables,
+    plan_snmp,
 )
+from netops.standards import Standards, StandardsError
+
+DOCUMENT = {
+    "snmp": {
+        "allow": ["10.1.1.0/24"],
+        "acl": "SNMP-POLLERS",
+        "communities": [],
+        "location": "ATL DC1 - row 4",
+        "contact": "netops@example.com",
+        "views": [{"name": "NMS-VIEW", "oid": "iso", "action": "included"}],
+        "groups": [{"name": "NMS-RO", "security": "priv", "read": "NMS-VIEW"}],
+        "users": [{"name": "nmsuser", "group": "NMS-RO", "auth": "sha", "priv": "aes 128"}],
+        "hosts": [{"host": "10.1.1.50", "user": "nmsuser", "security": "priv"}],
+    }
+}
+
+AUTH = "auth-passphrase-1"
+PRIV = "priv-passphrase-1"
 
 
-def parse_args(argv):
+@pytest.fixture
+def passphrases(monkeypatch):
+    monkeypatch.setenv("NETOPS_SNMP_AUTH_NMSUSER", AUTH)
+    monkeypatch.setenv("NETOPS_SNMP_PRIV_NMSUSER", PRIV)
+
+
+def parse_args(argv=(), document=None):
     parser = argparse.ArgumentParser()
     FEATURE.add_arguments(parser)
-    return parser.parse_args(argv)
+    parser.add_argument("--aws-region", default=None)
+    args = parser.parse_args(list(argv))
+    args.standards = Standards(path="test", document=document or DOCUMENT)
+    return args
 
 
-def test_parses_the_configured_size():
-    entries = parse_packetsize(IOS_SAMPLE)
-    assert [e.key for e in entries] == ["1500"]
+# --------------------------------------------------------------------------- #
+# reading state from two different commands
+# --------------------------------------------------------------------------- #
 
 
-def test_default_device_has_nothing_configured():
-    """IOS does not write the 1500 default into the running config."""
-    assert parse_packetsize("") == []
+def test_v3_users_come_from_show_snmp_user_on_ios():
+    """They are never in the running config, which is the whole reason the
+    feature reads a second command."""
+    users = {e.key: e for e in parse_snmp(IOS_SAMPLE)}
+    assert users["user:nmsuser"].data["group"] == "NMS-RO"
+    assert users["user:nmsuser"].data["auth"] == "md5"
+    assert users["user:nmsuser"].data["priv"] == "des"
 
 
-def test_parser_ignores_other_snmp_lines():
-    output = "snmp-server community public RO\nsnmp-server packetsize 1300\n"
-    assert [e.key for e in parse_packetsize(output)] == ["1300"]
+def test_v3_users_come_from_the_config_on_eos():
+    users = {e.key: e for e in parse_snmp(EOS_SAMPLE)}
+    assert users["user:nmsuser"].data == {
+        "kind": "user",
+        "group": "NMS-RO",
+        "auth": "sha",
+        "priv": "aes128",
+    }
 
 
-def test_sets_the_size_when_it_differs():
-    add, remove = plan_packetsize(parse_packetsize(IOS_SAMPLE), ["1300"], MODE_ADD)
-    assert (add, remove) == (["1300"], [])
+def test_the_feature_reads_both_commands_on_ios():
+    assert FEATURE.platforms["cisco_ios"].commands == (
+        "show running-config | include ^snmp-server",
+        "show snmp user",
+    )
 
 
-def test_sets_the_size_when_nothing_is_configured():
-    add, remove = plan_packetsize([], ["1300"], MODE_ADD)
-    assert (add, remove) == (["1300"], [])
+@pytest.mark.parametrize(
+    "written,normalized",
+    [("aes128", "aes128"), ("aes 128", "aes128"), ("AES-128", "aes128"), ("des", "des")],
+)
+def test_privacy_protocol_spellings_are_the_same_protocol(written, normalized):
+    """IOS writes `priv aes 128` as two tokens; EOS writes `aes128` as one."""
+    parsed = parse_snmp(f"snmp-server user u G v3 auth sha authpass priv {written} privpass")
+    assert parsed[0].data["priv"] == normalized
 
 
-def test_no_change_when_already_correct():
-    add, remove = plan_packetsize(parse_packetsize("snmp-server packetsize 1300"), ["1300"],
-                                 MODE_ADD)
-    assert (add, remove) == ([], [])
+def test_an_all_digit_passphrase_is_not_read_as_part_of_the_protocol():
+    parsed = parse_snmp("snmp-server user u G v3 auth sha 12345678 priv aes 128 87654321")
+    assert parsed[0].data["auth"] == "sha"
+    assert parsed[0].data["priv"] == "aes128"
 
 
-def test_replace_behaves_like_add_for_a_scalar():
-    """Writing the value replaces it; there is nothing to negate."""
-    add, remove = plan_packetsize(parse_packetsize(IOS_SAMPLE), ["1300"], MODE_REPLACE)
-    assert (add, remove) == (["1300"], [])
+def test_parses_groups_views_hosts_and_scalars():
+    keys = [e.key for e in parse_snmp(IOS_SAMPLE)]
+    assert "view:NMS-VIEW" in keys
+    assert "group:NMS-RO" in keys
+    assert "host:10.1.1.50" in keys
+    assert "location:OLD LOCATION" in keys
 
 
-def test_renders_the_ios_command():
-    assert render("snmp-packetsize", "cisco_ios", ["1300"], [], {}) == [
-        "snmp-server packetsize 1300"
-    ]
+def test_a_community_string_is_flagged_as_a_secret():
+    community = [e for e in parse_snmp(IOS_SAMPLE) if e.data["kind"] == "community"][0]
+    assert community.data["secret_value"] == "public"
+    assert "public" not in community.shown
 
 
-def test_default_size_is_1300():
-    assert FEATURE.build_desired(parse_args([])).keys == [str(DEFAULT_SIZE)]
+# --------------------------------------------------------------------------- #
+# planning
+# --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("size", [MIN_SIZE - 1, MAX_SIZE + 1, 0, -1])
-def test_size_outside_the_platform_range_is_rejected(size):
-    with pytest.raises(ValueError, match="must be between"):
-        FEATURE.build_desired(parse_args(["--size", str(size)]))
+def context(platform="cisco_ios", ignores=(), document=None, args=()):
+    desired = FEATURE.build_desired(parse_args(args, document))
+    return desired, {
+        "platform": platform,
+        "variables": desired.variables,
+        "ignores": ignores,
+    }
 
 
-@pytest.mark.parametrize("size", [MIN_SIZE, 1300, MAX_SIZE])
-def test_size_inside_the_range_is_accepted(size):
-    assert FEATURE.build_desired(parse_args(["--size", str(size)])).keys == [str(size)]
+def test_a_user_whose_protocols_differ_is_rebuilt(passphrases):
+    """The passphrase is unreadable, so the group and protocols are all there
+    is to compare -- md5/des against the standard's sha/aes128 is a change."""
+    desired, ctx = context()
+    add, remove = plan_snmp(parse_snmp(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "user:nmsuser" in add
+    assert "snmp-server user nmsuser NMS-RO v3" in [e.line for e in remove]
 
 
-def test_arista_is_not_applicable_rather_than_unsupported():
-    """A mixed-fleet run should skip EOS, not fail it."""
-    with pytest.raises(NotApplicable, match="no `snmp-server packetsize` equivalent"):
-        FEATURE.support_for("arista_eos")
+def test_a_user_that_matches_is_left_alone(passphrases):
+    desired, ctx = context(platform="arista_eos", ignores=("access",))
+    add, _ = plan_snmp(parse_snmp(EOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "user:nmsuser" not in add
 
 
-def test_an_unknown_platform_is_still_unsupported():
-    from netops.core import UnsupportedPlatform
+def test_a_missing_user_is_created_without_a_negation(passphrases):
+    desired, ctx = context()
+    add, remove = plan_snmp([], desired.keys, MODE_ADD, ctx)
+    assert "user:nmsuser" in add
+    assert remove == []
 
-    with pytest.raises(UnsupportedPlatform):
-        FEATURE.support_for("juniper_junos")
+
+def test_a_community_is_removed_even_in_add_mode(passphrases):
+    """`communities: []` is a statement that none may exist, not an extra to
+    be left alone."""
+    desired, ctx = context()
+    _, remove = plan_snmp(parse_snmp(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "snmp-server community public" in [e.line for e in remove]
+
+
+def test_communities_are_untouched_when_the_file_says_nothing(passphrases):
+    document = {"snmp": {"location": "somewhere"}}
+    desired, ctx = context(document=document)
+    _, remove = plan_snmp(parse_snmp(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert not any(e.data["kind"] == "community" for e in remove)
+
+
+def test_configuring_a_community_is_refused():
+    document = {"snmp": {"communities": ["public"]}}
+    with pytest.raises(StandardsError, match="may only be empty"):
+        FEATURE.build_desired(parse_args((), document))
+
+
+def test_eos_never_compares_the_acl_it_cannot_express(passphrases):
+    """Without this the group would be rebuilt on every run, forever."""
+    desired, ctx = context(platform="arista_eos", ignores=("access",))
+    add, remove = plan_snmp(parse_snmp(EOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "group:NMS-RO" not in add and remove == []
+
+
+def test_ios_does_compare_the_acl(passphrases):
+    desired, ctx = context()
+    without_acl = parse_snmp("snmp-server group NMS-RO v3 priv read NMS-VIEW")
+    add, _ = plan_snmp(without_acl, desired.keys, MODE_ADD, ctx)
+    assert "group:NMS-RO" in add
+
+
+def test_a_changed_location_is_detected(passphrases):
+    desired, ctx = context()
+    add, _ = plan_snmp(parse_snmp(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    assert "location:ATL DC1 - row 4" in add
+
+
+def test_replace_removes_an_unmanaged_user(passphrases):
+    desired, ctx = context()
+    stray = parse_snmp("User name: olduser\nGroup-name: OLD\n")
+    _, remove = plan_snmp(stray, desired.keys, MODE_REPLACE, ctx)
+    assert any("olduser" in e.line for e in remove)
+
+
+def test_add_mode_leaves_an_unmanaged_user_alone(passphrases):
+    desired, ctx = context()
+    stray = parse_snmp("User name: olduser\nGroup-name: OLD\n")
+    _, remove = plan_snmp(stray, desired.keys, MODE_ADD, ctx)
+    assert remove == []
+
+
+# --------------------------------------------------------------------------- #
+# passphrases
+# --------------------------------------------------------------------------- #
+
+
+def test_passphrase_variable_naming():
+    assert passphrase_variables("nmsuser") == (
+        "NETOPS_SNMP_AUTH_NMSUSER",
+        "NETOPS_SNMP_PRIV_NMSUSER",
+    )
+
+
+def test_passphrases_from_the_environment(passphrases):
+    desired = FEATURE.build_desired(parse_args())
+    assert sorted(desired.secrets) == sorted([AUTH, PRIV])
+
+
+def test_passphrases_from_a_secrets_manager_map(monkeypatch):
+    monkeypatch.setattr(
+        "netops.credentials.fetch_json_secret",
+        lambda name, region=None: {"nmsuser": {"auth": AUTH, "priv": PRIV}},
+    )
+    desired = FEATURE.build_desired(parse_args(["--passphrase-secret", "prod/snmp"]))
+    assert sorted(desired.secrets) == sorted([AUTH, PRIV])
+
+
+def test_a_missing_passphrase_names_the_variable(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(CredentialError, match="NETOPS_SNMP_AUTH_NMSUSER"):
+        FEATURE.build_desired(parse_args())
+
+
+def test_a_short_passphrase_is_rejected(monkeypatch):
+    monkeypatch.setenv("NETOPS_SNMP_AUTH_NMSUSER", "short")
+    monkeypatch.setenv("NETOPS_SNMP_PRIV_NMSUSER", PRIV)
+    with pytest.raises(ValueError, match="shorter than"):
+        FEATURE.build_desired(parse_args())
+
+
+# --------------------------------------------------------------------------- #
+# rendering
+# --------------------------------------------------------------------------- #
+
+
+def test_renders_ios_in_dependency_order(passphrases):
+    desired = FEATURE.build_desired(parse_args())
+    commands = render("snmp", "cisco_ios", desired.keys, [], desired.variables)
+    assert commands[0] == "snmp-server view NMS-VIEW iso included"
+    assert commands[1] == (
+        "snmp-server group NMS-RO v3 priv read NMS-VIEW access SNMP-POLLERS"
+    )
+    assert commands[2] == (
+        f"snmp-server user nmsuser NMS-RO v3 auth sha {AUTH} "
+        f"priv aes 128 {PRIV} access SNMP-POLLERS"
+    )
+    assert "snmp-server host 10.1.1.50 version 3 priv nmsuser" in commands
+    assert "snmp-server location ATL DC1 - row 4" in commands
+
+
+def test_renders_eos_with_one_token_privacy_and_no_acl(passphrases):
+    desired = FEATURE.build_desired(parse_args())
+    commands = render("snmp", "arista_eos", desired.keys, [], desired.variables)
+    assert f"snmp-server user nmsuser NMS-RO v3 auth sha {AUTH} priv aes128 {PRIV}" in commands
+    assert not any("access" in command for command in commands)
+
+
+def test_passphrases_are_scrubbed_from_what_gets_shown(passphrases):
+    desired = FEATURE.build_desired(parse_args())
+    commands = render("snmp", "cisco_ios", desired.keys, [], desired.variables)
+    shown = [scrub(command, desired.secrets) for command in commands]
+    assert not any(AUTH in command or PRIV in command for command in shown)
+    assert any("<redacted>" in command for command in shown)
+
+
+def test_an_injected_location_is_rejected():
+    document = {"snmp": {"location": "here\nusername backdoor privilege 15"}}
+    from netops.core import InvalidValue
+
+    with pytest.raises(InvalidValue):
+        FEATURE.build_desired(parse_args((), document))

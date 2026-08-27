@@ -1,0 +1,26 @@
+{#-
+  Cisco IOS / IOS-XE -- syslog.
+
+    logging host [vrf NAME] <addr> [transport udp port <port>]
+    logging trap <severity>
+    logging source-interface <interface>
+
+  Available variables:
+    add      list[str]    keys to configure; index into `entries`
+    remove   list[Entry]  collectors to negate
+    entries  {key: {kind, host, port, severity, source}}
+    vrf      str|None
+-#}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'host' %}
+logging host {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.port != 514 %} transport udp port {{ item.port }}{% endif %}
+{% elif item.kind == 'trap' %}
+logging trap {{ item.severity }}
+{% elif item.kind == 'source' %}
+logging source-interface {{ item.source }}
+{% endif %}
+{% endfor %}
+{% for entry in remove %}
+no {{ entry.line }}
+{% endfor %}

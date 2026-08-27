@@ -53,11 +53,33 @@ def _environment(directory: str) -> Environment:
     StrictUndefined: a typo in a template is a loud error, not a silently
     missing keyword on a config line we are about to push to production.
     """
-    return Environment(
+    environment = Environment(
         loader=FileSystemLoader(directory),
         undefined=StrictUndefined,
         keep_trailing_newline=False,
     )
+    # Address arithmetic a template should not be doing by hand. The template
+    # still decides the shape of the command; this only reformats the address.
+    environment.filters["wildcard"] = wildcard
+    environment.filters["netmask"] = netmask
+    return environment
+
+
+def wildcard(network: str) -> str:
+    """CIDR as IOS writes it: `10.1.1.0/24` -> `10.1.1.0 0.0.0.255`,
+    and a single host as `host 10.1.1.5`."""
+    parsed = ipaddress.ip_network(str(network).strip(), strict=False)
+    if parsed.prefixlen == parsed.max_prefixlen:
+        return f"host {parsed.network_address}"
+    bits = int(parsed.netmask) ^ ((1 << parsed.max_prefixlen) - 1)
+    inverted = ipaddress.ip_address(bits)
+    return f"{parsed.network_address} {inverted}"
+
+
+def netmask(network: str) -> str:
+    """CIDR as a dotted mask: `10.1.1.0/24` -> `10.1.1.0 255.255.255.0`."""
+    parsed = ipaddress.ip_network(str(network).strip(), strict=False)
+    return f"{parsed.network_address} {parsed.netmask}"
 
 # Spellings we accept in the CSV / autodetect, mapped to the netmiko platform
 # name used for both the connection and the template directory.
@@ -108,6 +130,22 @@ def validate_address(value: str) -> str:
     text = value.strip()
     if not _SAFE_ADDRESS.match(text) or len(text) > 253:
         raise InvalidValue(f"{value!r} is not a valid IP address or hostname")
+    return text
+
+
+def validate_text(value: str, kind: str = "text") -> str:
+    """Free text destined for a config line: a location, a contact.
+
+    Spaces are fine -- `snmp-server location ATL DC1 row 4` is one command --
+    but a newline would end the command and start another one.
+    """
+    text = str(value).strip()
+    if not text:
+        raise InvalidValue(f"empty {kind}")
+    if not text.isprintable():
+        raise InvalidValue(f"{kind} may not contain newlines or control characters")
+    if len(text) > 255:
+        raise InvalidValue(f"{kind} is too long ({len(text)} characters)")
     return text
 
 
@@ -218,6 +256,18 @@ class PlatformSupport:
     #: Sample device output, used by `configure.py selftest` and as living
     #: documentation of what the parser expects.
     sample: str = ""
+    #: Fields this platform has no way to express, and which must therefore
+    #: never be compared -- EOS has no `access <acl>` on an SNMP group, so
+    #: comparing it would rebuild the group on every run, forever.
+    ignores: Tuple[str, ...] = ()
+    #: Further commands whose output is appended before parsing. SNMPv3 users
+    #: are not in the running config on IOS, so reading them needs `show snmp
+    #: user` as well; the parser sees both and sorts out which is which.
+    extra_commands: Tuple[str, ...] = ()
+
+    @property
+    def commands(self) -> Tuple[str, ...]:
+        return (self.show_command,) + tuple(self.extra_commands)
 
 
 @dataclass(frozen=True)
@@ -255,6 +305,13 @@ class Feature:
     #: These are skipped and reported, not failed -- a fleet-wide run of a
     #: Cisco-only knob should not turn every Arista red.
     not_applicable: Dict[str, str] = field(default_factory=dict)
+    #: Whether a blank line in this feature's template is content (a banner
+    #: body) rather than layout.
+    keep_blank_lines: bool = False
+    #: Extra keyword arguments for the config push. A banner needs
+    #: cmd_verify=False: the device stops echoing a prompt between the
+    #: delimiters, and netmiko would otherwise wait for one that never comes.
+    config_options: Dict[str, Any] = field(default_factory=dict)
     #: How this feature turns current + desired into a change. default_factory,
     #: not a plain default: a bare function default on a dataclass is a class
     #: attribute, and would bind `self` as its first argument.
@@ -321,8 +378,23 @@ def render(
     add: Sequence[str],
     remove: Sequence[Entry],
     variables: Mapping[str, Any],
+    keep_blank: bool = False,
 ) -> List[str]:
-    """Render templates/<platform>/<feature>.j2 into a list of CLI commands."""
+    """Render templates/<platform>/<feature>.j2 into a list of CLI commands.
+
+    Blank lines are dropped, so a template can be laid out readably -- a bare
+    `{% for %}` on its own line costs nothing. `keep_blank` turns that off for
+    the one case where an empty line is content rather than formatting: the
+    body of a banner.
+    """
     template = _environment(str(template_dir())).get_template(f"{platform}/{feature}.j2")
     text = template.render(add=list(add), remove=list(remove), **dict(variables))
-    return [line.rstrip() for line in text.splitlines() if line.strip()]
+    lines = [line.rstrip() for line in text.splitlines()]
+    if keep_blank:
+        # Still drop the blank lines the block tags leave at either end.
+        while lines and not lines[0]:
+            lines.pop(0)
+        while lines and not lines[-1]:
+            lines.pop()
+        return lines
+    return [line for line in lines if line]

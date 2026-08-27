@@ -1,0 +1,28 @@
+{#-
+  Cisco IOS / IOS-XE -- banners.  **Edit the text below.**
+
+    banner motd ^C
+    <text>
+    ^C
+
+  `^C` here is two literal characters (caret, C), which is how IOS writes the
+  delimiter in the running config. It must not appear in the text itself.
+
+  Blank lines inside the body are content, not layout, so this template is
+  rendered with keep_blank_lines. That is why the tags sit at the end of the
+  preceding line -- a tag on its own line would add a blank line to the banner.
+-#}
+{% set mark = delimiter or '^C' %}{% for kind in add %}banner {{ kind }} {{ mark }}{% if kind == 'login' %}
+
+  Authorised access only.
+
+{% else %}
+
+  This system is for the use of authorised users only. Activity on this system
+  is monitored and recorded. Anyone using it consents to that monitoring.
+
+  Disconnect immediately if you are not an authorised user.
+
+{% endif %}{{ mark }}
+{% endfor %}{% for entry in remove %}no {{ entry.line }}
+{% endfor %}

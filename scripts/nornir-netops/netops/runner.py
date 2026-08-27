@@ -63,14 +63,18 @@ def detect_platform(task: Task) -> Result:
 
 
 def _read_state(task: Task, support) -> List:
-    shown = task.run(
-        task=netmiko_send_command,
-        name=support.show_command,
-        command_string=support.show_command,
-        enable=True,
-        read_timeout=SHOW_TIMEOUT,
-    )
-    return support.parse(shown.result or "")
+    """Run every command this feature reads from, and parse the lot together."""
+    output = []
+    for command in support.commands:
+        shown = task.run(
+            task=netmiko_send_command,
+            name=command,
+            command_string=command,
+            enable=True,
+            read_timeout=SHOW_TIMEOUT,
+        )
+        output.append(shown.result or "")
+    return support.parse("\n".join(output))
 
 
 def configure_feature(
@@ -123,16 +127,26 @@ def configure_feature(
         return Result(host=task.host, result=payload, changed=False)
 
     current = _read_state(task, support)
+    # A parser can flag a value it read off the device as sensitive -- an SNMP
+    # community has to be named to be removed, and that name is a credential.
+    secrets = list(secrets) + [
+        entry.data["secret_value"]
+        for entry in current
+        if entry.data.get("secret_value")
+    ]
     context = {
         "login_user": task.host.username,
         "platform": platform,
         "variables": variables,
+        "ignores": support.ignores,
     }
     to_add, to_remove = feature.plan(current, desired, mode, context)
 
     commands: List[str] = []
     if to_add or to_remove:
-        commands = render(feature.name, platform, to_add, to_remove, variables)
+        commands = render(
+            feature.name, platform, to_add, to_remove, variables, feature.keep_blank_lines
+        )
 
     payload.update(
         current=[entry.shown for entry in current],
@@ -150,6 +164,7 @@ def configure_feature(
         task=netmiko_send_config,
         name=f"configure {feature.name}",
         config_commands=commands,
+        **feature.config_options,
     )
     payload["applied"] = True
     payload["output"] = scrub(pushed.result, secrets)

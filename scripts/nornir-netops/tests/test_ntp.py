@@ -61,7 +61,7 @@ def test_servers_are_normalized():
 
 
 def test_prefer_must_be_one_of_the_servers():
-    with pytest.raises(ValueError, match="not one of --servers"):
+    with pytest.raises(ValueError, match="not one of the desired servers"):
         FEATURE.build_desired(parse_args(["-s", "10.1.1.1", "--prefer", "10.9.9.9"]))
 
 

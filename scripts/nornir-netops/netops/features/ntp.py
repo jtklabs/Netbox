@@ -11,6 +11,7 @@ import argparse
 from typing import List
 
 from ..core import Desired, Entry, Feature, PlatformSupport, normalize, validate_address
+from ..standards import host_and_port, of as standards_of
 
 # `include ^ntp server` rather than `section ntp`: we only ever want to see (and
 # therefore only ever risk removing) server statements, never `ntp source`,
@@ -52,14 +53,18 @@ def parse_ntp_servers(output: str) -> List[Entry]:
     return entries
 
 
+def _word(value):
+    return validate_address(str(value)) if value else None
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-s",
         "--servers",
         action="append",
-        required=True,
         metavar="ADDR[,ADDR...]",
-        help="desired NTP server(s); repeatable and/or comma separated",
+        help="desired NTP server(s); repeatable and/or comma separated. "
+        "Defaults to ntp.servers in the standards file.",
     )
     parser.add_argument(
         "--vrf",
@@ -86,29 +91,45 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_desired(args: argparse.Namespace) -> Desired:
+    standards = standards_of(args)
+
+    # A flag beats the file, so a one-off run never needs the file edited.
+    if args.servers:
+        wanted = [chunk for value in args.servers for chunk in value.split(",")]
+        preferred = args.prefer
+    else:
+        wanted, preferred = [], args.prefer
+        for item in standards.entries("ntp.servers"):
+            record = host_and_port(item)
+            wanted.append(record["host"])
+            if record.get("prefer") and not preferred:
+                preferred = record["host"]
+        preferred = preferred or standards.value("ntp.prefer")
+
     servers: List[str] = []
     seen = set()
-    for chunk in args.servers:
-        for value in chunk.split(","):
-            if not value.strip():
-                continue
-            key = normalize(validate_address(value))
-            if key not in seen:
-                seen.add(key)
-                servers.append(key)
+    for value in wanted:
+        if not str(value).strip():
+            continue
+        key = normalize(validate_address(str(value)))
+        if key not in seen:
+            seen.add(key)
+            servers.append(key)
     if not servers:
-        raise ValueError("--servers did not contain any addresses")
+        raise ValueError(
+            "no NTP servers given: pass --servers or set ntp.servers in the standards file"
+        )
 
-    prefer = normalize(validate_address(args.prefer)) if args.prefer else None
+    prefer = normalize(validate_address(str(preferred))) if preferred else None
     if prefer and prefer not in seen:
-        raise ValueError(f"--prefer {args.prefer} is not one of --servers")
+        raise ValueError(f"preferred server {preferred} is not one of the desired servers")
 
     return Desired(
         keys=servers,
         variables={
-            "vrf": validate_address(args.vrf) if args.vrf else None,
+            "vrf": _word(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
-            "source": validate_address(args.source) if args.source else None,
+            "source": _word(args.source or standards.value("ntp.source")),
             "iburst": args.iburst,
         },
     )
