@@ -25,6 +25,7 @@ The rule that follows from a boolean:
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from nornir.core.inventory import (
@@ -38,6 +39,54 @@ from nornir.core.inventory import (
 from nornir.core.plugins.inventory import InventoryPluginRegister
 
 from .core import canonical_platform
+
+#: NetBox platform slug -> the netmiko device type to connect with, which is
+#: also the `templates/<platform>/` directory.
+#:
+#: The names on the left are what `scripts/snmp-inventory` writes: it sets a
+#: NetBox Platform per OS family ("Cisco IOS", "Cisco IOS-XE", "Cisco NX-OS",
+#: "Arista EOS", "Junos", ...) and NetBox slugifies the name. Left to the
+#: generic hyphen-to-underscore rule, "Cisco NX-OS" would become `cisco_nx_os`
+#: -- not a netmiko driver -- and the device would fail on connect with
+#: something unhelpful.
+#:
+#: Platforms this tool has no templates for are mapped anyway. A device then
+#: fails with "platform 'cisco_nxos' has no 'ntp' support", which is accurate
+#: and costs no connection, rather than being dialled and misunderstood.
+NETBOX_PLATFORMS = {
+    # netmiko's cisco_ios driver speaks to both, and one template covers both.
+    "cisco-ios": "cisco_ios",
+    "cisco-ios-xe": "cisco_ios",
+    "cisco-nx-os": "cisco_nxos",
+    "cisco-asa": "cisco_asa",
+    "cisco-ios-xr": "cisco_xr",
+    "arista-eos": "arista_eos",
+    "junos": "juniper_junos",
+    "pan-os": "paloalto_panos",
+    "fortios": "fortinet",
+    "f5-tmos": "f5_tmsh",
+    "check-point-gaia": "checkpoint_gaia",
+    "arubaos": "aruba_os",
+    "arubaos-cx": "aruba_aoscx",
+    "opengear": "opengear_linux",
+    # No netmiko driver exists for these. Naming them is still better than
+    # leaving them blank: blank means "autodetect", which spends a login
+    # finding out what we already know.
+    "aruba-clearpass": "aruba_clearpass",
+    "infoblox-nios": "infoblox_nios",
+    "sgos": "bluecoat_sgos",
+}
+
+_SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(value: str) -> str:
+    """NetBox's own rule: lowercase, non-alphanumerics collapsed to hyphens.
+
+    Applied to whatever NetBox gave us, so a display name ("Cisco IOS-XE")
+    resolves the same as the slug it would have been given.
+    """
+    return _SLUG_STRIP.sub("-", str(value).strip().lower()).strip("-")
 
 #: Interface custom fields consulted by default. The part before
 #: `_source_interface` is the feature the answer belongs to.
@@ -138,11 +187,19 @@ def _slug(value: Any) -> Optional[str]:
 
 
 def platform_of(device: Mapping[str, Any]) -> Optional[str]:
-    """NetBox writes slugs with hyphens; netmiko uses underscores."""
-    slug = _slug(device.get("platform"))
-    if not slug:
+    """The netmiko device type for a NetBox platform.
+
+    The explicit table first, because an OS family's NetBox name rarely
+    resembles its netmiko driver; then the generic hyphen-to-underscore rule
+    for anything the table has not met yet.
+    """
+    value = _slug(device.get("platform"))
+    if not value:
         return None
-    return canonical_platform(str(slug).replace("-", "_")) or None
+    known = NETBOX_PLATFORMS.get(slugify(value))
+    if known:
+        return known
+    return canonical_platform(str(value).replace("-", "_")) or None
 
 
 def device_data(device: Mapping[str, Any]) -> Dict[str, Any]:

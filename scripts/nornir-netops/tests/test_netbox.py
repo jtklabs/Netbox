@@ -63,18 +63,59 @@ def test_devices_become_hosts():
     assert host.platform == "cisco_ios"
 
 
+# Every OS family scripts/snmp-inventory writes a NetBox Platform for, as the
+# slug NetBox derives from the name it sets.
 @pytest.mark.parametrize(
     "slug,expected",
     [
         ("cisco-ios", "cisco_ios"),
-        ("cisco-ios-xe", "cisco_ios"),
+        ("cisco-ios-xe", "cisco_ios"),   # one driver and one template cover both
+        ("cisco-nx-os", "cisco_nxos"),   # not cisco_nx_os
+        ("cisco-asa", "cisco_asa"),
         ("arista-eos", "arista_eos"),
-        ("eos", "arista_eos"),
+        ("junos", "juniper_junos"),
+        ("pan-os", "paloalto_panos"),
+        ("fortios", "fortinet"),
+        ("f5-tmos", "f5_tmsh"),
+        ("check-point-gaia", "checkpoint_gaia"),
+        ("arubaos", "aruba_os"),
+        ("arubaos-cx", "aruba_aoscx"),
+        ("opengear", "opengear_linux"),
     ],
 )
-def test_netbox_platform_slugs_map_to_netmiko_names(slug, expected):
-    """NetBox writes slugs with hyphens; netmiko uses underscores."""
+def test_netbox_platform_slugs_map_to_netmiko_drivers(slug, expected):
+    """An OS family's NetBox name rarely resembles its netmiko driver, so the
+    mapping is explicit rather than a hyphen-to-underscore guess."""
     assert platform_of({"platform": {"slug": slug}}) == expected
+
+
+def test_every_mapped_driver_is_one_netmiko_actually_has():
+    """Except the three deliberately named for platforms netmiko cannot drive."""
+    from netmiko.ssh_dispatcher import CLASS_MAPPER_BASE
+    from netops.netbox import NETBOX_PLATFORMS
+
+    undriveable = {"aruba_clearpass", "infoblox_nios", "bluecoat_sgos"}
+    for slug, driver in NETBOX_PLATFORMS.items():
+        if driver in undriveable:
+            continue
+        assert driver in CLASS_MAPPER_BASE, f"{slug} maps to unknown driver {driver}"
+
+
+def test_a_display_name_resolves_the_same_as_its_slug():
+    """NetBox slugifies the Platform name; older payloads may only give a name."""
+    assert platform_of({"platform": {"name": "Cisco IOS-XE"}}) == "cisco_ios"
+    assert platform_of({"platform": "Cisco NX-OS"}) == "cisco_nxos"
+
+
+def test_a_platform_netmiko_cannot_drive_is_still_named():
+    """Named rather than blank: blank means autodetect, which spends a login
+    finding out what NetBox already told us. Named, the feature stops first
+    with 'has no ntp support' and never dials."""
+    assert platform_of({"platform": {"slug": "aruba-clearpass"}}) == "aruba_clearpass"
+
+
+def test_an_unmapped_platform_falls_back_to_the_generic_rule():
+    assert platform_of({"platform": {"slug": "cisco-wlc"}}) == "cisco_wlc"
 
 
 def test_a_device_with_no_platform_is_left_for_autodetection():

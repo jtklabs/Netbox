@@ -149,11 +149,54 @@ The CSV stays the default; `--netbox` reads devices from NetBox instead:
 ./configure.py ntp --netbox --netbox-filter site=atl --netbox-filter role=core
 ```
 
-Active devices with a primary IP become hosts. The platform comes from
-NetBox's platform slug (`cisco-ios` -> `cisco_ios`), and site, role, tags and
-device custom fields land in host data, so `--filter site=atl` works exactly as
-it does with a CSV. A device with no platform is autodetected as usual; one
-with no primary IP is skipped, because there is nothing to connect to.
+Active devices with a primary IP become hosts. Site, role, tags and device
+custom fields land in host data, so `--filter site=atl` works exactly as it
+does with a CSV. A device with no platform is autodetected as usual; one with
+no primary IP is skipped, because there is nothing to connect to.
+
+### Platforms
+
+`scripts/snmp-inventory` sets a NetBox Platform per OS family -- "Cisco IOS",
+"Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Junos" -- and NetBox slugifies
+the name. Those slugs rarely resemble the netmiko driver, so the mapping is
+explicit rather than a hyphen-to-underscore guess:
+
+| NetBox platform | slug | connects as |
+| --- | --- | --- |
+| Cisco IOS | `cisco-ios` | `cisco_ios` |
+| Cisco IOS-XE | `cisco-ios-xe` | `cisco_ios` -- one driver and one template cover both |
+| Cisco NX-OS | `cisco-nx-os` | `cisco_nxos` (**not** `cisco_nx_os`) |
+| Cisco ASA | `cisco-asa` | `cisco_asa` |
+| Arista EOS | `arista-eos` | `arista_eos` |
+| Junos | `junos` | `juniper_junos` |
+| PAN-OS | `pan-os` | `paloalto_panos` |
+| FortiOS | `fortios` | `fortinet` |
+| F5 TMOS | `f5-tmos` | `f5_tmsh` |
+| Check Point Gaia | `check-point-gaia` | `checkpoint_gaia` |
+| ArubaOS / ArubaOS-CX | `arubaos`, `arubaos-cx` | `aruba_os`, `aruba_aoscx` |
+| Opengear | `opengear` | `opengear_linux` |
+
+Anything not in the table falls back to the generic rule. A test checks every
+mapped driver against netmiko's own dispatcher, so a typo -- or netmiko
+renaming one -- fails here rather than on a device.
+
+**Only `cisco_ios` and `arista_eos` have templates today.** The rest are mapped
+anyway, deliberately: a NX-OS device then stops with `platform 'cisco_nxos' has
+no 'ntp' support` without ever being dialled, which is accurate and free.
+Leaving them blank would instead spend an autodetect login finding out what
+NetBox already said.
+
+So on a mixed fleet, filter to what this tool can drive:
+
+```bash
+./configure.py ntp --netbox \
+  --netbox-filter platform=cisco-ios \
+  --netbox-filter platform=cisco-ios-xe \
+  --netbox-filter platform=arista-eos
+```
+
+A repeated key means "any of these" -- that is how NetBox reads repeated query
+parameters.
 
 `$NETBOX_URL` and `$NETBOX_TOKEN`, or `--netbox-secret` for an AWS secret
 holding `{"token": "...", "url": "..."}`. The URL may also sit in the standards
@@ -1135,7 +1178,7 @@ pip install pytest
 pytest
 ```
 
-552 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+556 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
