@@ -33,6 +33,7 @@ from .credentials import (
 from .features import FEATURES
 from .standards import Standards, StandardsError, load as load_standards
 from . import servicenow
+from .checks import CHECKS, FAIL, OK, WARN
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -377,6 +378,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="detect again even for devices already remembered",
     )
 
+    for check in CHECKS.values():
+        checker = subs.add_parser(
+            f"check-{check.name}",
+            parents=[_discover_arguments()],
+            help=check.help,
+            description=f"{check.help} Read-only: runs show commands and reports, "
+            f"and changes nothing on any device.",
+            formatter_class=HelpFormatter,
+        )
+        checker.add_argument(
+            "--standards",
+            metavar="FILE",
+            default=os.environ.get("NETOPS_STANDARDS"),
+            help="the desired state file, for what to expect [$NETOPS_STANDARDS]",
+        )
+        checker.add_argument("--no-standards", action="store_true", help=argparse.SUPPRESS)
+        check.add_arguments(checker)
+        checker.set_defaults(check=check)
+
     subs.add_parser(
         "selftest",
         help="render every template offline against sample output (touches no devices)",
@@ -689,6 +709,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         return selftest()
     if args.command == "discover":
         return _discover(args, style, log)
+    if args.command.startswith("check-"):
+        return _check(args, style, log)
 
     feature: Feature = args.feature
     try:
@@ -896,6 +918,105 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         # --fail-on-diff was asked for.
         return EXIT_DIFF
     if args.fail_on_diff and any(r["status"] == "pending" for r in records.values()):
+        return EXIT_DIFF
+    return EXIT_OK
+
+
+def _check(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
+    """Ask the fleet whether something is actually working."""
+    check = args.check
+    try:
+        args.standards = (
+            Standards() if args.no_standards else load_standards(args.standards, PROJECT_ROOT)
+        )
+        expected = check.expected(args)
+    except StandardsError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
+
+    targets, _, code = _connect(args, style)
+    if targets is None:
+        return code
+
+    from .runner import detect_platform, run_check
+
+    cache = load_platform_cache(
+        args.platform_cache,
+        PROJECT_ROOT,
+        args.platform_cache_ttl,
+        enabled=not args.no_platform_cache,
+    )
+    for host in targets.inventory.hosts.values():
+        if not host.platform:
+            host.platform = cache.get(host) or None
+    unknown = targets.filter(filter_func=lambda h: not h.platform)
+    if unknown.inventory.hosts:
+        for name, result in unknown.run(task=detect_platform).items():
+            if not result.failed:
+                cache.put(targets.inventory.hosts[name], result.result)
+        cache.save()
+
+    count = len(targets.inventory.hosts)
+    print(
+        f"{style.bold('CHECK')} {check.name}  |  {count} device(s), "
+        f"{min(args.workers, count)} at a time"
+    )
+    if expected:
+        print(style.dim(f"expecting: {', '.join(expected)}"))
+
+    options = {"max_offset": getattr(args, "max_offset", None)}
+    results = targets.run(task=run_check, check=check, expected=expected, options=options)
+
+    records: Dict[str, Dict[str, Any]] = {}
+    for name, result in sorted(results.items()):
+        host = targets.inventory.hosts[name]
+        if result.failed:
+            exception = _exception_of(result)
+            message = summarize(exception) if exception else "unknown error"
+            log.failure(name, message, exception)
+            records[name] = {"status": "failed", "summary": message, "state": {}}
+        else:
+            records[name] = result[0].result
+
+    print()
+    ranking = {OK: 0, WARN: 1, FAIL: 2, "failed": 3}
+    for name in sorted(records, key=lambda n: (ranking[records[n]["status"]], n)):
+        record = records[name]
+        host = targets.inventory.hosts[name]
+        label = {
+            OK: style.ok("ok"),
+            WARN: style.warn("WARN"),
+            FAIL: style.bad("NOT WORKING"),
+            "failed": style.bad("FAILED"),
+        }[record["status"]]
+        print(f"{style.bold(name)} ({host.hostname}) {label} -- {record['summary']}")
+        if args.verbose:
+            for item in record.get("state", {}).get("associations", []):
+                print(
+                    style.dim(
+                        f"    {item['address']:<16} {item['state']:<12} "
+                        f"reach {item['reach_octal']:<4} "
+                        f"offset {item['offset'] if item['offset'] is not None else '?'}ms"
+                    )
+                )
+
+    counts: Dict[str, int] = {}
+    for record in records.values():
+        counts[record["status"]] = counts.get(record["status"], 0) + 1
+    summary = [f"{len(records)} device(s)", style.ok(f"{counts.get(OK, 0)} ok")]
+    for key, wording, paint in (
+        (WARN, "with warnings", style.warn),
+        (FAIL, "not working", style.bad),
+        ("failed", "unreachable", style.bad),
+    ):
+        if counts.get(key):
+            summary.append(paint(f"{counts[key]} {wording}"))
+    print()
+    print(style.bold("summary: ") + ", ".join(summary))
+
+    if counts.get("failed"):
+        return EXIT_FAILED
+    if counts.get(FAIL) or counts.get(WARN):
         return EXIT_DIFF
     return EXIT_OK
 

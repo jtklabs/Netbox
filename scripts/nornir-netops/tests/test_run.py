@@ -1450,3 +1450,101 @@ def test_discover_has_no_change_flags():
     """It changes nothing, so it should not accept flags that say otherwise."""
     with pytest.raises(SystemExit):
         cli.main(["discover", "--apply"])
+
+
+# --------------------------------------------------------------------------- #
+# check-ntp -- is it actually working, as opposed to merely configured
+# --------------------------------------------------------------------------- #
+
+
+from netops.checks import IOS_SAMPLE as NTP_HEALTHY  # noqa: E402
+
+NTP_BROKEN = """\
+Clock is unsynchronized, stratum 16, no reference clock
+  address         ref clock       st   when   poll reach  delay  offset   disp
+ ~10.50.0.10      .INIT.          16      -   1024     0  0.000   0.000 15937.
+"""
+
+
+@pytest.fixture
+def ntp_state(monkeypatch):
+    """Per-device `show ntp ...` output, keyed by device name."""
+    state = {}
+
+    def send(task, command_string, **kwargs):
+        return Result(host=task.host, result=state.get(task.host.name, NTP_HEALTHY))
+
+    monkeypatch.setattr(runner, "netmiko_send_command", send)
+    return state
+
+
+def check_ntp(csv_file, standards_file, *extra):
+    return cli.main(
+        ["check-ntp", "--no-env-file", "--csv", csv_file, "--standards",
+         str(standards_file), *extra]
+    )
+
+
+def test_a_healthy_fleet_passes_and_changes_nothing(
+    device, csv_file, login, standards, ntp_state, capsys
+):
+    assert check_ntp(csv_file, standards) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "ok -- synchronised to 10.50.0.10" in out
+    assert "2 device(s), 2 ok" in out
+    assert device["config"] == {}  # a check never configures
+
+
+def test_a_device_that_is_not_synchronised_is_reported(
+    device, csv_file, login, standards, ntp_state, capsys
+):
+    ntp_state["sw1"] = NTP_BROKEN
+    assert check_ntp(csv_file, standards) == cli.EXIT_DIFF
+    out = capsys.readouterr().out
+    assert "NOT WORKING" in out
+    assert "clock is not synchronised" in out
+    assert "1 not working" in out
+
+
+def test_an_unreachable_device_is_separated_from_a_broken_one(
+    device, csv_file, login, standards, monkeypatch, capsys
+):
+    def send(task, command_string, **kwargs):
+        if task.host.name == "sw1":
+            raise OSError("connection refused")
+        return Result(host=task.host, result=NTP_HEALTHY)
+
+    monkeypatch.setattr(runner, "netmiko_send_command", send)
+    assert check_ntp(csv_file, standards) == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "FAILED -- OSError: connection refused" in out
+    assert "1 unreachable" in out
+
+
+def test_verbose_lists_the_associations(
+    device, csv_file, login, standards, ntp_state, capsys
+):
+    check_ntp(csv_file, standards, "-v", "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "10.50.0.10" in out and "sys.peer" in out and "reach 377" in out
+
+
+def test_the_expected_servers_come_from_the_standards_file(
+    device, csv_file, login, standards, ntp_state, capsys
+):
+    check_ntp(csv_file, standards)
+    assert "expecting: 10.50.0.10" in capsys.readouterr().out
+
+
+def test_problem_devices_are_listed_last(
+    device, csv_file, login, standards, ntp_state, capsys
+):
+    ntp_state["sw1"] = NTP_BROKEN
+    check_ntp(csv_file, standards)
+    out = capsys.readouterr().out
+    assert out.index("leaf1") < out.index("sw1")
+
+
+def test_a_check_has_no_change_flags():
+    with pytest.raises(SystemExit):
+        cli.main(["check-ntp", "--apply"])

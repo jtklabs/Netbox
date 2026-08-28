@@ -103,6 +103,38 @@ def _read_state(task: Task, support) -> List:
     return support.parse("\n".join(output))
 
 
+def run_check(task: Task, check, expected, options) -> Result:
+    """Read operational state and judge it. Changes nothing, ever."""
+    platform = canonical_platform(task.host.platform)
+    support = check.support_for(platform)  # raises UnsupportedPlatform
+
+    output = []
+    for command in support.commands:
+        shown = task.run(
+            task=netmiko_send_command,
+            name=command,
+            command_string=command,
+            enable=True,
+            read_timeout=SHOW_TIMEOUT,
+        )
+        _check_understood(command, shown.result or "")
+        output.append(shown.result or "")
+
+    state = support.parse("\n".join(output))
+    verdict = check.evaluate(state, expected, options)
+    return Result(
+        host=task.host,
+        result={
+            "platform": platform,
+            "status": verdict.status,
+            "summary": verdict.summary,
+            "reasons": verdict.reasons,
+            "state": state,
+        },
+        changed=False,
+    )
+
+
 def configure_feature(
     task: Task,
     feature: Feature,

@@ -38,6 +38,7 @@ re-run with --apply to push the commands above
 | [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
 | [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
 | [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
+| [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
@@ -887,6 +888,52 @@ the approval gate disappears and the whole thing can run unattended. Proposing
 one is a one-off ServiceNow admin task. Worth doing once this flow has proven
 itself on a few real changes.
 
+## Is it actually working?
+
+Converging `ntp server 10.50.0.10` onto a device says nothing about whether the
+device can *reach* it, whether the association ever came up, or whether the
+clock is synchronised. `check-ntp` answers that across the fleet, read-only:
+
+```console
+$ ./configure.py check-ntp
+
+CHECK ntp  |  4 device(s), 4 at a time
+expecting: 10.50.0.10, 10.50.0.11
+
+atl-core-sw1 (10.1.10.11) ok -- synchronised to 10.50.0.10, stratum 2, offset 0.1ms
+atl-dc-leaf1 (10.1.10.12) WARN -- 10.50.0.10 missed polls (reach 177)
+rdu-edge-rtr1 (10.2.10.11) NOT WORKING -- clock is not synchronised; stratum 16
+    (unsynchronised); 10.50.0.10 unreachable (reach 0); 10.50.0.11 is not
+    associated; no association selected as sys.peer
+rdu-old-box (10.2.10.12) FAILED -- OSError: connection refused
+
+summary: 4 device(s), 1 ok, 1 with warnings, 1 not working, 1 unreachable
+```
+
+It reads `show ntp status` and `show ntp associations` and judges:
+
+| Verdict | When |
+| --- | --- |
+| **ok** | Clock synchronised, every expected server associated with full reach, one selected as sys.peer |
+| **WARN** | Working, but a server has missed polls (`reach` below 377) or the selected peer's offset exceeds `--max-offset` (default 1000ms) |
+| **NOT WORKING** | Clock unsynchronised, stratum 16, an expected server missing or unreachable, or nothing selected as sys.peer |
+| **FAILED** | The device could not be asked at all |
+
+`-v` lists each association. `--servers` overrides what to expect; otherwise it
+comes from `ntp.servers` in the standards file. Exit codes: `0` all healthy,
+`2` something is unhealthy, `1` a device was unreachable -- so it drops into a
+cron drift check the same way `--fail-on-diff` does.
+
+Two details the parser gets right, because they are easy to get wrong.
+**`reach` is octal**: `377` is not three hundred and seventy-seven, it is eight
+successful polls out of the last eight, and `177` means one was missed. And
+**EOS prints an ntpq-style table with a `t` column that IOS does not have**, so
+fields are counted from both ends -- the address first, the stratum second, and
+reach/delay/offset/jitter last -- rather than by position.
+
+A check is not a Feature: it has no template, no desired-versus-current diff and
+no way to apply anything. It runs show commands and reports.
+
 ## Settings that sit at their default
 
 **A setting at its platform default is not written to the running config.**
@@ -1019,7 +1066,7 @@ pip install pytest
 pytest
 ```
 
-484 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+512 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
