@@ -46,8 +46,14 @@ def key(monkeypatch):
 
 
 def test_parses_ios_servers():
+    """The key carries how the server is configured, not just its address: a
+    stale `source` would otherwise read as compliant forever."""
     keys = [e.key for e in parse_ntp(IOS_SAMPLE) if e.data["kind"] == "server"]
-    assert keys == ["server:10.10.10.1:key:1", "server:10.10.10.2", "server:192.168.5.5"]
+    assert keys == [
+        "server:10.10.10.1:key:1",
+        "server:10.10.10.2",
+        "server:192.168.5.5:source:GigabitEthernet0/0",
+    ]
 
 
 def test_parses_eos_servers_including_a_hostname():
@@ -59,9 +65,16 @@ def test_parses_eos_servers_including_a_hostname():
     ]
 
 
+def test_the_source_interface_is_part_of_a_servers_identity():
+    plain = parse_ntp("ntp server 10.1.1.1")[0]
+    sourced = parse_ntp("ntp server 10.1.1.1 source Loopback0")[0]
+    assert plain.key != sourced.key
+    assert sourced.data["source"] == "Loopback0"
+
+
 def test_a_server_line_is_kept_verbatim_for_removal():
     entries = {e.key: e for e in parse_ntp(IOS_SAMPLE)}
-    assert entries["server:192.168.5.5"].line == (
+    assert entries["server:192.168.5.5:source:GigabitEthernet0/0"].line == (
         "ntp server vrf MGMT 192.168.5.5 source GigabitEthernet0/0"
     )
 

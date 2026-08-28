@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, normalize
 from ..core import validate_address, validate_text, validate_word
+from ..netbox import source_for
 from ..standards import host_and_port, of as standards_of
 
 SHOW_COMMAND = "show running-config all | include ^logging"
@@ -240,6 +241,27 @@ def build_desired(args: argparse.Namespace) -> Desired:
     )
 
 
+def per_device(keys, variables, host):
+    """Swap in this device's source interface, if the inventory knows one.
+
+    An authoritative "no interface" really does mean no `logging
+    source-interface` on that device, so the entry is dropped rather than
+    falling back to the fleet-wide value.
+    """
+    source, authoritative = source_for(host, "syslog")
+    if not authoritative:
+        return keys, variables
+    source = validate_word(str(source), "interface") if source else None
+
+    entries = {k: v for k, v in variables["entries"].items() if v["kind"] != "source"}
+    keys = [k for k in keys if variables["entries"][k]["kind"] != "source"]
+    if source:
+        key = f"source:{source}"
+        keys.append(key)
+        entries[key] = {"kind": "source", "source": source}
+    return keys, {**variables, "entries": entries}
+
+
 FEATURE = Feature(
     name="syslog",
     help="converge the syslog collectors, trap severity and source interface",
@@ -256,5 +278,6 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_syslog,
+    per_device=per_device,
     selftest_args=[],
 )

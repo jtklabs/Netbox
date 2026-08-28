@@ -141,6 +141,75 @@ expires. That fails loudly rather than quietly, because the device rejects the
 show command and the run stops there; `--no-platform-cache` or
 `discover --refresh` fixes it immediately.
 
+## NetBox as the inventory
+
+The CSV stays the default; `--netbox` reads devices from NetBox instead:
+
+```bash
+./configure.py ntp --netbox --netbox-filter site=atl --netbox-filter role=core
+```
+
+Active devices with a primary IP become hosts. The platform comes from
+NetBox's platform slug (`cisco-ios` -> `cisco_ios`), and site, role, tags and
+device custom fields land in host data, so `--filter site=atl` works exactly as
+it does with a CSV. A device with no platform is autodetected as usual; one
+with no primary IP is skipped, because there is nothing to connect to.
+
+`$NETBOX_URL` and `$NETBOX_TOKEN`, or `--netbox-secret` for an AWS secret
+holding `{"token": "...", "url": "..."}`. The URL may also sit in the standards
+file under `netbox.url`; the **token never does**, because that file is meant
+to be committed.
+
+### A source interface is a property of the device
+
+One switch sources syslog from Loopback0, another from Vlan10, a third from
+nothing at all. That is not a fleet-wide standard, so it is not in the
+standards file -- it is a boolean custom field on the *interface* in NetBox:
+
+```
+ntp_source_interface      true   on Loopback0
+syslog_source_interface   true   on Vlan10
+```
+
+The rule that follows from a boolean:
+
+| Interfaces marked | Result |
+| --- | --- |
+| none | **The device uses no source interface** -- and this overrides the fleet-wide `ntp.source` in the standards file. "Not set" is an answer, not a gap to fill. |
+| exactly one | That interface is the source. |
+| two or more | **That device fails**, naming the interfaces. |
+
+```console
+sw1 (10.1.1.1) [cisco_ios] FAILED -- 2 interfaces are marked ntp_source_interface
+    in NetBox (Loopback0, Vlan10); exactly one may be
+```
+
+The failure is per device and per standard: the rest of the fleet is planned
+normally, and a device whose `ntp_source_interface` is ambiguous can still have
+its syslog source applied. It is caught **before the device is read or
+written**, and picking one would be guessing -- the wrong source interface is
+the kind of thing that quietly breaks return traffic rather than failing
+visibly.
+
+The custom fields consulted default to `ntp_source_interface` and
+`syslog_source_interface`; `--netbox-source-field` or `netbox.source_fields` in
+the standards file changes that. The part before `_source_interface` names the
+feature the answer belongs to, so `snmp_source_interface` would wire itself to
+`snmp` once that feature learns to use one.
+
+NetBox is asked **once per custom field for the whole fleet**, not once per
+device -- a single query the server is built to answer, rather than a round
+trip per device per standard.
+
+### What this means for the templates
+
+A source interface is now part of what makes a line correct, so it is part of
+the comparison: `ntp server 10.50.0.10 source Loopback0` and
+`ntp server 10.50.0.10` are different states. Without that, a stale
+`source Loopback0` on a device that should no longer have one would read as
+compliant forever. Re-issuing the line replaces it; it is never negated first,
+for the same reason as the auth key.
+
 ## The standards file
 
 The CSV says *which* devices. `standards.yaml` beside this tool says *what*:
@@ -1066,7 +1135,7 @@ pip install pytest
 pytest
 ```
 
-512 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+552 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

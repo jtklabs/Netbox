@@ -127,6 +127,43 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         metavar="COLUMN=VALUE",
         help="only devices whose CSV column matches (repeatable, ANDed)",
     )
+    box = parent.add_argument_group(
+        "netbox",
+        "Take the inventory from NetBox instead of a CSV. The token comes from "
+        "$NETBOX_TOKEN or --netbox-secret, never from the standards file.",
+    )
+    box.add_argument(
+        "--netbox",
+        action="store_true",
+        help="use NetBox as the inventory rather than --csv",
+    )
+    box.add_argument(
+        "--netbox-url",
+        metavar="URL",
+        help="NetBox base URL [$NETBOX_URL, or netbox.url in the standards file]",
+    )
+    box.add_argument(
+        "--netbox-secret",
+        metavar="NAME_OR_ARN",
+        default=os.environ.get("NETBOX_SECRET"),
+        help='AWS secret holding {"token": "...", "url": "..."} [$NETBOX_SECRET]',
+    )
+    box.add_argument(
+        "--netbox-filter",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="NetBox API filter, e.g. site=atl or role=core (repeatable; a "
+        "repeated key means any of them)",
+    )
+    box.add_argument(
+        "--netbox-source-field",
+        action="append",
+        metavar="FIELD",
+        help="interface custom field naming a source interface, e.g. "
+        "ntp_source_interface (repeatable; defaults to the ntp and syslog ones)",
+    )
+
     cache = parent.add_argument_group(
         "platform cache",
         "Autodetecting a platform costs an extra SSH login per device, and the "
@@ -785,6 +822,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         if dry_run
         else style.bad("APPLYING CHANGES")
     )
+    if args.netbox:
+        print(style.dim(f"inventory: NetBox ({count} device(s))"))
     print(
         f"{banner}  |  {feature.name}, mode={args.mode}, {count} device(s), "
         f"{min(args.workers, count)} at a time"
@@ -1129,20 +1168,27 @@ def _connect(args: argparse.Namespace, style: Style):
 
     # nornir is imported here so `selftest` and --help work without it installed.
     from .inventory import InventoryError, init_nornir, missing_credentials
+    from .netbox import NetBoxError
+    from .netbox import init_nornir as init_netbox
 
     try:
-        nr = init_nornir(
-            csv_file=args.csv,
-            username=credentials.username,
-            password=credentials.password,
-            secret=credentials.secret,
-            key_file=args.key_file,
-            port=args.port,
-            workers=args.workers,
-            conn_timeout=args.conn_timeout,
-        )
+        if args.netbox:
+            nr = init_netbox(
+                args, credentials, getattr(args, "standards", None), args.workers
+            )
+        else:
+            nr = init_nornir(
+                csv_file=args.csv,
+                username=credentials.username,
+                password=credentials.password,
+                secret=credentials.secret,
+                key_file=args.key_file,
+                port=args.port,
+                workers=args.workers,
+                conn_timeout=args.conn_timeout,
+            )
         targets = _apply_filters(nr, args)
-    except (InventoryError, ValueError) as exc:
+    except (InventoryError, NetBoxError, ValueError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return None, None, EXIT_USAGE
 

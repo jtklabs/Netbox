@@ -1548,3 +1548,170 @@ def test_problem_devices_are_listed_last(
 def test_a_check_has_no_change_flags():
     with pytest.raises(SystemExit):
         cli.main(["check-ntp", "--apply"])
+
+
+# --------------------------------------------------------------------------- #
+# NetBox inventory, and per-device source interfaces
+# --------------------------------------------------------------------------- #
+
+
+NETBOX_STANDARDS = """
+ntp:
+  servers: [10.50.0.10]
+  source: Loopback99
+syslog:
+  destinations: [10.1.1.50]
+  source: Loopback99
+"""
+
+
+def nb_device(id, name, address, platform):
+    return {
+        "id": id,
+        "name": name,
+        "primary_ip4": {"address": f"{address}/24"},
+        "platform": {"slug": platform},
+        "site": {"slug": "atl"},
+        "role": {"slug": "core"},
+    }
+
+
+@pytest.fixture
+def netbox(monkeypatch, tmp_path):
+    """A NetBox that answers with three devices and whichever interfaces the
+    test marks."""
+    state = {
+        "devices": [
+            nb_device(1, "sw1", "10.1.1.1", "cisco-ios"),
+            nb_device(2, "leaf1", "10.1.1.2", "arista-eos"),
+            nb_device(3, "sw2", "10.1.1.3", "cisco-ios"),
+        ],
+        "interfaces": {},
+    }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get(self, path, params=None):
+            if path.startswith("dcim/devices"):
+                return state["devices"]
+            field = next((k[3:] for k in (params or {}) if k.startswith("cf_")), None)
+            return state["interfaces"].get(field, [])
+
+    monkeypatch.setattr("netops.netbox.Client", FakeClient)
+    monkeypatch.setenv("NETBOX_URL", "https://netbox.example.com")
+    monkeypatch.setenv("NETBOX_TOKEN", "token")
+    (tmp_path / "standards.yaml").write_text(NETBOX_STANDARDS, encoding="utf-8")
+    return state
+
+
+def marked(name, device_id):
+    return {"name": name, "device": {"id": device_id, "name": f"device{device_id}"}}
+
+
+def run_netbox(feature, *extra):
+    return cli.main([feature, "--no-env-file", "--netbox", *extra])
+
+
+def test_netbox_supplies_the_inventory(device, login, netbox, capsys):
+    assert run_netbox("ntp") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "inventory: NetBox (3 device(s))" in out
+    assert "sw1" in out and "leaf1" in out
+
+
+def test_a_marked_interface_becomes_that_devices_source(device, login, netbox, capsys):
+    netbox["interfaces"]["ntp_source_interface"] = [marked("Loopback0", 1)]
+    run_netbox("ntp", "--limit", "sw1")
+    assert "ntp server 10.50.0.10 source Loopback0" in capsys.readouterr().out
+
+
+def test_no_marked_interface_means_no_source_at_all(device, login, netbox, capsys):
+    """Even though the standards file names one -- NetBox is asked per device,
+    and 'not set' is an answer, not a gap to fill from the file."""
+    netbox["interfaces"]["ntp_source_interface"] = [marked("Loopback0", 1)]
+    run_netbox("ntp", "--limit", "sw2")
+    out = capsys.readouterr().out
+    assert "ntp server 10.50.0.10" in out
+    assert "source" not in out
+    assert "Loopback99" not in out
+
+
+def test_two_marked_interfaces_fail_that_device_and_no_other(
+    device, login, netbox, capsys
+):
+    netbox["interfaces"]["ntp_source_interface"] = [
+        marked("Loopback0", 1),
+        marked("Vlan10", 1),
+        marked("Management1", 2),
+    ]
+    code = run_netbox("ntp")
+    out = capsys.readouterr().out
+
+    assert code == cli.EXIT_FAILED
+    assert "sw1" in out and "2 interfaces are marked ntp_source_interface" in out
+    assert "Loopback0, Vlan10" in out
+    assert "exactly one may be" in out
+    # the other two are unaffected and still planned (leaf1 is EOS, so its
+    # line carries iburst as well)
+    assert "source Management1" in out
+    assert "ntp server 10.50.0.10" in out
+    assert "1 failed" in out
+
+
+def test_the_ambiguity_is_reported_before_the_device_is_touched(
+    device, login, netbox, capsys
+):
+    netbox["interfaces"]["ntp_source_interface"] = [
+        marked("Loopback0", 1),
+        marked("Vlan10", 1),
+    ]
+    run_netbox("ntp", "--apply", "-y", "--limit", "sw1")
+    assert device["config"] == {}
+    assert device["commands"] == {}  # not even read
+
+
+def test_one_standard_being_ambiguous_leaves_the_others_alone(
+    device, login, netbox, capsys
+):
+    netbox["interfaces"]["ntp_source_interface"] = [
+        marked("Loopback0", 1),
+        marked("Vlan10", 1),
+    ]
+    netbox["interfaces"]["syslog_source_interface"] = [marked("Loopback0", 1)]
+    assert run_netbox("syslog", "--limit", "sw1") == cli.EXIT_OK
+    assert "logging source-interface Loopback0" in capsys.readouterr().out
+
+
+def test_syslog_drops_the_source_when_no_interface_is_marked(
+    device, login, netbox, capsys
+):
+    run_netbox("syslog", "--limit", "sw1")
+    out = capsys.readouterr().out
+    assert "logging host 10.1.1.50" in out
+    assert "source-interface" not in out
+
+
+def test_a_netbox_filter_reaches_the_query(device, login, netbox, monkeypatch, capsys):
+    seen = {}
+
+    class Recording:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get(self, path, params=None):
+            seen.setdefault(path, dict(params or {}))
+            if path.startswith("dcim/devices"):
+                return netbox["devices"]
+            return []
+
+    monkeypatch.setattr("netops.netbox.Client", Recording)
+    run_netbox("ntp", "--netbox-filter", "site=atl", "--netbox-filter", "role=core")
+    assert seen["dcim/devices/"]["site"] == "atl"
+    assert seen["dcim/devices/"]["role"] == "core"
+
+
+def test_the_csv_is_unaffected_and_still_the_default(device, csv_file, login, standards):
+    """--netbox is opt-in; nothing changes for a CSV run."""
+    assert run_feature("ntp", csv_file) == cli.EXIT_OK

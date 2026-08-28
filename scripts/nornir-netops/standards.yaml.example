@@ -213,3 +213,20 @@ local_accounts:
 #    implement: "-1"
 #    review: "0"
 #    closed: "3"
+
+# --------------------------------------------------------------------------
+# NetBox  ->  configure.py <feature> --netbox
+#
+# The token is NOT here -- $NETBOX_TOKEN or --netbox-secret. This file is meant
+# to be committed.
+#
+# source_fields are boolean custom fields on *interfaces*. Set one true on the
+# interface that is the source for that standard: none means the device uses no
+# source interface, one means that interface, two or more fails that device
+# rather than guessing.
+# --------------------------------------------------------------------------
+#netbox:
+#  url: https://netbox.example.com
+#  source_fields:
+#    - ntp_source_interface
+#    - syslog_source_interface

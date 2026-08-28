@@ -54,7 +54,13 @@ def summarize(exc: BaseException) -> str:
     detail = first_line(str(exc))
     if not detail:
         detail = name
-    elif name not in ("ValueError", "UnsupportedPlatform", "NotApplicable", "CredentialError"):
+    elif name not in (
+        "ValueError",
+        "UnsupportedPlatform",
+        "NotApplicable",
+        "CredentialError",
+        "AmbiguousSource",
+    ):
         # An exception we have no wording for: keep the class name, since it is
         # the thing worth grepping the debug log for.
         detail = f"{name}: {detail}"

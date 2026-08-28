@@ -185,6 +185,11 @@ def configure_feature(
         payload.update(skipped=True, skip_reason=str(exc), compliant=True)
         return Result(host=task.host, result=payload, changed=False)
 
+    if feature.per_device is not None:
+        # Before touching the device: an inventory that cannot say what this
+        # device's source interface is should stop here, not halfway through.
+        desired, variables = feature.per_device(list(desired), dict(variables), task.host)
+
     current = _read_state(task, support)
     # A parser can flag a value it read off the device as sensitive -- an SNMP
     # community has to be named to be removed, and that name is a credential.

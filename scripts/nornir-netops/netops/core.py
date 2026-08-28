@@ -89,6 +89,8 @@ PLATFORM_ALIASES = {
     "ios-xe": "cisco_ios",
     "ios_xe": "cisco_ios",
     "cisco_xe": "cisco_ios",
+    "cisco_ios_xe": "cisco_ios",
+    "cisco_iosxe": "cisco_ios",
     "cisco_ios_telnet": "cisco_ios",
     "eos": "arista_eos",
     "arista": "arista_eos",
@@ -313,6 +315,14 @@ class Feature:
     #: These are skipped and reported, not failed -- a fleet-wide run of a
     #: Cisco-only knob should not turn every Arista red.
     not_applicable: Dict[str, str] = field(default_factory=dict)
+    #: Adjusts the desired state for one device, given its host object.
+    #: Most standards are the same everywhere; a source interface is not -- one
+    #: switch sources from Loopback0, another from Vlan10, a third from
+    #: nothing -- and that answer lives in the inventory, per device. Raising
+    #: from here fails that device and no other.
+    per_device: Optional[
+        Callable[[List[str], Dict[str, Any], Any], Tuple[List[str], Dict[str, Any]]]
+    ] = None
     #: Whether a blank line in this feature's template is content (a banner
     #: body) rather than layout.
     keep_blank_lines: bool = False

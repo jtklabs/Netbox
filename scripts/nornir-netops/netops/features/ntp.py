@@ -35,6 +35,7 @@ from ..core import (
     validate_secret_value,
     validate_word,
 )
+from ..netbox import source_for
 from ..standards import StandardsError, host_and_port, of as standards_of
 
 # Wide enough to see the authentication lines, narrow enough that `ntp master`,
@@ -64,14 +65,21 @@ ntp server time.example.net
 """
 
 
-def _server_key(host: str, key_id: Optional[str]) -> str:
-    """The comparison key for a server, including which auth key it uses.
+def _server_key(host: str, key_id: Optional[str], source: Optional[str] = None) -> str:
+    """The comparison key for a server, including how it is configured.
 
-    The binding is part of what makes a server line correct, so a server
-    configured without its key differs from one configured with it.
+    The auth key and the source interface are both part of what makes a server
+    line correct, so a server configured without its key -- or sourced from the
+    wrong interface -- differs from one configured properly. Without that, a
+    stale `source Loopback0` on a device that should no longer have one would
+    read as compliant forever.
     """
     base = f"server:{normalize(host)}"
-    return f"{base}:key:{key_id}" if key_id else base
+    if key_id:
+        base += f":key:{key_id}"
+    if source:
+        base += f":source:{source}"
+    return base
 
 
 def parse_ntp(output: str) -> List[Entry]:
@@ -99,16 +107,22 @@ def parse_ntp(output: str) -> List[Entry]:
             if index >= len(tokens):
                 continue  # malformed / truncated line; nothing safe to key on
             host = tokens[index]
-            key_id = None
-            if "key" in tokens[index:]:
-                position = tokens.index("key", index)
-                if position + 1 < len(tokens):
-                    key_id = tokens[position + 1]
+            options = {}
+            for keyword in ("key", "source"):
+                if keyword in tokens[index:]:
+                    position = tokens.index(keyword, index)
+                    if position + 1 < len(tokens):
+                        options[keyword] = tokens[position + 1]
             entries.append(
                 Entry(
-                    key=_server_key(host, key_id),
+                    key=_server_key(host, options.get("key"), options.get("source")),
                     line=line,
-                    data={"kind": "server", "host": normalize(host), "key": key_id},
+                    data={
+                        "kind": "server",
+                        "host": normalize(host),
+                        "key": options.get("key"),
+                        "source": options.get("source"),
+                    },
                 )
             )
         elif kind == "authentication-key" and len(tokens) >= 4:
@@ -341,10 +355,11 @@ def build_desired(args: argparse.Namespace) -> Desired:
             keys.append(trusted)
             entries[trusted] = {"kind": "trusted-key", "id": key_id}
 
+    source = _word(args.source or standards.value("ntp.source"))
     for host in servers:
-        key = _server_key(host, key_id)
+        key = _server_key(host, key_id, source)
         keys.append(key)
-        entries[key] = {"kind": "server", "host": host, "key": key_id}
+        entries[key] = {"kind": "server", "host": host, "key": key_id, "source": source}
 
     # ...and authentication is switched on last, once every server can satisfy it.
     if auth and auth.get("enable", True):
@@ -357,13 +372,36 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "entries": entries,
             "vrf": _word(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
-            "source": _word(args.source or standards.value("ntp.source")),
+            "source": source,
             "iburst": args.iburst,
             "manages_auth": bool(auth),
             "rewrite_keys": bool(getattr(args, "rewrite_keys", False)),
         },
         secrets=secrets,
     )
+
+
+def per_device(keys, variables, host):
+    """Swap in this device's source interface, if the inventory knows one."""
+    source, authoritative = source_for(host, "ntp")
+    if not authoritative:
+        return keys, variables  # a CSV has no opinion; the file's value stands
+    source = validate_word(str(source), "interface") if source else None
+    if source == variables.get("source"):
+        return keys, variables
+
+    entries = dict(variables["entries"])
+    rebuilt: List[str] = []
+    for key in keys:
+        record = entries[key]
+        if record["kind"] != "server":
+            rebuilt.append(key)
+            continue
+        new_key = _server_key(record["host"], record.get("key"), source)
+        entries.pop(key, None)
+        entries[new_key] = {**record, "source": source}
+        rebuilt.append(new_key)
+    return rebuilt, {**variables, "entries": entries, "source": source}
 
 
 FEATURE = Feature(
@@ -376,6 +414,7 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_ntp,
+    per_device=per_device,
     # 10.10.10.1 is already in both samples, so the selftest also shows that a
     # server already configured produces no command.
     selftest_args=[
