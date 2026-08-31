@@ -53,6 +53,7 @@ KNOWN_SECTIONS = {
         "packetsize",
     },
     "banner": {"motd", "login", "delimiter"},
+    "nac": {"policy", "scope"},
     "acls": None,  # a list, not a mapping
     "local_accounts": {"names", "privilege", "role"},
     # Passthrough to ServiceNow change fields. change_request has hundreds of

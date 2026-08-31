@@ -136,6 +136,29 @@ banner:
   login: false
 
 # --------------------------------------------------------------------------
+# NAC  ->  configure.py nac
+#
+# The required per-port configuration is NOT here -- it is in
+# templates/<platform>/nac.j2, because it is platform syntax. This section only
+# says which ports the standard applies to.
+#
+# A dry run audits: it reports every in-scope port that is missing part of the
+# block. --apply adds the missing lines to those ports.
+# --------------------------------------------------------------------------
+nac:
+  policy: NAC-POLICY     # service-policy type control subscriber <name>
+  scope:
+    access_only: true    # only `switchport mode access` ports
+    skip_shutdown: true  # leave administratively down ports alone
+    exclude:             # never audited, by name (prefix or glob)
+      - TenGigabitEthernet
+      - FortyGigabitEthernet
+    exclude_description: # ...or by what the description says the port is
+      - uplink
+      - trunk
+      - access point
+
+# --------------------------------------------------------------------------
 # ACLs  ->  configure.py acl
 # Entries are applied in the order written -- order is the whole meaning of an
 # ACL, so a device whose entries are in a different order has drifted.

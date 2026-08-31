@@ -35,6 +35,7 @@ re-run with --apply to push the commands above
 | [`syslog`](#syslog) | Collectors, trap severity, source interface | `cisco_ios`, `arista_eos` |
 | [`banner`](#banner) | Login and MOTD banners | `cisco_ios`, `arista_eos` |
 | [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
+| [`nac`](#nac) | Audit access ports for 802.1X / MAB, and fix what is missing | `cisco_ios`, `arista_eos` |
 | [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
 | [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
 | [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
@@ -663,6 +664,91 @@ VTY, NAT, route-map -- which is not a thing to offer as a flag. Only ACLs named
 in the file are ever touched. Standard ACLs only for now; an extended ACL is
 refused rather than guessed at.
 
+## NAC
+
+```bash
+./configure.py nac                       # audit: report every non-compliant port
+./configure.py nac --apply               # add the missing lines to those ports
+```
+
+```console
+atl-core-sw1 (10.1.10.11) [cisco_ios] would run (9 commands)
+    1 of 2 access port(s) are missing NAC configuration
+    interface GigabitEthernet1/0/2
+     access-session host-mode multi-auth
+     access-session closed
+     access-session port-control auto
+     dot1x pae authenticator
+     dot1x timeout tx-period 7
+     service-policy type control subscriber NAC-POLICY
+     spanning-tree portfast
+     spanning-tree bpduguard enable
+```
+
+Unlike every other feature, this one is **per interface**: a switch has a
+hundred access ports and the question is which of them are missing part of the
+block. Only the missing lines are pushed -- a port that already has `mab` is
+not sent it again -- and **nothing is ever removed**. Stripping a line somebody
+added deliberately is not this feature's business.
+
+### The required configuration is in the template
+
+**`templates/cisco_ios/nac.j2` is a generic IBNS 2.0 block, not your
+standard.** Correct it to match yours and the audit follows automatically:
+
+```jinja
+{% if declare %}
+switchport mode access
+access-session host-mode multi-auth
+access-session closed
+access-session port-control auto
+mab
+dot1x pae authenticator
+dot1x timeout tx-period 7
+{% if policy %}
+service-policy type control subscriber {{ policy }}
+{% endif %}
+spanning-tree portfast
+spanning-tree bpduguard enable
+{% else %}
+...
+```
+
+The template has two modes. The planner renders it in `declare` mode to learn
+what a compliant port looks like, compares every in-scope port against that,
+then renders it again -- as `interface X` plus only the lines that port
+lacks -- to fix one. There is exactly one copy of the standard, and it is the
+one that gets pushed. The legacy IBNS 1.0 `authentication ...` equivalents are
+in a comment at the bottom for a fleet not yet migrated.
+
+The EOS block is a great deal less certain than the IOS one; check it against
+your release before trusting the audit.
+
+### Which ports are in scope
+
+A judgement, so it is stated rather than guessed:
+
+```yaml
+nac:
+  policy: NAC-POLICY
+  scope:
+    access_only: true      # only `switchport mode access` ports
+    skip_shutdown: true    # leave administratively down ports alone
+    exclude: [TenGigabitEthernet]     # by name, prefix or glob
+    exclude_description: [uplink, trunk, access point]
+```
+
+SVIs, port-channels, loopbacks, tunnels and management interfaces are never in
+scope whatever the file says -- no NAC question applies to them. A trunk is not
+an access port, and NAC on an uplink takes the switch off the network, so
+trunks are excluded by default; `--include-trunks` and `--include-shutdown`
+override that for a one-off look.
+
+Verification is unusual here too: the desired set is "every in-scope port on
+this device", which is not known until the device has been read, so after
+applying the audit is simply re-run. If any port still wants a line, the device
+is reported unverified and startup-config is not saved.
+
 ## Local users
 
 ```bash
@@ -1178,7 +1264,7 @@ pip install pytest
 pytest
 ```
 
-565 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+603 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

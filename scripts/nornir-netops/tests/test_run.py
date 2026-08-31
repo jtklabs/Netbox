@@ -70,6 +70,13 @@ class FakeDevice:
         return "\n".join(out)
 
     def apply(self, commands):
+        """Config mode, including sub-mode context.
+
+        A device does not append `access-session closed` to the end of the
+        config; it merges it into the interface block that is currently open.
+        Modelling that is what makes the NAC round trip mean anything.
+        """
+        block = None
         for command in commands:
             if command.startswith("no "):
                 target = command[3:]
@@ -78,7 +85,19 @@ class FakeDevice:
                     for line in self.lines
                     if line != target and not line.startswith(target + " ")
                 ]
+            elif command.startswith((" ", "\t")) and block is not None:
+                start = self.lines.index(block) + 1
+                end = start
+                while end < len(self.lines) and self.lines[end].startswith((" ", "\t")):
+                    end += 1
+                if command not in self.lines[start:end]:
+                    self.lines.insert(end, command)
+            elif command.startswith("interface "):
+                block = command
+                if block not in self.lines:
+                    self.lines.append(block)
             else:
+                block = None
                 self.lines.append(command)
 
 
@@ -1715,3 +1734,76 @@ def test_a_netbox_filter_reaches_the_query(device, login, netbox, monkeypatch, c
 def test_the_csv_is_unaffected_and_still_the_default(device, csv_file, login, standards):
     """--netbox is opt-in; nothing changes for a CSV run."""
     assert run_feature("ntp", csv_file) == cli.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# nac -- a per-interface audit
+# --------------------------------------------------------------------------- #
+
+
+NAC_STANDARDS = """
+nac:
+  policy: NAC-POLICY
+  scope:
+    exclude_description: [uplink]
+"""
+
+
+@pytest.fixture
+def nac_standards(tmp_path):
+    (tmp_path / "standards.yaml").write_text(NAC_STANDARDS, encoding="utf-8")
+    return tmp_path / "standards.yaml"
+
+
+@pytest.fixture
+def ports(device):
+    """A switch with one compliant port, one bare port, and an uplink."""
+    from netops.features.nac import IOS_SAMPLE
+
+    device["devices"]["sw1"].lines.extend(IOS_SAMPLE.splitlines())
+    return device
+
+
+def test_the_audit_names_the_ports_and_only_their_missing_lines(
+    ports, csv_file, login, nac_standards, capsys
+):
+    assert run_feature("nac", csv_file, "--limit", "sw1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+
+    assert "interface GigabitEthernet1/0/2" in out
+    assert "access-session closed" in out
+    assert "1 of 2 access port(s) are missing NAC configuration" in out
+    # the compliant port, the shut port, the trunk and the SVI are all absent
+    assert "GigabitEthernet1/0/1" not in out
+    assert "GigabitEthernet1/0/48" not in out
+    assert "Vlan10" not in out
+    assert ports["config"] == {}  # an audit changes nothing
+
+
+def test_applying_fixes_only_the_ports_that_need_it(
+    ports, csv_file, login, nac_standards, capsys
+):
+    assert run_feature("nac", csv_file, "--apply", "-y", "--limit", "sw1") == cli.EXIT_OK
+    pushed = ports["config"]["sw1"]
+    assert pushed[0] == "interface GigabitEthernet1/0/2"
+    assert " mab" not in pushed  # it already had that line
+    assert not any("1/0/1" in command for command in pushed)
+
+
+def test_verification_re_runs_the_audit_and_it_comes_back_clean(
+    ports, csv_file, login, nac_standards, tmp_path, capsys
+):
+    report = tmp_path / "nac.json"
+    run_feature("nac", csv_file, "--apply", "-y", "--limit", "sw1", "--report", str(report))
+    record = json.loads(report.read_text())["devices"]["sw1"]
+    assert record["verified"] is True
+    assert record["missing_after"] == []
+
+
+def test_a_second_run_finds_nothing_left_to_do(
+    ports, csv_file, login, nac_standards, capsys
+):
+    run_feature("nac", csv_file, "--apply", "-y", "--limit", "sw1")
+    capsys.readouterr()
+    assert run_feature("nac", csv_file, "--limit", "sw1") == cli.EXIT_OK
+    assert "2 access port(s) checked, all compliant" in capsys.readouterr().out

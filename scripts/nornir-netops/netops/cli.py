@@ -489,6 +489,8 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
 
     if status == "ok":
         print(f"{header} {style.ok('already compliant')}")
+        for note in record.get("notes") or ():
+            print(style.dim(f"    {note}"))
         if verbose:
             for line in record["current"]:
                 print(style.dim(f"    {line}"))
@@ -517,6 +519,8 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
         print(f"    {command}")
     if record["save_command"]:
         print(f"    {record['save_command']}")
+    for note in record.get("notes") or ():
+        print(style.dim(f"    {note}"))
     for note in record.get("advisories") or ():
         print(style.warn(f"    {note}"))
     if status == "unverified":
@@ -629,6 +633,7 @@ def selftest() -> int:
             )
             for mode in (MODE_ADD, MODE_REPLACE):
                 advisories: List[str] = []
+                notes: List[str] = []
                 # the feature's own planner, so a rotation or a scalar setting
                 # renders here exactly as it would against a device
                 add, remove = feature.plan(
@@ -641,6 +646,7 @@ def selftest() -> int:
                         "variables": desired.variables,
                         "ignores": support.ignores,
                         "advisories": advisories,
+                        "notes": notes,
                     },
                 )
                 try:
@@ -659,6 +665,8 @@ def selftest() -> int:
                 print(f"  --{mode}:")
                 for command in commands:
                     print(f"    {scrub(command, shown_secrets)}")
+                for note in notes:
+                    print(f"    # {note}")
                 for note in advisories:
                     print(f"    ! {note}")
                 if not commands and not advisories:

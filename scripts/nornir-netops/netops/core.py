@@ -315,6 +315,10 @@ class Feature:
     #: These are skipped and reported, not failed -- a fleet-wide run of a
     #: Cisco-only knob should not turn every Arista red.
     not_applicable: Dict[str, str] = field(default_factory=dict)
+    #: Verify by re-running this feature's own planner rather than checking
+    #: that the desired keys are present. For a feature whose desired set comes
+    #: from the device itself, the keys are not known in advance.
+    verify_with_plan: bool = False
     #: Adjusts the desired state for one device, given its host object.
     #: Most standards are the same everywhere; a source interface is not -- one
     #: switch sources from Loopback0, another from Vlan10, a third from

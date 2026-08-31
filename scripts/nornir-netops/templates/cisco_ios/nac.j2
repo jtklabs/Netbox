@@ -1,0 +1,55 @@
+{#-
+  Cisco IOS / IOS-XE -- NAC on access ports.
+
+  ============================ REVIEW THIS BLOCK ============================
+  This is a generic IBNS 2.0 access-port configuration, not your standard.
+  Correct it to match what your access ports should look like and the audit
+  follows automatically -- there is nothing else to change.
+
+  If your fleet is still on legacy `authentication ...` commands rather than
+  `access-session ...`, replace the block wholesale; the commented lines at the
+  bottom are the legacy equivalents.
+  ===========================================================================
+
+  How it is used: the planner renders this once in `declare` mode to learn what
+  a compliant port looks like, compares every in-scope port against it, and
+  renders it again as `interface X` plus only the lines that port is missing.
+  One copy of the standard, and it is the one that gets pushed.
+
+  Available variables:
+    declare  bool                 emit the required block, with no interface
+    add      list[str]            interfaces to correct
+    missing  {interface: [lines]} what each of them lacks
+    policy   str|None             subscriber control policy name
+-#}
+{% if declare %}
+switchport mode access
+access-session host-mode multi-auth
+access-session closed
+access-session port-control auto
+mab
+dot1x pae authenticator
+dot1x timeout tx-period 7
+{% if policy %}
+service-policy type control subscriber {{ policy }}
+{% endif %}
+spanning-tree portfast
+spanning-tree bpduguard enable
+{#-
+  Legacy IBNS 1.0 equivalents, for a fleet not yet migrated:
+    authentication host-mode multi-auth
+    authentication order dot1x mab
+    authentication priority dot1x mab
+    authentication port-control auto
+    authentication periodic
+    authentication timer reauthenticate server
+    authentication violation restrict
+-#}
+{% else %}
+{% for name in add %}
+interface {{ name }}
+{% for line in missing[name] %}
+ {{ line }}
+{% endfor %}
+{% endfor %}
+{% endif %}

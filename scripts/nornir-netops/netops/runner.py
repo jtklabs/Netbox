@@ -168,6 +168,7 @@ def configure_feature(
         "save_command": None,
         "compliant": False,
         "advisories": [],
+        "notes": [],
         "applied": False,
         "saved": None,
         "skipped": False,
@@ -184,6 +185,10 @@ def configure_feature(
         # Not an error: the setting does not exist on this OS.
         payload.update(skipped=True, skip_reason=str(exc), compliant=True)
         return Result(host=task.host, result=payload, changed=False)
+
+    # Each host gets its own copy, so a planner that records something for the
+    # template -- which interfaces are missing what -- cannot race another host.
+    variables = dict(variables)
 
     if feature.per_device is not None:
         # Before touching the device: an inventory that cannot say what this
@@ -205,9 +210,13 @@ def configure_feature(
         "ignores": support.ignores,
         # A planner appends here when it finds drift it will not fix by itself.
         "advisories": [],
+        # ...and here when it has something to say that is not a problem: how
+        # many interfaces it looked at, say. Notes never affect compliance.
+        "notes": [],
     }
     to_add, to_remove = feature.plan(current, desired, mode, context)
     advisories: List[str] = list(context["advisories"])
+    notes: List[str] = list(context["notes"])
 
     commands: List[str] = []
     if to_add or to_remove:
@@ -222,6 +231,7 @@ def configure_feature(
         commands=[scrub(command, secrets) for command in commands],
         save_command=SAVE_COMMANDS.get(platform) if (commands and save) else None,
         advisories=advisories,
+        notes=notes,
         # Drift we are not fixing is still drift: this device is not compliant.
         compliant=not commands and not advisories,
     )
@@ -243,9 +253,17 @@ def configure_feature(
     # the account still in it.
     if verify:
         after = _read_state(task, support)
-        missing, _ = plan_changes(after, desired, MODE_ADD)
-        payload["verified"] = not missing
-        payload["missing_after"] = missing
+        if feature.verify_with_plan:
+            # For a feature whose desired set is worked out from the device --
+            # every access port, say -- "is anything still outstanding?" is the
+            # only question worth asking, and its own planner is what answers it.
+            again, _ = feature.plan(after, desired, mode, {**context, "advisories": []})
+            payload["verified"] = not again
+            payload["missing_after"] = list(again)
+        else:
+            missing, _ = plan_changes(after, desired, MODE_ADD)
+            payload["verified"] = not missing
+            payload["missing_after"] = missing
 
     if payload["save_command"] and payload["verified"] is not False:
         saved = task.run(

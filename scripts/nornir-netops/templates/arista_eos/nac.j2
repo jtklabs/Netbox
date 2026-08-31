@@ -1,0 +1,28 @@
+{#-
+  Arista EOS -- NAC on access ports.
+
+  ============================ REVIEW THIS BLOCK ============================
+  Generic EOS 802.1X, not your standard, and less certain than the IOS block:
+  confirm the keywords against your EOS release before trusting the audit.
+  ===========================================================================
+
+  Same two modes as the IOS template: `declare` emits the required block, and
+  otherwise it emits `interface X` plus only the lines that port lacks.
+-#}
+{% if declare %}
+switchport mode access
+dot1x pae authenticator
+dot1x port-control auto
+dot1x reauthentication
+dot1x timeout tx-period 7
+dot1x mac based authentication
+spanning-tree portfast
+spanning-tree bpduguard enable
+{% else %}
+{% for name in add %}
+interface {{ name }}
+{% for line in missing[name] %}
+ {{ line }}
+{% endfor %}
+{% endfor %}
+{% endif %}
