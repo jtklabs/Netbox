@@ -6,15 +6,14 @@ Two things arrive together here, because the second is the reason for the first.
 from NetBox's platform slug, and site, role, tags and device custom fields land
 in host data, so `--filter site=atl` works exactly as it does with a CSV.
 
-**Interface custom fields.** A source interface is a property of the device, not
-of the fleet: one switch sources syslog from Loopback0, another from Vlan10,
-and a third from nothing at all. That is recorded in NetBox as a boolean custom
-field on the *interface* -- `ntp_source_interface` set true on the one interface
-that is the source.
+**Interface tags.** A source interface is a property of the device, not of the
+fleet: one switch sources syslog from Loopback0, another from Vlan10, and a
+third from nothing at all. That is recorded in NetBox as a *tag* on the
+interface -- `ntp-source` on the one interface that is the source.
 
-The rule that follows from a boolean:
+The rule that follows:
 
-* no interface marked -> the device uses no source interface;
+* no interface tagged -> the device uses no source interface;
 * exactly one -> that interface;
 * two or more -> the device is in an ambiguous state nobody meant, so that
   device fails with a message naming the interfaces. Picking one would be
@@ -88,11 +87,11 @@ def slugify(value: str) -> str:
     """
     return _SLUG_STRIP.sub("-", str(value).strip().lower()).strip("-")
 
-#: Interface custom fields consulted by default. The part before
-#: `_source_interface` is the feature the answer belongs to.
-DEFAULT_SOURCE_FIELDS = ("ntp_source_interface", "syslog_source_interface")
+#: Interface tags consulted by default, as feature -> tag slug. A tag is a
+#: slug in NetBox, so `ntp-source` rather than `ntp_source_interface`.
+DEFAULT_SOURCE_TAGS = {"ntp": "ntp-source", "syslog": "syslog-source"}
 
-_SOURCE_SUFFIX = "_source_interface"
+_SOURCE_SUFFIX = "-source"
 
 #: NetBox pages at 50 by default, which is a lot of round trips for a fleet.
 PAGE_SIZE = 250
@@ -106,9 +105,22 @@ class AmbiguousSource(Exception):
     """More than one interface claims to be the source for one standard."""
 
 
-def feature_of(field: str) -> str:
-    """`ntp_source_interface` -> `ntp`."""
-    return field[: -len(_SOURCE_SUFFIX)] if field.endswith(_SOURCE_SUFFIX) else field
+def feature_of(tag: str) -> str:
+    """`ntp-source` -> `ntp`."""
+    return tag[: -len(_SOURCE_SUFFIX)] if tag.endswith(_SOURCE_SUFFIX) else tag
+
+
+def source_tags(configured: Any) -> Dict[str, str]:
+    """Normalize what the standards file or the flags asked for.
+
+    Accepts a mapping of feature to tag, or a bare list of tags whose feature
+    is the part before `-source`.
+    """
+    if not configured:
+        return dict(DEFAULT_SOURCE_TAGS)
+    if isinstance(configured, Mapping):
+        return {str(feature): str(tag) for feature, tag in configured.items()}
+    return {feature_of(str(tag)): str(tag) for tag in configured}
 
 
 class Client:
@@ -221,12 +233,12 @@ def device_data(device: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_sources(
-    interfaces: Iterable[Mapping[str, Any]], field: str
+    interfaces: Iterable[Mapping[str, Any]], tag: str
 ) -> Tuple[Dict[int, str], Dict[int, List[str]]]:
-    """Group interfaces claiming `field` by device.
+    """Group interfaces carrying `tag` by device.
 
     Returns the single source per device, and separately the devices where more
-    than one interface claims it -- which is not something to resolve by
+    than one interface carries it -- which is not something to resolve by
     picking one.
     """
     claimed: Dict[int, List[str]] = {}
@@ -248,20 +260,19 @@ def resolve_sources(
 
 
 def source_interfaces(
-    client: Client, fields: Sequence[str], filters: Mapping[str, Any]
+    client: Client, tags: Mapping[str, str], filters: Mapping[str, Any]
 ) -> Dict[int, Dict[str, Any]]:
-    """One query per custom field, for the whole fleet at once.
+    """One query per tag, for the whole fleet at once.
 
     Asking per device would be one round trip per device per standard; asking
-    NetBox for every interface with the field set is a single query that the
+    NetBox for every interface carrying the tag is a single query that the
     server is built to answer.
     """
     per_device: Dict[int, Dict[str, Any]] = {}
-    for field in fields:
-        query = {f"cf_{field}": "true", **filters}
+    for feature, tag in tags.items():
+        query = {"tag": tag, **filters}
         interfaces = client.get("dcim/interfaces/", query)
-        single, ambiguous = resolve_sources(interfaces, field)
-        feature = feature_of(field)
+        single, ambiguous = resolve_sources(interfaces, tag)
         for device_id, name in single.items():
             per_device.setdefault(device_id, {}).setdefault("source_interface", {})[
                 feature
@@ -270,7 +281,7 @@ def source_interfaces(
             per_device.setdefault(device_id, {}).setdefault("source_interface_error", {})[
                 feature
             ] = (
-                f"{len(names)} interfaces are marked {field} in NetBox "
+                f"{len(names)} interfaces are tagged {tag} in NetBox "
                 f"({', '.join(names)}); exactly one may be"
             )
     return per_device
@@ -284,7 +295,7 @@ class NetBoxInventory:
         url: Optional[str] = None,
         token: Optional[str] = None,
         filters: Optional[Mapping[str, Any]] = None,
-        source_fields: Sequence[str] = DEFAULT_SOURCE_FIELDS,
+        source_tags: Optional[Mapping[str, str]] = None,
         verify_tls: bool = True,
         username: Optional[str] = None,
         password: Optional[str] = None,
@@ -300,7 +311,9 @@ class NetBoxInventory:
             verify_tls,
         )
         self.filters = dict(filters or {})
-        self.source_fields = tuple(source_fields)
+        self.source_tags = dict(
+            DEFAULT_SOURCE_TAGS if source_tags is None else source_tags
+        )
         self.username = username
         self.password = password
         self.secret = secret
@@ -333,8 +346,8 @@ class NetBoxInventory:
         )
 
         sources = (
-            source_interfaces(self.client, self.source_fields, self.filters)
-            if self.source_fields
+            source_interfaces(self.client, self.source_tags, self.filters)
+            if self.source_tags
             else {}
         )
 
@@ -412,12 +425,12 @@ def settings_from(standards, args) -> Dict[str, Any]:
     be committed.
     """
     section = standards.section("netbox") if standards is not None else {}
-    fields = getattr(args, "netbox_source_field", None) or section.get("source_fields")
+    tags = getattr(args, "netbox_source_tag", None) or section.get("source_tags")
     return {
         "url": getattr(args, "netbox_url", None) or section.get("url") or os.environ.get("NETBOX_URL"),
         "token": os.environ.get("NETBOX_TOKEN"),
         "filters": parse_filters(getattr(args, "netbox_filter", None) or []),
-        "source_fields": tuple(fields) if fields else DEFAULT_SOURCE_FIELDS,
+        "source_tags": source_tags(tags),
         "verify_tls": str(section.get("verify_tls", "true")).lower() != "false",
     }
 

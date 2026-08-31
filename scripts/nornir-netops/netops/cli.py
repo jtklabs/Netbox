@@ -157,11 +157,11 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         "repeated key means any of them)",
     )
     box.add_argument(
-        "--netbox-source-field",
+        "--netbox-source-tag",
         action="append",
-        metavar="FIELD",
-        help="interface custom field naming a source interface, e.g. "
-        "ntp_source_interface (repeatable; defaults to the ntp and syslog ones)",
+        metavar="TAG",
+        help="interface tag naming a source interface, e.g. ntp-source "
+        "(repeatable; defaults to ntp-source and syslog-source)",
     )
 
     cache = parent.add_argument_group(

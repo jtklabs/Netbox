@@ -28,8 +28,7 @@ class FakeClient:
         self.calls.append((path, dict(params or {})))
         if path.startswith("dcim/devices"):
             return self.devices
-        field = next((k[3:] for k in (params or {}) if k.startswith("cf_")), None)
-        return self.interfaces.get(field, [])
+        return self.interfaces.get((params or {}).get("tag"), [])
 
 
 def device(id=1, name="sw1", address="10.1.1.1/24", platform="cisco-ios", **extra):
@@ -173,34 +172,45 @@ def test_no_devices_is_an_error_that_says_why():
 # --------------------------------------------------------------------------- #
 
 
-def test_feature_of_a_field_name():
-    assert feature_of("ntp_source_interface") == "ntp"
-    assert feature_of("syslog_source_interface") == "syslog"
+def test_feature_of_a_tag():
+    assert feature_of("ntp-source") == "ntp"
+    assert feature_of("syslog-source") == "syslog"
 
 
-def test_exactly_one_marked_interface_is_the_source():
-    single, ambiguous = resolve_sources([interface("Loopback0")], "ntp_source_interface")
+def test_source_tags_accepts_a_mapping_or_a_list():
+    from netops.netbox import DEFAULT_SOURCE_TAGS, source_tags
+
+    assert source_tags(None) == DEFAULT_SOURCE_TAGS
+    assert source_tags({"ntp": "clock-source"}) == {"ntp": "clock-source"}
+    assert source_tags(["ntp-source", "snmp-source"]) == {
+        "ntp": "ntp-source",
+        "snmp": "snmp-source",
+    }
+
+
+def test_exactly_one_tagged_interface_is_the_source():
+    single, ambiguous = resolve_sources([interface("Loopback0")], "ntp-source")
     assert single == {1: "Loopback0"}
     assert ambiguous == {}
 
 
-def test_two_marked_interfaces_are_ambiguous_not_a_choice():
+def test_two_tagged_interfaces_are_ambiguous_not_a_choice():
     """Picking one would be guessing, and the wrong source quietly breaks
     return traffic."""
     single, ambiguous = resolve_sources(
-        [interface("Loopback0"), interface("Vlan10")], "ntp_source_interface"
+        [interface("Loopback0"), interface("Vlan10")], "ntp-source"
     )
     assert single == {}
     assert ambiguous == {1: ["Loopback0", "Vlan10"]}
 
 
-def test_no_marked_interface_means_no_source():
-    single, ambiguous = resolve_sources([], "ntp_source_interface")
+def test_no_tagged_interface_means_no_source():
+    single, ambiguous = resolve_sources([], "ntp-source")
     assert (single, ambiguous) == ({}, {})
 
 
 def test_the_source_lands_on_the_host():
-    client = FakeClient([device()], {"ntp_source_interface": [interface("Loopback0")]})
+    client = FakeClient([device()], {"ntp-source": [interface("Loopback0")]})
     inventory = NetBoxInventory(client=client).load()
     assert inventory.hosts["sw1"].data["source_interface"]["ntp"] == "Loopback0"
 
@@ -208,27 +218,29 @@ def test_the_source_lands_on_the_host():
 def test_an_ambiguous_device_carries_the_problem_not_a_guess():
     client = FakeClient(
         [device()],
-        {"ntp_source_interface": [interface("Loopback0"), interface("Vlan10")]},
+        {"ntp-source": [interface("Loopback0"), interface("Vlan10")]},
     )
     inventory = NetBoxInventory(client=client).load()
     problem = inventory.hosts["sw1"].data["source_interface_error"]["ntp"]
     assert "2 interfaces" in problem
+    assert "tagged ntp-source" in problem
     assert "Loopback0, Vlan10" in problem
     assert "exactly one may be" in problem
 
 
-def test_one_query_per_field_not_per_device():
+def test_one_query_per_tag_not_per_device():
     """Asking per device would be a round trip per device per standard."""
     devices = [device(id=i, name=f"sw{i}") for i in range(1, 51)]
-    client = FakeClient(devices, {"ntp_source_interface": [interface("Loopback0", 3)]})
-    NetBoxInventory(client=client, source_fields=("ntp_source_interface",)).load()
-    assert len(client.calls) == 2  # one for devices, one for the field
+    client = FakeClient(devices, {"ntp-source": [interface("Loopback0", 3)]})
+    NetBoxInventory(client=client, source_tags={"ntp": "ntp-source"}).load()
+    assert len(client.calls) == 2  # one for devices, one for the tag
+    assert client.calls[1][1]["tag"] == "ntp-source"
 
 
 def test_each_device_gets_its_own_answer():
     client = FakeClient(
         [device(), device(id=2, name="sw2"), device(id=3, name="sw3")],
-        {"ntp_source_interface": [interface("Loopback0", 1), interface("Vlan10", 2)]},
+        {"ntp-source": [interface("Loopback0", 1), interface("Vlan10", 2)]},
     )
     hosts = NetBoxInventory(client=client).load().hosts
     assert hosts["sw1"].data["source_interface"]["ntp"] == "Loopback0"
@@ -251,7 +263,7 @@ def test_a_csv_host_has_no_opinion():
 
 
 def test_netbox_saying_nothing_is_still_an_answer():
-    """`not set` means no source interface, not "fall back to the file"."""
+    """No tag means no source interface, not "fall back to the file"."""
     assert source_for(host(source_interface={}), "ntp") == (None, True)
 
 
@@ -265,7 +277,7 @@ def test_netbox_naming_an_interface():
 def test_an_ambiguous_device_raises_for_that_standard_only():
     subject = host(
         source_interface={"syslog": "Vlan10"},
-        source_interface_error={"ntp": "2 interfaces are marked ntp_source_interface"},
+        source_interface_error={"ntp": "2 interfaces are tagged ntp-source"},
     )
     with pytest.raises(AmbiguousSource, match="2 interfaces"):
         source_for(subject, "ntp")

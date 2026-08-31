@@ -208,23 +208,23 @@ to be committed.
 
 One switch sources syslog from Loopback0, another from Vlan10, a third from
 nothing at all. That is not a fleet-wide standard, so it is not in the
-standards file -- it is a boolean custom field on the *interface* in NetBox:
+standards file -- it is a **tag on the interface** in NetBox:
 
 ```
-ntp_source_interface      true   on Loopback0
-syslog_source_interface   true   on Vlan10
+Loopback0    tags: ntp-source
+Vlan10       tags: syslog-source
 ```
 
-The rule that follows from a boolean:
+The rule that follows:
 
-| Interfaces marked | Result |
+| Interfaces tagged | Result |
 | --- | --- |
-| none | **The device uses no source interface** -- and this overrides the fleet-wide `ntp.source` in the standards file. "Not set" is an answer, not a gap to fill. |
+| none | **The device uses no source interface** -- and this overrides the fleet-wide `ntp.source` in the standards file. No tag is an answer, not a gap to fill. |
 | exactly one | That interface is the source. |
 | two or more | **That device fails**, naming the interfaces. |
 
 ```console
-sw1 (10.1.1.1) [cisco_ios] FAILED -- 2 interfaces are marked ntp_source_interface
+sw1 (10.1.1.1) [cisco_ios] FAILED -- 2 interfaces are tagged ntp-source
     in NetBox (Loopback0, Vlan10); exactly one may be
 ```
 
@@ -235,15 +235,24 @@ written**, and picking one would be guessing -- the wrong source interface is
 the kind of thing that quietly breaks return traffic rather than failing
 visibly.
 
-The custom fields consulted default to `ntp_source_interface` and
-`syslog_source_interface`; `--netbox-source-field` or `netbox.source_fields` in
-the standards file changes that. The part before `_source_interface` names the
-feature the answer belongs to, so `snmp_source_interface` would wire itself to
-`snmp` once that feature learns to use one.
+The tags consulted default to `ntp-source` and `syslog-source`;
+`--netbox-source-tag`, or `netbox.source_tags` in the standards file, changes
+that:
 
-NetBox is asked **once per custom field for the whole fleet**, not once per
-device -- a single query the server is built to answer, rather than a round
-trip per device per standard.
+```yaml
+netbox:
+  source_tags:
+    ntp: ntp-source
+    syslog: syslog-source
+```
+
+A bare list works too, in which case the part before `-source` names the
+feature -- so `snmp-source` wires itself to `snmp` once that feature learns to
+use one.
+
+NetBox is asked **once per tag for the whole fleet**, not once per device -- a
+single query the server is built to answer, rather than a round trip per device
+per standard.
 
 ### What this means for the templates
 
@@ -1264,7 +1273,7 @@ pip install pytest
 pytest
 ```
 
-603 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+604 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

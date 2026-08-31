@@ -59,7 +59,7 @@ KNOWN_SECTIONS = {
     # Passthrough to ServiceNow change fields. change_request has hundreds of
     # valid columns, so warning about an unrecognised one would be noise.
     "change": None,
-    "netbox": {"url", "source_fields", "verify_tls"},
+    "netbox": {"url", "source_tags", "verify_tls"},
 }
 
 _DOTTED_PATH = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)+$", re.IGNORECASE)

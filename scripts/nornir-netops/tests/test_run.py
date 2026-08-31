@@ -1615,8 +1615,7 @@ def netbox(monkeypatch, tmp_path):
         def get(self, path, params=None):
             if path.startswith("dcim/devices"):
                 return state["devices"]
-            field = next((k[3:] for k in (params or {}) if k.startswith("cf_")), None)
-            return state["interfaces"].get(field, [])
+            return state["interfaces"].get((params or {}).get("tag"), [])
 
     monkeypatch.setattr("netops.netbox.Client", FakeClient)
     monkeypatch.setenv("NETBOX_URL", "https://netbox.example.com")
@@ -1625,7 +1624,7 @@ def netbox(monkeypatch, tmp_path):
     return state
 
 
-def marked(name, device_id):
+def tagged(name, device_id):
     return {"name": name, "device": {"id": device_id, "name": f"device{device_id}"}}
 
 
@@ -1640,16 +1639,16 @@ def test_netbox_supplies_the_inventory(device, login, netbox, capsys):
     assert "sw1" in out and "leaf1" in out
 
 
-def test_a_marked_interface_becomes_that_devices_source(device, login, netbox, capsys):
-    netbox["interfaces"]["ntp_source_interface"] = [marked("Loopback0", 1)]
+def test_a_tagged_interface_becomes_that_devices_source(device, login, netbox, capsys):
+    netbox["interfaces"]["ntp-source"] = [tagged("Loopback0", 1)]
     run_netbox("ntp", "--limit", "sw1")
     assert "ntp server 10.50.0.10 source Loopback0" in capsys.readouterr().out
 
 
-def test_no_marked_interface_means_no_source_at_all(device, login, netbox, capsys):
+def test_no_tagged_interface_means_no_source_at_all(device, login, netbox, capsys):
     """Even though the standards file names one -- NetBox is asked per device,
     and 'not set' is an answer, not a gap to fill from the file."""
-    netbox["interfaces"]["ntp_source_interface"] = [marked("Loopback0", 1)]
+    netbox["interfaces"]["ntp-source"] = [tagged("Loopback0", 1)]
     run_netbox("ntp", "--limit", "sw2")
     out = capsys.readouterr().out
     assert "ntp server 10.50.0.10" in out
@@ -1657,19 +1656,19 @@ def test_no_marked_interface_means_no_source_at_all(device, login, netbox, capsy
     assert "Loopback99" not in out
 
 
-def test_two_marked_interfaces_fail_that_device_and_no_other(
+def test_two_tagged_interfaces_fail_that_device_and_no_other(
     device, login, netbox, capsys
 ):
-    netbox["interfaces"]["ntp_source_interface"] = [
-        marked("Loopback0", 1),
-        marked("Vlan10", 1),
-        marked("Management1", 2),
+    netbox["interfaces"]["ntp-source"] = [
+        tagged("Loopback0", 1),
+        tagged("Vlan10", 1),
+        tagged("Management1", 2),
     ]
     code = run_netbox("ntp")
     out = capsys.readouterr().out
 
     assert code == cli.EXIT_FAILED
-    assert "sw1" in out and "2 interfaces are marked ntp_source_interface" in out
+    assert "sw1" in out and "2 interfaces are tagged ntp-source" in out
     assert "Loopback0, Vlan10" in out
     assert "exactly one may be" in out
     # the other two are unaffected and still planned (leaf1 is EOS, so its
@@ -1682,9 +1681,9 @@ def test_two_marked_interfaces_fail_that_device_and_no_other(
 def test_the_ambiguity_is_reported_before_the_device_is_touched(
     device, login, netbox, capsys
 ):
-    netbox["interfaces"]["ntp_source_interface"] = [
-        marked("Loopback0", 1),
-        marked("Vlan10", 1),
+    netbox["interfaces"]["ntp-source"] = [
+        tagged("Loopback0", 1),
+        tagged("Vlan10", 1),
     ]
     run_netbox("ntp", "--apply", "-y", "--limit", "sw1")
     assert device["config"] == {}
@@ -1694,16 +1693,16 @@ def test_the_ambiguity_is_reported_before_the_device_is_touched(
 def test_one_standard_being_ambiguous_leaves_the_others_alone(
     device, login, netbox, capsys
 ):
-    netbox["interfaces"]["ntp_source_interface"] = [
-        marked("Loopback0", 1),
-        marked("Vlan10", 1),
+    netbox["interfaces"]["ntp-source"] = [
+        tagged("Loopback0", 1),
+        tagged("Vlan10", 1),
     ]
-    netbox["interfaces"]["syslog_source_interface"] = [marked("Loopback0", 1)]
+    netbox["interfaces"]["syslog-source"] = [tagged("Loopback0", 1)]
     assert run_netbox("syslog", "--limit", "sw1") == cli.EXIT_OK
     assert "logging source-interface Loopback0" in capsys.readouterr().out
 
 
-def test_syslog_drops_the_source_when_no_interface_is_marked(
+def test_syslog_drops_the_source_when_no_interface_is_tagged(
     device, login, netbox, capsys
 ):
     run_netbox("syslog", "--limit", "sw1")
