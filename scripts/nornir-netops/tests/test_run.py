@@ -1806,3 +1806,137 @@ def test_a_second_run_finds_nothing_left_to_do(
     capsys.readouterr()
     assert run_feature("nac", csv_file, "--limit", "sw1") == cli.EXIT_OK
     assert "2 access port(s) checked, all compliant" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# rollback, end to end
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def journals(tmp_path, monkeypatch):
+    directory = tmp_path / "rollback"
+    monkeypatch.setenv("NETOPS_ROLLBACK_DIR", str(directory))
+    return directory
+
+
+def test_an_apply_records_how_to_undo_itself(
+    device, csv_file, login, standards, journals, capsys
+):
+    assert run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "rollback recorded in" in out
+    assert "configure.py rollback" in out
+
+    written = list(journals.glob("*-syslog.json"))
+    assert len(written) == 1
+    record = json.loads(written[0].read_text())["devices"]["sw1"]
+    assert record["hostname"] == "10.1.1.1"
+    assert record["platform"] == "cisco_ios"
+    assert "no logging host 10.1.1.50" in record["rollback"]
+
+
+def test_a_dry_run_records_nothing(device, csv_file, login, standards, journals):
+    run_feature("syslog", csv_file, "--limit", "sw1")
+    assert not journals.exists() or list(journals.glob("*.json")) == []
+
+
+def test_no_rollback_file_records_nothing(device, csv_file, login, standards, journals):
+    run_feature("syslog", csv_file, "--apply", "-y", "--no-rollback-file")
+    assert not journals.exists() or list(journals.glob("*.json")) == []
+
+
+def test_the_round_trip_puts_the_device_back(
+    device, csv_file, login, standards, journals, capsys
+):
+    """The test that matters: change it, undo it, and the config is what it was."""
+    before = sorted(device["devices"]["sw1"].lines)
+
+    run_feature("syslog", csv_file, "--replace", "--apply", "-y", "--limit", "sw1")
+    assert sorted(device["devices"]["sw1"].lines) != before  # it really changed
+
+    assert cli.main(["rollback", "--no-env-file", "--apply", "-y"]) == cli.EXIT_OK
+    assert sorted(device["devices"]["sw1"].lines) == before
+
+
+def test_a_rollback_is_a_dry_run_by_default(
+    device, csv_file, login, standards, journals, capsys
+):
+    run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1")
+    after_change = list(device["devices"]["sw1"].lines)
+    capsys.readouterr()
+
+    assert cli.main(["rollback", "--no-env-file"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "no logging host 10.1.1.50" in out
+    assert device["devices"]["sw1"].lines == after_change  # nothing was sent
+
+
+def test_the_newest_journal_is_the_one_replayed(
+    device, csv_file, login, standards, journals, capsys
+):
+    run_feature("ntp", csv_file, "--apply", "-y", "--limit", "sw1")
+    run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1")
+    capsys.readouterr()
+
+    cli.main(["rollback", "--no-env-file"])
+    assert "rollback of syslog" in capsys.readouterr().out
+
+
+def test_an_older_journal_can_be_named(
+    device, csv_file, login, standards, journals, capsys
+):
+    run_feature("ntp", csv_file, "--apply", "-y", "--limit", "sw1")
+    ntp_journal = next(iter(journals.glob("*-ntp.json")))
+    run_feature("syslog", csv_file, "--apply", "-y", "--limit", "sw1")
+    capsys.readouterr()
+
+    cli.main(["rollback", "--no-env-file", str(ntp_journal)])
+    assert "rollback of ntp" in capsys.readouterr().out
+
+
+def test_no_journal_at_all_is_a_usage_error(device, login, journals, capsys):
+    assert cli.main(["rollback", "--no-env-file"]) == cli.EXIT_USAGE
+    assert "no rollback journal" in capsys.readouterr().err
+
+
+def test_a_users_change_records_no_rollback_and_says_why(
+    device, csv_file, login, user_password, journals, capsys
+):
+    """A password hash is not a password, so a rotation cannot be undone -- and
+    that is said at the time of the change, not discovered later."""
+    assert run_feature("users", csv_file, "-U", "admin", "--apply", "-y") == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "rollback: this change cannot be undone" in out
+    assert "cannot be read back" in out
+    assert not journals.exists() or list(journals.glob("*.json")) == []
+
+
+def test_an_ntp_key_is_never_written_into_a_journal(
+    device, csv_file, login, tmp_path, journals, monkeypatch
+):
+    (tmp_path / "standards.yaml").write_text(
+        "ntp:\n  servers: [10.50.0.10]\n  authentication:\n    key_id: 1\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("NETOPS_NTP_KEY_1", "s3cr3t-ntp-key-material")
+    run_feature("ntp", csv_file, "--apply", "-y", "--limit", "sw1")
+
+    written = list(journals.glob("*-ntp.json"))
+    assert written, "the servers are still reversible even if the key is not"
+    text = written[0].read_text()
+    assert "s3cr3t-ntp-key-material" not in text
+    assert "carries a secret" in text
+
+
+def test_nac_rollback_removes_only_what_it_added(
+    ports, csv_file, login, nac_standards, journals, capsys
+):
+    run_feature("nac", csv_file, "--apply", "-y", "--limit", "sw1")
+    capsys.readouterr()
+
+    cli.main(["rollback", "--no-env-file"])
+    out = capsys.readouterr().out
+    assert "interface GigabitEthernet1/0/2" in out
+    assert " no access-session closed" in out
+    assert "no interface" not in out  # never negate the context line

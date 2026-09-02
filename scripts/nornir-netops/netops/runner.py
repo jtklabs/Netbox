@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from nornir.core.task import Result, Task
 from nornir_netmiko import netmiko_send_command, netmiko_send_config
 
+from .rollback import default_reversal
 from .core import (
     MODE_ADD,
     SAVE_COMMANDS,
@@ -135,6 +136,38 @@ def run_check(task: Task, check, expected, options) -> Result:
     )
 
 
+def apply_rollback(task: Task, save: bool) -> Result:
+    """Send one device's recorded reversal."""
+    commands = list(task.host.data.get("rollback") or [])
+    payload: Dict[str, Any] = {
+        "platform": canonical_platform(task.host.platform),
+        "commands": commands,
+        "applied": False,
+        "saved": None,
+        "output": None,
+    }
+    if not commands:
+        return Result(host=task.host, result=payload, changed=False)
+
+    pushed = task.run(
+        task=netmiko_send_config, name="rollback", config_commands=commands
+    )
+    payload["applied"] = True
+    payload["output"] = pushed.result
+
+    save_command = SAVE_COMMANDS.get(payload["platform"]) if save else None
+    if save_command:
+        task.run(
+            task=netmiko_send_command,
+            name=save_command,
+            command_string=save_command,
+            enable=True,
+            read_timeout=SAVE_TIMEOUT,
+        )
+        payload["saved"] = True
+    return Result(host=task.host, result=payload, changed=True)
+
+
 def configure_feature(
     task: Task,
     feature: Feature,
@@ -169,6 +202,8 @@ def configure_feature(
         "compliant": False,
         "advisories": [],
         "notes": [],
+        "rollback": [],
+        "rollback_unsupported": [],
         "applied": False,
         "saved": None,
         "skipped": False,
@@ -236,8 +271,31 @@ def configure_feature(
         compliant=not commands and not advisories,
     )
 
+    # Said before the change, when there is still time to take a backup.
+    if commands and feature.rollback_note:
+        payload["notes"].append(f"rollback: {feature.rollback_note}")
+    if commands and not feature.reversible:
+        payload["notes"].append("rollback: this change cannot be undone")
+
     if not commands or dry_run:
         return Result(host=task.host, result=payload, changed=False)
+
+    # Worked out now rather than later: once the device is changed it no longer
+    # knows what it used to be.
+    if feature.reversible:
+        reverse_context = {
+            "platform": platform,
+            "variables": variables,
+            "added": list(to_add),
+            "secrets": list(secrets),
+        }
+        reversal = (
+            feature.reverse(commands, current, to_remove, reverse_context)
+            if feature.reverse is not None
+            else default_reversal(commands, current, to_remove, secrets)
+        )
+        payload["rollback"] = reversal.commands
+        payload["rollback_unsupported"] = reversal.unsupported
 
     pushed = task.run(
         task=netmiko_send_config,

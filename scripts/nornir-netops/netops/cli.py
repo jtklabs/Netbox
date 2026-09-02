@@ -21,6 +21,8 @@ from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
 from .platform_cache import DEFAULT_FILENAME as DEFAULT_CACHE_FILE
 from .platform_cache import DEFAULT_TTL_HOURS
 from .platform_cache import load as load_platform_cache
+from . import rollback as rollback_journal
+from .rollback import DEFAULT_DIRECTORY as ROLLBACK_DIR
 from .errors import summarize
 from .credentials import (
     AwsSecretSpec,
@@ -331,6 +333,24 @@ def _common_arguments() -> argparse.ArgumentParser:
         help="do not read the config back after applying to confirm the change landed",
     )
 
+    undo = parent.add_argument_group(
+        "rollback",
+        "Every --apply that changes something records how to undo it, while "
+        "the pre-change state is still in hand. `configure.py rollback` replays "
+        "that.",
+    )
+    undo.add_argument(
+        "--rollback-dir",
+        metavar="DIR",
+        help=f"where journals are written (default: <project>/{ROLLBACK_DIR}) "
+        f"[$NETOPS_ROLLBACK_DIR]",
+    )
+    undo.add_argument(
+        "--no-rollback-file",
+        action="store_true",
+        help="do not record how to undo this change",
+    )
+
     report = parent.add_argument_group("reporting")
     report.add_argument("--report", metavar="FILE", help="write a JSON report of the run")
     report.add_argument(
@@ -433,6 +453,31 @@ def build_parser() -> argparse.ArgumentParser:
         checker.add_argument("--no-standards", action="store_true", help=argparse.SUPPRESS)
         check.add_arguments(checker)
         checker.set_defaults(check=check)
+
+    undo = subs.add_parser(
+        "rollback",
+        parents=[_discover_arguments()],
+        help="undo a change recorded by an earlier --apply",
+        description="Replay the reversal recorded by an earlier --apply. The "
+        "devices come from the journal, not from the inventory: what matters is "
+        "what was changed, not what is in the CSV now. Dry run unless --apply.",
+        formatter_class=HelpFormatter,
+    )
+    undo.add_argument(
+        "journal", nargs="?", help="journal to replay (default: the most recent)"
+    )
+    undo.add_argument(
+        "--rollback-dir", metavar="DIR", help="where to look for the journal"
+    )
+    undo.add_argument("--apply", action="store_true", help="actually push the reversal")
+    undo.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
+    undo.add_argument(
+        "--no-save",
+        dest="save",
+        action="store_false",
+        default=True,
+        help="do not write to startup-config afterwards",
+    )
 
     subs.add_parser(
         "selftest",
@@ -756,6 +801,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         return _discover(args, style, log)
     if args.command.startswith("check-"):
         return _check(args, style, log)
+    if args.command == "rollback":
+        return _rollback(args, style, log)
 
     feature: Feature = args.feature
     try:
@@ -939,6 +986,28 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
             handle.write(report)
         print(f"report written to {args.report}")
 
+    if args.apply and not args.no_rollback_file:
+        journal = rollback_journal.Journal(feature=feature.name, mode=args.mode)
+        for name, record in records.items():
+            if not record.get("rollback"):
+                continue
+            journal.add(
+                name,
+                {
+                    "hostname": record.get("hostname"),
+                    "platform": record.get("platform"),
+                    "applied": record.get("commands") or [],
+                    "rollback": record["rollback"],
+                    "unsupported": record.get("rollback_unsupported") or [],
+                },
+            )
+        written = journal.save(
+            rollback_journal.journal_directory(args.rollback_dir, PROJECT_ROOT)
+        )
+        if written:
+            print(style.dim(f"rollback recorded in {written}"))
+            print(style.dim(f"undo it with: configure.py rollback {written}"))
+
     snow_failed = False
     if snow is not None:
         try:
@@ -1068,6 +1137,113 @@ def _check(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     return EXIT_OK
 
 
+def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
+    """Replay a recorded reversal."""
+    directory = rollback_journal.journal_directory(args.rollback_dir, PROJECT_ROOT)
+    try:
+        path = Path(args.journal) if args.journal else rollback_journal.latest(directory)
+        journal = rollback_journal.load(path)
+    except rollback_journal.RollbackError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
+
+    devices = journal.restorable
+    if args.limit:
+        wanted = {value.strip() for value in args.limit.split(",") if value.strip()}
+        devices = {n: r for n, r in devices.items() if n in wanted}
+    if not devices:
+        print(style.bad(f"error: {path} records nothing that can be undone"), file=sys.stderr)
+        return EXIT_USAGE
+
+    credentials, code = _login(args, style)
+    if credentials is None:
+        return code
+
+    from .inventory import InventoryError, init_from_records, missing_credentials
+
+    try:
+        nr = init_from_records(
+            devices,
+            credentials.username,
+            credentials.password,
+            credentials.secret,
+            args.key_file,
+            args.port,
+            args.workers,
+            args.conn_timeout,
+        )
+    except (InventoryError, ValueError) as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
+
+    incomplete = missing_credentials(nr, key_file=args.key_file)
+    if incomplete:
+        print(
+            style.bad(f"error: no credentials for: {', '.join(incomplete[:10])}"),
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    dry_run = not args.apply
+    banner = (
+        style.warn("DRY RUN -- nothing will be changed")
+        if dry_run
+        else style.bad("UNDOING CHANGES")
+    )
+    print(
+        f"{banner}  |  rollback of {journal.feature}, recorded "
+        f"{journal.recorded_at}, {len(devices)} device(s)"
+    )
+    print(style.dim(f"journal: {path}"))
+
+    unsupported = {n: r["unsupported"] for n, r in devices.items() if r.get("unsupported")}
+    for name, reasons in sorted(unsupported.items()):
+        for reason in reasons:
+            print(style.warn(f"  {name}: cannot be undone -- {reason}"))
+
+    if not dry_run and not args.yes and sys.stdin.isatty():
+        answer = input(
+            style.warn(f"Undo {journal.feature} on {len(devices)} device(s)? [y/N] ")
+        )
+        if answer.strip().lower() not in {"y", "yes"}:
+            print("aborted")
+            return EXIT_USAGE
+
+    print()
+    if dry_run:
+        for name in sorted(devices):
+            record = devices[name]
+            print(f"{style.bold(name)} ({record.get('hostname', '')}) would run")
+            for command in record["rollback"]:
+                print(f"    {command}")
+            print()
+        print(style.bold("summary: ") + f"{len(devices)} device(s) to undo")
+        print(style.dim("re-run with --apply to push the commands above"))
+        return EXIT_OK
+
+    from .runner import apply_rollback
+
+    failed = 0
+    results = nr.run(task=apply_rollback, save=args.save)
+    for name, result in sorted(results.items()):
+        if result.failed:
+            exception = _exception_of(result)
+            message = summarize(exception) if exception else "unknown error"
+            log.failure(name, message, exception)
+            print(f"{style.bold(name)} {style.bad('FAILED')} -- {message}")
+            failed += 1
+        else:
+            count = len(result[0].result["commands"])
+            print(f"{style.bold(name)} {style.ok('undone')} ({count} commands)")
+
+    print()
+    summary = [f"{len(devices)} device(s)", style.ok(f"{len(devices) - failed} undone")]
+    if failed:
+        summary.append(style.bad(f"{failed} failed"))
+    print(style.bold("summary: ") + ", ".join(summary))
+    return EXIT_FAILED if failed else EXIT_OK
+
+
 def _discover(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     """Work out what each device is and remember it, changing nothing."""
     targets, _, code = _connect(args, style)
@@ -1144,12 +1320,8 @@ def _discover(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     return EXIT_FAILED if failed else EXIT_OK
 
 
-def _connect(args: argparse.Namespace, style: Style):
-    """Resolve credentials, read the CSV, apply the filters.
-
-    Shared by a feature run and by `discover`, which need exactly the same
-    setup and differ only in what they do once connected.
-    """
+def _login(args: argparse.Namespace, style: Style):
+    """The fleet credentials, however they were configured."""
     aws = (
         AwsSecretSpec(
             name=args.aws_secret,
@@ -1172,7 +1344,19 @@ def _connect(args: argparse.Namespace, style: Style):
         )
     except CredentialError as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
-        return None, None, EXIT_USAGE
+        return None, EXIT_USAGE
+    return credentials, EXIT_OK
+
+
+def _connect(args: argparse.Namespace, style: Style):
+    """Credentials, inventory and filters.
+
+    Shared by a feature run and by `discover`, which need exactly the same
+    setup and differ only in what they do once connected.
+    """
+    credentials, code = _login(args, style)
+    if credentials is None:
+        return None, None, code
 
     # nornir is imported here so `selftest` and --help work without it installed.
     from .inventory import InventoryError, init_nornir, missing_credentials

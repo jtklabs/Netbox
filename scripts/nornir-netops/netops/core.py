@@ -315,6 +315,18 @@ class Feature:
     #: These are skipped and reported, not failed -- a fleet-wide run of a
     #: Cisco-only knob should not turn every Arista red.
     not_applicable: Dict[str, str] = field(default_factory=dict)
+    #: Whether a change made by this feature can be undone at all. False when
+    #: the previous state is something the device will not tell us -- a
+    #: password hash is not a password.
+    reversible: bool = True
+    #: Said at the time of the change, when there is still a chance to take a
+    #: backup, rather than discovered later.
+    rollback_note: str = ""
+    #: How to undo a change. The default -- negate what was sent, re-apply what
+    #: was there -- is wrong for anything with a config sub-mode or a body.
+    reverse: Optional[
+        Callable[[Sequence[str], Sequence["Entry"], Sequence["Entry"], Mapping[str, Any]], Any]
+    ] = None
     #: Verify by re-running this feature's own planner rather than checking
     #: that the desired keys are present. For a feature whose desired set comes
     #: from the device itself, the keys are not known in advance.

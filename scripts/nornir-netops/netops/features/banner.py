@@ -139,6 +139,34 @@ def plan_banner(
     return to_add, to_remove
 
 
+def reverse(commands, current, removed, context):
+    """Write the previous banner back.
+
+    The delimiters are platform syntax, so they are taken from the template
+    rather than written again here: render the block, keep its first and last
+    lines, and put the old body between them.
+    """
+    from ..rollback import Reversal
+
+    platform = context["platform"]
+    variables = context["variables"]
+    before = {entry.key: entry for entry in current}
+    reversal = Reversal()
+
+    for kind in context.get("added") or []:
+        previous = before.get(kind)
+        if previous is None:
+            reversal.commands.append(f"no banner {kind}")
+            continue
+        block = render("banner", platform, [kind], [], variables, keep_blank=True)
+        if len(block) < 2:  # nothing to take a wrapper from
+            reversal.unsupported.append(f"banner {kind}")
+            continue
+        body = previous.data.get("body", "")
+        reversal.commands.extend([block[0], *body.splitlines(), block[-1]])
+    return reversal
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-b",
@@ -177,6 +205,7 @@ FEATURE = Feature(
     build_desired=build_desired,
     plan=plan_banner,
     keep_blank_lines=True,
+    reverse=reverse,
     # The device stops prompting between the delimiters, so netmiko must not
     # wait for a prompt it will not get until the banner is finished.
     config_options={"cmd_verify": False},

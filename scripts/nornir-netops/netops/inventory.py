@@ -169,7 +169,63 @@ class CSVInventory:
         return Inventory(hosts=hosts, groups=Groups(), defaults=defaults)
 
 
+class RecordsInventory:
+    """Hosts taken from a rollback journal.
+
+    A rollback goes back to the devices that were changed, which the journal
+    already names. Re-reading the CSV or NetBox would be answering a different
+    question -- what is in the inventory now, rather than what was touched.
+    """
+
+    def __init__(
+        self,
+        records: Optional[Dict[str, Any]] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        secret: Optional[str] = None,
+        key_file: Optional[str] = None,
+        conn_timeout: Optional[float] = None,
+        port: int = 22,
+    ) -> None:
+        self.records = dict(records or {})
+        self.username = username
+        self.password = password
+        self.secret = secret
+        self.key_file = key_file
+        self.conn_timeout = conn_timeout
+        self.port = port
+
+    def load(self) -> Inventory:
+        extras: Dict[str, Any] = {}
+        if self.secret:
+            extras["secret"] = self.secret
+        if self.key_file:
+            extras["use_keys"] = True
+            extras["key_file"] = self.key_file
+        if self.conn_timeout:
+            extras["conn_timeout"] = self.conn_timeout
+        defaults = Defaults(
+            username=self.username,
+            password=self.password,
+            port=self.port,
+            connection_options={"netmiko": ConnectionOptions(extras=dict(extras))},
+        )
+        hosts = Hosts()
+        for name, record in self.records.items():
+            hosts[name] = Host(
+                name=name,
+                hostname=record.get("hostname") or name,
+                platform=canonical_platform(record.get("platform")) or None,
+                data={"rollback": list(record.get("rollback") or [])},
+                defaults=defaults,
+            )
+        if not hosts:
+            raise InventoryError("the journal names no devices to roll back")
+        return Inventory(hosts=hosts, groups=Groups(), defaults=defaults)
+
+
 InventoryPluginRegister.register("csv", CSVInventory)
+InventoryPluginRegister.register("records", RecordsInventory)
 
 
 def init_nornir(
@@ -192,6 +248,36 @@ def init_nornir(
             "plugin": "csv",
             "options": {
                 "csv_file": csv_file,
+                "username": username,
+                "password": password,
+                "secret": secret,
+                "key_file": key_file,
+                "conn_timeout": conn_timeout,
+                "port": port,
+            },
+        },
+        logging={"enabled": False},
+    )
+
+
+def init_from_records(
+    records: Dict[str, Any],
+    username: Optional[str],
+    password: Optional[str],
+    secret: Optional[str],
+    key_file: Optional[str],
+    port: int,
+    workers: int,
+    conn_timeout: Optional[float] = None,
+) -> Nornir:
+    from nornir import InitNornir
+
+    return InitNornir(
+        runner={"plugin": "threaded", "options": {"num_workers": workers}},
+        inventory={
+            "plugin": "records",
+            "options": {
+                "records": records,
                 "username": username,
                 "password": password,
                 "secret": secret,

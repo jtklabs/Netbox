@@ -179,7 +179,13 @@ def parse_snmp(output: str) -> List[Entry]:
                     display=f"snmp-server community <redacted> ({' '.join(tokens[3:]) or 'RO'})",
                     # The string has to be named to be removed, and it is a
                     # credential: flag it so the command is scrubbed on the way out.
-                    data={"kind": "community", "secret_value": tokens[2]},
+                    data={
+                        "kind": "community",
+                        "secret_value": tokens[2],
+                        # Restoring it would mean writing the community string
+                        # into a journal on disk.
+                        "restorable": False,
+                    },
                 )
             )
         elif kind == "view" and len(tokens) >= 5:
@@ -259,7 +265,9 @@ def parse_snmp(output: str) -> List[Entry]:
                 key=f"user:{name}",
                 line=f"snmp-server user {name} {record.get('group') or ''} v3".strip(),
                 display=f"snmp-server user {name} ({detail or 'no auth'})",
-                data={"kind": "user", **record},
+                # `snmp-server user x G v3` alone would create the user with no
+                # authentication, and the passphrase is unreadable.
+                data={"kind": "user", "restorable": False, **record},
             )
         )
     return entries
@@ -633,6 +641,11 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_snmp,
+    rollback_note=(
+        "a v3 passphrase and a community string cannot be written to a journal, "
+        "so a rewritten user or a removed community cannot be put back; groups, "
+        "views, hosts and the scalars can"
+    ),
     selftest_args=[],
     selftest_env_from=selftest_placeholders,
 )

@@ -135,7 +135,14 @@ def parse_ntp(output: str) -> List[Entry]:
                     key=f"key:{tokens[2]}:{tokens[3]}",
                     line=f"ntp authentication-key {tokens[2]}",
                     display=f"ntp authentication-key {tokens[2]} {tokens[3]} <hidden>",
-                    data={"kind": "key", "id": tokens[2], "type": tokens[3]},
+                    data={
+                        "kind": "key",
+                        "id": tokens[2],
+                        "type": tokens[3],
+                        # `ntp authentication-key 1` on its own is not a command,
+                        # and the material it needs is stored encrypted.
+                        "restorable": False,
+                    },
                 )
             )
         elif kind == "trusted-key" and len(tokens) >= 3:
@@ -415,6 +422,10 @@ FEATURE = Feature(
     build_desired=build_desired,
     plan=plan_ntp,
     per_device=per_device,
+    rollback_note=(
+        "an authentication key's material is stored encrypted, so a changed key "
+        "cannot be put back; the servers and the trusted-key can"
+    ),
     # 10.10.10.1 is already in both samples, so the selftest also shows that a
     # server already configured produces no command.
     selftest_args=[

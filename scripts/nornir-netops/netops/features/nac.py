@@ -235,6 +235,22 @@ def plan_nac(
 # --------------------------------------------------------------------------- #
 
 
+def reverse(commands, current, removed, context):
+    """Remove the lines that were added, from the ports they were added to.
+
+    The commands include `interface X` context lines; negating those would
+    delete the interface configuration wholesale rather than undo a setting.
+    """
+    from ..rollback import Reversal
+
+    missing = (context.get("variables") or {}).get("missing") or {}
+    reversal = Reversal()
+    for name in sorted(missing):
+        reversal.commands.append(f"interface {name}")
+        reversal.commands.extend(f" no {line}" for line in missing[name])
+    return reversal
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--policy",
@@ -299,6 +315,7 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_nac,
+    reverse=reverse,
     # The desired set is every in-scope port on the device, which is not known
     # until the device has been read, so verification re-runs the planner.
     verify_with_plan=True,

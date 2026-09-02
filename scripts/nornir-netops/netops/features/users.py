@@ -115,7 +115,8 @@ def parse_users(output: str) -> List[Entry]:
                 # and keeps the hash out of the command we build.
                 line=f"username {name}",
                 display=_describe(name, info),
-                data=dict(info),
+                # `username x` alone would create the account with no password.
+                data={**info, "restorable": False},
             )
         )
     return entries
@@ -357,6 +358,15 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_users,
+    # Undoing a rotation would mean knowing the password it replaced. The
+    # device stores a hash, so nothing can. Rolling back the *negation* alone
+    # would leave the account gone, which is worse than either state.
+    reversible=False,
+    rollback_note=(
+        "a local account's password is stored hashed, so the previous one cannot "
+        "be read back and a rotation cannot be undone. Take a backup first if "
+        "you may need to reverse this."
+    ),
     selftest_args=["--user", "admin,netauto", "--privilege", "15"],
     selftest_env={
         "NETOPS_PW_ADMIN": "selftest-placeholder",

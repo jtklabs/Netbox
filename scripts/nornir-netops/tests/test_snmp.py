@@ -68,6 +68,8 @@ def test_v3_users_come_from_the_config_on_eos():
         "group": "NMS-RO",
         "auth": "sha",
         "priv": "aes128",
+        # the passphrase is unreadable, so this cannot be put back by a rollback
+        "restorable": False,
     }
 
 

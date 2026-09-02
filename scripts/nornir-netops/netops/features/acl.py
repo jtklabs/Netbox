@@ -31,7 +31,15 @@ import ipaddress
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ..core import Desired, Entry, Feature, InvalidValue, PlatformSupport, validate_word
+from ..core import (
+    Desired,
+    Entry,
+    Feature,
+    InvalidValue,
+    PlatformSupport,
+    render,
+    validate_word,
+)
 from ..standards import StandardsError, of as standards_of
 
 SHOW_COMMAND = "show running-config | section ^ip access-list standard"
@@ -214,6 +222,39 @@ def _acl_from_standards(item: Mapping[str, Any], standards) -> Dict[str, Any]:
     }
 
 
+def reverse(commands, current, removed, context):
+    """Put each ACL back exactly as it was, entries and order included.
+
+    Negating the commands one at a time would be wrong: they include the
+    `ip access-list standard NAME` context line, and `no` on that deletes the
+    whole list rather than undoing an entry.
+    """
+    from ..rollback import Reversal
+
+    platform = context["platform"]
+    existing = {entry.key: entry for entry in current}
+    reversal = Reversal()
+
+    for name in context.get("added") or []:
+        before = existing.get(name)
+        if before is None:
+            # It did not exist; undoing means it should not exist.
+            reversal.commands.append(f"no ip access-list standard {name}")
+            continue
+        restored = {
+            "acls": {
+                name: {
+                    "name": name,
+                    "type": "standard",
+                    "entries": before.data.get("entries", []),
+                    "rebuild": True,
+                }
+            }
+        }
+        reversal.commands.extend(render("acl", platform, [name], [before], restored))
+    return reversal
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-a",
@@ -264,5 +305,10 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_acls,
+    reverse=reverse,
+    rollback_note=(
+        "undoing this rebuilds each ACL as it was, which means deleting it "
+        "again for a moment"
+    ),
     selftest_args=[],
 )

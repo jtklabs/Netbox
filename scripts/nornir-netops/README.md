@@ -40,6 +40,7 @@ re-run with --apply to push the commands above
 | [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
 | [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
+| `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
@@ -1141,6 +1142,83 @@ reach/delay/offset/jitter last -- rather than by position.
 A check is not a Feature: it has no template, no desired-versus-current diff and
 no way to apply anything. It runs show commands and reports.
 
+## Undoing a change
+
+Every `--apply` that changes something records how to undo it:
+
+```console
+$ ./configure.py syslog --replace --apply
+
+atl-core-sw1 (10.1.10.11) [cisco_ios] applied (4 commands)
+    logging host 10.1.1.50
+    logging trap informational
+    no logging host 10.9.9.9
+    write memory
+
+rollback recorded in .rollback/20260902T104540Z-syslog.json
+undo it with: configure.py rollback .rollback/20260902T104540Z-syslog.json
+```
+
+```console
+$ ./configure.py rollback
+
+DRY RUN -- nothing will be changed  |  rollback of syslog, recorded 20260902T104540Z, 1 device(s)
+
+atl-core-sw1 (10.1.10.11) would run
+    no logging host 10.1.1.50
+    no logging trap informational
+    logging trap notifications
+    logging host 10.9.9.9
+
+summary: 1 device(s) to undo
+re-run with --apply to push the commands above
+```
+
+`rollback` replays the most recent journal, or one named on the command line.
+It is a dry run unless `--apply`, like everything else here, and `--limit`
+narrows it to particular devices. The device list comes **from the journal**,
+not from the inventory: what matters is what was changed, not what is in the
+CSV now.
+
+**The reversal is worked out at the time of the change**, because afterwards it
+cannot be. Once `logging trap informational` has replaced `notifications`, the
+device no longer knows it was ever `notifications`. The rule is: negate every
+command that was sent, then re-apply the lines the device had before. Replaying
+a line that is still present is a harmless no-op, and doing it wholesale is
+what restores a scalar.
+
+Journals are written to `.rollback/` (gitignored, mode 0600 -- they name
+devices and their configuration), or `--rollback-dir`. `--no-rollback-file`
+skips recording.
+
+### What cannot be undone
+
+Anything whose old value the device will not tell us, and this is said **at the
+time of the change** rather than discovered when you need it:
+
+```console
+atl-core-sw1 (10.1.10.11) [cisco_ios] applied (3 commands)
+    rollback: this change cannot be undone
+    rollback: a local account's password is stored hashed, so the previous one
+    cannot be read back and a rotation cannot be undone. Take a backup first if
+    you may need to reverse this.
+```
+
+| | Why |
+| --- | --- |
+| **`users`** -- not reversible at all | A password hash is not a password. Undoing only the negation would leave the account gone, which is worse than either state. |
+| **`snmp`** v3 users, communities | A passphrase is unreadable. A community string could be recorded, but this does not write credentials to disk. Groups, views, hosts and the scalars roll back normally. |
+| **`ntp`** authentication key | Stored encrypted. The servers and the trusted-key roll back normally. |
+
+A command carrying a secret is never written into a journal -- it is listed as
+unrestorable instead, so the file can be kept without holding credentials.
+
+Three features need more than the default rule and have their own:
+`acl` rebuilds each list with the entries it had (negating the commands one at
+a time would `no` the context line and delete the whole list), `banner` puts
+the previous body back inside the template's own delimiters, and `nac` negates
+the lines inside the interface they were added to.
+
 ## Settings that sit at their default
 
 **A setting at its platform default is not written to the running config.**
@@ -1273,7 +1351,7 @@ pip install pytest
 pytest
 ```
 
-604 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+638 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.
@@ -1289,8 +1367,8 @@ the device and never the terminal, the report, or the logs.
 - `standards.yaml` must never hold a credential:
   SNMPv3 passphrases, community strings and account passwords all come from the
   environment or AWS.
-- `.env`, `inventory/hosts.csv`, `standards.yaml`, `netops-debug.log` and
-  `.platform-cache.json` are gitignored. Keep real
+- `.env`, `inventory/hosts.csv`, `standards.yaml`, `netops-debug.log`,
+  `.platform-cache.json` and `.rollback/` are gitignored. Keep real
   credentials in AWS Secrets Manager where you can.
 - The debug log records device names, addresses and command output. Passwords
   are scrubbed from it the same way they are from the terminal, but treat it as
