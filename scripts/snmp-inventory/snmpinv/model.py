@@ -246,11 +246,8 @@ def _model_for(facts: DeviceFacts, entity: Entity | None) -> str:
 
 
 def _serial_for(facts: DeviceFacts, entity: Entity | None) -> str:
-    if entity is not None and entity.serial:
-        return entity.serial.strip()
-    if facts.vendor_serial:
-        return facts.vendor_serial.strip()
-    return ""
+    serial = vendors.clean_serial(entity.serial) if entity is not None else ""
+    return serial or vendors.clean_serial(facts.vendor_serial)
 
 
 # --- stacks -----------------------------------------------------------------

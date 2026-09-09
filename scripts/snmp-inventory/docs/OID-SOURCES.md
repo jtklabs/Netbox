@@ -210,6 +210,56 @@ as `ClearPass Policy Manager 6.10.6.186545, Model: C1000, FIPS Mode: Disabled`
 `Model:\s*([A-Za-z0-9][\w\-]*)` patterns read code and model from it; the
 serial is not in sysDescr.
 
+## Dell Force10 / FTOS
+
+Verified 2026-09-09 against the vendor MIB files mirrored in
+[librenms-mibs](https://github.com/librenms/librenms-mibs) and Dell's
+[S-series chassis OID reference](https://www.dell.com/support/kbdoc/pt-br/000182626/force10-s-series-chassis-mib-oids).
+
+| Object | OID | Use |
+|---|---|---|
+| `chSerialNumber` (F10-CHASSIS-MIB) | `1.3.6.1.4.1.6027.3.1.1.1.2.0` | Chassis serial scalar |
+| `chStackUnitModelID` (F10-S-SERIES-CHASSIS-MIB) | `1.3.6.1.4.1.6027.3.10.1.2.2.1.7` | Walked model column |
+| `chStackUnitCodeVersion` | `1.3.6.1.4.1.6027.3.10.1.2.2.1.10` | Running code column |
+| `chStackUnitSerialNumber` | `1.3.6.1.4.1.6027.3.10.1.2.2.1.12` | Walked serial column |
+
+Resolve F10-CHASSIS-MIB and F10-S-SERIES-CHASSIS-MIB in **separate directories**,
+each with FORCE10-SMI. They reuse local object names; combining them feeds the
+resolver the wrong branch even though both files are from the same vendor.
+Do not use `chStackUnitCodeVersionInFlash` (column 11): an image stored in flash
+need not be the running image.
+
+The S-series columns supply a device-wide fallback only when the walk returns
+one row. Multi-unit replies are refused with a warning rather than assigning
+the first member's serial to another chassis. Mapping those vendor rows to
+individual stack members needs a real stack capture; this change does not add
+Force10 stack topology support.
+
+The sysDescr fallback reads `Application Software Version`, preserving the
+release verbatim, including parentheses and letter prefixes. The preceding
+`Operating System Version: 2.0` is not the application release. Dell's
+[SNMP example](https://dl.dell.com/manuals/all-products/esuprt_networking_int/esuprt_networking_operating_systems/dell-emc-os-9_connectivity-guide_en-us.pdf)
+also shows an application version with an `E_MAIN` prefix. Generic version
+matching is disabled for this profile so it cannot fall back to the wrong field.
+
+## ClearPass virtual appliance serials
+
+HPE identifies C2000V and C3000V as
+[virtual appliances](https://arubanetworking.hpe.com/techdocs/ClearPass/6.11/Installation-Guide/Content/SystemRequirements/SR-KVMRequirements.htm).
+The scanner already walks `cppmSystemSerialNumber`, the serial object documented
+in the [ClearPass private MIB](https://arubanetworking.hpe.com/techdocs/ClearPass/6.11/PolicyManager/Content/CPPM_UserGuide/SNMP_MIB_Events_Errors/SNMP_private_MIB.htm).
+This does not establish that every virtual appliance populates it. A missing
+or empty reply leaves the serial unknown; a returned serial is retained even
+for a virtual model. `NA`, `N/A`, `None`, `unknown` and `not available` are treated
+as missing serials, not hardware identities. A real vendor serial can therefore
+replace an ENTITY-MIB placeholder, and correcting a placeholder already stored
+in NetBox does not count as a hardware replacement.
+
+Use `--probe` to inspect the raw serial-column response before diagnosing a
+blank serial as a collection failure. The synthetic tests exercise both virtual
+models, absent/placeholder serials, real serials, and non-default table indexes;
+they do not establish what a particular deployed ClearPass VM returns.
+
 ## Manufacturer identification
 
 `sysObjectID` is used **only** for the enterprise arc — the `N` in

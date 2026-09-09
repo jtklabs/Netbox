@@ -63,6 +63,14 @@ CPPM_SYSTEM_MODEL = f"{CPPM_SYSTEM_ENTRY}.1.*"
 CPPM_SYSTEM_SERIAL = f"{CPPM_SYSTEM_ENTRY}.2.*"
 CPPM_SYSTEM_VERSION = f"{CPPM_SYSTEM_ENTRY}.3.*"
 
+# F10-CHASSIS-MIB and F10-S-SERIES-CHASSIS-MIB. Resolve separately:
+# the modules reuse object names for different branches (see OID-SOURCES.md).
+FORCE10_CHASSIS_SERIAL = "1.3.6.1.4.1.6027.3.1.1.1.2.0"
+FORCE10_UNIT_ENTRY = "1.3.6.1.4.1.6027.3.10.1.2.2.1"
+FORCE10_UNIT_MODEL = f"{FORCE10_UNIT_ENTRY}.7.*"
+FORCE10_UNIT_VERSION = f"{FORCE10_UNIT_ENTRY}.10.*"
+FORCE10_UNIT_SERIAL = f"{FORCE10_UNIT_ENTRY}.12.*"
+
 
 @dataclass(frozen=True)
 class VendorProfile:
@@ -93,6 +101,10 @@ class VendorProfile:
     part_number_oids: tuple[str, ...] = ()
     # Applied to sysDescr when no version OID answered.
     version_patterns: tuple[str, ...] = ()
+    generic_version_fallback: bool = True
+    # Multi-unit tables cannot supply a host-wide serial/model by picking the
+    # first row. Only use these columns when exactly one unit was returned.
+    singleton_columns: bool = False
     # Applied to sysDescr when no model OID answered. Only for vendors that
     # publish no model scalar at all — Palo Alto and Fortinet both name the
     # model in sysDescr and nowhere else queryable. This is still the device
@@ -116,6 +128,20 @@ GENERIC_VERSION_PATTERNS = (
 )
 
 PROFILES: dict[int, VendorProfile] = {
+    6027: VendorProfile(
+        name="force10",
+        manufacturer="Force10",
+        platform="Dell FTOS",
+        serial_oids=(FORCE10_CHASSIS_SERIAL, FORCE10_UNIT_SERIAL),
+        model_oids=(FORCE10_UNIT_MODEL,),
+        version_oids=(FORCE10_UNIT_VERSION,),
+        singleton_columns=True,
+        # The preceding "Operating System Version: 2.0" is the underlying
+        # OS, not the switch software release operators track.
+        version_patterns=(r"Application Software Version\s*:\s*([A-Za-z0-9][\w.()\-]*)",),
+        generic_version_fallback=False,
+        model_patterns=(r"\bSeries:\s*([A-Za-z0-9][\w/\-]*)",),
+    ),
     9: VendorProfile(
         name="cisco",
         manufacturer="Cisco",
@@ -345,21 +371,29 @@ def extract_model(sys_descr: str, patterns: tuple[str, ...]) -> str:
     return ""
 
 
-def extract_version(sys_descr: str, patterns: tuple[str, ...]) -> str:
+def extract_version(sys_descr: str, patterns: tuple[str, ...], *,
+                    allow_generic: bool = True) -> str:
     """Pull a software version out of sysDescr using the profile's patterns.
 
-    Falls back to the generic patterns so an unrecognised vendor still usually
+    By default, falls back to generic patterns so an unrecognised vendor usually
     gets a version. Returns "" when nothing matches, which the sync layer
     treats as "leave whatever NetBox already has alone" rather than blanking a
     version somebody entered by hand.
     """
     if not sys_descr:
         return ""
-    for pattern in tuple(patterns) + GENERIC_VERSION_PATTERNS:
+    for pattern in tuple(patterns) + (GENERIC_VERSION_PATTERNS if allow_generic else ()):
         match = re.search(pattern, sys_descr)
         if match:
             return match.group(1).strip().rstrip(",")
     return ""
+
+
+def clean_serial(value: str) -> str:
+    """Treat explicit missing-value markers as absent hardware identity."""
+    value = value.strip()
+    missing = {"", "na", "n/a", "none", "unknown", "not available"}
+    return "" if value.casefold() in missing else value
 
 
 # sysDescr hints that identify the OS family more precisely than the vendor

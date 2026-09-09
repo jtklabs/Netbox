@@ -368,7 +368,10 @@ class Collector:
         # absent, and the only source for the ones that publish none.
         if not facts.software_version:
             patterns = profile.version_patterns if profile else ()
-            facts.software_version = vendors.extract_version(facts.sys_descr, patterns)
+            facts.software_version = vendors.extract_version(
+                facts.sys_descr, patterns,
+                allow_generic=profile.generic_version_fallback if profile else True,
+            )
         if not facts.software_version:
             # Some platforms leave sysDescr terse but fill in the chassis
             # entity's software rev.
@@ -978,6 +981,10 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
             except SnmpError as exc:
                 log.debug("%s: vendor column %s unavailable (%s)", host, oid, exc)
                 binds = []
+            if profile.singleton_columns and len(binds) > 1:
+                log.warning("%s: vendor column %s has multiple units; cannot use "
+                            "one unit's value for the whole device", host, oid)
+                binds = []
             walked[oid] = next((b for b in binds if b.value), None)
         return walked[oid]
 
@@ -1028,7 +1035,7 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
             break
 
     for oid in profile.serial_oids:
-        value = _answer(oid)
+        value = vendors.clean_serial(_answer(oid))
         if value:
             facts.vendor_serial = value
             break

@@ -53,7 +53,15 @@ serial matching, Hardware Lifecycle EoL), so owning discovery fits.
 
 Cisco (IOS, IOS-XE, NX-OS), Arista EOS, Aruba (ArubaOS controllers, ClearPass,
 CX), F5 BIG-IP, Palo Alto PAN-OS, Fortinet FortiOS, Check Point Gaia, Infoblox
-NIOS, Juniper Junos, Opengear.
+NIOS, Juniper Junos, Opengear, Dell Force10/FTOS.
+
+Force10 reads the application software release instead of the underlying
+`Operating System Version: 2.0`, and falls back to the chassis/S-series MIBs
+when ENTITY-MIB reports no usable serial. S-series table fallback requires a
+single unit; Force10 stack topology is not yet mapped. ClearPass C2000V/C3000V
+serials are read from `cppmSystemSerialNumber` when supplied by the appliance.
+An empty or placeholder serial stays unknown. See
+[vendor details](docs/OID-SOURCES.md#dell-force10--ftos).
 
 An unrecognised vendor still works — it just loses the vendor-specific extras.
 The standard MIBs carry model, serial, modules and interfaces for most gear.

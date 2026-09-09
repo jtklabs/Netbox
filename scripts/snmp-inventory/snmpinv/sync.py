@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from .cables import DEFAULT_CABLE_CLASSES, CableSyncer
 from .model import DeviceRecord, InterfaceRecord, ModuleRecord, ScanResult
 from .netbox import NetBox, NetBoxError
+from .vendors import clean_serial
 
 log = logging.getLogger(__name__)
 
@@ -388,8 +389,8 @@ class Syncer:
 
         Returns the retired record when a swap happened, else None.
         """
-        old_serial = (existing.get("serial") or "").strip()
-        new_serial = record.serial.strip()
+        old_serial = clean_serial(existing.get("serial") or "")
+        new_serial = clean_serial(record.serial)
         if not self.options.retain_replaced_hardware:
             return None
         # Only a change between two known serials counts. Filling in a blank is
