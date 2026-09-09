@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub
 from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
+from .debuglog import protect, redact
 from .platform_cache import DEFAULT_FILENAME as DEFAULT_CACHE_FILE
 from .platform_cache import DEFAULT_TTL_HOURS
 from .platform_cache import load as load_platform_cache
@@ -156,7 +157,7 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         default=[],
         metavar="KEY=VALUE",
         help="NetBox API filter, e.g. site=atl or role=core (repeatable; a "
-        "repeated key means any of them)",
+        "repeated site/platform values mean any; repeated tags require all)",
     )
     box.add_argument(
         "--netbox-source-tag",
@@ -429,6 +430,11 @@ def build_parser() -> argparse.ArgumentParser:
         "do not have to. Reads nothing but the login banner and changes nothing.",
         formatter_class=HelpFormatter,
     )
+    found.add_argument(
+        "--standards", metavar="FILE", default=os.environ.get("NETOPS_STANDARDS"),
+        help="settings file, including NetBox connection settings [$NETOPS_STANDARDS]",
+    )
+    found.add_argument("--no-standards", action="store_true", help=argparse.SUPPRESS)
     found.add_argument(
         "--refresh",
         action="store_true",
@@ -767,31 +773,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     style = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
-    log = bootstrap_log(argv)
+    log = DebugLog(None, None)
     try:
-        return _run(argv, style, log)
+        try:
+            env_note = bootstrap_env(argv)
+        except CredentialError as exc:
+            print(style.bad(f"error: {exc}"), file=sys.stderr)
+            return EXIT_USAGE
+        log = bootstrap_log(argv)
+        return _run(argv, style, log, env_note)
     except KeyboardInterrupt:
         print(style.warn("interrupted -- anything already applied is above"), file=sys.stderr)
         return EXIT_INTERRUPTED
     except Exception as exc:  # noqa: BLE001 - the whole point is to not leak it
-        summary = summarize(exc)
+        summary = redact(summarize(exc))
         print(style.bad(f"error: {summary}"), file=sys.stderr)
         log.failure("run", summary, exc)
         if log.debug or log.logger is None:
-            traceback.print_exc()  # asked for it, or nowhere else to put it
+            print(redact(traceback.format_exc()), file=sys.stderr)
         return EXIT_FAILED
     finally:
         if log.used and log.path:
             print(style.dim(f"full detail in {log.path}"))
 
 
-def _run(argv: List[str], style: Style, log: DebugLog) -> int:
-    try:
-        env_note = bootstrap_env(argv)
-    except CredentialError as exc:
-        print(style.bad(f"error: {exc}"), file=sys.stderr)
-        return EXIT_USAGE
-
+def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -833,6 +839,7 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
             )
         parser.error(str(exc))
 
+    protect(desired.secrets)
     targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
@@ -850,6 +857,12 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
         print(
             style.bad("error: --open-change is a dry-run action -- it records what "
                       "would be done so somebody can approve it. Drop --apply."),
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.change and not args.apply:
+        print(
+            style.bad("error: --change requires --apply to implement and close the change"),
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -968,6 +981,8 @@ def _run(argv: List[str], style: Style, log: DebugLog) -> int:
             verify=args.verify,
         )
         for name, result in results.items():
+            if isinstance(result[0].result, dict):
+                records[name].update(result[0].result)
             if result.failed:
                 _record_failure(records, name, result, log, args.debug)
                 continue
@@ -1246,6 +1261,13 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
 
 def _discover(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     """Work out what each device is and remember it, changing nothing."""
+    try:
+        args.standards = (
+            Standards() if args.no_standards else load_standards(args.standards, PROJECT_ROOT)
+        )
+    except StandardsError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
     targets, _, code = _connect(args, style)
     if targets is None:
         return code
@@ -1380,7 +1402,7 @@ def _connect(args: argparse.Namespace, style: Style):
                 conn_timeout=args.conn_timeout,
             )
         targets = _apply_filters(nr, args)
-    except (InventoryError, NetBoxError, ValueError) as exc:
+    except (InventoryError, NetBoxError, CredentialError, StandardsError, ValueError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return None, None, EXIT_USAGE
 
@@ -1399,6 +1421,9 @@ def _connect(args: argparse.Namespace, style: Style):
         )
         return None, None, EXIT_USAGE
 
+    for host in targets.inventory.hosts.values():
+        extras = host.get_connection_parameters("netmiko").extras or {}
+        protect([host.password, extras.get("secret")])
     return targets, credentials, EXIT_OK
 
 
@@ -1514,13 +1539,13 @@ def _record_failure(
 ) -> None:
     """One readable line for the terminal; the whole story for the log."""
     exc = _exception_of(result)
-    summary = prefix + (summarize(exc) if exc is not None else "unknown error")
+    summary = redact(prefix + (summarize(exc) if exc is not None else "unknown error"))
     records[name]["error"] = summary
     records[name]["status"] = "failed"
     if debug and exc is not None:
-        records[name]["traceback"] = "".join(
+        records[name]["traceback"] = redact("".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
-        )
+        ))
     log.failure(name, summary, exc)
 
 

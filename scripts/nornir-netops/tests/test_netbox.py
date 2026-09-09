@@ -162,6 +162,24 @@ def test_filters_reach_the_query():
     assert client.calls[0][1]["site"] == "atl"
 
 
+def test_device_filters_do_not_change_interface_tag_queries():
+    client = FakeClient([device()], {"ntp-source": [interface("Loopback0")]})
+    inventory = NetBoxInventory(
+        client=client, filters={"tag": "managed", "name": "sw1", "role": "core"}
+    ).load()
+    assert inventory.hosts["sw1"].data["source_interface"]["ntp"] == "Loopback0"
+    assert client.calls[1:] == [
+        ("dcim/interfaces/", {"tag": "ntp-source"}),
+        ("dcim/interfaces/", {"tag": "syslog-source"}),
+    ]
+
+
+def test_duplicate_netbox_names_do_not_silently_drop_a_device():
+    client = FakeClient([device(), device(id=2, address="10.2.1.1/24")])
+    with pytest.raises(NetBoxError, match="duplicate NetBox device name"):
+        NetBoxInventory(client=client).load()
+
+
 def test_no_devices_is_an_error_that_says_why():
     with pytest.raises(NetBoxError, match="check the filters"):
         NetBoxInventory(client=FakeClient([])).load()
@@ -186,6 +204,13 @@ def test_source_tags_accepts_a_mapping_or_a_list():
         "ntp": "ntp-source",
         "snmp": "snmp-source",
     }
+
+
+def test_source_tags_rejects_a_string_instead_of_querying_each_character():
+    from netops.netbox import source_tags
+
+    with pytest.raises(NetBoxError, match="mapping or a list"):
+        source_tags("ntp-source")
 
 
 def test_exactly_one_tagged_interface_is_the_source():
@@ -325,3 +350,25 @@ def test_paging_follows_next():
     client = Client("https://nb", "token")
     client._session = Paged()
     assert len(client.get("dcim/devices/")) == 2
+
+
+@pytest.mark.parametrize("document", [[], {}, {"results": None}, {"results": ["bad"]}])
+def test_malformed_api_payload_fails_instead_of_looking_like_empty_inventory(document):
+    client = Client("https://nb", "token")
+    client._session = SimpleNamespace(get=lambda *a, **kw: SimpleNamespace(
+        status_code=200, json=lambda: document, text=""
+    ))
+    with pytest.raises(NetBoxError, match="paginated NetBox response"):
+        client.get("dcim/devices/")
+
+
+def test_connection_failure_is_a_netbox_error():
+    from requests.exceptions import ConnectionError
+
+    def unreachable(*args, **kwargs):
+        raise ConnectionError("connection refused")
+
+    client = Client("https://nb", "token")
+    client._session = SimpleNamespace(get=unreachable)
+    with pytest.raises(NetBoxError, match="could not reach NetBox"):
+        client.get("dcim/devices/")

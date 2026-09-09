@@ -204,6 +204,7 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_banner,
+    verify_with_plan=True,
     keep_blank_lines=True,
     reverse=reverse,
     # The device stops prompting between the delimiters, so netmiko must not

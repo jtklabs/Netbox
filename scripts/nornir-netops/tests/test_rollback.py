@@ -223,3 +223,28 @@ def test_users_declares_itself_irreversible():
 
     assert FEATURE.reversible is False
     assert "cannot be undone" in FEATURE.rollback_note
+
+
+def test_two_runs_in_the_same_second_keep_both_journals(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from netops import rollback
+
+    timestamps = iter([
+        datetime(2026, 9, 9, 12, 0, 0, 1, tzinfo=timezone.utc),
+        datetime(2026, 9, 9, 12, 0, 0, 2, tzinfo=timezone.utc),
+    ])
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return next(timestamps)
+
+    monkeypatch.setattr(rollback, 'datetime', Clock)
+    first = Journal(feature='ntp', devices={'sw1': {'rollback': ['no ntp server 10.0.0.1']}})
+    second = Journal(feature='ntp', devices={'sw2': {'rollback': ['no ntp server 10.0.0.2']}})
+    first_path = first.save(tmp_path)
+    second_path = second.save(tmp_path)
+    assert first_path != second_path
+    assert list(load(first_path).devices) == ['sw1']
+    assert list(load(second_path).devices) == ['sw2']
+    assert latest(tmp_path) == second_path

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nornir-netops"
 version = "0.1.0"
-description = "Nornir-driven, template-based config convergence from a CSV of device addresses"
+description = "Nornir-driven config convergence using CSV or NetBox inventory"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Proprietary" }
@@ -22,8 +22,9 @@ dependencies = [
 # Nothing here is imported at module import time; each integration is loaded
 # lazily with a clear message if the package is missing.
 servicenow = ["requests>=2.31"]
+netbox = ["requests>=2.31"]
 aws = ["boto3>=1.34"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "requests>=2.31"]
 
 [project.scripts]
 netops = "netops.cli:main"

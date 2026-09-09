@@ -25,17 +25,10 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from nornir.core.inventory import (
-    ConnectionOptions,
-    Defaults,
-    Groups,
-    Host,
-    Hosts,
-    Inventory,
-)
-from nornir.core.plugins.inventory import InventoryPluginRegister
+if TYPE_CHECKING:
+    from nornir.core.inventory import Inventory
 
 from .core import canonical_platform
 
@@ -120,6 +113,8 @@ def source_tags(configured: Any) -> Dict[str, str]:
         return dict(DEFAULT_SOURCE_TAGS)
     if isinstance(configured, Mapping):
         return {str(feature): str(tag) for feature, tag in configured.items()}
+    if isinstance(configured, str) or not isinstance(configured, Sequence):
+        raise NetBoxError("netbox.source_tags must be a mapping or a list of tag slugs")
     return {feature_of(str(tag)): str(tag) for tag in configured}
 
 
@@ -144,7 +139,7 @@ class Client:
             except ImportError as exc:  # pragma: no cover - depends on extras
                 raise NetBoxError(
                     "NetBox support needs the 'requests' package "
-                    "(pip install -r requirements.txt)"
+                    "(pip install 'requests>=2.31')"
                 ) from exc
             self._session = requests.Session()
             self._session.headers.update(
@@ -158,11 +153,16 @@ class Client:
         query.setdefault("limit", PAGE_SIZE)
         url = f"{self.url}/api/{path.lstrip('/')}"
         results: List[Dict[str, Any]] = []
+        session = self.session()
+        from requests import RequestException
 
         while url:
-            response = self.session().get(
-                url, params=query, timeout=self.timeout, verify=self.verify_tls
-            )
+            try:
+                response = session.get(
+                    url, params=query, timeout=self.timeout, verify=self.verify_tls
+                )
+            except RequestException as exc:
+                raise NetBoxError(f"GET {path}: could not reach NetBox: {exc}") from exc
             if response.status_code >= 400:
                 raise NetBoxError(
                     f"GET {path} failed ({response.status_code}): "
@@ -172,7 +172,14 @@ class Client:
                 document = response.json()
             except ValueError as exc:
                 raise NetBoxError(f"GET {path}: response was not JSON") from exc
-            results.extend(document.get("results", []))
+            if (
+                not isinstance(document, dict)
+                or not isinstance(document.get("results"), list)
+                or any(not isinstance(item, dict) for item in document["results"])
+                or (document.get("next") is not None and not isinstance(document["next"], str))
+            ):
+                raise NetBoxError(f"GET {path}: expected a paginated NetBox response")
+            results.extend(document["results"])
             url = document.get("next")
             query = {}  # the `next` URL already carries the query
         return results
@@ -260,7 +267,7 @@ def resolve_sources(
 
 
 def source_interfaces(
-    client: Client, tags: Mapping[str, str], filters: Mapping[str, Any]
+    client: Client, tags: Mapping[str, str]
 ) -> Dict[int, Dict[str, Any]]:
     """One query per tag, for the whole fleet at once.
 
@@ -270,7 +277,10 @@ def source_interfaces(
     """
     per_device: Dict[int, Dict[str, Any]] = {}
     for feature, tag in tags.items():
-        query = {"tag": tag, **filters}
+        # Device filters belong to dcim/devices: name, tag, id and custom
+        # fields mean something different on interfaces. Join by device ID
+        # below, after the inventory has selected the devices.
+        query = {"tag": tag}
         interfaces = client.get("dcim/interfaces/", query)
         single, ambiguous = resolve_sources(interfaces, tag)
         for device_id, name in single.items():
@@ -322,6 +332,8 @@ class NetBoxInventory:
         self.port = port
 
     def load(self) -> Inventory:
+        from nornir.core.inventory import ConnectionOptions, Defaults, Groups, Host, Hosts, Inventory
+
         query = {"status": "active", "has_primary_ip": "true", **self.filters}
         devices = self.client.get("dcim/devices/", query)
         if not devices:
@@ -346,7 +358,7 @@ class NetBoxInventory:
         )
 
         sources = (
-            source_interfaces(self.client, self.source_tags, self.filters)
+            source_interfaces(self.client, self.source_tags)
             if self.source_tags
             else {}
         )
@@ -359,6 +371,11 @@ class NetBoxInventory:
             if not address:
                 skipped.append(str(name))
                 continue
+            if str(name) in hosts:
+                raise NetBoxError(
+                    f"duplicate NetBox device name {name!r}; narrow --netbox-filter "
+                    "so each inventory host has a unique name"
+                )
             data = device_data(device)
             # An empty mapping still means "NetBox was asked", which is what
             # tells a feature that the answer here is authoritative.
@@ -376,9 +393,6 @@ class NetBoxInventory:
         if not hosts:
             raise NetBoxError("no NetBox device had a primary IP to connect to")
         return Inventory(hosts=hosts, groups=Groups(), defaults=defaults)
-
-
-InventoryPluginRegister.register("netbox", NetBoxInventory)
 
 
 def parse_filters(pairs: Sequence[str]) -> Dict[str, Any]:
@@ -438,6 +452,9 @@ def settings_from(standards, args) -> Dict[str, Any]:
 def init_nornir(args, credentials, standards, workers: int):
     """A Nornir instance whose inventory is NetBox."""
     from nornir import InitNornir
+    from nornir.core.plugins.inventory import InventoryPluginRegister
+
+    InventoryPluginRegister.register("netbox", NetBoxInventory)
 
     settings = settings_from(standards, args)
     if getattr(args, "netbox_secret", None):

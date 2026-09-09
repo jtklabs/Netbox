@@ -187,7 +187,7 @@ def scrub(text: Optional[str], secrets: Sequence[str]) -> Optional[str]:
     """
     if not text:
         return text
-    for secret in secrets:
+    for secret in sorted(set(secrets), key=len, reverse=True):
         if secret:
             text = text.replace(secret, REDACTED)
     return text

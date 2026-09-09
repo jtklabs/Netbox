@@ -1,0 +1,4 @@
+include configure.py requirements.txt .env.example standards.yaml.example
+recursive-include inventory *.example
+recursive-include templates *.j2
+recursive-include tests *.py

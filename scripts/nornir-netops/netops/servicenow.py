@@ -175,7 +175,7 @@ class Client:
         except ImportError as exc:  # pragma: no cover - depends on extras
             raise ServiceNowError(
                 "ServiceNow support needs the 'requests' package "
-                "(pip install -r requirements.txt)"
+                "(pip install 'requests>=2.31')"
             ) from exc
         return requests
 

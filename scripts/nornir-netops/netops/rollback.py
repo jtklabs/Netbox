@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 #: Where journals are kept when nothing else is said.
 DEFAULT_DIRECTORY = ".rollback"
 
-_STAMP = "%Y%m%dT%H%M%SZ"
+_STAMP = "%Y%m%dT%H%M%S%fZ"
 
 
 class RollbackError(Exception):
@@ -166,7 +166,9 @@ def load(path: Path) -> Journal:
 
 def latest(directory: Path) -> Path:
     """The most recent journal, by the timestamp in its name."""
-    journals = sorted(directory.glob("*.json"))
+    # Removing Z keeps second-resolution journals ordered before newer
+    # fractional timestamps within the same second.
+    journals = sorted(directory.glob("*.json"), key=lambda path: path.name.replace("Z", ""))
     if not journals:
         raise RollbackError(
             f"no rollback journal in {directory} -- one is written by each --apply "

@@ -793,7 +793,7 @@ def test_platform_detection_failure_is_also_one_line(
 
 
 def test_ctrl_c_does_not_print_a_traceback(monkeypatch, capsys):
-    def interrupted(argv, style, log):
+    def interrupted(argv, style, log, env_note):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "_run", interrupted)
@@ -804,7 +804,7 @@ def test_ctrl_c_does_not_print_a_traceback(monkeypatch, capsys):
 
 
 def test_an_unexpected_crash_is_one_line_and_logged(monkeypatch, log_file, capsys):
-    def explode(argv, style, log):
+    def explode(argv, style, log, env_note):
         raise RuntimeError("something nobody anticipated")
 
     monkeypatch.setattr(cli, "_run", explode)
@@ -1237,6 +1237,13 @@ def test_open_change_and_change_together_is_a_usage_error(
     assert "Use one or the other" in capsys.readouterr().err
 
 
+def test_change_without_apply_cannot_close_a_change(device, csv_file, login, snow, capsys):
+    assert run(csv_file, "-s", "10.99.99.1", "--change", "CHG1") == cli.EXIT_USAGE
+    assert "--change requires --apply" in capsys.readouterr().err
+    assert snow.updates == snow.notes == snow.attachments == []
+    assert device["commands"] == device["config"] == {}
+
+
 def test_no_servicenow_call_without_the_flags(device, csv_file, login, snow):
     run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
     assert snow.created is None and snow.updates == []
@@ -1639,6 +1646,39 @@ def test_netbox_supplies_the_inventory(device, login, netbox, capsys):
     assert "sw1" in out and "leaf1" in out
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_discover_loads_netbox_settings_from_standards(
+    device, login, netbox, monkeypatch, tmp_path, explicit
+):
+    from netops.netbox import Client
+
+    path = tmp_path / "standards.yaml"
+    path.write_text("netbox:\n  url: https://from-standards.example.com\n")
+    monkeypatch.delenv("NETBOX_URL")
+    urls = []
+
+    class RecordingClient(Client):
+        def __init__(self, url, *args, **kwargs):
+            urls.append(url)
+            super().__init__(url, *args, **kwargs)
+
+    monkeypatch.setattr("netops.netbox.Client", RecordingClient)
+    extra = ["--standards", str(path)] if explicit else []
+    assert run_netbox("discover", *extra) == cli.EXIT_OK
+    assert urls == ["https://from-standards.example.com"]
+
+
+def test_missing_netbox_aws_secret_is_a_usage_error(device, login, netbox, monkeypatch, capsys):
+    from netops.credentials import CredentialError
+
+    def missing(*args):
+        raise CredentialError("could not read secret")
+
+    monkeypatch.setattr("netops.credentials.fetch_json_secret", missing)
+    assert run_netbox("ntp", "--netbox-secret", "missing") == cli.EXIT_USAGE
+    assert "could not read secret" in capsys.readouterr().err
+
+
 def test_a_tagged_interface_becomes_that_devices_source(device, login, netbox, capsys):
     netbox["interfaces"]["ntp-source"] = [tagged("Loopback0", 1)]
     run_netbox("ntp", "--limit", "sw1")
@@ -1940,3 +1980,101 @@ def test_nac_rollback_removes_only_what_it_added(
     assert "interface GigabitEthernet1/0/2" in out
     assert " no access-session closed" in out
     assert "no interface" not in out  # never negate the context line
+
+
+def test_failed_removal_is_unverified_and_not_saved(device, csv_file, login, monkeypatch):
+    # Adding the desired server succeeds, but the device ignores negations.
+    def add_only(task, config_commands, **kwargs):
+        device['devices'][task.host.name].apply(
+            [command for command in config_commands if not command.startswith('no ')]
+        )
+        return Result(host=task.host, result='OK')
+
+    monkeypatch.setattr(runner, 'netmiko_send_config', add_only)
+    assert run(csv_file, '-s', '10.99.99.1', '--replace', '--apply', '-y') == cli.EXIT_FAILED
+    assert all('write memory' not in commands for commands in device['commands'].values())
+
+
+@pytest.mark.parametrize('feature,lines', [
+    ('acl', ['ip access-list standard SNMP-POLLERS', ' deny any log']),
+    ('banner', ['banner motd ^C', ' wrong notice', '^C']),
+])
+def test_existing_name_does_not_verify_wrong_contents(
+    device, csv_file, login, standards, monkeypatch, feature, lines
+):
+    device['devices']['sw1'].lines.extend(lines)
+
+    def ignored(task, **kwargs):
+        return Result(host=task.host, result='OK')
+
+    monkeypatch.setattr(runner, 'netmiko_send_config', ignored)
+    assert run_feature(feature, csv_file, '--apply', '-y', '--limit', 'sw1') == cli.EXIT_FAILED
+    assert 'write memory' not in device['commands']['sw1']
+
+
+def test_config_error_is_not_saved_even_without_verification(device, csv_file, login, monkeypatch):
+    def rejected(task, **kwargs):
+        return Result(host=task.host, result='% Invalid input detected')
+
+    monkeypatch.setattr(runner, 'netmiko_send_config', rejected)
+    assert run(csv_file, '-s', '10.99.99.1', '--apply', '-y', '--no-verify') == cli.EXIT_FAILED
+    assert all('write memory' not in commands for commands in device['commands'].values())
+
+
+def test_save_error_is_a_failure(device, csv_file, login, monkeypatch):
+    original = runner.netmiko_send_command
+
+    def save_rejected(task, command_string, **kwargs):
+        if command_string == 'write memory':
+            return Result(host=task.host, result='% Permission denied')
+        return original(task, command_string, **kwargs)
+
+    monkeypatch.setattr(runner, 'netmiko_send_command', save_rejected)
+    assert run(csv_file, '-s', '10.99.99.1', '--apply', '-y') == cli.EXIT_FAILED
+
+
+def test_failed_save_preserves_the_rollback_journal(device, csv_file, login, monkeypatch, journals):
+    original = runner.netmiko_send_command
+
+    def failed_save(task, command_string, **kwargs):
+        if command_string == 'write memory':
+            raise RuntimeError('save failed')
+        return original(task, command_string, **kwargs)
+
+    monkeypatch.setattr(runner, 'netmiko_send_command', failed_save)
+    assert run(csv_file, '-s', '10.99.99.1', '--apply', '-y') == cli.EXIT_FAILED
+    path = next(journals.glob('*-ntp.json'))
+    assert 'no ntp server 10.99.99.1' in json.loads(path.read_text())['devices']['sw1']['rollback']
+
+
+def test_failure_output_and_library_logs_redact_passwords(
+    device, csv_file, login, user_password, monkeypatch, tmp_path, capsys
+):
+    import logging
+
+    logfile = tmp_path / 'debug.log'
+    report = tmp_path / 'report.json'
+
+    def failed_push(task, **kwargs):
+        logging.getLogger('netmiko').debug('sending secret %s', PASSWORD)
+        raise RuntimeError('rejected ' + PASSWORD)
+
+    monkeypatch.setattr(runner, 'netmiko_send_config', failed_push)
+    assert run_feature(
+        'users', csv_file, '-U', 'admin', '--apply', '-y', '--debug',
+        '--log-file', str(logfile), '--report', str(report)
+    ) == cli.EXIT_FAILED
+    output = capsys.readouterr()
+    for text in (output.out, output.err, logfile.read_text(), report.read_text()):
+        assert PASSWORD not in text
+    assert '<redacted>' in logfile.read_text()
+
+
+def test_env_file_controls_the_debug_log_path(device, csv_file, login, timing_out, tmp_path, monkeypatch):
+    logfile = tmp_path / 'from-env.log'
+    envfile = tmp_path / '.env'
+    envfile.write_text(f'NETOPS_LOG_FILE={logfile}\n')
+    monkeypatch.delenv('NETOPS_LOG_FILE')
+    assert cli.main(['ntp', '--env-file', str(envfile), '--csv', csv_file, '-s', '10.99.99.1']) == cli.EXIT_FAILED
+    assert logfile.is_file()
+    assert 'Traceback' in logfile.read_text()

@@ -8,8 +8,12 @@ the full traceback -- and the terminal prints the path once at the end.
 from __future__ import annotations
 
 import logging
+import re
+import threading
 import traceback
 from typing import List, Optional, Tuple
+
+from .core import scrub
 
 LOGGER_NAME = "netops"
 DEFAULT_LOG_FILE = "netops-debug.log"
@@ -22,6 +26,51 @@ TRANSCRIPT_LOGGERS = ("netmiko", "paramiko")
 #: them to stderr -- one traceback per device, which is exactly the wall of
 #: text this module exists to prevent. So we take the logger over.
 CAPTURED_LOGGERS = ("nornir",)
+
+
+class SecretFilter(logging.Filter):
+    """Redact before a library message or traceback reaches the file."""
+
+    def __init__(self):
+        super().__init__()
+        self.secrets = set()
+        self.lock = threading.Lock()
+
+    def add(self, values):
+        with self.lock:
+            self.secrets.update(value for value in values if isinstance(value, str) and value)
+
+    def clean(self, text):
+        with self.lock:
+            values = sorted(self.secrets, key=len, reverse=True)
+        text = scrub(text, values)
+        # Device output may reveal a community or stored hash before a parser
+        # has had the chance to identify it as sensitive.
+        text = re.sub(r"(snmp-server community\s+)\S+", r"\1<redacted>", text)
+        text = re.sub(
+            r"(username\s+\S+[^\r\n]*?\s(?:secret|password)\s+)[^\r\n]+",
+            r"\1<redacted>", text,
+        )
+        return text
+
+    def filter(self, record):
+        message = record.getMessage()
+        if record.exc_info:
+            message += "\n" + "".join(traceback.format_exception(*record.exc_info))
+        record.msg, record.args = self.clean(message), ()
+        record.exc_info = record.exc_text = None
+        return True
+
+
+_secrets = SecretFilter()
+
+
+def protect(values):
+    _secrets.add(values)
+
+
+def redact(text):
+    return _secrets.clean(text)
 
 
 class DebugLog:
@@ -87,11 +136,14 @@ def configure(path: Optional[str], debug: bool = False) -> DebugLog:
     `path=None` (--no-log-file) still silences them: the terminal report is the
     output, and a traceback is not part of it.
     """
+    global _secrets
+    _secrets = SecretFilter()
     handler: Optional[logging.Handler] = None
     if path:
         # delay=True: the file is created on the first write, so a clean run
         # does not litter the working directory.
         handler = logging.FileHandler(path, mode="a", delay=True, encoding="utf-8")
+        handler.addFilter(_secrets)
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
         )

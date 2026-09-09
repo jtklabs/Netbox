@@ -17,7 +17,7 @@ def isolated_environment(tmp_path_factory):
     """
     saved = dict(os.environ)
     for key in list(os.environ):
-        if key.startswith(("NET_", "NETOPS_", "AWS_")):
+        if key.startswith(("NET_", "NETOPS_", "NETBOX_", "SNOW_", "AWS_")):
             del os.environ[key]
     # The debug log and the platform cache are still exercised, just never in
     # the working directory -- and never shared between tests, which would let

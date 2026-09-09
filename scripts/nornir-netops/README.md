@@ -1,6 +1,6 @@
 # nornir-netops
 
-Push configuration to network devices listed in a CSV, one feature at a time,
+Push configuration to network devices from CSV or NetBox inventory, one feature at a time,
 from a per-platform Jinja template. **Dry run by default** -- without `--apply`
 it connects read-only, works out the delta, and prints the exact commands it
 would send.
@@ -52,21 +52,41 @@ feature module plus two templates -- see [Adding a feature](#adding-a-feature).
 
 [`scripts/ios/`](../ios/README.md) checks devices against the standards **held
 in NetBox** and records a per-device verdict; [`scripts/f5/`](../f5/README.md)
-maps `scripts/standards.yaml` onto BIG-IPs. This one is the fleet-push half and
-deliberately has no NetBox dependency -- it takes a CSV of addresses and
-converges one setting at a time. Reach for it when the question is "set this on
+maps `scripts/standards.yaml` onto BIG-IPs. This one is the fleet-push half:
+it defaults to CSV inventory and can read inventory from NetBox with `--netbox`.
+Desired configuration comes from this folder's standards file and templates.
+Reach for it when the question is "set this on
 these devices", and for `scripts/ios/` when it is "which devices are out of
 compliance".
 
 ## Install
 
+Run these commands from `scripts/nornir-netops`:
+
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-pip install boto3          # only if you keep credentials in AWS Secrets Manager
+python -m pip install -r requirements.txt
+python -m pip install 'requests>=2.31'  # for NetBox or ServiceNow
+python -m pip install 'boto3>=1.34'     # for AWS Secrets Manager
+cp .env.example .env
+cp standards.yaml.example standards.yaml
 ```
 
-Python 3.9+. Nothing is written to the network until you pass `--apply`.
+Python 3.9+. Edit `.env` and `standards.yaml` with your real settings before
+running against devices. For CSV inventory, also copy and edit
+`inventory/hosts.csv.example` as described below. For NetBox, use the
+[NetBox setup](#netbox-as-the-inventory).
+
+An editable package install also provides the `netops` command and optional
+dependency groups:
+
+```bash
+python -m pip install -e '.[netbox,aws,servicenow]'
+```
+
+Install only the groups you use; the base CSV workflow needs none of them.
+Device configuration is read-only unless `--apply` is passed. `--open-change`
+writes a ServiceNow change record while leaving device configuration untouched.
 
 ## The inventory CSV
 
@@ -145,7 +165,19 @@ show command and the run stops there; `--no-platform-cache` or
 
 ## NetBox as the inventory
 
-The CSV stays the default; `--netbox` reads devices from NetBox instead:
+The CSV stays the default; `--netbox` reads devices from NetBox instead.
+Install `requests` as shown above, then find the **NetBox inventory** section
+in [this folder's `.env.example`](.env.example). In your `.env`, uncomment
+and fill in:
+
+```dotenv
+NETBOX_URL=https://netbox.example.com
+NETBOX_TOKEN=your-token
+```
+
+The token needs read access to devices and interfaces. Device SSH credentials
+are separate (`NET_USER` / `NET_PASS`, an SSH key, or an AWS login secret).
+Setting the URL and token does not select NetBox automatically; pass `--netbox`:
 
 ```bash
 ./configure.py ntp --netbox --netbox-filter site=atl --netbox-filter role=core
@@ -197,8 +229,11 @@ So on a mixed fleet, filter to what this tool can drive:
   --netbox-filter platform=arista-eos
 ```
 
-A repeated key means "any of these" -- that is how NetBox reads repeated query
-parameters.
+Repeated site or platform filters mean "any of these". Repeated `tag` filters
+require all the tags, following [NetBox's filter semantics](https://netbox.readthedocs.io/en/stable/reference/filtering/).
+These filters select devices. Interface source tags are queried separately and
+joined to the selected devices by ID. Duplicate device names are rejected;
+narrow the device filters if names are reused across sites or tenants.
 
 `$NETBOX_URL` and `$NETBOX_TOKEN`, or `--netbox-secret` for an AWS secret
 holding `{"token": "...", "url": "..."}`. The URL may also sit in the standards
@@ -266,7 +301,7 @@ for the same reason as the auth key.
 
 ## The standards file
 
-The CSV says *which* devices. `standards.yaml` beside this tool says *what*:
+CSV or NetBox says *which* devices. `standards.yaml` beside this tool says *what*:
 
 ```yaml
 ntp:
@@ -1029,7 +1064,7 @@ plan, the device list, and the JSON report attached as evidence. The backout
 plan states plainly what exists -- the pre-change configuration of every device
 is in the attached report -- rather than pretending to be a procedure.
 
-`--change` checks the state **before reading or writing a single device**:
+`--change` requires `--apply` and checks the state **before reading or writing a single device**:
 
 ```console
 $ ./configure.py ntp --apply --change CHG0012345
@@ -1272,9 +1307,13 @@ for it -- it is per-platform already.
 3. Render the platform's template for what is missing, and negate what is left
    over (`--replace`).
 4. Push with netmiko.
-5. **Read the config back** and confirm every desired entry is now present. If
-   not, report it loudly and do **not** save. `--no-verify` skips this.
-6. `write memory`, unless `--no-save`.
+5. **Read the config back** and confirm desired entries are present and planned
+   removals took effect. ACLs, banners and NAC use their planners to check the
+   contents, order or required port settings. If verification fails, report it
+   and do **not** save. Password/key material cannot be verified from encrypted
+   device output. `--no-verify` skips read-back.
+6. `write memory`, unless `--no-save`. Recognized CLI errors during the push
+   or save are reported as failures.
 
 ## Templates
 
@@ -1347,11 +1386,13 @@ plain set of lines. Reach for one only when the domain needs it:
 ## Tests
 
 ```bash
-pip install pytest
-pytest
+python -m pip install -e '.[dev]'
+python -m pytest
+python -m pip check
+./configure.py selftest
 ```
 
-638 tests, no network. `tests/test_run.py` drives the real CLI, inventory,
+The test suite runs without network access. `tests/test_run.py` drives the real CLI, inventory,
 runner and templates end to end against a stateful fake device, so an apply is
 followed by a genuine read-back -- including the checks that a password reaches
 the device and never the terminal, the report, or the logs.

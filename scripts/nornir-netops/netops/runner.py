@@ -8,6 +8,7 @@ from nornir.core.task import Result, Task
 from nornir_netmiko import netmiko_send_command, netmiko_send_config
 
 from .rollback import default_reversal
+from .debuglog import protect
 from .core import (
     MODE_ADD,
     SAVE_COMMANDS,
@@ -152,18 +153,20 @@ def apply_rollback(task: Task, save: bool) -> Result:
     pushed = task.run(
         task=netmiko_send_config, name="rollback", config_commands=commands
     )
+    _check_understood("rollback", pushed.result or "")
     payload["applied"] = True
     payload["output"] = pushed.result
 
     save_command = SAVE_COMMANDS.get(payload["platform"]) if save else None
     if save_command:
-        task.run(
+        saved = task.run(
             task=netmiko_send_command,
             name=save_command,
             command_string=save_command,
             enable=True,
             read_timeout=SAVE_TIMEOUT,
         )
+        _check_understood(save_command, saved.result or "")
         payload["saved"] = True
     return Result(host=task.host, result=payload, changed=True)
 
@@ -238,6 +241,7 @@ def configure_feature(
         for entry in current
         if entry.data.get("secret_value")
     ]
+    protect(secrets)
     context = {
         "login_user": task.host.username,
         "platform": platform,
@@ -297,43 +301,63 @@ def configure_feature(
         payload["rollback"] = reversal.commands
         payload["rollback_unsupported"] = reversal.unsupported
 
-    pushed = task.run(
-        task=netmiko_send_config,
-        name=f"configure {feature.name}",
-        config_commands=commands,
-        **feature.config_options,
-    )
-    payload["applied"] = True
-    payload["output"] = scrub(pushed.result, secrets)
-
-    # Read back before saving. If a `no username x` landed but its replacement
-    # did not, this is what notices -- and not saving leaves startup-config with
-    # the account still in it.
-    if verify:
-        after = _read_state(task, support)
-        if feature.verify_with_plan:
-            # For a feature whose desired set is worked out from the device --
-            # every access port, say -- "is anything still outstanding?" is the
-            # only question worth asking, and its own planner is what answers it.
-            again, _ = feature.plan(after, desired, mode, {**context, "advisories": []})
-            payload["verified"] = not again
-            payload["missing_after"] = list(again)
-        else:
-            missing, _ = plan_changes(after, desired, MODE_ADD)
-            payload["verified"] = not missing
-            payload["missing_after"] = missing
-
-    if payload["save_command"] and payload["verified"] is not False:
-        saved = task.run(
-            task=netmiko_send_command,
-            name=payload["save_command"],
-            command_string=payload["save_command"],
-            enable=True,
-            read_timeout=SAVE_TIMEOUT,
+    try:
+        pushed = task.run(
+            task=netmiko_send_config,
+            name=f"configure {feature.name}",
+            config_commands=commands,
+            **feature.config_options,
         )
-        payload["save_output"] = scrub(saved.result, secrets)
-        payload["saved"] = True
-    elif payload["save_command"]:
-        payload["saved"] = False
+        payload["applied"] = True
+        payload["output"] = scrub(pushed.result, secrets)
+        _check_understood(f"configure {feature.name}", payload["output"] or "")
+
+        # Read back before saving. If a `no username x` landed but its replacement
+        # did not, this is what notices -- and not saving leaves startup-config with
+        # the account still in it.
+        if verify:
+            after = _read_state(task, support)
+            if feature.verify_with_plan:
+                # For a feature whose desired set is worked out from the device --
+                # every access port, say -- "is anything still outstanding?" is the
+                # only question worth asking, and its own planner is what answers it.
+                verification_context = {**context, "advisories": [], "notes": []}
+                again, remaining = feature.plan(after, desired, mode, verification_context)
+                outstanding = list(again) + [f"remove {entry.key}" for entry in remaining]
+                outstanding.extend(verification_context["advisories"])
+                payload["verified"] = not outstanding
+                payload["missing_after"] = outstanding
+            else:
+                missing, _ = plan_changes(after, desired, MODE_ADD)
+                # A removal-only run must be verified too. Keys also being
+                # rewritten (accounts, groups) are expected to remain present.
+                removed_entries = {
+                    (entry.key, entry.line) for entry in to_remove if entry.key not in to_add
+                }
+                remaining = sorted({
+                    entry.key for entry in after if (entry.key, entry.line) in removed_entries
+                })
+                outstanding = missing + [f"remove {key}" for key in remaining]
+                payload["verified"] = not outstanding
+                payload["missing_after"] = outstanding
+
+        if payload["save_command"] and payload["verified"] is not False:
+            saved = task.run(
+                task=netmiko_send_command,
+                name=payload["save_command"],
+                command_string=payload["save_command"],
+                enable=True,
+                read_timeout=SAVE_TIMEOUT,
+            )
+            payload["save_output"] = scrub(saved.result, secrets)
+            _check_understood(payload["save_command"], payload["save_output"] or "")
+            payload["saved"] = True
+        elif payload["save_command"]:
+            payload["saved"] = False
+
+    except Exception as exc:
+        # Preserve pre-change evidence even if the push, read-back or save
+        # fails after the device has accepted some commands.
+        return Result(host=task.host, result=payload, changed=True, failed=True, exception=exc)
 
     return Result(host=task.host, result=payload, changed=True)

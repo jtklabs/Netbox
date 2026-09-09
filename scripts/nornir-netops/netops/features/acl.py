@@ -305,6 +305,7 @@ FEATURE = Feature(
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_acls,
+    verify_with_plan=True,
     reverse=reverse,
     rollback_note=(
         "undoing this rebuilds each ACL as it was, which means deleting it "
