@@ -87,7 +87,7 @@
       {% if object.discovered_devices %}
         <div class="card">
           <h5 class="card-header">
-            {% if object.manually_entered %}Entered by hand{% else %}What the poller found{% endif %}
+            {% if object.manually_entered %}Device details (includes manual entries){% else %}What the poller found{% endif %}
             {% if object.scanned_at %}
               <span class="text-muted small float-end">{{ object.scanned_at }}</span>
             {% endif %}
@@ -96,8 +96,8 @@
             {% if object.manually_entered %}
               <p class="text-warning">
                 <i class="mdi mdi-pencil" aria-hidden="true"></i>
-                These details were typed in, not observed — the device could not
-                be scanned.
+                Missing details were entered by hand. Any details already
+                discovered were preserved.
               </p>
             {% endif %}
             <table class="table table-hover attr-table">
@@ -180,11 +180,10 @@
           <h5 class="card-header">Enter the details by hand</h5>
           <div class="card-body">
             <p class="text-muted">
-              The scan did not work. If this device has no SNMP — or is never
-              going to answer it — describe it here instead and it will be
-              created the same way a scanned one is. What you type is marked as
-              entered by hand, so nobody later mistakes it for something the
-              device reported.
+              Fill in the missing device details. Discovered values are
+              prefilled and cannot be changed. The site comes from the
+              request's network assignment. Manual additions are recorded
+              with the discovery results.
             </p>
             <form action="{% url 'plugins:netbox_discovery:onboardingrequest_manual' pk=object.pk %}" method="post">
               {% csrf_token %}

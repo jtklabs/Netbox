@@ -52,8 +52,16 @@ serial matching, Hardware Lifecycle EoL), so owning discovery fits.
 ### Vendors
 
 Cisco (IOS, IOS-XE, NX-OS), Arista EOS, Aruba (ArubaOS controllers, ClearPass,
-CX), F5 BIG-IP, Palo Alto PAN-OS, Fortinet FortiOS, Check Point Gaia, Infoblox
-NIOS, Juniper Junos, Opengear, Dell Force10/FTOS.
+CX), F5 BIG-IP, Palo Alto PAN-OS, Fortinet (FortiOS, FortiManager, FortiAnalyzer), Check Point Gaia, Infoblox
+NIOS, Juniper Junos, Opengear, Dell Force10/FTOS, AudioCodes.
+
+AudioCodes uses its vendor MIB for model, serial and software version, with
+`AudioCodes` as the inventory platform label. For M800C appliances that report
+the model in `entPhysicalMfgName`, the scanner uses `AudioCodes` as manufacturer
+and recovers that model when the normal model sources are empty. The original
+SNMP fields remain visible in probe output. After updating the poller, rescan
+affected requests to replace their old findings. See
+[AudioCodes details](docs/OID-SOURCES.md#audiocodes).
 
 Force10 reads the application software release instead of the underlying
 `Operating System Version: 2.0`, and falls back to the chassis/S-series MIBs

@@ -1,7 +1,7 @@
 """Per-vendor OIDs and the software-version extraction that goes with them.
 
-Every OID in this file was resolved from the vendor's own published MIB with a
-parser, not recalled — see docs/OID-SOURCES.md for the MIB and the object name
+Every OID in this file was verified against the vendor's published MIB or
+documentation — see docs/OID-SOURCES.md for the source and the object name
 behind each constant. That matters more than usual here: the reason this
 scanner exists is that the tool it replaces guessed hardware facts instead of
 reading them, and a mis-transcribed OID would be the same class of bug.
@@ -128,6 +128,21 @@ GENERIC_VERSION_PATTERNS = (
 )
 
 PROFILES: dict[int, VendorProfile] = {
+    5003: VendorProfile(
+        name="audiocodes",
+        manufacturer="AudioCodes",
+        # Inventory platform label for the AudioCodes software family.
+        platform="AudioCodes",
+        # AC-SYSTEM-MIB; verified via docs/resolve_oid.py. Prefer the string
+        # serial, which also accommodates products with non-numeric serials.
+        version_oids=("1.3.6.1.4.1.5003.9.10.10.2.2.1.0",),  # acSysVersionSoftware
+        serial_oids=(
+            "1.3.6.1.4.1.5003.9.10.10.2.3.5.0",  # acSysIdSerialNumberString
+            "1.3.6.1.4.1.5003.9.10.10.2.3.2.0",  # acSysIdSerialNumber
+        ),
+        model_oids=("1.3.6.1.4.1.5003.9.10.10.2.3.1.0",),  # acSysIdName
+        model_patterns=(r"(?i)\b(M800C)\b", r"(?i)\b(Mediant\s+800C)\b"),
+    ),
     6027: VendorProfile(
         name="force10",
         manufacturer="Force10",
@@ -201,7 +216,10 @@ PROFILES: dict[int, VendorProfile] = {
         name="fortinet",
         manufacturer="Fortinet",
         platform="FortiOS",
-        version_oids=("1.3.6.1.4.1.12356.101.4.1.1.0",),   # fgSysVersion
+        version_oids=(
+            "1.3.6.1.4.1.12356.101.4.1.1.0",   # fgSysVersion (FortiGate)
+            "1.3.6.1.4.1.12356.103.2.1.7.0",   # fmSysVersion (FortiManager/Analyzer)
+        ),
         serial_oids=("1.3.6.1.4.1.12356.100.1.1.1.0",),    # fnSysSerial
         version_patterns=(r"v([0-9]+\.[0-9]+\.[0-9]+)",),
         # "FortiGate-600E v7.2.8,build1639,240110 (GA)"
@@ -410,6 +428,8 @@ PLATFORM_HINTS: tuple[tuple[str, str, str], ...] = (
     ("cisco", "Adaptive Security Appliance", "Cisco ASA"),
     ("aruba", "ArubaOS-CX", "ArubaOS-CX"),
     ("aruba", "ClearPass", "Aruba ClearPass"),
+    ("fortinet", "FortiManager", "FortiManager"),
+    ("fortinet", "FortiAnalyzer", "FortiAnalyzer"),
 )
 
 

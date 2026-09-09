@@ -1,7 +1,7 @@
 # Where every OID came from
 
-Each numeric OID in `snmpinv/mibs.py` and `snmpinv/vendors.py` was resolved
-from the vendor's published MIB by parsing the file, not recalled from memory.
+Each numeric OID in `snmpinv/mibs.py` and `snmpinv/vendors.py` was verified
+against the vendor's published MIB or documentation, not recalled from memory.
 This document records the source so the next person can re-derive them.
 
 That sounds like overkill for a handful of numbers. It is not: a mis-transcribed
@@ -43,6 +43,37 @@ python3 docs/resolve_oid.py ~/mibs/paloalto panSysSwVersion panSysSerialNumber
 
 Give each vendor its own directory — see the note in `resolve_oid.py` about
 why parsing several at once produces wrong answers.
+
+## AudioCodes
+
+Verified on 2026-09-09 from AudioCodes' vendor-authored
+[AC-SYSTEM-MIB](https://github.com/librenms/librenms/blob/master/mibs/audiocodes/AC-SYSTEM-MIB)
+and [AUDIOCODES-TYPES-MIB](https://github.com/librenms/librenms/blob/master/mibs/audiocodes/AUDIOCODES-TYPES-MIB),
+mirrored by LibreNMS. `audioCodes ::= { enterprises 5003 }` identifies the
+manufacturer; no product sub-arcs are used to infer a model.
+
+| Object | Scalar instance | Purpose |
+|---|---|---|
+| `acSysVersionSoftware` | 1.3.6.1.4.1.5003.9.10.10.2.2.1.0 | Running software release |
+| `acSysIdName` | 1.3.6.1.4.1.5003.9.10.10.2.3.1.0 | Board/model name |
+| `acSysIdSerialNumberString` | 1.3.6.1.4.1.5003.9.10.10.2.3.5.0 | Preferred string serial |
+| `acSysIdSerialNumber` | 1.3.6.1.4.1.5003.9.10.10.2.3.2.0 | Numeric serial fallback |
+
+Resolve the objects with `docs/resolve_oid.py <audiocodes-mib-directory>
+acSysVersionSoftware acSysIdName acSysIdSerialNumberString acSysIdSerialNumber`;
+the output omits the scalar `.0` instances shown above.
+
+The `AudioCodes` platform is an inventory mapping for the vendor software
+family. It is not an OS string read from the device: the MIB's `acSysTypeOSType`
+applies only to hosted products, so it is not a reliable source for an M800C.
+
+The M800C manufacturer-column correction follows a field report, not a
+captured walk: when enterprise 5003 reports exactly `M800C` or `Mediant 800C`
+in the chassis manufacturer field, use `AudioCodes` for manufacturer. Recover
+the misplaced model only after ENTITY-MIB and vendor model sources are empty.
+No raw observations are modified. Unknown models remain blank.
+`tests/test_audiocodes.py` exercises synthetic replies; a live M800C walk has
+not yet been validated.
 
 ## Standard MIBs
 
@@ -113,6 +144,7 @@ would be inventing a switch that is not in the rack.
 | Palo Alto | `panSysHwVersion` | 1.3.6.1.4.1.25461.2.1.2.1.2.0 | PAN-COMMON-MIB |
 | Palo Alto | `panSysSerialNumber` | 1.3.6.1.4.1.25461.2.1.2.1.3.0 | PAN-COMMON-MIB |
 | Fortinet | `fgSysVersion` | 1.3.6.1.4.1.12356.101.4.1.1.0 | FORTINET-FORTIGATE-MIB |
+| Fortinet | `fmSysVersion` | 1.3.6.1.4.1.12356.103.2.1.7.0 | FORTINET-FORTIMANAGER-FORTIANALYZER-MIB; verified against [Fortinet's OID reference](https://community.fortinet.com/fortimanager-27/technical-tip-how-to-get-and-troubleshoot-mibs-and-oids-from-snmp-105493) on 2026-09-09; `.0` is the scalar instance |
 | Fortinet | `fnSysSerial` | 1.3.6.1.4.1.12356.100.1.1.1.0 | FORTINET-CORE-MIB |
 | F5 | `sysProductVersion` | 1.3.6.1.4.1.3375.2.1.4.2.0 | F5-BIGIP-SYSTEM-MIB |
 | F5 | `sysGeneralChassisSerialNum` | 1.3.6.1.4.1.3375.2.1.3.3.3.0 | F5-BIGIP-SYSTEM-MIB |

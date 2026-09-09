@@ -105,11 +105,7 @@ class OnboardingRequestView(ObjectView):
             # Offered exactly where it is the answer: the scan failed, so
             # nothing else is going to fill these in.
             'can_enter_manually': instance.status == OnboardingStatusChoices.STATUS_FAILED,
-            'manual_form': forms.OnboardingManualEntryForm(initial={
-                'name': instance.override_name or instance.address,
-                'override_site': instance.override_site,
-                'role': instance.role,
-            }),
+            'manual_form': forms.OnboardingManualEntryForm(entry=instance),
         }
 
 
@@ -318,7 +314,7 @@ class OnboardingManualEntryView(_ReviewActionView):
         if not request.user.has_perm(self.permission_required):
             return self.deny(request, entry, 'You do not have permission to do that.')
 
-        form = forms.OnboardingManualEntryForm(request.POST)
+        form = forms.OnboardingManualEntryForm(request.POST, entry=entry)
         if not form.is_valid():
             return self.deny(
                 request, entry,

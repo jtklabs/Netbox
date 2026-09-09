@@ -290,6 +290,7 @@ ENTERPRISE_PREFIX = "1.3.6.1.4.1."
 # the label is the brand the GEAR carries, with the registry name alongside;
 # additions come from the registry, never from memory.
 ENTERPRISE_MANUFACTURERS = {
+    5003: "AudioCodes",
     9: "Cisco",
     11: "HPE",                      # registry: Hewlett-Packard
     43: "3Com",

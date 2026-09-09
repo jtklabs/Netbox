@@ -11,6 +11,8 @@ not allowed, so callers differ only in how they render the message.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from django.utils import timezone
 
 from netbox_discovery.choices import OnboardingStatusChoices
@@ -212,7 +214,30 @@ def enter_manually(entry, user=None, *, name, manufacturer, model, serial='',
             'This request is finished (%s); create a new one instead.'
             % entry.get_status_display()
         )
-    if not (model or '').strip():
+    discovered = deepcopy(entry.discovered or {})
+    devices = discovered.setdefault('devices', [])
+    if devices:
+        primary = next((device for device in devices if device.get('is_master')),
+                       devices[0])
+    else:
+        primary = {'is_master': True, 'vc_position': None,
+                   'interfaces': [], 'modules': []}
+        devices.append(primary)
+
+    # Fill gaps only, including through the API. Keep the complete reading:
+    # stack members, interfaces, modules, access points and scan metadata.
+    values = {
+        'name': (discovered.get('sys_name') or '').strip() or name,
+        'manufacturer': str(manufacturer),
+        'model': model,
+        'serial': serial,
+        'platform': str(platform) if platform else '',
+        'software_version': software_version,
+    }
+    for field, value in values.items():
+        if not (primary.get(field) or '').strip():
+            primary[field] = (value or '').strip()
+    if not primary['model']:
         raise TransitionError('A model is required — it is what the device type is.')
 
     if override_site is not None:
@@ -222,31 +247,17 @@ def enter_manually(entry, user=None, *, name, manufacturer, model, serial='',
     if entry.target_site is None:
         raise TransitionError(
             'This request has no site, so there is nowhere to create the device. '
-            'Choose one.'
+            'Correct this request\'s site assignment before submitting again.'
         )
 
-    entry.discovered = {
-        'sys_name': name,
-        'sys_descr': '',
-        'credential': '',
-        'devices': [{
-            'name': name,
-            'model': model.strip(),
-            'serial': (serial or '').strip(),
-            'manufacturer': str(manufacturer),
-            'platform': str(platform) if platform else '',
-            'software_version': (software_version or '').strip(),
-            'is_master': True,
-            'vc_position': None,
-            # No interfaces: nothing observed them, and inventing them would be
-            # worse than leaving the device with none.
-            'interfaces': [],
-            'modules': [],
-        }],
-        'access_points': [],
-    }
+    if not (discovered.get('sys_name') or '').strip():
+        discovered['sys_name'] = primary['name']
+    discovered.setdefault('sys_descr', '')
+    discovered.setdefault('credential', '')
+    discovered.setdefault('access_points', [])
+    entry.discovered = discovered
     entry.manually_entered = True
-    entry.override_name = name
+    entry.override_name = primary['name']
     entry.error = ''
     entry.status = OnboardingStatusChoices.STATUS_APPROVED
     entry.reviewed_at = timezone.now()

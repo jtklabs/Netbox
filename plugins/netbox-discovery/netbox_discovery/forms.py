@@ -207,9 +207,8 @@ class OnboardingManualEntryForm(forms.Form):
     in for those, using the same request, the same review and the same apply as
     a scanned device, so there is one path into DCIM rather than two.
 
-    What is typed here is marked as entered by hand wherever it is shown. A
-    hand-typed serial and an observed one are not equally trustworthy and
-    should never look alike.
+    Existing observations are prefilled and locked. Only missing details are
+    entered here, and the request is marked as including manual entries.
     """
 
     name = forms.CharField(
@@ -236,14 +235,36 @@ class OnboardingManualEntryForm(forms.Form):
         queryset=DeviceRole.objects.all(), required=False,
         help_text="Blank uses the poller's default role",
     )
-    override_site = DynamicModelChoiceField(
-        queryset=Site.objects.all(), required=False, label='Site',
-        help_text='Only needed if no prefix placed the address',
-    )
     software_version = forms.CharField(
         required=False,
         help_text='Running version, if known',
     )
+
+    def __init__(self, *args, entry, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initial.update({
+            'name': entry.override_name or entry.address,
+            'model': entry.override_model,
+            'role': entry.role,
+        })
+        observed = dict(entry.primary_discovered)
+        if not (observed.get('name') or '').strip():
+            observed['name'] = (entry.discovered or {}).get('sys_name', '')
+        for name in ('name', 'manufacturer', 'model', 'serial', 'platform',
+                     'software_version'):
+            value = observed.get(name)
+            if not value or not str(value).strip():
+                continue
+            # The poller reports names, which may not exist in DCIM yet.
+            # Display those directly instead of requiring a matching object.
+            field = self.fields[name]
+            if name in ('manufacturer', 'platform'):
+                field = self.fields[name] = forms.CharField(
+                    label=field.label, required=field.required,
+                )
+            field.disabled = True
+            field.help_text = 'Discovered automatically'
+            self.initial[name] = value
 
 
 class DiscoveryIssueForm(NetBoxModelForm):

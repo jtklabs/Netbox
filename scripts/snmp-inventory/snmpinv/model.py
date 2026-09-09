@@ -154,7 +154,7 @@ def _device_name(facts: DeviceFacts) -> str:
 def _manufacturer(facts: DeviceFacts) -> str:
     """Prefer what the hardware says, then the vendor profile, then the OID map."""
     for entity in facts.chassis_entities():
-        if entity.mfg_name:
+        if entity.mfg_name and not _misplaced_audiocodes_model(facts, entity):
             return _tidy_manufacturer(entity.mfg_name)
     if facts.profile is not None:
         return facts.profile.manufacturer
@@ -189,6 +189,8 @@ def _tidy_manufacturer(raw: str) -> str:
         ("blue coat", "Blue Coat"),
         ("bluecoat", "Blue Coat"),
         ("opengear", "Opengear"),
+        ("audiocodes", "AudioCodes"),
+        ("audio codes", "AudioCodes"),
     ):
         if needle in lowered:
             return canonical
@@ -242,7 +244,24 @@ def _model_for(facts: DeviceFacts, entity: Entity | None) -> str:
         return _tidy_model(entity.model)
     if facts.vendor_model:
         return _tidy_model(facts.vendor_model)
+    misplaced = _misplaced_audiocodes_model(facts, entity)
+    if misplaced:
+        return misplaced
     return ""
+
+
+def _misplaced_audiocodes_model(facts: DeviceFacts, entity: Entity | None) -> str:
+    """Recover the reported M800C model from the wrong ENTITY-MIB column.
+
+    Scoped to AudioCodes and known model strings: an arbitrary manufacturer
+    must never become a device type. Keep the original entity for probe output.
+    """
+    if (entity is None or facts.profile is None
+            or facts.profile.name != "audiocodes"):
+        return ""
+    return {"m800c": "M800C", "mediant 800c": "Mediant 800C"}.get(
+        entity.mfg_name.strip().casefold(), "",
+    )
 
 
 def _serial_for(facts: DeviceFacts, entity: Entity | None) -> str:
