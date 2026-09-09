@@ -104,6 +104,15 @@ Either way the device's **Platform** is also set to the OS family (`Cisco
 IOS-XE`, `PAN-OS`, `Arista EOS` …), which is what Platform is for and makes the
 fleet filterable by NOS.
 
+For controller-discovered Aruba APs, the per-AP software version is preferred;
+an absent per-AP value falls back to the controller version. `--probe` shows
+both the AP table's reading and the effective version that would be written.
+In JSON, these are `access_points[].software_version` and
+`would_create.access_point_devices[].software_version`. AP records and their
+versions are also kept when applying a saved onboarding scan after the
+controller becomes unreachable. Older saved scans that did not store AP
+versions need a fresh controller scan to supply them.
+
 Find everything running a given release:
 
 ```

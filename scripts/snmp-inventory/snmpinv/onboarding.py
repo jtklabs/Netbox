@@ -459,7 +459,9 @@ def scan_payload(result: ScanResult) -> dict:
             for device in result.devices
         ],
         "access_points": [
-            {"name": ap.name, "model": ap.model, "serial": ap.serial}
+            {"name": ap.name, "model": ap.model, "serial": ap.serial,
+             "manufacturer": ap.manufacturer, "platform": ap.platform,
+             "software_version": ap.software_version, "description": ap.description}
             for ap in result.access_points
         ],
     }
@@ -507,6 +509,19 @@ def scan_result_from_payload(payload: dict, host: str = "") -> ScanResult:
             ],
         ))
     result = ScanResult(host=host, sys_name=payload.get("sys_name", ""), devices=devices)
+    result.access_points = [
+        DeviceRecord(
+            name=entry.get("name", ""),
+            model=entry.get("model", ""),
+            serial=entry.get("serial", ""),
+            manufacturer=entry.get("manufacturer", "Aruba Networks"),
+            platform=entry.get("platform", "ArubaOS"),
+            software_version=entry.get("software_version", ""),
+            description=entry.get("description", ""),
+            is_access_point=True,
+        )
+        for entry in payload.get("access_points", [])
+    ]
     if len([d for d in devices if d.vc_position is not None]) > 1:
         primary = result.primary
         result.virtual_chassis_name = primary.name if primary else ""

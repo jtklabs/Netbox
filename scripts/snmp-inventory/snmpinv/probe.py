@@ -258,11 +258,11 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
     if facts.access_points:
         _section(w, f"ACCESS POINTS — reported by this controller "
                     f"({len(facts.access_points)})")
-        w(f"  {'name':<24} {'model':<14} {'serial':<18} {'address':<16} status\n")
+        w(f"  {'name':<24} {'model':<14} {'serial':<18} {'address':<16} status / software\n")
         for ap in facts.access_points:
             w(f"  {(ap.name or '—')[:24]:<24} {ap.model or '—':<14} "
               f"{ap.serial or '—':<18} {ap.ip_address or '—':<16} "
-              f"{'up' if ap.is_up else ap.status}\n")
+              f"{'up' if ap.is_up else ap.status} / {ap.software_version or '(not reported)'}\n")
 
     _section(w, "WHAT THIS WOULD BECOME IN NETBOX")
     if not result.devices:
@@ -290,7 +290,8 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
           f"with {len(result.devices)} members\n")
     for ap in result.access_points:
         w(f"  device   {ap.name} | {ap.manufacturer} {ap.model} "
-          f"serial {ap.serial or '—'} (access point)\n")
+          f"serial {ap.serial or '—'} (access point) | "
+          f"software {ap.software_version or '(not reported)'}\n")
     w("\n")
 
 
@@ -398,7 +399,7 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
         "access_points": [
             {"name": ap.name, "model": ap.model, "serial": ap.serial,
              "mac": ap.mac_address, "address": ap.ip_address, "group": ap.group,
-             "up": ap.is_up}
+             "up": ap.is_up, "software_version": ap.software_version}
             for ap in facts.access_points
         ],
         # Both layers on purpose: the sightings are what the device said, the
@@ -443,6 +444,11 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
             ],
             "virtual_chassis": result.virtual_chassis_name or None,
             "access_points": len(result.access_points),
+            "access_point_devices": [
+                {"name": ap.name, "model": ap.model, "serial": ap.serial,
+                 "platform": ap.platform, "software_version": ap.software_version}
+                for ap in result.access_points
+            ],
         },
     }
 
