@@ -16,6 +16,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile-Plugins
+      secrets:
+        - python_index_url
     pull_policy: ${PROD_PULL_POLICY:-never}
     restart: unless-stopped
     ports:
@@ -51,3 +53,8 @@ services:
     restart: unless-stopped
   redis-cache:
     restart: unless-stopped
+
+# Supplied only during image builds; never added to the running containers.
+secrets:
+  python_index_url:
+    environment: PYTHON_INDEX_URL

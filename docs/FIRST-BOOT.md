@@ -122,6 +122,8 @@ sudo vi /mnt/data_disk/netbox-secrets/prod.env
 
 sudo tee /mnt/data_disk/netbox-secrets/.env >/dev/null <<'EOF'
 COMPOSE_FILE=docker-compose.yml:compose/prod.yml
+# Required for local image builds; replace with your internal Python index.
+PYTHON_INDEX_URL=https://packages.example.com/repository/pypi/simple/
 # The address NetBox publishes on. Apache is on another host, so this must NOT
 # be loopback. Use 0.0.0.0, NOT the instance's private IP: this file lives on
 # the data disk and is reused by every future instance, whose IP will differ —

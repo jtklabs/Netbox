@@ -1,14 +1,17 @@
 FROM docker.io/netboxcommunity/netbox:v4.6.7-5.0.2
 
+COPY scripts/install-build-packages.sh /opt/netbox/install-build-packages.sh
 COPY plugin_requirements.txt /opt/netbox/
-RUN /usr/local/bin/uv pip install -r /opt/netbox/plugin_requirements.txt
+RUN --mount=type=secret,id=python_index_url,required=true \
+    sh /opt/netbox/install-build-packages.sh -r /opt/netbox/plugin_requirements.txt
 
 # Our own plugins, vendored in this repo
 COPY plugins/netbox-quotes /opt/netbox-plugins/netbox-quotes
 COPY plugins/netbox-refresh /opt/netbox-plugins/netbox-refresh
 COPY plugins/netbox-discovery /opt/netbox-plugins/netbox-discovery
 COPY plugins/netbox-compliance /opt/netbox-plugins/netbox-compliance
-RUN /usr/local/bin/uv pip install \
+RUN --mount=type=secret,id=python_index_url,required=true \
+    sh /opt/netbox/install-build-packages.sh \
     /opt/netbox-plugins/netbox-quotes \
     /opt/netbox-plugins/netbox-refresh \
     /opt/netbox-plugins/netbox-discovery \

@@ -5,6 +5,7 @@
 # out, so instances boot with the image already present instead of building it
 # at first boot (see docs/FIRST-BOOT.md — we do not use ECR).
 #
+#   export PYTHON_INDEX_URL=https://packages.example.com/repository/pypi/simple/
 #   ./scripts/prod-build.sh              build and verify
 #   ./scripts/prod-build.sh --tag NAME   build under a different tag
 #   ./scripts/prod-build.sh --no-verify  skip the plugin load check
@@ -21,7 +22,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --tag) tag="${2:?--tag requires a value}"; shift 2 ;;
     --no-verify) verify=false; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -40,7 +41,13 @@ fi
 
 echo "==> base image:  $base_image"
 echo "==> building:    $image"
-docker build -f Dockerfile-Plugins -t "$image" .
+if [ -z "${PYTHON_INDEX_URL:-}" ]; then
+  echo 'Set PYTHON_INDEX_URL in the build environment (the Python package index /simple URL).' >&2
+  echo 'For builds using the root .env, use docker compose build netbox.' >&2
+  exit 1
+fi
+export PYTHON_INDEX_URL
+docker build --secret id=python_index_url,env=PYTHON_INDEX_URL -f Dockerfile-Plugins -t "$image" .
 
 if [ "$verify" = true ]; then
   echo '==> verifying the plugins load in the built image'

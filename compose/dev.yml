@@ -7,6 +7,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile-Plugins
+      secrets:
+        - python_index_url
     pull_policy: never
     healthcheck:
       # Upstream allows 90s + 3 default retries (~135s). A cold start runs
@@ -57,3 +59,8 @@ services:
 volumes:
   netbox-postgres:
     driver: local
+
+# Supplied only during image builds; never added to the running containers.
+secrets:
+  python_index_url:
+    environment: PYTHON_INDEX_URL
