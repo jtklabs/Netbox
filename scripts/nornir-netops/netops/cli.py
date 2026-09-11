@@ -119,13 +119,13 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
     source.add_argument(
         "-c",
         "--csv",
-        default=os.environ.get("NETOPS_CSV", "inventory/hosts.csv"),
-        help="CSV of devices [$NETOPS_CSV]",
+        help="CSV of devices [$NETOPS_CSV; default: inventory/hosts.csv]. "
+             "Overrides $NETOPS_INVENTORY.",
     )
     source.add_argument(
         "--netbox",
         action="store_true",
-        help="use NetBox as the inventory rather than --csv",
+        help="use NetBox as the inventory rather than --csv [$NETOPS_INVENTORY=netbox]",
     )
     source.add_argument(
         "--ip",
@@ -170,7 +170,8 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         default=[],
         metavar="KEY=VALUE",
         help="NetBox API filter, e.g. site=atl or role=core (repeatable; a "
-        "repeated site/platform values mean any; repeated tags require all)",
+        "repeated site/platform values mean any; repeated tags require all). "
+        "Overrides the space-separated $NETBOX_FILTERS list.",
     )
     box.add_argument(
         "--netbox-source-tag",
@@ -834,6 +835,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Resolve the default source only when no source was explicitly selected.
+    # In particular, an .env selecting NetBox must not defeat --csv or --ip.
+    if hasattr(args, "csv"):
+        if not args.csv and not args.ip and not args.netbox:
+            source = os.environ.get("NETOPS_INVENTORY", "csv").strip().lower()
+            if source not in ("csv", "netbox"):
+                parser.error("NETOPS_INVENTORY must be csv or netbox")
+            args.netbox = source == "netbox"
+        args.csv = args.csv or os.environ.get("NETOPS_CSV", "inventory/hosts.csv")
 
     if args.command == "selftest":
         return selftest()

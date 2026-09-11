@@ -508,3 +508,86 @@ def test_failed_rest_login_closes_session(monkeypatch):
         with f5_waf.Client(host):
             pytest.fail("failed login must not enter the session")
     assert closed == [True]
+
+
+def test_env_file_supplies_netbox_aws_keys_and_f5_options(setup, tmp_path, monkeypatch):
+    from netops import credentials
+
+    fetched = []
+
+    def secret(name, region):
+        fetched.append((name, region))
+        return {"f5_user": "aws-user", "f5_password": "aws-password"}
+
+    monkeypatch.setattr(credentials, "fetch_json_secret", secret)
+    env = tmp_path / "f5.env"
+    env.write_text('''NETOPS_INVENTORY=netbox
+NETBOX_FILTERS="platform=f5-tmos site=atl"
+NET_AWS_SECRET=prod/network/f5
+NET_AWS_REGION=us-east-1
+NET_AWS_USERNAME_KEY=f5_user
+NET_AWS_PASSWORD_KEY=f5_password
+NETOPS_F5_PORT=8443
+NETOPS_F5_TIMEOUT=45
+NETOPS_F5_VERIFY_TLS=false
+NETOPS_F5_LOGIN_PROVIDER=radius
+NETBOX_CHECKED_FIELD=syslog_last_checked
+''')
+    code = cli.main(["waf", "--env-file", str(env), "--standards", str(setup.standards)])
+    assert code == cli.EXIT_OK
+    assert fetched == [("prod/network/f5", "us-east-1")]
+    assert setup.box.logins[0][2:4] == ("aws-user", "aws-password")
+    assert setup.box.logins[0][4] == {"port": 8443, "timeout": 45,
+                                      "verify_tls": False, "provider": "radius"}
+    query = setup.nb.calls[0][2]
+    assert query["platform"] == "f5-tmos" and query["site"] == "atl"
+    assert setup.nb.writes == setup.box.writes == []
+
+
+def test_cli_overrides_environment_connection_settings_and_filters(setup, monkeypatch):
+    monkeypatch.setenv("NETOPS_F5_PORT", "8443")
+    monkeypatch.setenv("NETOPS_F5_TIMEOUT", "45")
+    monkeypatch.setenv("NETOPS_F5_VERIFY_TLS", "false")
+    monkeypatch.setenv("NETOPS_F5_LOGIN_PROVIDER", "radius")
+    monkeypatch.setenv("NETBOX_FILTERS", "site=wrong platform=wrong")
+    code, _ = setup.run("--f5-port", "443", "--f5-timeout", "60", "--f5-verify-tls",
+                         "--f5-login-provider", "tmos", "--netbox-filter", "platform=f5-tmos",
+                         netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    assert setup.box.logins[0][4] == {"port": 443, "timeout": 60,
+                                      "verify_tls": True, "provider": "tmos"}
+    assert setup.nb.calls[0][2]["platform"] == "f5-tmos"
+    assert "site" not in setup.nb.calls[0][2]
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_explicit_csv_or_ip_overrides_netbox_environment(setup, monkeypatch, direct):
+    monkeypatch.setenv("NETOPS_INVENTORY", "netbox")
+    assert setup.run(direct=direct)[0] == cli.EXIT_OK
+    assert setup.nb.calls == []
+    assert len(setup.box.logins) == 1
+
+
+def test_environment_csv_default_still_works(setup, monkeypatch):
+    monkeypatch.setenv("NETOPS_INVENTORY", "csv")
+    monkeypatch.setenv("NETOPS_CSV", str(setup.csv))
+    assert cli.main(["waf", "--no-env-file", "--standards", str(setup.standards)]) == cli.EXIT_OK
+    assert setup.nb.calls == []
+
+
+@pytest.mark.parametrize("variable,value", [("NETOPS_INVENTORY", "typo"),
+                                             ("NETOPS_F5_VERIFY_TLS", "typo")])
+def test_invalid_environment_defaults_fail_before_connection(setup, monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(SystemExit):
+        cli.main(["waf", "--no-env-file", "--standards", str(setup.standards)])
+    assert setup.nb.calls == setup.box.logins == []
+
+
+def test_shell_environment_wins_over_env_file(setup, monkeypatch, tmp_path):
+    monkeypatch.setenv("NETOPS_F5_PORT", "8443")
+    env = tmp_path / "f5.env"
+    env.write_text("NETOPS_F5_PORT=443\n")
+    assert cli.main(["waf", "--env-file", str(env), "--csv", str(setup.csv),
+                     "--standards", str(setup.standards)]) == cli.EXIT_OK
+    assert setup.box.logins[0][4]["port"] == 8443

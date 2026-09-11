@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -17,15 +18,29 @@ CHECKED_FIELD = "syslog_last_checked"
 
 def add_arguments(parser):
     group = parser.add_argument_group("F5 WAF")
-    group.add_argument("--f5-port", type=int, default=443, help="BIG-IP management HTTPS port")
-    group.add_argument("--f5-timeout", type=float, default=30, help="REST request timeout in seconds")
-    group.add_argument("--f5-insecure", action="store_true", help="disable BIG-IP certificate verification")
-    group.add_argument("--f5-login-provider", default="tmos", help="BIG-IP authentication provider")
-    group.add_argument("--netbox-checked-field", default=CHECKED_FIELD,
-                       help="device datetime custom field recording the last completed syslog check")
+    group.add_argument("--f5-port", type=int, default=os.environ.get("NETOPS_F5_PORT", "443"),
+                       help="BIG-IP management HTTPS port [$NETOPS_F5_PORT]")
+    group.add_argument("--f5-timeout", type=float, default=os.environ.get("NETOPS_F5_TIMEOUT", "30"),
+                       help="REST request timeout in seconds [$NETOPS_F5_TIMEOUT]")
+    tls = group.add_mutually_exclusive_group()
+    tls.add_argument("--f5-insecure", action="store_true", default=None,
+                     help="disable BIG-IP certificate verification [$NETOPS_F5_VERIFY_TLS=false]")
+    tls.add_argument("--f5-verify-tls", dest="f5_insecure", action="store_false", default=None,
+                     help="enable BIG-IP certificate verification, overriding $NETOPS_F5_VERIFY_TLS")
+    group.add_argument("--f5-login-provider", default=os.environ.get("NETOPS_F5_LOGIN_PROVIDER", "tmos"),
+                       help="BIG-IP authentication provider [$NETOPS_F5_LOGIN_PROVIDER]")
+    group.add_argument("--netbox-checked-field", default=os.environ.get("NETBOX_CHECKED_FIELD", CHECKED_FIELD),
+                       help="device datetime custom field for the last syslog check [$NETBOX_CHECKED_FIELD]")
 
 
 def build_desired(args):
+    if args.f5_insecure is None:
+        tls = os.environ.get("NETOPS_F5_VERIFY_TLS", "true").strip().lower()
+        if tls not in ("true", "false"):
+            raise ValueError("NETOPS_F5_VERIFY_TLS must be true or false")
+        verify_tls = tls == "true"
+    else:
+        verify_tls = not args.f5_insecure
     destinations = []
     for raw in of(args).entries("syslog.destinations"):
         item = host_and_port(raw, 514)
@@ -48,7 +63,7 @@ def build_desired(args):
     return Desired(
         keys=[f"{host}{'.' if ':' in host else ':'}{port}" for host, port in destinations],
         variables={"destinations": destinations, "port": args.f5_port,
-                   "verify_tls": not args.f5_insecure, "timeout": args.f5_timeout,
+                   "verify_tls": verify_tls, "timeout": args.f5_timeout,
                    "provider": args.f5_login_provider,
                    "netbox_policy": bool(getattr(args, "netbox", False))},
     )
