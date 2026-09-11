@@ -19,9 +19,9 @@ CHECKED_FIELD = "syslog_last_checked"
 def add_arguments(parser):
     parser.add_argument(
         "--policy", dest="logging_policy", choices=("audit", "add", "manage", "netbox"),
-        help="F5 logging action: audit only, add missing, manage exact destinations, or follow "
+        help="logging action: audit only, add missing, manage exact destinations, or follow "
              "each device's NetBox tag. Overrides tags unless netbox is selected "
-             "[$NETOPS_F5_POLICY; default: netbox for NetBox inventory, add otherwise]",
+             "[$NETOPS_SYSLOG_POLICY (NETOPS_F5_POLICY fallback); default: netbox for NetBox inventory, add otherwise]",
     )
     group = parser.add_argument_group("F5 HTTPS")
     group.add_argument("--f5-port", type=int, default=os.environ.get("NETOPS_F5_PORT", "443"),
@@ -47,12 +47,12 @@ def selected_policy(args):
     if explicit_mode:
         policy = "manage" if args.mode == MODE_REPLACE else "add"
     elif policy is None:
-        policy = os.environ.get("NETOPS_F5_POLICY")
+        policy = os.environ.get("NETOPS_SYSLOG_POLICY", os.environ.get("NETOPS_F5_POLICY"))
     if policy is None:
         policy = ("netbox" if getattr(args, "netbox", False) else
                   "manage" if getattr(args, "mode", None) == MODE_REPLACE else "add")
     if policy not in ("audit", "add", "manage", "netbox"):
-        raise ValueError("NETOPS_F5_POLICY must be audit, add, manage or netbox")
+        raise ValueError("NETOPS_SYSLOG_POLICY / NETOPS_F5_POLICY must be audit, add, manage or netbox")
     # Offline selftest namespaces have no inventory arguments.
     if policy == "netbox" and hasattr(args, "netbox") and not args.netbox:
         raise ValueError("--policy netbox requires NetBox inventory (--netbox or NETOPS_INVENTORY=netbox)")

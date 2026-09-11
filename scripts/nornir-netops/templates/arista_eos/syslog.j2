@@ -15,7 +15,7 @@ logging {% if vrf %}vrf {{ vrf }} {% endif %}host {{ item.host }}{% if item.port
 {% elif item.kind == 'trap' %}
 logging trap {{ item.severity }}
 {% elif item.kind == 'source' %}
-logging source-interface {{ item.source }}
+logging {% if vrf %}vrf {{ vrf }} {% endif %}source-interface {{ item.source }}
 {% endif %}
 {% endfor %}
 {% for entry in remove %}

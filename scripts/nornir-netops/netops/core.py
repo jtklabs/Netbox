@@ -360,6 +360,10 @@ class Feature:
     run: Optional[Callable[..., Any]] = None
     #: API task overrides for individual platforms in an otherwise SSH feature.
     platform_runs: Dict[str, Callable[..., Any]] = field(default_factory=dict)
+    #: Resolve per-device execution policy before any configuration is read.
+    execution_policy: Optional[Callable[..., Any]] = None
+    #: Fields derived from an observed configuration after a successful check.
+    audit_fields: Optional[Callable[..., Dict[str, Any]]] = None
     #: Offline validation for an API feature which has no CLI templates.
     selftest: Optional[Callable[[Desired], int]] = None
 

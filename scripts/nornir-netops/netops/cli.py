@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub, canonical_platform
+from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub
 from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
 from .debuglog import protect, redact
 from .platform_cache import DEFAULT_FILENAME as DEFAULT_CACHE_FILE
@@ -895,7 +895,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         parser.error(str(exc))
 
     protect(desired.secrets)
-    if feature.name == "waf":
+    if feature.name in ("waf", "syslog"):
         selected = desired.variables["logging_policy"]
         args.policy_mode = "netbox-tags" if selected == "netbox" else selected
     targets, credentials, code = _connect(args, style)
@@ -904,16 +904,8 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
 
     dry_run = not args.apply
 
-    f5_syslog = feature.name == "syslog" and any(
-        canonical_platform(host.platform) == "f5_tmsh" for host in targets.inventory.hosts.values())
-    if f5_syslog and args.netbox:
-        selected = desired.variables["logging_policy"]
-        selected = "netbox-tags" if selected == "netbox" else selected
-        args.policy_mode = f"F5={selected}, other-platforms={args.mode}"
-    elif f5_syslog:
-        args.policy_mode = desired.variables["logging_policy"]
     waf_netbox = None
-    if (feature.name == "waf" or f5_syslog) and args.netbox:
+    if feature.name in ("waf", "syslog") and args.netbox:
         from .netbox import NetBoxError
 
         waf_netbox = args._netbox_client

@@ -546,6 +546,9 @@ def init_nornir(args, credentials, standards, workers: int):
     if getattr(getattr(args, "feature", None), "name", None) == "waf":
         # WAF reads device policy tags, not source-interface tags.
         settings["source_tags"] = {}
+    elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
+        tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")
+        settings["source_tags"] = {"syslog": tag} if tag else {}
     args._netbox_client = Client(settings["url"], settings["token"], settings["verify_tls"])
 
     return InitNornir(
