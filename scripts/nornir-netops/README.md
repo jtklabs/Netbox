@@ -653,6 +653,41 @@ policy tags; it never assigns or removes them.
 ./configure.py waf --netbox --netbox-filter platform=f5-tmos --apply --yes --report waf-results.json
 ```
 
+Inventory, credentials, and connection defaults can instead live in `.env`:
+
+```dotenv
+NETOPS_INVENTORY=netbox
+NETBOX_FILTERS="platform=f5-tmos"
+NETBOX_URL=https://netbox.example.com
+NETBOX_TOKEN=your-netbox-token
+# Alternatively use NETBOX_SECRET for a separate AWS secret with url/token.
+
+NET_AWS_SECRET=prod/network/f5
+NET_AWS_REGION=us-east-1
+NET_AWS_USERNAME_KEY=your_username_key
+NET_AWS_PASSWORD_KEY=your_password_key
+
+# Optional F5 defaults:
+NETOPS_F5_PORT=443
+NETOPS_F5_TIMEOUT=30
+NETOPS_F5_VERIFY_TLS=true
+NETOPS_F5_LOGIN_PROVIDER=tmos
+NETBOX_CHECKED_FIELD=syslog_last_checked
+```
+
+Then run `./configure.py waf` for a dry run, or
+`./configure.py waf --apply --yes` to execute the device tags' policies.
+The AWS key variables name fields inside the secret, not credential values.
+`NETOPS_INVENTORY` accepts `csv` (the default) or `netbox`; an explicit `--csv`,
+`--ip`, or `--netbox` takes precedence. `NETBOX_FILTERS` is a space-separated
+list such as `"platform=f5-tmos site=atl"`. Repeated keys are supported; any
+`--netbox-filter` arguments replace the entire environment filter list.
+These inventory defaults apply to other features too, so use `--env-file` for
+a dedicated F5 configuration if needed. Shell environment variables override
+`.env`, and explicit command-line options override their environment defaults.
+`--f5-verify-tls` can re-enable TLS verification when the environment disables it.
+The execution flags `--apply` and `--yes` remain on the command line.
+
 NetBox supplies device IDs, primary management IPs and platform mappings. The
 usual `--netbox-filter`, `--filter` and `--limit` options narrow the inventory.
 Authentication uses the existing `NET_USER`/`NET_PASS`, AWS secret, or CSV

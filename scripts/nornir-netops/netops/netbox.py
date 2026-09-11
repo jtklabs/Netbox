@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
@@ -520,7 +521,8 @@ def settings_from(standards, args) -> Dict[str, Any]:
     return {
         "url": getattr(args, "netbox_url", None) or section.get("url") or os.environ.get("NETBOX_URL"),
         "token": os.environ.get("NETBOX_TOKEN"),
-        "filters": parse_filters(getattr(args, "netbox_filter", None) or []),
+        "filters": parse_filters(getattr(args, "netbox_filter", None) or
+                                 shlex.split(os.environ.get("NETBOX_FILTERS", ""))),
         "source_tags": source_tags(tags),
         "verify_tls": str(section.get("verify_tls", "true")).lower() != "false",
     }
