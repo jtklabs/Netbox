@@ -46,6 +46,8 @@ class Client:
         if response.status_code >= 400:
             raise RuntimeError(f"F5 {method} {path} failed ({response.status_code}): "
                                f"{' '.join(response.text.split())[:300]}")
+        if method == "DELETE" and (response.status_code == 204 or not response.text):
+            return {}
         document = response.json()
         if not isinstance(document, dict):
             raise ValueError(f"F5 {method} {path}: expected a JSON object")

@@ -23,6 +23,12 @@ def add_arguments(parser):
              "each device's NetBox tag. Overrides tags unless netbox is selected "
              "[$NETOPS_SYSLOG_POLICY (NETOPS_F5_POLICY fallback); default: netbox for NetBox inventory, add otherwise]",
     )
+    add_connection_arguments(parser)
+    parser.add_argument("--netbox-checked-field", default=os.environ.get("NETBOX_CHECKED_FIELD", CHECKED_FIELD),
+                       help="device datetime custom field for the last syslog check [$NETBOX_CHECKED_FIELD]")
+
+
+def add_connection_arguments(parser):
     group = parser.add_argument_group("F5 HTTPS")
     group.add_argument("--f5-port", type=int, default=os.environ.get("NETOPS_F5_PORT", "443"),
                        help="BIG-IP management HTTPS port [$NETOPS_F5_PORT]")
@@ -35,8 +41,6 @@ def add_arguments(parser):
                      help="enable BIG-IP certificate verification, overriding $NETOPS_F5_VERIFY_TLS")
     group.add_argument("--f5-login-provider", default=os.environ.get("NETOPS_F5_LOGIN_PROVIDER", "tmos"),
                        help="BIG-IP authentication provider [$NETOPS_F5_LOGIN_PROVIDER]")
-    group.add_argument("--netbox-checked-field", default=os.environ.get("NETBOX_CHECKED_FIELD", CHECKED_FIELD),
-                       help="device datetime custom field for the last syslog check [$NETBOX_CHECKED_FIELD]")
 
 
 def selected_policy(args):
@@ -69,7 +73,7 @@ def connection_settings(args):
         verify_tls = not args.f5_insecure
     if not 1 <= args.f5_port <= 65535 or args.f5_timeout <= 0:
         raise ValueError("F5 HTTPS port must be 1–65535 and timeout must be positive")
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", args.netbox_checked_field):
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", getattr(args, "netbox_checked_field", CHECKED_FIELD)):
         raise ValueError("the NetBox checked field must be an identifier, e.g. syslog_last_checked")
     return {"port": args.f5_port, "verify_tls": verify_tls, "timeout": args.f5_timeout,
             "provider": args.f5_login_provider}

@@ -72,6 +72,7 @@ syslog:
 snmp:
   # Networks allowed to poll at all. Stated once here and referenced by the
   # ACL below, so there is one place to add a new poller.
+  # F5 applies this directly to its SNMP Client Allow List, plus localhost.
   allow:
     - 10.1.1.0/24        # NMS / poller subnet
     - 10.2.0.0/16        # monitoring VLANs
@@ -79,7 +80,7 @@ snmp:
   # The default ACL, applied to any group or user that does not name its own.
   acl: SNMP-POLLERS
 
-  communities: []        # v2c: none permitted, remove any found
+  communities: []        # remove v2c communities; F5 also disables v1/v2c responses
 
   location: "ATL DC1 - row 4"
   contact: "netops@example.com"

@@ -38,7 +38,7 @@ re-run with --apply to push the commands above
 | [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
 | [`nac`](#nac) | Audit access ports for 802.1X / MAB, and fix what is missing | `cisco_ios`, `arista_eos` |
 | [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
-| [`snmp`](#snmp) | v3 users, groups, views, hosts; removes v2c | `cisco_ios`, `arista_eos` |
+| [`snmp`](#snmp) | v3 users, removes v2c; F5 client allow list | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`snmp-packetsize`](#snmp-packet-size) | SNMP maximum packet size | `cisco_ios` (EOS skipped -- no equivalent) |
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
@@ -1354,6 +1354,75 @@ compared there; without that the group would be rebuilt on every run forever.
 Views are written before groups and groups before users, because a group naming
 a view that does not exist yet is rejected, as is a user in a group that does
 not exist yet.
+
+### F5 BIG-IP SNMP
+
+The same `snmp` command uses the management REST API for `f5_tmsh` devices.
+NetBox supplies inventory and the existing AWS device secret supplies the login.
+F5 TLS options, including `NETOPS_F5_VERIFY_TLS=false` and `--f5-insecure`, work
+here too. SNMP uses `--add` / `--replace`; syslog policy tags and syslog audit
+fields apply only to the logging commands.
+
+```bash
+# Preview the complete SNMP standard on one NetBox device
+./configure.py snmp --netbox --limit us-uat-us-east4-bigip1 --replace
+
+# Add missing poller networks and users; enforce communities: []
+./configure.py snmp --netbox --limit us-uat-us-east4-bigip1 --add --apply
+
+# Also remove extra poller networks and v3 users
+./configure.py snmp --netbox --limit us-uat-us-east4-bigip1 --replace --apply
+
+# Push the current auth/privacy passphrases even when protocols already match
+./configure.py snmp --netbox --limit us-uat-us-east4-bigip1 --rewrite-users --apply
+```
+
+F5 reads these existing settings from `standards.yaml`:
+
+| Standard | F5 setting |
+| --- | --- |
+| `snmp.communities: []` | Disable SNMPv1 and SNMPv2c responses and delete communities, in both add and replace modes |
+| `snmp.allow` | SNMP Client Allow List (`allowedAddresses`), accepting IPs and CIDR networks |
+| `snmp.users` | SNMPv3 username, authentication and privacy protocols |
+| User's `snmp.groups` entry | Security level and read-only/read-write access |
+| Group's `snmp.views` entry | The user's allowed OID subtree (`iso` becomes `.1`) |
+| `snmp.location`, `snmp.contact` | Agent location and contact |
+
+`snmp.allow` must be defined. The localhost network `127.0.0.0/8` is included
+by default, matching the older F5 standards script. `--f5-no-localhost` omits
+that implicit entry; combine with `--replace` to remove an existing entry.
+CIDR and dotted netmask spellings compare by network, and extra broad entries
+such as `ALL` are removed only in replace mode. Omitting `snmp.communities`
+leaves communities and protocol enablement unchanged.
+
+F5 uses one global client allow list. Named Cisco group/user ACLs are not bound
+to F5 users: define the F5 polling networks in `snmp.allow`. A user needs a
+named group with an included read view. F5 supports one OID subtree per user;
+if a group also names a write view, its subtree must match the read view.
+Excluded views, missing groups/views and unsupported protocols fail before
+that device is changed. `aes 128` / `aes128` map to F5 `aes`; `aes192` and
+`aes256` map to `aes-192` and `aes-256`. SHA-2 and extended AES combinations
+must be supported by the installed BIG-IP version.
+
+Passphrases use the existing SNMP secret mechanism described above:
+`NETOPS_SNMP_AUTH_<USER>` / `NETOPS_SNMP_PRIV_<USER>` in `.env`, or
+`NETOPS_SNMP_SECRET` / `--passphrase-secret` with the nested username JSON.
+The standards file defines the users and protocols; it does not hold passwords.
+A changed user receives the current passphrases. `--rewrite-users` updates
+existing F5 records in place, preserving their resource names and descriptions.
+Readback verifies protocols, security level, access, OID, allow list and disabled
+community protocols. It cannot verify the actual passphrase or test an SNMP
+poll. Reports and command previews redact passwords and community strings.
+
+F5 trap destinations (`snmp.hosts`), chassis ID, listener addresses and other
+agent settings are outside this command's F5 scope. The result includes a note
+when trap hosts or chassis ID are specified. Applied changes are read back and
+saved unless `--no-verify` / `--no-save` is supplied; failed verification prevents
+saving. REST changes are not atomic, and a failure may leave partial changes.
+Rollback is manual because previous passphrases are not retained.
+
+API references: [F5 SNMP agent](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_snmp.html)
+and [F5 SNMP users](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_snmp_users.html).
 
 ## SNMP packet size
 

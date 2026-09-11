@@ -49,6 +49,8 @@ from ..core import (
     validate_text,
     validate_word,
 )
+from .. import f5_snmp
+from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
 
 CONFIG_COMMAND = "show running-config | include ^snmp-server"
@@ -447,6 +449,9 @@ def selftest_placeholders(standards) -> Dict[str, str]:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    add_connection_arguments(parser)
+    parser.add_argument("--f5-no-localhost", action="store_true",
+                        help="omit the default 127.0.0.0/8 SNMP client allowance on F5")
     parser.add_argument(
         "--passphrase-secret",
         metavar="NAME_OR_ARN",
@@ -461,9 +466,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rewrite-users",
         action="store_true",
-        help="negate and recreate every managed v3 user, whether or not it looks "
-        "different. The way to push a changed passphrase or a changed per-user "
-        "ACL, neither of which can be read back from a device.",
+        help="rewrite every managed v3 user even when its settings match "
+        "(F5 updates in place; switches recreate). Pushes changed passphrases "
+        "or an unreadable per-user ACL.",
     )
 
 
@@ -618,6 +623,9 @@ def build_desired(args: argparse.Namespace) -> Desired:
         keys=keys,
         variables={
             "entries": entries,
+            "f5": connection_settings(args),
+            "f5_allow": standards.entries("snmp.allow") if standards.defined("snmp.allow") else None,
+            "f5_no_localhost": args.f5_no_localhost,
             "acl": acl,
             "forbid_communities": communities is not None,
             "rewrite_users": bool(getattr(args, "rewrite_users", False)),
@@ -638,6 +646,7 @@ FEATURE = Feature(
             CONFIG_COMMAND, parse_snmp, EOS_SAMPLE, ignores=("access",)
         ),
     },
+    platform_runs={"f5_tmsh": f5_snmp.run},
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_snmp,
