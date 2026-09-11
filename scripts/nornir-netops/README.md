@@ -61,6 +61,13 @@ Reach for it when the question is "set this on
 these devices", and for `scripts/ios/` when it is "which devices are out of
 compliance".
 
+## CLI reference
+
+See the [complete command and flag reference](CLI_REFERENCE.md) for feature-by-feature
+options, platform support, defaults, environment equivalents and examples. Shared
+flags are grouped by inventory and filtering, authentication, HTTPS, execution,
+reporting, rollback, platform caching and ServiceNow.
+
 ## Install
 
 Run these commands from `scripts/nornir-netops`:
