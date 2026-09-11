@@ -396,12 +396,16 @@ class NetBoxInventory:
         conn_timeout: Optional[float] = None,
         port: int = 22,
         client: Optional[Client] = None,
+        autofilter: bool = False,
+        poller: Optional[str] = None,
     ) -> None:
         self.client = client or Client(
             url or os.environ.get("NETBOX_URL", ""),
             token or os.environ.get("NETBOX_TOKEN", ""),
             verify_tls,
         )
+        self.autofilter = autofilter
+        self.poller = poller
         self.filters = dict(filters or {})
         self.source_tags = dict(
             DEFAULT_SOURCE_TAGS if source_tags is None else source_tags
@@ -423,6 +427,23 @@ class NetBoxInventory:
                 f"NetBox returned no devices for {query} -- check the filters, and "
                 f"that the devices are active and have a primary IP"
             )
+
+        ownership = {}
+        if self.autofilter:
+            from .poller import poller_tag, select_devices
+            from . import archive
+            summary = {"source": "netbox", "autofilter": True, "poller_tag": poller_tag(self.poller),
+                       "api_filters": query, "candidates": len(devices), "status": "resolving"}
+            run = archive.current()
+            if run:
+                run.document["inventory_selection"] = summary
+                run.write()
+            devices, ownership = select_devices(self.client, devices, self.poller)
+            summary.update(selected=len(devices), excluded=summary["candidates"] - len(devices), status="resolved")
+            if run:
+                run.write()
+            if not devices:
+                raise NetBoxError(f"NetBox autofilter: no devices belong to {summary['poller_tag']} within the requested filters")
 
         extras: Dict[str, Any] = {}
         if self.secret:
@@ -459,6 +480,8 @@ class NetBoxInventory:
                     "so each inventory host has a unique name"
                 )
             data = device_data(device)
+            if self.autofilter:
+                data["poller_selection"] = ownership[device["id"]]
             # An empty mapping still means "NetBox was asked", which is what
             # tells a feature that the answer here is authoritative.
             data["source_interface"] = {}
@@ -520,6 +543,8 @@ def settings_from(standards, args) -> Dict[str, Any]:
     The token is never taken from the standards file -- that file is meant to
     be committed.
     """
+    from .poller import settings_from as poller_settings
+    selection = poller_settings(args)
     section = standards.section("netbox") if standards is not None else {}
     tags = getattr(args, "netbox_source_tag", None) or section.get("source_tags")
     tls = str(os.environ.get("NETBOX_VERIFY_TLS", section.get("verify_tls", False))).strip().lower()
@@ -530,6 +555,7 @@ def settings_from(standards, args) -> Dict[str, Any]:
         "token": os.environ.get("NETBOX_TOKEN"),
         "filters": parse_filters(getattr(args, "netbox_filter", None) or
                                  shlex.split(os.environ.get("NETBOX_FILTERS", ""))),
+        **selection,
         "source_tags": source_tags(tags),
         "verify_tls": tls == "true",
     }

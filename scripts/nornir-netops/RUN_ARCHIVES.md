@@ -38,6 +38,15 @@ available for older consumers. Existing integration payloads (such as ServiceNow
 attachments) retain their previous format; the local archive adds versioned
 metadata and normalized steps. Timestamps use UTC ISO 8601.
 
+When `--netbox-autofilter` is enabled, `inventory_selection` records the
+`poller_tag`, `api_filters`, candidate count, selected/excluded counts and
+resolution status. These counts describe ownership filtering before local
+`--limit`/`--filter`; `devices` contains only the final selected hosts. Each host
+also has `poller_selection` with the matching tag and source (`device-tag`,
+`site-tag`, `region-tag` or a `prefix-` source), plus applicable site, region and
+prefix identifiers. A failed ownership lookup leaves status `resolving` and no
+device commands are attempted.
+
 Each device includes:
 
 | Field | Meaning |

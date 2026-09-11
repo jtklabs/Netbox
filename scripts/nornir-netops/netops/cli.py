@@ -156,6 +156,12 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         "Take the inventory from NetBox instead of a CSV. The token comes from "
         "$NETBOX_TOKEN or --netbox-secret, never from the standards file.",
     )
+    auto = box.add_mutually_exclusive_group()
+    auto.add_argument("--netbox-autofilter", action="store_true", default=None,
+                      help="only devices owned by this poller [$NETBOX_AUTOFILTER; default: false]")
+    auto.add_argument("--no-netbox-autofilter", dest="netbox_autofilter", action="store_false",
+                      help="disable poller ownership filtering for this run")
+    box.add_argument("--poller", metavar="NAME", help="SNMP inventory poller name or poller-NAME tag [$NETOPS_POLLER]")
     box.add_argument(
         "--netbox-url",
         metavar="URL",
@@ -883,6 +889,18 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
             args.netbox = source == "netbox"
         args.csv = args.csv or os.environ.get("NETOPS_CSV", "inventory/hosts.csv")
 
+    if getattr(args, "netbox_autofilter", None) is True and (
+            not args.netbox or args.command == "rollback"):
+        parser.error("--netbox-autofilter requires NetBox inventory; it cannot filter CSV, direct IP or rollback journals")
+    if getattr(args, "netbox", False) and args.command != "rollback":
+        from .poller import settings_from as poller_settings
+        from .netbox import NetBoxError
+        try:
+            selection = poller_settings(args)
+        except NetBoxError as exc:
+            parser.error(str(exc))
+        args.netbox_autofilter, args.poller = selection["autofilter"], selection["poller"]
+
     if args.command == "selftest":
         return selftest()
     if args.command == "discover":
@@ -1568,6 +1586,8 @@ def _connect(args: argparse.Namespace, style: Style):
                 conn_timeout=args.conn_timeout,
             )
         targets = _apply_filters(nr, args)
+        if args.netbox and args.netbox_autofilter:
+            print(style.dim(f"NetBox autofilter: {args.poller}, {len(targets.inventory.hosts)} device(s) selected"))
     except (InventoryError, NetBoxError, CredentialError, StandardsError, ValueError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return None, None, EXIT_USAGE
