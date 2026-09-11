@@ -33,6 +33,7 @@ class FakeF5:
     def __init__(self):
         self.app = application()
         self.responses = {
+            f5_syslog.ASM_PROVISION: {"name": "asm", "level": "nominal"},
             ROOT: {"items": [{"name": "logging", "fullPath": "/Tenant/folder/logging",
                               "builtIn": "disabled",
                               "applicationReference": {

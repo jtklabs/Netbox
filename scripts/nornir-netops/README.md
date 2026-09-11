@@ -737,11 +737,26 @@ and saved by default; `--no-verify` and `--no-save` retain their usual meanings.
 REST rollback is manual; `before_servers` in the report preserves the original
 remote server list. ConfigSync is not triggered.
 
-Both F5 commands audit **system syslog plus eligible user-defined WAF profiles**
-for the shared NetBox compliance field, but each changes only its selected
-logging type. Run both commands to converge both configurations. The JSON report
-includes the other logging type's audit (`waf_audit` or `system_syslog_audit`).
-An unreadable counterpart fails the device before any configuration change.
+Regular F5 `syslog` works on devices without WAF. It checks
+[ASM provisioning](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_provision.html)
+first: `level=none` skips WAF discovery and records `waf_audit.status=not_applicable`.
+The shared NetBox `syslog_compliant` field then reflects system syslog alone.
+
+When ASM/WAF is provisioned, the system syslog run also audits eligible
+user-defined WAF destinations for the shared compliance field. Each command
+still changes only its selected logging type. Run both commands to converge
+both configurations on WAF devices. The JSON report includes the other logging
+type's audit (`waf_audit` or `system_syslog_audit`).
+
+A failed or unreadable WAF/provisioning audit **does not block system syslog**:
+its configuration, verification and save proceed normally. The report records
+`waf_audit.status=unavailable` and the reason; `syslog_compliant` is left unchanged
+because the combined verdict is unknown. The completed system check can still
+update `syslog_last_checked`. Permission errors, timeouts and malformed responses
+are not interpreted as proof that WAF is absent. System syslog read/write,
+verification and save failures retain their usual failure behavior. The explicit
+`waf` command still requires readable WAF configuration and system syslog evidence.
+
 See [F5's system syslog API](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_syslog.html)
 and the field/writeback rules below.
 

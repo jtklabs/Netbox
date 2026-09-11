@@ -125,7 +125,8 @@ previews the managed configuration. With NetBox inventory, `--apply` can write
 logging audit fields even under `--policy audit`; without it, NetBox writes are
 only previewed. The boolean field is always `syslog_compliant`, indicating
 whether the observed configuration matches the fully managed standard. For
-F5 it covers both system syslog and eligible WAF destinations. Failed or
+F5 it covers system syslog and applicable WAF destinations; when ASM is not
+provisioned it reflects system syslog alone. Failed or
 incomplete checks leave the applicable audit fields unchanged.
 
 ```bash
@@ -149,7 +150,10 @@ Use the [F5 HTTPS flags](#f5-https) for the connection. Destinations come from
 `syslog.destinations` in the standards file; **WAF has no `--destination`
 override**. It does not create new remote logging profiles. It audits system
 syslog for combined compliance but changes only WAF destinations. `syslog`
-does the reverse. Neither operation triggers ConfigSync.
+audits WAF only when ASM is provisioned. Missing WAF functionality never blocks
+system syslog: confirmed unprovisioned ASM is not applicable; unreadable WAF
+status leaves the shared compliance field unchanged while syslog continues.
+Neither operation triggers ConfigSync.
 
 ```bash
 ./configure.py waf --netbox --limit bigip1 --policy manage --apply

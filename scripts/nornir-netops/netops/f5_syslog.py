@@ -12,6 +12,7 @@ from . import f5_waf
 from .core import MODE_REPLACE
 
 SYSLOG = "/mgmt/tm/sys/syslog"
+ASM_PROVISION = "/mgmt/tm/sys/provision/asm"
 
 
 def destination(host, port=514):
@@ -70,6 +71,40 @@ def plan_syslog(document, wanted, clean):
     return plan
 
 
+def audit_waf(client, wanted):
+    """Optional WAF evidence for the shared NetBox compliance field.
+
+    A provisioning level of none positively identifies WAF as inapplicable.
+    Permission, transport and malformed-response errors are unknown evidence,
+    never proof that WAF is absent. Neither case blocks system syslog.
+    """
+    audit = {"status": "unavailable", "applicable": None, "compliant": None,
+             "applicable_profiles": None, "skipped_profiles": [], "profiles": []}
+    try:
+        provision = client.get_json(ASM_PROVISION)
+        if not isinstance(provision, dict) or provision.get("name") != "asm":
+            raise ValueError("invalid F5 ASM provisioning response")
+        level = str(provision.get("level", "")).strip().lower()
+        if level not in ("none", "minimum", "nominal", "dedicated", "custom"):
+            raise ValueError("unknown F5 ASM provisioning level")
+        audit["provisioning"] = {"path": ASM_PROVISION, "level": level}
+        if level == "none":
+            audit.update(status="not_applicable", applicable=False, applicable_profiles=0,
+                         reason="ASM/WAF is not provisioned; only system syslog applies")
+            return audit
+        audit["applicable"] = True
+        plans = f5_waf.plan_waf(client, wanted, True, skipped_profiles=audit["skipped_profiles"])
+        unknown = any(row["built_in"] is None for row in audit["skipped_profiles"])
+        audit.update(status="incomplete" if unknown else "audited", applicable_profiles=len(plans),
+                     compliant=None if unknown else all(not row.drift(True) for row in plans),
+                     profiles=[{"profile": row.label, "missing": row.add, "extra": row.extra} for row in plans])
+        if unknown:
+            audit["reason"] = "some WAF profile ownership could not be confirmed"
+    except Exception as exc:
+        audit["reason"] = str(exc)
+    return audit
+
+
 def run(task, desired, variables, mode, dry_run, save, verify):
     from nornir.core.task import Result
     from .features.waf import device_policy
@@ -102,17 +137,15 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         clean = mode == MODE_REPLACE
         with f5_waf.Client(host, **variables["f5"]) as client:
             plan = plan_syslog(client.get_json(SYSLOG), wanted, clean)
-            skipped = []
-            waf_plans = f5_waf.plan_waf(client, wanted, True, skipped_profiles=skipped)
-            waf_exact = (None if any(row["built_in"] is None for row in skipped) else
-                         all(not row.drift(True) for row in waf_plans))
-            payload["waf_audit"] = {
-                "compliant": waf_exact, "applicable_profiles": len(waf_plans),
-                "skipped_profiles": skipped,
-                "profiles": [{"profile": row.label, "missing": row.add, "extra": row.extra}
-                             for row in waf_plans],
-            }
-            payload["notes"].append("WAF destinations audited for combined compliance; use configure.py waf to change them")
+            waf_audit = payload["waf_audit"] = audit_waf(client, wanted)
+            waf_exact = True if waf_audit["status"] == "not_applicable" else waf_audit["compliant"]
+            if waf_audit["status"] == "not_applicable":
+                payload["notes"].append(waf_audit["reason"])
+            elif waf_exact is None:
+                payload["notes"].append("WAF audit incomplete; system syslog continues and syslog_compliant "
+                                        "is left unchanged: " + waf_audit["reason"])
+            else:
+                payload["notes"].append("WAF destinations audited for combined compliance; use configure.py waf to change them")
             payload.update(current=plan.current, add=plan.add,
                            remove=plan.extra if clean else [], before_servers=plan.before_servers)
             exact = not plan.drift(True)

@@ -178,11 +178,28 @@ def test_waf_drift_prevents_combined_compliance_but_is_not_changed(setup):
     assert [path for path, _ in setup.box.writes] == [SYSLOG]
 
 
-def test_waf_discovery_failure_prevents_system_syslog_changes(setup):
-    setup.box.responses[ROOT] = RuntimeError("cannot audit WAF")
-    code, _ = setup.run("--apply", netbox_inventory=True)
-    assert code == cli.EXIT_FAILED
-    assert setup.box.writes == setup.nb.writes == []
+@pytest.mark.parametrize("endpoint,error", [
+    (ROOT, RuntimeError("WAF feature is not available (404)")),
+    (ROOT, RuntimeError("WAF access forbidden (403)")),
+    (ROOT, RuntimeError("WAF discovery timed out")),
+    (f5_syslog.ASM_PROVISION, RuntimeError("provisioning read forbidden (403)")),
+])
+def test_optional_waf_audit_failure_does_not_block_system_syslog(setup, endpoint, error):
+    setup.box.responses[endpoint] = error
+    setup.nb.device["custom_fields"]["syslog_compliant"] = False
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    row = report["devices"]["f5"]
+    assert [path for path, _ in setup.box.writes] == [SYSLOG]
+    assert setup.box.saves == 1 and row["verified"] is True
+    assert row["system_syslog_compliant"] is True
+    assert row["waf_audit"]["status"] == "unavailable"
+    assert row["waf_audit"]["compliant"] is None
+    assert row["syslog_compliant"] is None
+    assert setup.nb.device["custom_fields"]["syslog_compliant"] is False
+    assert setup.nb.device["custom_fields"]["syslog_last_checked"] != OLD_DATE
+    if endpoint == f5_syslog.ASM_PROVISION:
+        assert ROOT not in setup.box.reads
 
 
 def test_unknown_waf_ownership_preserves_compliance(setup):
@@ -200,3 +217,48 @@ def test_builtin_waf_is_not_part_of_system_syslog_compliance(setup):
     assert code == cli.EXIT_OK
     assert report["devices"]["f5"]["syslog_compliant"] is True
     assert report["devices"]["f5"]["waf_audit"]["applicable_profiles"] == 0
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("policy", ["audit", "add", "manage"])
+def test_system_syslog_without_waf_provisioning(setup, apply, policy):
+    setup.box.responses[f5_syslog.ASM_PROVISION] = {"name": "asm", "level": "none"}
+    setup.box.responses[ROOT] = RuntimeError("security logging feature is not available")
+    code, report = setup.run("--policy", policy, *(["--apply"] if apply else []), netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    row = report["devices"]["f5"]
+    assert row["waf_audit"]["status"] == "not_applicable"
+    assert row["waf_audit"]["applicable"] is False
+    assert row["waf_audit"]["applicable_profiles"] == 0
+    assert ROOT not in setup.box.reads
+    assert row["syslog_compliant"] is (apply and policy == "manage")
+    assert row["system_syslog_compliant"] == row["syslog_compliant"]
+    if apply and policy != "audit":
+        assert [path for path, _ in setup.box.writes] == [SYSLOG]
+        assert row["verified"] and setup.box.saves == 1
+    else:
+        assert setup.box.writes == [] and setup.box.saves == 0
+    assert bool(setup.nb.writes) is apply
+
+
+@pytest.mark.parametrize("provision", [{}, {"name": "ltm", "level": "none"},
+                                       {"name": "asm"}, {"name": "asm", "level": "unknown"}])
+def test_incomplete_provisioning_does_not_claim_waf_is_absent(setup, provision):
+    setup.box.responses[f5_syslog.ASM_PROVISION] = provision
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    row = report["devices"]["f5"]
+    assert row["waf_audit"]["status"] == "unavailable"
+    assert row["waf_audit"]["applicable"] is None
+    assert row["syslog_compliant"] is None
+    assert row["verified"] and setup.box.saves == 1
+    assert ROOT not in setup.box.reads
+
+
+def test_system_syslog_failure_still_fails_without_waf(setup):
+    setup.box.responses[f5_syslog.ASM_PROVISION] = {"name": "asm", "level": "none"}
+    setup.box.reject.add(SYSLOG)
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_FAILED
+    assert setup.box.saves == 0 and setup.nb.writes == []
+    assert report["devices"]["f5"]["syslog_compliant"] is None
