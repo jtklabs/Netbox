@@ -38,8 +38,11 @@ scripts/nornir-netops/reports/
 scripts/nornir-netops/*.log
 scripts/nornir-netops/.venv/
 scripts/nornir-netops/.pytest_cache/
+scripts/nornir-netops/.upgrade-locks/
 
 # Import/export drop zone — CSVs carry pricing and quotes
 csv/*
 !csv/.gitkeep
 !csv/README.md
+# Private scheduled-upgrade claims and undelivered progress
+scripts/nornir-netops/.upgrade-queue/

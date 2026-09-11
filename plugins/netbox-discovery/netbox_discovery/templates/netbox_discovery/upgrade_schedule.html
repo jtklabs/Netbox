@@ -1,0 +1,20 @@
+{% extends 'base/layout.html' %}
+{% load form_helpers %}
+{% block title %}Schedule IOS XE work{% endblock %}
+{% block content %}
+<div class="row"><div class="col-lg-8">
+  <h1>Schedule IOS XE work</h1>
+  <p>Choose a site and role, or explicit devices. Devices and the profile are captured when you schedule. Select only the master device for each switch stack.</p>
+  <form method="post" class="card card-body">{% csrf_token %}
+    {% render_form form %}
+    <div><button class="btn btn-secondary" type="submit">Preview devices</button>
+    <button class="btn btn-primary" type="submit" name="schedule" value="yes">Schedule selected operation</button></div>
+  </form>
+</div></div>
+{% if preview %}
+<h2 class="mt-4">{{ preview|length }} device(s) currently match</h2>
+<table class="table"><thead><tr><th>Device</th><th>Address</th><th>Poller</th></tr></thead><tbody>
+{% for row in preview %}<tr><td><a href="{{ row.device.get_absolute_url }}">{{ row.device }}</a></td><td>{{ row.address }}</td><td>{{ row.poller_name }}</td></tr>{% endfor %}
+</tbody></table>
+{% endif %}
+{% endblock %}

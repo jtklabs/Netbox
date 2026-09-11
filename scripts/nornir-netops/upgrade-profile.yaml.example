@@ -1,0 +1,22 @@
+# EXAMPLE ONLY: these releases/PIDs are illustrative, not a validated path.
+# C9350 IOS XE example. Fill in your exact PIDs and team-validated release path.
+# Review release notes, ROMMON requirements and lab results for that path.
+name: campus-switch-upgrade
+models:
+  - C9350-48P
+starting_versions:
+  - "17.18.1"
+target_version: "17.18.4"
+image: cisco9k_iosxe.17.18.04.SPA.bin
+# Replace with the checksum published by Cisco for this exact image.
+# The placeholder intentionally fails profile validation.
+md5: REPLACE_WITH_CISCO_PUBLISHED_MD5
+# Free bytes reserved for extraction on every member. Include extra capacity
+# for your tested image/path. Missing member copies additionally need bin size.
+minimum_free_bytes: 2000000000
+# Enable only after testing conversion for every listed starting version/PID.
+bundle_conversion_validated: false
+# Optional: switch-reachable HTTP(S)/TFTP URL, without credentials/query params.
+# If omitted, the image must already be on the active switch's flash.
+# Use upgrade --stage-only --apply to copy/verify ahead of the upgrade window.
+# image_source: http://images.example.com/cisco9k_iosxe.17.18.04.SPA.bin

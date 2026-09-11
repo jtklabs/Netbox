@@ -47,6 +47,7 @@ re-run with --apply to push the commands above
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
+| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, reload and operational comparison | C9350 and C9300 family |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
 What each of them should converge on comes from
@@ -201,6 +202,70 @@ Active devices with a primary IP become hosts. Site, role, tags and device
 custom fields land in host data, so `--filter site=atl` works exactly as it
 does with a CSV. A device with no platform is autodetected as usual; one with
 no primary IP is skipped, because there is nothing to connect to.
+
+### Limit NetBox inventory to this poller
+
+Use `--netbox-autofilter` to follow the ownership rules used by
+`scripts/snmp-inventory`. Set `--poller` to the same name as `[poller] name` in
+`snmp-inventory.conf`. The name can also be set once in `.env`:
+
+```dotenv
+NETOPS_POLLER=checkmk-us
+# Optional: enable ownership filtering for every NetBox inventory run.
+NETBOX_AUTOFILTER=true
+```
+
+```bash
+# All eligible devices owned by this poller, preview only:
+./configure.py syslog --netbox --netbox-autofilter --poller checkmk-us --policy netbox
+
+# Only F5 devices owned by this poller:
+./configure.py syslog --netbox --netbox-autofilter --poller checkmk-us --netbox-filter platform=f5-tmos --policy netbox
+
+# Apply each device's syslog policy without an interactive prompt:
+./configure.py syslog --netbox --netbox-autofilter --poller checkmk-us --policy netbox --apply --yes
+```
+
+For Cisco IOS-XE use `--netbox-filter platform=cisco-ios-xe`; for Arista use
+`platform=arista-eos`. Repeat the platform filter to include multiple platforms.
+`--platform` is reserved for direct-IP runs. This inventory filter also applies
+to other configuration features, `discover` and `check-*` commands.
+
+The ownership rules match the scanner:
+
+- Device `poller-<name>` tags override the device site's ownership.
+- A site's poller tags override the nearest tagged ancestor region.
+- Untagged devices qualify if their site belongs to the poller **or** their
+  selected management IP lies inside a prefix scoped to one of the poller's
+  sites (including location-scoped prefixes).
+- An explicit foreign device tag excludes the device from both sources.
+  When an object carries several poller tags, it is included for each named
+  poller, matching the scanner's existing rule.
+
+Prefixes supply a site association; poller tags directly on prefixes are not
+part of the SNMP selector's current rules. Prefix membership is unioned with
+device site membership, not resolved by a longest-prefix override. Ownership
+reflects current tags; it does not require a record of a successful historical
+SNMP scan. The scanner's optional IPAM `scan_tag` is not consulted for these
+existing device primaries.
+
+Autofilter is **off by default**. `--no-netbox-autofilter` disables it even when
+`NETBOX_AUTOFILTER=true`. `--poller` overrides `NETOPS_POLLER`; bare names and
+`poller-`-prefixed names are accepted and normalized to lowercase. The hostname
+is not guessed, and the SNMP configuration file is not read automatically.
+
+The API first applies your usual `--netbox-filter` values; ownership then
+narrows those results, followed by `--limit` and `--filter`. Autofilter never
+adds devices outside your requested API filters. Missing poller identity,
+unreadable ownership data, or no matching devices stops the run before device
+connections. NetBox credentials need read access to regions, sites and their
+prefixes as well as the normal inventory objects. Omit API `brief`/`fields`
+filters so device override tags remain visible.
+
+CSV/direct-IP runs and rollback journals retain their existing selection;
+passing `--netbox-autofilter` explicitly to those runs is an error. Its environment
+default applies only when loading NetBox inventory. The JSON archive records
+ownership selection counts and the evidence for each included device.
 
 ### Platforms
 
@@ -1891,3 +1956,12 @@ the device and never the terminal, the report, or the logs.
 - The debug log records device names, addresses and command output. Passwords
   are scrubbed from it the same way they are from the terminal, but treat it as
   you would any operational log.
+
+### NetBox-scheduled upgrades
+
+Use **Discovery → Software → Upgrade Jobs** to schedule audits, image staging,
+or upgrades by site/role/platform. Run `./configure.py upgrade-poll --apply`
+from cron each minute on the remotes. The worker shares this directory's `.env`
+and AWS settings, processes a bounded Nornir batch, and reports progress to
+NetBox and the optional upgrade webhook. Without `--apply` it claims audits only.
+See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruption/recovery behavior.

@@ -48,6 +48,15 @@ menu = PluginMenu(
     groups=(
         ('Onboarding', (onboarding, pollers)),
         ('Changes', (replacements, issues)),
+        ('Software', (PluginMenuItem(
+            link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
+            permissions=['netbox_discovery.view_upgradejob'],
+            buttons=(PluginMenuButton(
+                link='plugins:netbox_discovery:upgradejob_add', title='Schedule upgrades',
+                icon_class='mdi mdi-calendar-plus',
+                permissions=['netbox_discovery.add_upgradejob'],
+            ),),
+        ),)),
     ),
     icon_class='mdi mdi-radar',
 )

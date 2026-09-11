@@ -156,6 +156,12 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         "Take the inventory from NetBox instead of a CSV. The token comes from "
         "$NETBOX_TOKEN or --netbox-secret, never from the standards file.",
     )
+    auto = box.add_mutually_exclusive_group()
+    auto.add_argument("--netbox-autofilter", action="store_true", default=None,
+                      help="only devices owned by this poller [$NETBOX_AUTOFILTER; default: false]")
+    auto.add_argument("--no-netbox-autofilter", dest="netbox_autofilter", action="store_false",
+                      help="disable poller ownership filtering for this run")
+    box.add_argument("--poller", metavar="NAME", help="SNMP inventory poller name or poller-NAME tag [$NETOPS_POLLER]")
     box.add_argument(
         "--netbox-url",
         metavar="URL",
@@ -442,6 +448,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common = _common_arguments()
     subs = parser.add_subparsers(dest="command", metavar="FEATURE", required=True)
+
+    from .upgrade.cli import add_arguments as upgrade_arguments
+    upgrade = subs.add_parser("upgrade", parents=[_discover_arguments()],
+                              help="audit or install an approved Catalyst IOS XE image",
+                              formatter_class=HelpFormatter)
+    upgrade_arguments(upgrade)
+    poll_upgrades = subs.add_parser("upgrade-poll", parents=[_discover_arguments()],
+                                   help="claim due NetBox upgrade jobs once (for cron)",
+                                   formatter_class=HelpFormatter)
+    upgrade_arguments(poll_upgrades, scheduled=True)
+    poll_upgrades.add_argument("--queue-state-dir", default=os.environ.get("NETOPS_UPGRADE_QUEUE_STATE_DIR"),
+                               help="private lock/progress spool directory; retain between cron runs")
 
     for feature in FEATURES.values():
         sub = subs.add_parser(
@@ -813,6 +831,9 @@ def _confirm(style: Style, count: int, feature: str, mode: str) -> bool:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "upgrade-poll":
+        from .upgrade.scheduler import main as poll_main
+        return poll_main(argv)
     run = archive.Run(argv, PROJECT_ROOT)
     token = archive.ACTIVE.set(run)
     code = EXIT_FAILED
@@ -877,14 +898,30 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     # In particular, an .env selecting NetBox must not defeat --csv or --ip.
     if hasattr(args, "csv"):
         if not args.csv and not args.ip and not args.netbox:
-            source = os.environ.get("NETOPS_INVENTORY", "csv").strip().lower()
+            source = ("netbox" if args.command == "upgrade" else
+                      os.environ.get("NETOPS_INVENTORY", "csv").strip().lower())
             if source not in ("csv", "netbox"):
                 parser.error("NETOPS_INVENTORY must be csv or netbox")
             args.netbox = source == "netbox"
         args.csv = args.csv or os.environ.get("NETOPS_CSV", "inventory/hosts.csv")
 
+    if getattr(args, "netbox_autofilter", None) is True and (
+            not args.netbox or args.command == "rollback"):
+        parser.error("--netbox-autofilter requires NetBox inventory; it cannot filter CSV, direct IP or rollback journals")
+    if getattr(args, "netbox", False) and args.command != "rollback":
+        from .poller import settings_from as poller_settings
+        from .netbox import NetBoxError
+        try:
+            selection = poller_settings(args)
+        except NetBoxError as exc:
+            parser.error(str(exc))
+        args.netbox_autofilter, args.poller = selection["autofilter"], selection["poller"]
+
     if args.command == "selftest":
         return selftest()
+    if args.command == "upgrade":
+        from .upgrade.cli import run
+        return run(args, style)
     if args.command == "discover":
         return _discover(args, style, log)
     if args.command.startswith("check-"):
@@ -1568,6 +1605,8 @@ def _connect(args: argparse.Namespace, style: Style):
                 conn_timeout=args.conn_timeout,
             )
         targets = _apply_filters(nr, args)
+        if args.netbox and args.netbox_autofilter:
+            print(style.dim(f"NetBox autofilter: {args.poller}, {len(targets.inventory.hosts)} device(s) selected"))
     except (InventoryError, NetBoxError, CredentialError, StandardsError, ValueError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return None, None, EXIT_USAGE
