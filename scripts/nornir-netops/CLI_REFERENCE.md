@@ -125,8 +125,9 @@ previews the managed configuration. With NetBox inventory, `--apply` can write
 logging audit fields even under `--policy audit`; without it, NetBox writes are
 only previewed. The boolean field is always `syslog_compliant`, indicating
 whether the observed configuration matches the fully managed standard. For
-F5 it covers system syslog and applicable WAF destinations; when ASM is not
-provisioned it reflects system syslog alone. Failed or
+F5 each run evaluates only its selected feature: system syslog or eligible WAF
+destinations. The existing NetBox fields describe the most recent logging check;
+use the JSON archive's feature scope to distinguish their results. Failed or
 incomplete checks leave the applicable audit fields unchanged.
 
 ```bash
@@ -148,11 +149,11 @@ unknown ownership is not treated as permission to change a profile.
 
 Use the [F5 HTTPS flags](#f5-https) for the connection. Destinations come from
 `syslog.destinations` in the standards file; **WAF has no `--destination`
-override**. It does not create new remote logging profiles. It audits system
-syslog for combined compliance but changes only WAF destinations. `syslog`
-audits WAF only when ASM is provisioned. Missing WAF functionality never blocks
-system syslog: confirmed unprovisioned ASM is not applicable; unreadable WAF
-status leaves the shared compliance field unchanged while syslog continues.
+override**. It does not create new remote logging profiles. WAF and system
+syslog independently read, configure, verify and report their own sections.
+Neither audits or requires access to the other, and regular syslog does not
+query ASM provisioning. They share standards destinations, NetBox policy tags and audit
+field names; compliance is calculated only for the selected feature.
 Neither operation triggers ConfigSync.
 
 ```bash

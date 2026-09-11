@@ -152,21 +152,10 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     attempted = False
     errors = []
     try:
-        from .. import f5_syslog
-
         with f5_waf.Client(host, **{k: variables[k] for k in
                                    ("port", "verify_tls", "timeout", "provider")}) as client:
             plans = f5_waf.plan_waf(client, variables["destinations"], clean,
                                     skipped_profiles=payload["skipped_profiles"])
-            system_plan = f5_syslog.plan_syslog(client.get_json(f5_syslog.SYSLOG),
-                                              variables["destinations"], True)
-            system_exact = not system_plan.drift(True)
-            payload["system_syslog_audit"] = {
-                "compliant": system_exact, "current": system_plan.current,
-                "missing": system_plan.add, "extra": system_plan.extra,
-            }
-            payload["notes"].append(
-                "system syslog audited for combined compliance; use configure.py syslog to change it")
             payload["notes"].extend(
                 f"skipped {row['profile']}: {row['reason']}"
                 for row in payload["skipped_profiles"])
@@ -241,7 +230,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 if not ownership_unknown:
                     # Inventory policy controls writes, not the compliance target:
                     # add-only with extra destinations is not fully managed.
-                    payload["syslog_compliant"] = system_exact and all(
+                    payload["syslog_compliant"] = all(
                         row["fully_managed_compliant"] is True for row in payload["profiles"])
             if attempted:
                 payload["rollback_unsupported"] = [

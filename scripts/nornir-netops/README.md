@@ -737,25 +737,20 @@ and saved by default; `--no-verify` and `--no-save` retain their usual meanings.
 REST rollback is manual; `before_servers` in the report preserves the original
 remote server list. ConfigSync is not triggered.
 
-Regular F5 `syslog` works on devices without WAF. It checks
-[ASM provisioning](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_provision.html)
-first: `level=none` skips WAF discovery and records `waf_audit.status=not_applicable`.
-The shared NetBox `syslog_compliant` field then reflects system syslog alone.
+F5 `syslog` and `waf` are independent features that share the destination IPs
+and ports from `syslog.destinations` in the standards file:
 
-When ASM/WAF is provisioned, the system syslog run also audits eligible
-user-defined WAF destinations for the shared compliance field. Each command
-still changes only its selected logging type. Run both commands to converge
-both configurations on WAF devices. The JSON report includes the other logging
-type's audit (`waf_audit` or `system_syslog_audit`).
+- `syslog` reads, configures and verifies only `/mgmt/tm/sys/syslog`.
+- `waf` reads, configures and verifies only eligible remote application logging
+  profiles under `/mgmt/tm/security/log/profile`.
 
-A failed or unreadable WAF/provisioning audit **does not block system syslog**:
-its configuration, verification and save proceed normally. The report records
-`waf_audit.status=unavailable` and the reason; `syslog_compliant` is left unchanged
-because the combined verdict is unknown. The completed system check can still
-update `syslog_last_checked`. Permission errors, timeouts and malformed responses
-are not interpreted as proof that WAF is absent. System syslog read/write,
-verification and save failures retain their usual failure behavior. The explicit
-`waf` command still requires readable WAF configuration and system syslog evidence.
+Neither feature reads the other's configuration or includes it in compliance.
+Regular syslog does not query ASM provisioning or require WAF functionality.
+Each run's configuration snapshot, implementation and backout cover only its
+selected feature. There are no `waf_audit` or `system_syslog_audit` cross-audits.
+The existing NetBox field names remain shared: their values describe the most
+recent completed logging feature check. The JSON archive's `feature` and
+`configuration_scope` identify which configuration was evaluated.
 
 See [F5's system syslog API](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_syslog.html)
 and the field/writeback rules below.
@@ -781,8 +776,8 @@ device notes. They never contribute destinations to the plan or compliance
 comparison. Missing or unrecognized `builtIn` values are also skipped; in that
 case `syslog_compliant` is left unchanged because the full user-defined scope
 could not be confirmed. A completed discovery still records `syslog_last_checked`.
-If only built-in profiles exist, the WAF command makes no F5 changes and
-combined compliance is determined by the system syslog destinations.
+If only built-in profiles exist, the WAF command makes no F5 changes and reports
+no applicable WAF drift. System syslog is not queried or included in that verdict.
 
 For NetBox inventory, assign **one** of these tags to each F5 device:
 
@@ -954,9 +949,10 @@ in NetBox's Custom Fields UI before running.
 
 The existing **`syslog_compliant`** boolean custom field must also be assigned to
 `dcim.device`. The script validates its type before making changes. A completed
-check sets it to **true only when system syslog and every eligible user-defined
-WAF logging profile match the fully managed destination list exactly**:
-all standard IP/port pairs present,
+check sets it to **true when the selected feature matches its fully managed
+destination list exactly**: system syslog for `syslog`, or every eligible
+user-defined remote WAF logging profile for `waf`. All standard IP/port pairs
+must be present,
 with no extra or duplicate destinations. Otherwise it sets it to false. This
 comparison is independent of the device's policy tag: add-only can succeed while
 remaining noncompliant because it preserves extras. After changes, the value is
@@ -966,9 +962,12 @@ The timestamp means **last successfully checked**, not necessarily compliant:
 an audit can find drift, and a completed discovery can find no eligible remote
 profiles. A discovery, configuration, verification, or requested save failure
 leaves both previous field values unchanged. Changes made with `--no-verify`
-do not update either field. With no eligible WAF profiles, the system syslog
-comparison determines compliance. Unknown WAF profile ownership leaves the
-boolean unchanged and records the completed check date. When a verdict is
+do not update either field. With no eligible WAF profiles and no unknown
+ownership, the WAF check reports true because there is no applicable WAF drift.
+Unknown WAF profile ownership leaves the boolean unchanged and records the
+completed check date. Both features use the same existing NetBox fields, so
+these fields describe the last completed logging check, not a combined verdict.
+Use the run archive's feature scope when reporting results separately. When a verdict is
 available, both values are sent in one PATCH and read back for verification;
 a failed NetBox writeback makes the run fail while preserving F5 results in the
 report. Only these custom-field keys are patched, leaving other fields and tags
