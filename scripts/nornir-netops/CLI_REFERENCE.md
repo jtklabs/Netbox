@@ -21,6 +21,8 @@ standards-file examples.
   [ACL](#acl), [NAC](#nac), [local accounts](#users).
 - [Utility commands](#utility-commands): [NTP check](#check-ntp),
   [discovery](#discover), [rollback](#rollback), [selftest](#selftest).
+- [IOS XE upgrades](UPGRADES.md): approved profiles, NetBox targeting, install
+  mode/conversion, parallel execution, pre/post validation and progress webhooks.
 - [Shared flags](#shared-flags): [inventory](#inventory-and-device-selection),
   [NetBox](#netbox-inventory-and-interface-tags), [authentication](#device-authentication),
   [AWS](#aws-secrets-manager), [F5 HTTPS](#f5-https),
@@ -375,6 +377,7 @@ These groups apply to configuration features unless stated otherwise.
 Choose only one of `--csv`, `--netbox`, `--ip`. Without an explicit choice,
 `NETOPS_INVENTORY` selects `csv` (default) or `netbox`. NetBox defaults to active
 devices with a primary IP. `--netbox-filter` restricts the API results first;
+`--netbox-autofilter` can then restrict ownership to the local poller;
 `--limit` and `--filter` further narrow the loaded inventory. Multiple filters
 are intersections, not independent batches. For individual NetBox tags use
 `--netbox-filter tag=TAG`; local `--filter tags=...` compares the whole stored
@@ -387,7 +390,18 @@ comma-separated tag string.
 | `--netbox-url URL` | NetBox base URL. Fallback: `netbox.url` in standards, then `NETBOX_URL`, then the selected NetBox secret's `url`. |
 | `--netbox-secret NAME_OR_ARN` | Separate AWS JSON secret containing `token` and optionally `url`. Default: `NETBOX_SECRET`. Existing URL/token values take precedence over its fields. |
 | `--netbox-filter KEY=VALUE` | API filter, repeatable. Any CLI filters replace the entire `NETBOX_FILTERS` environment list. Repeated site/platform values are alternatives; repeated tags require all. |
+| `--netbox-autofilter` | Restrict NetBox candidates to this poller's device/site/region tags or site-scoped prefixes. Default: `NETBOX_AUTOFILTER=false`. Requires a poller identity. |
+| `--no-netbox-autofilter` | Disable poller ownership filtering even if enabled in the environment. |
+| `--poller NAME` | Same identity as SNMP inventory's `[poller] name`. Default: `NETOPS_POLLER`. Accepts a bare name or `poller-NAME` tag; does not enable filtering by itself. |
 | `--netbox-source-tag TAG` | Interface tag identifying an NTP/syslog source, such as `ntp-source`; repeatable. Overrides the source-tag set from `netbox.source_tags`; default tags are `ntp-source` and `syslog-source`. |
+
+Autofilter applies to configuration features, `discover` and checks when their
+inventory is NetBox. Its environment setting is ignored for CSV/direct-IP and
+rollback runs; explicitly enabling it there is an error. CLI enable/disable and
+poller flags override their environment settings. Read the [poller ownership
+rules and examples](README.md#limit-netbox-inventory-to-this-poller) before enabling it.
+Platform filtering still uses `--netbox-filter platform=SLUG`, independently of
+ownership. Ownership selects devices; syslog policy tags still select actions.
 
 The NetBox token is set with `NETBOX_TOKEN` or the NetBox secret; there is no
 `--netbox-token` flag. For syslog, `--syslog-source-tag` selects that feature's
@@ -616,3 +630,17 @@ NETOPS_F5_VERIFY_TLS=true
 
 For programmatic reporting, inspect each device's report fields along with
 the exit code. Utility commands do not all produce JSON reports.
+
+### `upgrade-poll`: scheduled work from NetBox
+
+```sh
+./configure.py upgrade-poll --poller checkmk-us --workers 3          # scheduled audits only
+./configure.py upgrade-poll --poller checkmk-us --workers 3 --apply  # also staging/upgrades
+```
+
+Checks in once, claims a bounded batch, runs it and exits. Intended for cron each
+minute; overlapping ticks exit quietly. Targets, operation, and profile come
+from the NetBox schedule. Shared environment/AWS credentials and upgrade timeout
+flags apply. `--queue-state-dir` selects persistent private delivery/lock state;
+`--report-dir` holds one archive per job. See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md)
+for the NetBox form, deployment, permissions, API, and recovery rules.

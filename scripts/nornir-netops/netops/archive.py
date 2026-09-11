@@ -117,6 +117,10 @@ def step(command, purpose="configure"):
 
 def action(args, desired, host, record):
     feature = getattr(args, "command", None)
+    if feature == "upgrade":
+        operation = "stage_image" if getattr(args, "stage_only", False) else "upgrade"
+        return {"action": operation if getattr(args, "apply", False) else "audit",
+                "action_source": "profile", "action_from_netbox": False, "netbox_policy_tag": None}
     if feature in ("check-ntp", "discover", "selftest", "rollback"):
         return {"action": "rollback" if feature == "rollback" else "audit",
                 "action_source": "utility", "action_from_netbox": False, "netbox_policy_tag": None}
@@ -143,6 +147,8 @@ def action(args, desired, host, record):
 
 def device_document(name, record, args, desired, host):
     row = dict(record)
+    if host and host.data.get("poller_selection"):
+        row["poller_selection"] = host.data["poller_selection"]
     row.update(action(args, desired, host, row))
     feature = getattr(args, "command", None)
     read_steps = []

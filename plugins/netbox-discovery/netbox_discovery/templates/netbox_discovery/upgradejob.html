@@ -1,0 +1,44 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Scheduled work</h5><div class="card-body">
+    <table class="table attr-table">
+      <tr><th>Device</th><td>{{ object.device|linkify }} ({{ object.address }})</td></tr>
+      <tr><th>Poller</th><td>{{ object.poller|linkify }}</td></tr>
+      <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
+      <tr><th>Status</th><td>{{ object.get_status_display }}</td></tr>
+      <tr><th>Scheduled start</th><td>{{ object.scheduled_at }}</td></tr>
+      <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>
+      <tr><th>Last heartbeat</th><td>{{ object.last_seen_at|placeholder }}</td></tr>
+      <tr><th>Requested by</th><td>{{ object.requested_by|placeholder }}</td></tr>
+      <tr><th>Batch</th><td><a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a></td></tr>
+      <tr><th>Remote run</th><td>{{ object.run_id|placeholder }}</td></tr>
+    </table>
+    <p><strong>{{ object.stage }}</strong> {{ object.message }}</p>
+    {% if object.heartbeat_stale %}<p class="text-danger">This worker has not sent a heartbeat for over five minutes. Check the remote and the switch before taking further action.</p>{% endif %}
+    {% if perms.netbox_discovery.change_upgradejob %}
+      {% if object.status == 'pending' %}
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_cancel' pk=object.pk %}">{% csrf_token %}<button class="btn btn-danger">Cancel pending job</button></form>
+      {% elif object.needs_recovery %}
+      <p class="text-danger">This device stays locked against further scheduled work. Verify the switch and stop any surviving worker before releasing it.</p>
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_cancel' pk=object.pk %}">{% csrf_token %}
+        <input type="hidden" name="recovered" value="yes">
+        <label for="reason">Verified device state and recovery performed</label>
+        <textarea id="reason" name="reason" class="form-control" maxlength="1000" required></textarea>
+        <button class="btn btn-warning mt-2">Record recovery and release device</button>
+      </form>
+      {% endif %}
+    {% endif %}
+  </div></div>
+  <div class="card"><h5 class="card-header">Profile snapshot</h5><pre class="card-body">{{ profile_text }}</pre></div>
+</div><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Validation summary</h5><pre class="card-body">{{ summary_text }}</pre></div>
+  <div class="card"><h5 class="card-header">Progress</h5><div class="card-body">
+    <p class="text-muted">Refresh to see new progress. The latest 500 events are shown; the full archive stays on the remote.</p>
+    <table class="table table-sm"><thead><tr><th>Time (UTC)</th><th>Stage</th><th>Message</th></tr></thead><tbody>
+    {% for event in object.events reversed %}<tr><td>{{ event.timestamp }}</td><td>{{ event.stage }}</td><td>{{ event.message }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div></div>
+</div></div>
+{% endblock %}

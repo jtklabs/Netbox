@@ -20,6 +20,7 @@ __all__ = (
     'DiscoveryPoller',
     'HardwareReplacement',
     'OnboardingRequest',
+    'UpgradeJob',
 )
 
 
@@ -622,3 +623,7 @@ class DiscoveryIssue(PrimaryModel):
     @property
     def is_open(self):
         return self.status == IssueStatusChoices.STATUS_OPEN
+
+
+# Imported here so Django discovers these models with the rest of the plugin.
+from .upgrade_models import UpgradeJob  # noqa: E402,F401

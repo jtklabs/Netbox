@@ -1,4 +1,6 @@
 include configure.py requirements.txt .env.example standards.yaml.example
+include UPGRADES.md upgrade-profile.yaml.example
 recursive-include inventory *.example
 recursive-include templates *.j2
 recursive-include tests *.py
+include SCHEDULED_UPGRADES.md
