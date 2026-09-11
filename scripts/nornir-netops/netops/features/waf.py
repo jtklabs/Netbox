@@ -17,6 +17,12 @@ CHECKED_FIELD = "syslog_last_checked"
 
 
 def add_arguments(parser):
+    parser.add_argument(
+        "--policy", dest="logging_policy", choices=("audit", "add", "manage", "netbox"),
+        help="F5 logging action: audit only, add missing, manage exact destinations, or follow "
+             "each device's NetBox tag. Overrides tags unless netbox is selected "
+             "[$NETOPS_F5_POLICY; default: netbox for NetBox inventory, add otherwise]",
+    )
     group = parser.add_argument_group("F5 HTTPS")
     group.add_argument("--f5-port", type=int, default=os.environ.get("NETOPS_F5_PORT", "443"),
                        help="BIG-IP management HTTPS port [$NETOPS_F5_PORT]")
@@ -31,6 +37,26 @@ def add_arguments(parser):
                        help="BIG-IP authentication provider [$NETOPS_F5_LOGIN_PROVIDER]")
     group.add_argument("--netbox-checked-field", default=os.environ.get("NETBOX_CHECKED_FIELD", CHECKED_FIELD),
                        help="device datetime custom field for the last syslog check [$NETBOX_CHECKED_FIELD]")
+
+
+def selected_policy(args):
+    policy = getattr(args, "logging_policy", None)
+    explicit_mode = getattr(args, "explicit_mode", False)
+    if policy is not None and explicit_mode:
+        raise ValueError("choose --policy or --add/--replace, not both")
+    if explicit_mode:
+        policy = "manage" if args.mode == MODE_REPLACE else "add"
+    elif policy is None:
+        policy = os.environ.get("NETOPS_F5_POLICY")
+    if policy is None:
+        policy = ("netbox" if getattr(args, "netbox", False) else
+                  "manage" if getattr(args, "mode", None) == MODE_REPLACE else "add")
+    if policy not in ("audit", "add", "manage", "netbox"):
+        raise ValueError("NETOPS_F5_POLICY must be audit, add, manage or netbox")
+    # Offline selftest namespaces have no inventory arguments.
+    if policy == "netbox" and hasattr(args, "netbox") and not args.netbox:
+        raise ValueError("--policy netbox requires NetBox inventory (--netbox or NETOPS_INVENTORY=netbox)")
+    return policy
 
 
 def connection_settings(args):
@@ -69,11 +95,15 @@ def build_desired(args):
     return Desired(
         keys=[f"{host}{'.' if ':' in host else ':'}{port}" for host, port in destinations],
         variables={"destinations": destinations, **connection,
+                   "logging_policy": selected_policy(args),
                    "netbox_policy": bool(getattr(args, "netbox", False))},
     )
 
 
-def device_policy(host, mode, netbox=False):
+def device_policy(host, mode, netbox=False, policy=None):
+    if policy is not None and policy != "netbox":
+        return (MODE_REPLACE if policy in ("audit", "manage") else "add",
+                policy == "audit", f"selected policy: {policy}")
     if not netbox:
         return mode, False, "CLI policy"
     tags = {tag.strip() for tag in str(host.data.get("tags", "")).split(",")}
@@ -104,7 +134,8 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     if platform != "f5_tmsh":
         payload.update(skipped=True, skip_reason="WAF logging applies only to F5 BIG-IP")
         return Result(host=host, result=payload)
-    mode, audit_only, policy = device_policy(host, mode, variables["netbox_policy"])
+    mode, audit_only, policy = device_policy(host, mode, variables["netbox_policy"],
+                                            variables.get("logging_policy"))
     clean = mode == MODE_REPLACE
     payload.update(mode="audit" if audit_only else mode, audit_only=audit_only, policy=policy)
     payload["notes"].append(f"policy: {policy}")

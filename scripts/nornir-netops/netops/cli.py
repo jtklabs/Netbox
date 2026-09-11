@@ -297,6 +297,14 @@ def _ip_address(value: str) -> str:
         raise argparse.ArgumentTypeError("--ip requires a single IPv4 or IPv6 address") from None
 
 
+class ExplicitMode(argparse.Action):
+    """Keep the legacy default while distinguishing explicit mode overrides."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, self.const)
+        namespace.explicit_mode = True
+
+
 def _common_arguments() -> argparse.ArgumentParser:
     """Options shared by every feature subcommand."""
     parent = argparse.ArgumentParser(add_help=False)
@@ -321,7 +329,8 @@ def _common_arguments() -> argparse.ArgumentParser:
     mode.add_argument(
         "--add",
         dest="mode",
-        action="store_const",
+        action=ExplicitMode,
+        nargs=0,
         const=MODE_ADD,
         default=MODE_ADD,
         help="add the desired entries, leave anything else alone (default)",
@@ -329,7 +338,8 @@ def _common_arguments() -> argparse.ArgumentParser:
     mode.add_argument(
         "--replace",
         dest="mode",
-        action="store_const",
+        action=ExplicitMode,
+        nargs=0,
         const=MODE_REPLACE,
         default=MODE_ADD,
         help="add the desired entries and remove every other one",
@@ -792,9 +802,8 @@ def _apply_filters(nr, args: argparse.Namespace):
 def _confirm(style: Style, count: int, feature: str, mode: str) -> bool:
     if not sys.stdin.isatty():
         return True  # non-interactive: --apply was explicit enough
-    verb = "add to" if mode == MODE_ADD else "replace on"
     answer = input(
-        style.warn(f"About to {verb} {feature} on {count} device(s). Continue? [y/N] ")
+        style.warn(f"Run {feature} with policy {mode} on {count} device(s)? [y/N] ")
     )
     return answer.strip().lower() in {"y", "yes"}
 
@@ -886,6 +895,9 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         parser.error(str(exc))
 
     protect(desired.secrets)
+    if feature.name == "waf":
+        selected = desired.variables["logging_policy"]
+        args.policy_mode = "netbox-tags" if selected == "netbox" else selected
     targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
@@ -895,7 +907,11 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     f5_syslog = feature.name == "syslog" and any(
         canonical_platform(host.platform) == "f5_tmsh" for host in targets.inventory.hosts.values())
     if f5_syslog and args.netbox:
-        args.policy_mode = f"F5=netbox-tags, other-platforms={args.mode}"
+        selected = desired.variables["logging_policy"]
+        selected = "netbox-tags" if selected == "netbox" else selected
+        args.policy_mode = f"F5={selected}, other-platforms={args.mode}"
+    elif f5_syslog:
+        args.policy_mode = desired.variables["logging_policy"]
     waf_netbox = None
     if (feature.name == "waf" or f5_syslog) and args.netbox:
         from .netbox import NetBoxError

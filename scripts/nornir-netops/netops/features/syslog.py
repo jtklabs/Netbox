@@ -30,7 +30,7 @@ from ..core import validate_address, validate_text, validate_word
 from ..netbox import source_for
 from ..standards import host_and_port, of as standards_of
 from .. import f5_syslog
-from .waf import add_arguments as f5_arguments, connection_settings
+from .waf import add_arguments as f5_arguments, connection_settings, selected_policy
 
 SHOW_COMMAND = "show running-config all | include ^logging"
 
@@ -242,6 +242,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
         keys=keys,
         variables={"entries": entries, "vrf": validate_word(str(vrf), "vrf") if vrf else None,
                    "f5": connection_settings(args),
+                   "logging_policy": selected_policy(args),
                    "netbox_policy": bool(getattr(args, "netbox", False))},
     )
 

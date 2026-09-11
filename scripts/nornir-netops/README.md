@@ -698,11 +698,39 @@ For NetBox inventory, assign **one** of these tags to each F5 device:
 | `syslog-manage` | Add missing standard destinations and remove extras. |
 | None of these tags | Audit only. |
 
-Conflicting policy tags fail that device before logging into the F5. These tags
-control F5 `waf` and `syslog`; they do not change Cisco/Arista syslog behavior.
-NetBox policy takes precedence over `--add`/`--replace` on F5. **Without
-`--apply`, every policy is a dry run, including NetBox writeback.** The tool reads
-policy tags; it never assigns or removes them.
+Select the action explicitly with **`--policy`** on either F5 command:
+
+| Policy | Behavior |
+| --- | --- |
+| `audit` | Compare the fully managed destination list; never change F5 settings, even with `--apply`. |
+| `add` | Add missing destinations on every targeted F5, overriding device tags; preserve extras. |
+| `manage` | Add missing and remove extra/duplicate destinations on every targeted F5, overriding device tags. |
+| `netbox` | Resolve each device's own tag independently: audit, add, or manage as listed above. Requires NetBox inventory. |
+
+```bash
+# One fleet run, a different policy for each device according to its tag:
+./configure.py syslog --netbox --policy netbox --apply --yes
+./configure.py waf --netbox --policy netbox --apply --yes
+
+# Override the tags for this run:
+./configure.py syslog --netbox --policy audit --apply --yes
+./configure.py waf --netbox --limit my-bigip --policy manage --apply --yes
+```
+
+Set `NETOPS_F5_POLICY=netbox` (or `audit`, `add`, `manage`) in `.env` for a
+default policy. Explicit `--policy` overrides it. The existing `--add` and
+`--replace` flags are aliases for selecting F5 add/manage and now also override
+NetBox tags and the environment policy. Do not combine them with `--policy`.
+If no policy or mode is selected, existing defaults remain: follow tags for
+NetBox inventory, add for CSV/direct IP. This selector applies only to F5;
+Cisco/Arista syslog behavior still follows the existing CLI mode.
+
+Conflicting policy tags fail that device before F5 login when following tags;
+an explicit audit/add/manage selection ignores them. Untagged devices audit
+when following tags. **Without `--apply`, every policy is a dry run, including
+NetBox writeback.** Audit with `--apply` records completed checks in NetBox but
+does not change F5 configuration. The tool reads policy tags; it never assigns
+or removes them.
 
 ```bash
 # Preview the policy selected by each F5's NetBox tag.
