@@ -5,6 +5,10 @@ using per-platform Jinja templates or the BIG-IP REST API. **Dry run by default*
 it connects read-only, works out the delta, and prints the exact commands it
 would send.
 
+Every run automatically saves a private JSON archive with original feature configuration,
+implementation steps, backout steps, effective action and the resulting state.
+See [JSON run archives](RUN_ARCHIVES.md) for the schema, `.env` settings and examples.
+
 ```console
 $ ./configure.py ntp --servers 10.50.0.10,10.50.0.11 --replace
 

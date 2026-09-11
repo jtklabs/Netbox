@@ -294,7 +294,7 @@ Read NTP operational state on Cisco/Arista; does not configure devices.
 | `--max-offset MS` | Warn when the selected peer exceeds this absolute offset in milliseconds. Default: 1000. |
 
 Accepts shared connection, inventory, logging and standards flags, but not
-`--apply`, `--report`, `--fail-on-diff` or ServiceNow flags. It returns 2 for
+`--apply`, `--fail-on-diff` or ServiceNow flags. It returns 2 for
 an attention result without needing a separate fail-on-diff option.
 
 ```bash
@@ -312,7 +312,7 @@ data in NetBox/CSV or `--platform f5_tmsh` for a direct address.
 | `--refresh` | Ignore cached detection and detect again. Explicit inventory platform values still win. Default: off. |
 
 Accepts shared connection, inventory, logging, cache and standards flags.
-Does not accept apply, report or ServiceNow flags. `--no-platform-cache` disables
+Does not accept apply or ServiceNow flags. JSON archive flags are accepted. `--no-platform-cache` disables
 cache use; unlike `--refresh`, it also prevents remembering the result.
 
 ```bash
@@ -335,7 +335,7 @@ addresses come from that journal, not current CSV/NetBox inventory.
 
 Uses the shared login/AWS/environment, SSH port/timeout, worker and logging
 flags. Inventory/filter/platform flags inherited in help do not select or
-replace journal devices. It does not accept `--standards`, `--report`,
+replace journal devices. It does not accept `--standards`,
 `--no-verify`, `--add`, `--replace` or ServiceNow flags. F5 REST rollback is
 manual; consult the feature's report and README instructions.
 
@@ -347,7 +347,7 @@ manual; consult the feature's report and README instructions.
 ### selftest
 
 `./configure.py selftest` runs offline template/sample checks. It has no
-feature or shared CLI flags beyond `-h` / `--help`. It finds a standards file
+feature flags; it accepts `-h` / `--help`, `--report` and `--report-dir`. It finds a standards file
 in the normal locations and may fall back to the shipped example for this
 offline check. It does not test live authentication, device APIs or reachability.
 
@@ -483,20 +483,27 @@ prevents saving. F5 REST changes may be partial when an operation fails.
 | `--log-file FILE` | Detailed errors/tracebacks. Default: `NETOPS_LOG_FILE`, then `netops-debug.log`. |
 | `--no-log-file` | Disable the debug log file. |
 | `--debug` | Print tracebacks and include SSH transcripts in the log. Secrets are scrubbed. |
-| `--report FILE` | Write a JSON result report. Configuration features only; no default report file. |
+| `--report FILE` | Archive JSON at this exact path (overwrites). All commands; default is a unique file in the report directory. |
+| `--report-dir DIR` | Automatic archive directory. Default: `NETOPS_REPORT_DIR`, then `<project>/reports`. All commands. |
 | `--fail-on-diff` | Return exit code 2 when a configuration feature has pending changes. Without it, an ordinary successful dry run can return 0 even when it previews changes. |
 
 Connection/output flags through `--debug` also apply to discovery, checks and
-rollback. `--report` / `--fail-on-diff` do not. Reports distinguish execution
+rollback. `--report` and `--report-dir` apply to every command, including selftest.
+`--fail-on-diff` applies only to configuration features. Reports distinguish execution
 success, initial compliance, pending changes, verification and save results;
 an exit code of 0 alone does not mean the initial configuration matched.
+
+Every run writes JSON automatically, including dry runs and failures. Each device
+records original feature configuration, implementation and backout steps, resulting
+state, effective action, and whether its action came from NetBox. See
+[JSON run archives](RUN_ARCHIVES.md) for the schema and restoration guidance.
 
 ### Rollback journals
 
 | Flag | Meaning and default |
 | --- | --- |
 | `--rollback-dir DIR` | Where configuration features write reversal journals. Default: `NETOPS_ROLLBACK_DIR`, then `<project>/.rollback`. Also controls rollback's search directory. |
-| `--no-rollback-file` | Do not write a reversal journal for this run. Does not suppress a requested JSON report. Configuration features only. |
+| `--no-rollback-file` | Do not write a reversal journal for this run. Does not suppress the automatic JSON archive. Configuration features only. |
 
 Journals record supported reversals; they cannot recover unreadable previous
 passwords. F5 REST features describe manual rollback in their reports instead

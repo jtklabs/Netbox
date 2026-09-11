@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from nornir.core.task import Result, Task
 from nornir_netmiko import netmiko_send_command, netmiko_send_config
 
+from . import archive
 from .rollback import default_reversal
 from .debuglog import protect
 from .core import (
@@ -138,41 +139,62 @@ def run_check(task: Task, check, expected, options) -> Result:
     )
 
 
-def apply_rollback(task: Task, save: bool) -> Result:
-    """Send one device's recorded reversal."""
+def apply_rollback(task: Task, save: bool, feature=None, dry_run=False, archive_sink=None) -> Result:
+    """Read the affected feature, replay the journal, and observe the result."""
     commands = list(task.host.data.get("rollback") or [])
-    payload: Dict[str, Any] = {
-        "platform": canonical_platform(task.host.platform),
-        "commands": commands,
-        "applied": False,
-        "saved": None,
-        "output": None,
-    }
-    if not commands:
-        return Result(host=task.host, result=payload, changed=False)
+    platform = canonical_platform(task.host.platform)
+    payload = {"platform": platform, "commands": commands, "applied": False,
+               "saved": None, "output": None, "verified": None,
+               "config_before": None, "config_after": None}
+    save_command = SAVE_COMMANDS.get(platform) if save and commands else None
+    payload["save_command"] = save_command
+    attempted = False
+    try:
+        support = feature.support_for(platform) if feature else None
+        if support:
+            payload["config_before"] = archive.snapshot(_read_state(task, support))
+        if not commands or dry_run:
+            return Result(host=task.host, result=payload, changed=False)
+        if archive_sink:
+            archive_sink.record(task.host, payload, changed=True, status="applying")
+        attempted = True
+        pushed = task.run(task=netmiko_send_config, name="rollback", config_commands=commands,
+                          **(feature.config_options if feature else {}))
+        payload["applied"] = True
+        payload["output"] = pushed.result
+        _check_understood("rollback", pushed.result or "")
+        if support:
+            payload["config_after"] = archive.snapshot(_read_state(task, support))
+        if save_command:
+            saved = task.run(task=netmiko_send_command, name=save_command,
+                             command_string=save_command, enable=True, read_timeout=SAVE_TIMEOUT)
+            _check_understood(save_command, saved.result or "")
+            payload["saved"] = True
+        return Result(host=task.host, result=payload, changed=True)
+    except Exception as exc:
+        return Result(host=task.host, result=payload, changed=attempted, failed=True, exception=exc)
 
-    pushed = task.run(
-        task=netmiko_send_config, name="rollback", config_commands=commands
-    )
-    _check_understood("rollback", pushed.result or "")
-    payload["applied"] = True
-    payload["output"] = pushed.result
 
-    save_command = SAVE_COMMANDS.get(payload["platform"]) if save else None
-    if save_command:
-        saved = task.run(
-            task=netmiko_send_command,
-            name=save_command,
-            command_string=save_command,
-            enable=True,
-            read_timeout=SAVE_TIMEOUT,
-        )
-        _check_understood(save_command, saved.result or "")
-        payload["saved"] = True
-    return Result(host=task.host, result=payload, changed=True)
+def configure_feature(task, feature, desired, variables, secrets, mode, dry_run, save, verify, archive_sink=None):
+    token = archive.ACTIVE.set(archive_sink)
+    try:
+        try:
+            result = _configure_feature(task, feature, desired, variables, secrets, mode, dry_run, save, verify)
+        except Exception as exc:
+            if archive_sink:
+                archive_sink.record(task.host, {"error": str(exc)}, failed=True)
+            raise
+        if archive_sink:
+            payload = dict(result.result) if isinstance(result.result, dict) else {}
+            if result.failed and result.exception:
+                payload["error"] = str(result.exception)
+            archive_sink.record(task.host, payload, failed=result.failed, changed=result.changed)
+        return result
+    finally:
+        archive.ACTIVE.reset(token)
 
 
-def configure_feature(
+def _configure_feature(
     task: Task,
     feature: Feature,
     desired: Sequence[str],
@@ -258,6 +280,7 @@ def configure_feature(
         if entry.data.get("secret_value")
     ]
     protect(secrets)
+    payload["config_before"] = archive.snapshot(current)
     context = {
         "login_user": task.host.username,
         "platform": platform,
@@ -297,15 +320,9 @@ def configure_feature(
     if commands and not feature.reversible:
         payload["notes"].append("rollback: this change cannot be undone")
 
-    if not commands or dry_run or audit_only:
-        if feature.audit_fields is not None:
-            payload.update(feature.audit_fields(current, desired, context))
-            payload["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        return Result(host=task.host, result=payload, changed=False)
-
     # Worked out now rather than later: once the device is changed it no longer
     # knows what it used to be.
-    if feature.reversible:
+    if commands and feature.reversible:
         reverse_context = {
             "platform": platform,
             "variables": variables,
@@ -320,6 +337,13 @@ def configure_feature(
         payload["rollback"] = reversal.commands
         payload["rollback_unsupported"] = reversal.unsupported
 
+    if not commands or dry_run or audit_only:
+        if feature.audit_fields is not None:
+            payload.update(feature.audit_fields(current, desired, context))
+            payload["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return Result(host=task.host, result=payload, changed=False)
+
+    archive.checkpoint(task, payload)
     try:
         pushed = task.run(
             task=netmiko_send_config,
@@ -336,6 +360,7 @@ def configure_feature(
         # the account still in it.
         if verify:
             after = _read_state(task, support)
+            payload["config_after"] = archive.snapshot(after)
             if feature.verify_with_plan:
                 # For a feature whose desired set is worked out from the device --
                 # every access port, say -- "is anything still outstanding?" is the

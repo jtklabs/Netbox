@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from . import archive
 from . import f5_waf
 from .core import render
 
@@ -77,6 +78,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             if changes and not dry_run:
                 for row in changes:
                     attempted = True
+                    archive.checkpoint(task, payload)
                     client.patch_json(row["endpoint"], row["desired"])
                     row["applied"] = True
                 payload["applied"] = True

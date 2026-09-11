@@ -155,7 +155,8 @@ def reverse(commands, current, removed, context):
     before = {entry.key: entry for entry in current}
     reversal = Reversal()
 
-    for kind in context.get("added") or []:
+    kinds = list(dict.fromkeys(list(context.get("added") or []) + [entry.key for entry in removed]))
+    for kind in kinds:
         previous = before.get(kind)
         if previous is None:
             reversal.commands.append(f"no banner {kind}")
