@@ -85,7 +85,8 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     }
     attempted = False
     try:
-        mode, audit_only, policy = device_policy(host, mode, variables["netbox_policy"])
+        mode, audit_only, policy = device_policy(host, mode, variables["netbox_policy"],
+                                                variables.get("logging_policy"))
         payload.update(mode="audit" if audit_only else mode, audit_only=audit_only, policy=policy)
         payload["notes"].append(f"policy: {policy}")
         wanted = list(dict.fromkeys(destination(e["host"], e["port"])

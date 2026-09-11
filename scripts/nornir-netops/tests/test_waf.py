@@ -212,7 +212,7 @@ def test_replace_removes_duplicates_wrong_ports_and_extras(setup):
 def test_netbox_tags_control_each_device_and_stamp_completed_checks(setup, tags, expected):
     setup.nb.device["tags"] = [{"slug": tag} for tag in tags] + [{"slug": "existing-tag"}]
     before_tags = copy.deepcopy(setup.nb.device["tags"])
-    code, report = setup.run("--apply", "--replace", netbox_inventory=True)
+    code, report = setup.run("--apply", "--policy", "netbox", netbox_inventory=True)
     assert code == cli.EXIT_OK
     assert report["mode"] == "netbox-tags"
     record = report["devices"]["f5"]
@@ -678,3 +678,102 @@ def test_system_syslog_read_failure_prevents_waf_changes(setup):
     code, _ = setup.run("--apply", netbox_inventory=True)
     assert code == cli.EXIT_FAILED
     assert setup.box.writes == setup.nb.writes == []
+
+
+@pytest.mark.parametrize("feature", ["waf", "syslog"])
+@pytest.mark.parametrize("policy,expected", [("audit", "audit"), ("add", "add"), ("manage", "replace")])
+def test_explicit_policy_overrides_tags_even_when_conflicting(setup, feature, policy, expected):
+    setup.nb.device["tags"] = [{"slug": "syslog-audit"}, {"slug": "syslog-manage"}]
+    setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = [
+        {"name": "old", "host": "192.0.2.99", "remotePort": 514}]
+    code, report = setup.run("--apply", "--policy", policy, netbox_inventory=True, feature=feature)
+    assert code == cli.EXIT_OK
+    row = report["devices"]["f5"]
+    assert row["mode"] == expected
+    assert len(setup.box.writes) == int(policy != "audit")
+    assert row["netbox_writeback"]["status"] == "written"
+    if policy != "audit":
+        servers = setup.box.writes[0][1]["servers" if feature == "waf" else "remoteServers"]
+        assert len(servers) == (3 if policy == "add" else 2)
+
+
+@pytest.mark.parametrize("feature", ["waf", "syslog"])
+@pytest.mark.parametrize("flag,expected", [("--add", "add"), ("--replace", "replace")])
+def test_legacy_mode_flags_override_netbox_tags(setup, feature, flag, expected):
+    setup.nb.device["tags"] = [{"slug": "syslog-audit"}]
+    setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = []
+    code, report = setup.run("--apply", flag, netbox_inventory=True, feature=feature)
+    assert code == cli.EXIT_OK
+    assert report["devices"]["f5"]["mode"] == expected
+    assert len(setup.box.writes) == 1
+
+
+@pytest.mark.parametrize("feature", ["waf", "syslog"])
+@pytest.mark.parametrize("policy", ["audit", "add", "manage", "netbox"])
+def test_policy_never_bypasses_dry_run(setup, feature, policy):
+    setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = []
+    assert setup.run("--policy", policy, netbox_inventory=True, feature=feature)[0] == cli.EXIT_OK
+    assert setup.box.writes == setup.nb.writes == []
+    assert setup.box.saves == 0
+
+
+@pytest.mark.parametrize("feature", ["waf", "syslog"])
+@pytest.mark.parametrize("flags", [("--policy", "netbox"),
+                                   ("--policy", "audit", "--add"),
+                                   ("--policy", "netbox", "--replace")])
+def test_invalid_policy_selection_stops_before_connections(setup, feature, flags):
+    with pytest.raises(SystemExit):
+        setup.run(*flags, feature=feature)
+    assert setup.box.logins == setup.nb.calls == []
+
+
+def test_policy_env_default_and_cli_override(setup, monkeypatch):
+    monkeypatch.setenv("NETOPS_F5_POLICY", "audit")
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    assert report["devices"]["f5"]["mode"] == "audit"
+    assert setup.box.writes == []
+    code, report = setup.run("--apply", "--policy", "manage", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    assert report["devices"]["f5"]["mode"] == "replace"
+    assert len(setup.box.writes) == 1
+
+
+@pytest.mark.parametrize("feature", ["waf", "syslog"])
+def test_netbox_policy_is_resolved_independently_for_multiple_devices(setup, monkeypatch, feature):
+    devices, boxes = {}, {}
+    for offset, tag in enumerate(("syslog-audit", "syslog-add", "syslog-manage", None)):
+        device = copy.deepcopy(setup.nb.device)
+        device.update(id=7 + offset, name=f"f5-{offset}", tags=[{"slug": tag}] if tag else [])
+        devices[device["id"]] = device
+        box = FakeF5()
+        box.responses[f5_syslog.SYSLOG]["remoteServers"] = [
+            {"name": "old", "host": "192.0.2.99", "remotePort": 514}]
+        boxes[device["name"]] = box
+    original_request = setup.nb.request
+
+    def request(method, url, json=None, params=None, **kwargs):
+        path = urlsplit(url).path.removeprefix("/api/")
+        if path == "dcim/devices/":
+            body = {"results": list(devices.values()), "next": None}
+        elif path.startswith("dcim/devices/"):
+            device = devices[int(path.rstrip("/").rsplit("/", 1)[1])]
+            if method == "PATCH":
+                device["custom_fields"].update(json["custom_fields"])
+            body = device
+        else:
+            return original_request(method, url, json=json, params=params, **kwargs)
+        return SimpleNamespace(status_code=200, text="", json=lambda: copy.deepcopy(body))
+
+    monkeypatch.setattr(setup.nb, "request", request)
+    monkeypatch.setattr(f5_waf, "Client", lambda host, **kwargs: boxes[host.name])
+    code, report = setup.run("--apply", "--policy", "netbox", netbox_inventory=True, feature=feature)
+    assert code == cli.EXIT_OK
+    for offset, expected in enumerate(("audit", "add", "replace", "audit")):
+        row = report["devices"][f"f5-{offset}"]
+        assert row["mode"] == expected
+        assert row["netbox_writeback"]["device_id"] == 7 + offset
+        assert len(boxes[f"f5-{offset}"].writes) == int(expected != "audit")
+        if expected != "audit":
+            patch = boxes[f"f5-{offset}"].writes[0][1]
+            assert len(patch["servers" if feature == "waf" else "remoteServers"]) == (3 if expected == "add" else 2)
