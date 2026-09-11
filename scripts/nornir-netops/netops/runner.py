@@ -192,6 +192,9 @@ def configure_feature(
     output are scrubbed of `secrets` before they go into the payload, so the
     password reaches the device and neither the terminal nor the report.
     """
+    if feature.run is not None:
+        return feature.run(task, desired, variables, mode, dry_run, save, verify)
+
     platform = canonical_platform(task.host.platform)
     payload: Dict[str, Any] = {
         "platform": platform,

@@ -170,7 +170,7 @@ class CSVInventory:
 
 
 class RecordsInventory:
-    """Hosts taken from a rollback journal.
+    """Hosts supplied directly, for a single IP or a rollback journal.
 
     A rollback goes back to the devices that were changed, which the journal
     already names. Re-reading the CSV or NetBox would be answering a different
@@ -216,7 +216,7 @@ class RecordsInventory:
                 name=name,
                 hostname=record.get("hostname") or name,
                 platform=canonical_platform(record.get("platform")) or None,
-                data={"rollback": list(record.get("rollback") or [])},
+                data={"rollback": list(record["rollback"] or [])} if "rollback" in record else {},
                 defaults=defaults,
             )
         if not hosts:
