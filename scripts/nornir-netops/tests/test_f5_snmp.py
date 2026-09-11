@@ -74,6 +74,12 @@ def test_dry_run_netbox_and_redaction(setup, capsys):
     assert all(path.startswith(snmp.SNMP) for path in setup.box.reads)
     assert "syslog_compliant" not in row
 
+    assert not row["backout"]["complete"]
+    steps = row["backout"]["steps"]
+    assert any(step.get("method") == "DELETE" and "/users/" in step["path"] for step in steps)
+    assert any("communityName" in step.get("requires_secret_fields", []) for step in steps)
+    assert any(step["body"].get("snmpv2c") == "enabled" for step in steps if step.get("body"))
+
 
 @pytest.mark.parametrize("replace", [False, True])
 def test_apply_preserves_unrelated_config_and_second_run_is_idempotent(setup, replace):
