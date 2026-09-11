@@ -196,6 +196,8 @@ def configure_feature(
         return feature.run(task, desired, variables, mode, dry_run, save, verify)
 
     platform = canonical_platform(task.host.platform)
+    if platform in feature.platform_runs:
+        return feature.platform_runs[platform](task, desired, variables, mode, dry_run, save, verify)
     payload: Dict[str, Any] = {
         "platform": platform,
         "mode": mode,
