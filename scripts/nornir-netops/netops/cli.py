@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from . import archive
+
 import argparse
 import ipaddress
 import json
@@ -114,6 +116,7 @@ def bootstrap_log(argv: List[str]) -> DebugLog:
 
 def _connection_arguments(parent: argparse.ArgumentParser) -> None:
     """How to reach the devices. Shared by the features and by `discover`."""
+    archive.arguments(parent)
     inv = parent.add_argument_group("inventory")
     source = inv.add_mutually_exclusive_group()
     source.add_argument(
@@ -384,7 +387,6 @@ def _common_arguments() -> argparse.ArgumentParser:
     )
 
     report = parent.add_argument_group("reporting")
-    report.add_argument("--report", metavar="FILE", help="write a JSON report of the run")
     report.add_argument(
         "--fail-on-diff",
         action="store_true",
@@ -516,12 +518,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not write to startup-config afterwards",
     )
 
-    subs.add_parser(
+    offline = subs.add_parser(
         "selftest",
         help="render every template offline against sample output (touches no devices)",
         description="Renders each feature/platform template against sample device output. "
         "Run it after editing a template or adding a platform.",
     )
+    archive.arguments(offline)
     return parser
 
 
@@ -809,6 +812,28 @@ def _confirm(style: Style, count: int, feature: str, mode: str) -> bool:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    run = archive.Run(argv, PROJECT_ROOT)
+    token = archive.ACTIVE.set(run)
+    code = EXIT_FAILED
+    try:
+        code = _execute(argv)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else EXIT_USAGE
+        raise
+    finally:
+        try:
+            run.finish(code)
+            print(f"report written to {run.path}")
+        except Exception as exc:
+            print(f"error: could not archive run: {redact(str(exc))}", file=sys.stderr)
+            code = EXIT_FAILED
+        finally:
+            archive.ACTIVE.reset(token)
+    return code
+
+
+def _execute(argv: Optional[List[str]] = None) -> int:
     """Thin wrapper: however a run ends, the terminal gets one line about it.
 
     A traceback is a debugging aid for whoever wrote this, not for whoever is
@@ -824,6 +849,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except CredentialError as exc:
             print(style.bad(f"error: {exc}"), file=sys.stderr)
             return EXIT_USAGE
+        archive.current().prepare()
         log = bootstrap_log(argv)
         return _run(argv, style, log, env_note)
     except KeyboardInterrupt:
@@ -831,6 +857,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_INTERRUPTED
     except Exception as exc:  # noqa: BLE001 - the whole point is to not leak it
         summary = redact(summarize(exc))
+        archive.failure(summary)
         print(style.bad(f"error: {summary}"), file=sys.stderr)
         log.failure("run", summary, exc)
         if log.debug or log.logger is None:
@@ -844,6 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    archive.configure(args)
 
     # Resolve the default source only when no source was explicitly selected.
     # In particular, an .env selecting NetBox must not defeat --csv or --ip.
@@ -898,6 +926,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     if feature.name in ("waf", "syslog"):
         selected = desired.variables["logging_policy"]
         args.policy_mode = "netbox-tags" if selected == "netbox" else selected
+    archive.configure(args, desired)
     targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
@@ -1060,6 +1089,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
             dry_run=dry_run,
             save=args.save,
             verify=args.verify,
+            archive_sink=archive.current(),
         )
         for name, result in results.items():
             if isinstance(result[0].result, dict):
@@ -1105,15 +1135,14 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
 
     number = change.get("number") if change else None
     report = _report_text(args, feature, desired, dry_run, records, number)
-    if args.report:
-        with open(args.report, "w", encoding="utf-8") as handle:
-            handle.write(report)
-        print(f"report written to {args.report}")
+    if archive.current():
+        archive.current().document.update(json.loads(report))
+        archive.capture(records)
 
     if args.apply and not args.no_rollback_file:
         journal = rollback_journal.Journal(feature=feature.name, mode=args.mode)
         for name, record in records.items():
-            if not record.get("rollback"):
+            if not record.get("rollback") or not record.get("applied"):
                 continue
             journal.add(
                 name,
@@ -1218,6 +1247,10 @@ def _check(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
         else:
             records[name] = result[0].result
 
+    for name, record in records.items():
+        if record.get("state") is not None:
+            record["config_before"] = {"operational_state": record["state"]}
+    archive.capture(records)
     print()
     ranking = {OK: 0, WARN: 1, FAIL: 2, "failed": 3}
     for name in sorted(records, key=lambda n: (ranking[records[n]["status"]], n)):
@@ -1333,23 +1366,24 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
             print("aborted")
             return EXIT_USAGE
 
-    print()
-    if dry_run:
-        for name in sorted(devices):
-            record = devices[name]
-            print(f"{style.bold(name)} ({record.get('hostname', '')}) would run")
-            for command in record["rollback"]:
-                print(f"    {command}")
-            print()
-        print(style.bold("summary: ") + f"{len(devices)} device(s) to undo")
-        print(style.dim("re-run with --apply to push the commands above"))
-        return EXIT_OK
+    args.feature = FEATURES.get(journal.feature)
+    archive.targets(nr.inventory)
+    if archive.current():
+        archive.current().document["rollback_feature"] = journal.feature
+    archive.capture({name: {"commands": record["rollback"], "rollback": record.get("applied", []),
+                           "status": "pending", "rollback_unsupported": ["Reapplying the original journal commands may not restore intervening drift; compare the new before snapshot. Previous secret values may be unavailable."]}
+                     for name, record in devices.items()})
 
     from .runner import apply_rollback
 
     failed = 0
-    results = nr.run(task=apply_rollback, save=args.save)
+    results = nr.run(task=apply_rollback, save=args.save, feature=FEATURES.get(journal.feature),
+                     dry_run=dry_run, archive_sink=archive.current())
     for name, result in sorted(results.items()):
+        if isinstance(result[0].result, dict):
+            archive.capture({name: {**result[0].result, "status": "failed" if result.failed else "completed",
+                                  "change_attempted": result[0].changed,
+                                  "error": str(_exception_of(result)) if result.failed else None}})
         if result.failed:
             exception = _exception_of(result)
             message = summarize(exception) if exception else "unknown error"
@@ -1358,7 +1392,10 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
             failed += 1
         else:
             count = len(result[0].result["commands"])
-            print(f"{style.bold(name)} {style.ok('undone')} ({count} commands)")
+            print(f"{style.bold(name)} {style.ok('would undo' if dry_run else 'undone')} ({count} commands)")
+            if dry_run:
+                for command in result[0].result['commands']:
+                    print(f'    {command}')
 
     print()
     summary = [f"{len(devices)} device(s)", style.ok(f"{len(devices) - failed} undone")]
@@ -1423,6 +1460,11 @@ def _discover(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
                 cache.put(targets.inventory.hosts[name], result.result)
         cache.save()
 
+    archive.capture({name: {"status": "completed", "config_before": {"platform": platform},
+                            "platform_source": source}
+                     for source, rows in (("inventory", stated), ("cache", remembered), ("detected", detected))
+                     for name, platform in rows})
+    archive.capture({name: {"status": "failed", "error": message} for name, message in failed})
     width = max((len(name) for name, _ in stated + remembered + detected + failed), default=0)
     print()
     for name, platform in sorted(stated):
@@ -1548,6 +1590,7 @@ def _connect(args: argparse.Namespace, style: Style):
     for host in targets.inventory.hosts.values():
         extras = host.get_connection_parameters("netmiko").extras or {}
         protect([host.password, extras.get("secret")])
+    archive.targets(targets.inventory)
     return targets, credentials, EXIT_OK
 
 
@@ -1681,7 +1724,7 @@ def _report_text(
     records: Dict[str, Dict[str, Any]],
     change: Optional[str] = None,
 ) -> str:
-    """The JSON report, scrubbed. Written by --report and attached to a change."""
+    """Legacy integration payload; its fields are retained in the run archive."""
     document = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "feature": feature.name,

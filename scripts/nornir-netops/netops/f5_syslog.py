@@ -7,6 +7,7 @@ import ipaddress
 import json
 from datetime import datetime, timezone
 
+from . import archive
 from . import f5_waf
 from .core import MODE_REPLACE
 
@@ -124,11 +125,13 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                     attempted = True
                     payload["rollback_unsupported"] = ["REST rollback is manual; before_servers in --report records the original list"]
                     payload["notes"].extend(payload["rollback_unsupported"])
+                    archive.checkpoint(task, payload)
                     client.patch_json(SYSLOG, plan.payload)
                     payload["applied"] = True
                     if verify:
                         after = plan_syslog(client.get_json(SYSLOG), wanted, clean)
                         payload["after"] = after.current
+                        payload["config_after"] = {"remoteServers": after.before_servers}
                         payload["missing_after"] = after.add + (after.extra if clean else [])
                         payload["verified"] = not after.drift(clean)
                         exact = not after.drift(True)

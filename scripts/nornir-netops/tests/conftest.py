@@ -24,6 +24,7 @@ def isolated_environment(tmp_path_factory):
     # one test's detected platform satisfy another test's detection.
     scratch = tmp_path_factory.mktemp("netops-state")
     os.environ["NETOPS_LOG_FILE"] = str(scratch / "netops-debug.log")
+    os.environ["NETOPS_REPORT_DIR"] = str(scratch / "reports")
     os.environ["NETOPS_PLATFORM_CACHE"] = str(scratch / "platform-cache.json")
     yield
     os.environ.clear()

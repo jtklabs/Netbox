@@ -8,6 +8,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from .. import archive
 from .. import f5_waf
 from ..core import Desired, Feature, MODE_REPLACE, canonical_platform
 from ..standards import host_and_port, of
@@ -176,6 +177,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                     "syslog_compliant left unchanged: some profile ownership could not be confirmed")
             if not plans:
                 payload.update(skipped=True, skip_reason="no confirmed user-defined WAF profiles with existing remote servers")
+            payload["config_read_complete"] = True
             for plan in plans:
                 row = {"profile": plan.label, "endpoint": plan.endpoint,
                        "current": plan.current, "keep": plan.keep, "add": plan.add,
@@ -198,10 +200,12 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 payload["commands"].append(f"PATCH {plan.endpoint} {json.dumps(plan.payload)}")
                 if save and not audit_only:
                     payload["save_command"] = 'POST /mgmt/tm/sys/config {"command": "save"}'
-                if dry_run or audit_only:
+            for plan, row in zip(plans, payload["profiles"]):
+                if dry_run or audit_only or not plan.drift(clean):
                     continue
                 try:
                     attempted = True
+                    archive.checkpoint(task, payload)
                     client.patch_json(plan.endpoint, plan.payload)
                     payload["applied"] = row["applied"] = True
                     row["fully_managed_compliant"] = None
@@ -216,6 +220,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                         row["fully_managed_compliant"] = (
                             not again.drift(True) and after.get("remoteStorage", "none") != "none")
                         row["after"] = again.current
+                        row["after_servers"] = again.before_servers
                         payload["missing_after"].extend(f"{plan.label}: {item}" for item in missing)
                 except Exception as exc:
                     row["error"] = str(exc)

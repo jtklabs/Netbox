@@ -7,6 +7,7 @@ import json
 import re
 from urllib.parse import quote, urlsplit
 
+from . import archive
 from . import debuglog, f5_waf
 from .core import MODE_REPLACE, REDACTED, scrub
 
@@ -196,8 +197,48 @@ def plan(client, root, users, clean, forbid, rewrite, secrets):
         operations.append(("DELETE", resource(item, COMMUNITIES), None))
         remove.append("community:" + str(item["name"]))
     state = {key: current.get(key) for key in root}
-    state["users"] = [metadata(item) for item in existing]
+    state["users"] = [{"name": item["name"], "path": resource(item, USERS), **metadata(item)} for item in existing]
+    state["communities"] = [{"path": resource(item, COMMUNITIES), **{
+        key: item[key] for key in ("name", "access", "ipv6", "oidSubset", "source", "description") if key in item}}
+        for item in communities]
     return operations, add, remove, extra, state
+
+
+def reversal(operations, state):
+    """Actual REST reversal steps; unreadable old credentials require input."""
+    steps, limitations = [], []
+    users = {item["path"]: item for item in state["users"]}
+    communities = {item["path"]: item for item in state["communities"]}
+    for method, path, body in reversed(operations):
+        required = []
+        if path == SNMP:
+            restore_method, restore_path = "PATCH", SNMP
+            restore = {key: state[key] for key in body if state.get(key) is not None}
+            if len(restore) != len(body):
+                limitations.append("Some previous SNMP scalar values were not returned by BIG-IP.")
+        elif method == "POST":
+            restore_method, restore_path, restore = "DELETE", resource(body, USERS), None
+        else:
+            old = users.get(path) or communities.get(path)
+            restore_method = "POST" if method == "DELETE" else "PATCH"
+            restore_path = path.rsplit("/", 1)[0] if method == "DELETE" else path
+            restore = {key: value for key, value in old.items() if key != "path" and value is not None}
+            if path in communities:
+                required = ["communityName"]
+            else:
+                if old.get("authProtocol") not in (None, "none"):
+                    required.append("authPassword")
+                if old.get("privacyProtocol") not in (None, "none"):
+                    required.append("privacyPassword")
+                if any(old.get(key) is None for key in ("access", "securityLevel", "authProtocol", "privacyProtocol", "oidSubset")):
+                    limitations.append("Some previous user settings were not returned by BIG-IP.")
+            for key in required:
+                restore[key] = "<previous-secret-required>"
+            if required:
+                limitations.append(f"Supply previous {', '.join(required)} for {restore_path} before restoring.")
+        steps.append({"transport": "rest", "method": restore_method, "path": restore_path,
+                      "body": restore, "requires_secret_fields": required, "purpose": "restore"})
+    return steps, limitations
 
 
 def run(task, desired, variables, mode, dry_run, save, verify):
@@ -229,23 +270,25 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             operations, add, remove, extra, state = plan(client, root, users, clean, forbid,
                                                        variables.get("rewrite_users", False), secrets)
             payload.update(current=[json.dumps(state, sort_keys=True)], add=add, remove=remove,
-                           extra=extra, compliant=not operations)
+                           extra=extra, compliant=not operations, config_before=state)
+            payload["rollback_steps"], payload["rollback_unsupported"] = reversal(operations, state)
             payload["commands"] = [method + " " + path + (" " + json.dumps({
                 key: REDACTED if key in PASSWORDS else value for key, value in body.items()}) if body else "")
                 for method, path, body in operations]
             if operations:
-                payload["rollback_unsupported"] = ["F5 SNMP REST rollback is manual; deleted communities and previous passphrases are not recorded"]
                 payload["notes"].extend(payload["rollback_unsupported"])
                 if save:
                     payload["save_command"] = 'POST /mgmt/tm/sys/config {"command": "save"}'
             if operations and not dry_run:
                 for method, path, body in operations:
                     attempted = True
+                    archive.checkpoint(task, payload)
                     client.request(method, path, body)
                 payload["applied"] = True
                 if verify:
                     remaining, _, _, _, after = plan(client, root, users, clean, forbid, False, secrets)
                     payload["after"] = [json.dumps(after, sort_keys=True)]
+                    payload["config_after"] = after
                     payload["verified"] = not remaining
                     payload["missing_after"] = [method + " " + path for method, path, _ in remaining]
                 if save:
