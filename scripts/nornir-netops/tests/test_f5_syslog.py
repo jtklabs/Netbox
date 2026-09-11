@@ -63,6 +63,12 @@ def test_netbox_policies_preserve_unrelated_settings_and_verify(setup, policy):
         k: v for k, v in before.items() if k != "remoteServers"}
     assert ROOT in setup.box.reads
 
+    assert row["backout"]["complete"]
+    for step in row["backout"]["steps"]:
+        if step["purpose"] == "restore":
+            setup.box.patch_json(step["path"], step["body"])
+    assert setup.box.responses[SYSLOG]["remoteServers"] == before["remoteServers"]
+
 
 @pytest.mark.parametrize("replace", [False, True])
 def test_direct_ip_uses_cli_mode_and_tls_options(setup, replace):

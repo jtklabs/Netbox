@@ -185,11 +185,7 @@ def test_dry_run_is_the_default_and_changes_nothing(device, csv_file, login, cap
     assert "ntp server 10.99.99.1 iburst" in out  # the EOS form
     assert device["config"] == {}  # nothing was pushed
     assert device["commands"]["sw1"] == ["show running-config | include ^ntp"]
-
-
-def test_dry_run_shows_the_save_command_it_would_run(device, csv_file, login, capsys):
-    run(csv_file, "-s", "10.99.99.1")
-    assert "write memory" in capsys.readouterr().out
+    assert "write memory" in out
 
 
 def test_dry_run_replace_lists_the_removals(device, csv_file, login, capsys):
@@ -236,6 +232,7 @@ def test_apply_pushes_per_platform_commands(device, csv_file, login, capsys):
         "ntp server 10.99.99.2 iburst",
     ]
     assert "APPLYING CHANGES" in capsys.readouterr().out
+    assert all(commands[-1] == "write memory" for commands in device["commands"].values())
 
 
 def test_apply_replace_adds_and_removes(device, csv_file, login):
@@ -245,11 +242,6 @@ def test_apply_replace_adds_and_removes(device, csv_file, login):
         "no ntp server 10.10.10.1",
         "no ntp server 10.10.10.2 prefer",
     ]
-
-
-def test_apply_saves_the_config(device, csv_file, login):
-    run(csv_file, "-s", "10.99.99.1", "--apply", "-y")
-    assert device["commands"]["sw1"][-1] == "write memory"
 
 
 def test_no_save_skips_the_write(device, csv_file, login, capsys):
@@ -1030,29 +1022,23 @@ def test_snmp_without_passphrases_is_a_usage_error(device, csv_file, login, stan
 # --------------------------------------------------------------------------- #
 
 
-def test_selftest_runs_clean(capsys):
+def test_selftest_covers_all_templates_and_standards_without_network(capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def unexpected_connection(*args, **kwargs):
+        pytest.fail("selftest must not connect to inventory or devices")
+
+    monkeypatch.setattr(cli, "_connect", unexpected_connection)
     assert cli.main(["selftest"]) == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "all templates rendered" in out
     assert "RENDER FAILED" not in out
-
-
-def test_selftest_covers_every_feature_and_platform(capsys):
-    cli.main(["selftest"])
-    out = capsys.readouterr().out
+    assert "standards:" in out
+    assert "warning:" not in out
     for name, feature in cli.FEATURES.items():
         assert f"### {name}" in out
         for platform in feature.platforms:
             assert platform in out
-
-
-def test_selftest_checks_the_standards_file(capsys):
-    """It renders against the real file when there is one, and the shipped
-    example when there is not -- so a fresh clone can still check itself."""
-    cli.main(["selftest"])
-    out = capsys.readouterr().out
-    assert "standards:" in out
-    assert "warning:" not in out
 
 
 def test_a_run_with_no_standards_file_says_where_the_example_is(
@@ -1063,11 +1049,6 @@ def test_a_run_with_no_standards_file_says_where_the_example_is(
     err = capsys.readouterr().err
     assert "no standards file here" in err
     assert "standards.yaml.example" in err
-
-
-def test_selftest_needs_no_credentials_or_network(capsys, monkeypatch):
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    assert cli.main(["selftest"]) == cli.EXIT_OK
 
 
 # --------------------------------------------------------------------------- #

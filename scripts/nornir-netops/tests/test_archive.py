@@ -1,4 +1,8 @@
-"""Archive evidence through the real CLI, planners and simulated devices."""
+"""Archive lifecycle through the real CLI, planners and simulated devices.
+
+Feature-specific archive/backout assertions live beside their existing apply,
+audit and failure scenarios in the WAF, syslog, F5 SNMP and banner test modules.
+"""
 import json
 import os
 from pathlib import Path
@@ -7,10 +11,8 @@ import pytest
 
 from netops import archive, cli, runner
 from test_run import device, csv_file, login, run
-from test_waf import setup as waf_setup, APP, ROOT
-from test_f5_syslog import setup as syslog_setup, SYSLOG, RETAINED, EXTRA
-from test_f5_banner import setup as banner_setup, SSH, GUI
-from test_f5_snmp import setup as snmp_setup
+from test_waf import setup as waf_setup
+from test_f5_syslog import setup as syslog_setup, SYSLOG
 from test_syslog_netbox import setup as switches
 
 
@@ -82,28 +84,6 @@ def test_actions_resolve_per_device_and_explicit_override(switches, tags, flags,
     assert report['action'] == ('mixed' if len(set(expected)) > 1 else expected[0])
 
 
-def test_conflicting_netbox_policy_does_not_invent_action(switches):
-    switches.nb.devices[7]['tags'] = [{'slug': 'syslog-add'}, {'slug': 'syslog-manage'}]
-    code, report = switches.run()
-    assert code == 1
-    row = report['devices']['ios']
-    assert row['action'] is None and row['action_from_netbox']
-    assert row['current_config']['status'] == 'unavailable'
-    assert not row['backout']['complete']
-
-
-def test_failed_device_keeps_original_and_plan(switches):
-    switches.boxes['ios'].reject = True
-    code, report = switches.run('--apply')
-    assert code == 1
-    row = report['devices']['ios']
-    assert row['current_config']['status'] == 'observed'
-    assert row['implementation']['steps'] and row['backout']['steps']
-    assert row['result_after']['status'] == 'unknown'
-    assert row['result_after']['error']
-    assert report['devices']['eos']['result_after']['status'] == 'observed'
-
-
 def test_plan_checkpoint_exists_before_ssh_write(device, csv_file, login, monkeypatch):
     original = runner.netmiko_send_config
     seen = []
@@ -118,67 +98,6 @@ def test_plan_checkpoint_exists_before_ssh_write(device, csv_file, login, monkey
     monkeypatch.setattr(runner, 'netmiko_send_config', send)
     assert run(csv_file, '-s', '10.99.99.1', '--apply', '--yes', '--no-rollback-file') == 0
     assert set(seen) == {'sw1', 'leaf1'}
-
-
-def test_waf_rest_reversal_restores_original_objects(waf_setup):
-    before = json.loads(json.dumps(waf_setup.box.app['servers']))
-    code, report = waf_setup.run('--policy', 'manage', '--apply')
-    assert code == 0
-    row = report['devices']['f5']
-    assert row['current_config']['config'] == [{'path': APP, 'servers': before}]
-    assert row['result_after']['status'] == 'observed'
-    for step in row['backout']['steps']:
-        if step['purpose'] == 'restore':
-            waf_setup.box.patch_json(step['path'], step['body'])
-    assert waf_setup.box.app['servers'] == before
-    assert row['backout']['complete']
-
-
-def test_waf_discovery_failure_is_unavailable(waf_setup):
-    waf_setup.box.responses[ROOT] = RuntimeError('could not read profiles')
-    code, report = waf_setup.run()
-    assert code == 1
-    row = report['devices']['f5']
-    assert row['current_config']['status'] == 'unavailable'
-    assert row['result_after']['config'] is None
-    assert not row['backout']['complete']
-
-
-def test_system_syslog_rest_reversal_can_be_replayed(syslog_setup):
-    code, report = syslog_setup.run('--policy', 'manage', '--apply')
-    assert code == 0
-    row = report['devices']['f5']
-    assert row['backout']['complete']
-    for step in row['backout']['steps']:
-        if step['purpose'] == 'restore':
-            syslog_setup.box.patch_json(step['path'], step['body'])
-    assert syslog_setup.box.responses[SYSLOG]['remoteServers'] == [RETAINED, EXTRA]
-
-
-def test_banner_rest_reversal_contains_both_original_bodies(banner_setup):
-    code, report = banner_setup.run('--apply')
-    assert code == 0
-    row = report['devices']['f5']
-    assert row['result_after']['status'] == 'observed'
-    for step in row['backout']['steps']:
-        if step['purpose'] == 'restore':
-            banner_setup.box.patch_json(step['path'], step['body'])
-    assert banner_setup.box.responses[SSH]['bannerText'] == 'Old SSH notice'
-    assert banner_setup.box.responses[GUI]['guiSecurityBannerText'] == 'Old GUI notice'
-    assert row['backout']['complete']
-
-
-def test_snmp_reversal_marks_unreadable_previous_secrets(snmp_setup):
-    code, report = snmp_setup.run('--replace')
-    assert code == 0
-    row = report['devices']['f5']
-    assert not row['backout']['complete']
-    steps = row['backout']['steps']
-    assert any(s.get('method') == 'DELETE' and '/users/' in s['path'] for s in steps)
-    assert any('communityName' in s.get('requires_secret_fields', []) for s in steps)
-    assert any(s.get('body', {}).get('snmpv2c') == 'enabled' for s in steps if s.get('body'))
-    assert 'old-community-password' not in json.dumps(report)
-    assert 'encrypted-old-auth' not in json.dumps(report)
 
 
 def test_json_escaped_credentials_are_redacted_recursively():
@@ -226,28 +145,6 @@ def test_interrupted_run_finishes_archive(monkeypatch):
     monkeypatch.setattr(cli, '_run', lambda *a, **kw: (_ for _ in ()).throw(KeyboardInterrupt()))
     assert cli.main(['selftest']) == 130
     assert latest()['status'] == 'interrupted'
-
-
-def test_archive_switch_reversal_restores_source_and_destination(switches):
-    before = {name: sorted(box.lines) for name, box in switches.boxes.items()}
-    code, report = switches.run('--policy', 'manage', '--apply')
-    assert code == 0
-    for name, row in report['devices'].items():
-        assert row['backout']['complete']
-        switches.boxes[name].apply([s['command'] for s in row['backout']['steps'] if s['purpose'] == 'restore'])
-        assert sorted(switches.boxes[name].lines) == before[name]
-
-
-def test_audit_policy_and_untagged_fallback_are_recorded(switches):
-    for item in switches.nb.devices.values():
-        item['tags'] = []
-    code, report = switches.run('--apply')
-    assert code == 0
-    for row in report['devices'].values():
-        assert row['action'] == 'audit' and row['action_from_netbox']
-        assert row['netbox_policy_tag'] is None
-        assert not row['implementation']['will_execute']
-        assert row['result_after']['status'] == 'not_changed'
 
 
 def test_f5_checkpoint_precedes_rest_mutation(syslog_setup):

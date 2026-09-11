@@ -201,10 +201,20 @@ def test_replace_removes_duplicates_wrong_ports_and_extras(setup):
     keep = {"name": "192.0.2.50:514", "appService": "/Tenant/service"}
     setup.box.app["servers"] = [keep, {"name": "192.0.2.50:514"},
                                 {"name": "192.0.2.51:514"}, {"name": "192.0.2.99:514"}]
+    before = copy.deepcopy(setup.box.app["servers"])
     code, report = setup.run("--replace", "--apply")
     assert code == cli.EXIT_OK
     assert setup.box.app["servers"] == [keep, COLLECTORS[1]]
     assert len(report["devices"]["f5"]["remove"]) == 3
+
+    row = report["devices"]["f5"]
+    assert row["current_config"]["config"] == [{"path": APP, "servers": before}]
+    assert row["result_after"]["status"] == "observed"
+    assert row["backout"]["complete"]
+    for step in row["backout"]["steps"]:
+        if step["purpose"] == "restore":
+            setup.box.patch_json(step["path"], step["body"])
+    assert setup.box.app["servers"] == before
 
 
 @pytest.mark.parametrize("tags,expected", [([], "audit"), (["syslog-audit"], "audit"),
@@ -285,6 +295,12 @@ def test_device_failures_leave_old_timestamp_and_report_failure(setup, failure):
     assert setup.nb.writes == []
     assert setup.nb.device["custom_fields"][waf.CHECKED_FIELD] == OLD_DATE
     assert setup.nb.device["custom_fields"]["syslog_compliant"] is True
+
+    if failure == "discovery":
+        row = report["devices"]["f5"]
+        assert row["current_config"]["status"] == "unavailable"
+        assert row["result_after"]["config"] is None
+        assert not row["backout"]["complete"]
 
 
 @pytest.mark.parametrize("failure", ["denied", "ignored"])

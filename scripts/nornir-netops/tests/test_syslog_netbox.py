@@ -144,6 +144,7 @@ def test_dry_run_loads_tagged_sources_without_any_writes(setup):
 
 @pytest.mark.parametrize("policy", ["audit", "add", "manage"])
 def test_each_platform_applies_policy_and_reports_exact_compliance(setup, policy):
+    before = {name: sorted(box.lines) for name, box in setup.boxes.items()}
     code, report = setup.run("--policy", policy, "--apply")
     assert code == cli.EXIT_OK
     for name, source in (("ios", "Loopback0"), ("eos", "Management1")):
@@ -168,6 +169,13 @@ def test_each_platform_applies_policy_and_reports_exact_compliance(setup, policy
         assert all(not row["commands"] for row in again["devices"].values())
         assert all(box.saves == 1 for box in setup.boxes.values())
 
+    # The first apply's archive must restore both collector and source settings.
+    for name, row in report["devices"].items():
+        assert row["backout"]["complete"]
+        setup.boxes[name].apply([step["command"] for step in row["backout"]["steps"]
+                                if step["purpose"] == "restore"])
+        assert sorted(setup.boxes[name].lines) == before[name]
+
 
 def test_mixed_device_tags_resolve_independently(setup):
     setup.nb.devices[7]["tags"] = [{"slug": "syslog-add"}]
@@ -186,9 +194,16 @@ def test_mixed_device_tags_resolve_independently(setup):
 def test_untagged_and_audit_tag_are_read_only_with_apply(setup, tags):
     for device in setup.nb.devices.values():
         device["tags"] = tags
-    assert setup.run("--apply")[0] == cli.EXIT_OK
+    code, report = setup.run("--apply")
+    assert code == cli.EXIT_OK
     assert all(not box.writes and not box.saves for box in setup.boxes.values())
     assert all(d["custom_fields"]["syslog_last_checked"] != OLD_DATE for d in setup.nb.devices.values())
+
+    for row in report["devices"].values():
+        assert row["action"] == "audit" and row["action_from_netbox"]
+        assert row["netbox_policy_tag"] == ("syslog-audit" if tags else None)
+        assert not row["implementation"]["will_execute"]
+        assert row["result_after"]["status"] == "not_changed"
 
 
 def test_conflicting_tags_fail_only_that_device_before_ssh(setup):
@@ -199,6 +214,11 @@ def test_conflicting_tags_fail_only_that_device_before_ssh(setup):
     assert setup.boxes["ios"].reads == setup.boxes["ios"].writes == []
     assert setup.nb.devices[7]["custom_fields"]["syslog_last_checked"] == OLD_DATE
     assert setup.nb.devices[8]["custom_fields"]["syslog_compliant"] is True
+
+    row = report["devices"]["ios"]
+    assert row["action"] is None and row["action_from_netbox"]
+    assert row["current_config"]["status"] == "unavailable"
+    assert not row["backout"]["complete"]
 
 
 def test_duplicate_source_tags_fail_only_ambiguous_device(setup):
@@ -231,6 +251,14 @@ def test_failed_device_check_preserves_its_netbox_fields(setup, failure):
     if failure != "fail_save":
         assert setup.boxes["ios"].saves == 0
     assert setup.nb.devices[8]["custom_fields"]["syslog_compliant"] is True
+
+    if failure == "reject":
+        row = report["devices"]["ios"]
+        assert row["current_config"]["status"] == "observed"
+        assert row["implementation"]["steps"] and row["backout"]["steps"]
+        assert row["result_after"]["status"] == "unknown"
+        assert row["result_after"]["error"]
+        assert report["devices"]["eos"]["result_after"]["status"] == "observed"
 
 
 def test_no_verify_no_save_does_not_stamp(setup):

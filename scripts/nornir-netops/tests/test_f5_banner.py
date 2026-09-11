@@ -63,6 +63,14 @@ def test_apply_verify_save_and_idempotence(setup, replace):
     assert setup.run(*flags)[1]["devices"]["f5"]["status"] == "ok"
     assert len(setup.box.writes) == 2 and setup.box.saves == 1
 
+    assert row["result_after"]["status"] == "observed"
+    assert row["backout"]["complete"]
+    for step in row["backout"]["steps"]:
+        if step["purpose"] == "restore":
+            setup.box.patch_json(step["path"], step["body"])
+    assert setup.box.responses[SSH]["bannerText"] == "Old SSH notice"
+    assert setup.box.responses[GUI]["guiSecurityBannerText"] == "Old GUI notice"
+
 
 @pytest.mark.parametrize("kind", ["login", "motd"])
 def test_default_f5_text_matches_switch_standard(kind):
