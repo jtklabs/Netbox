@@ -131,6 +131,7 @@ snmp:
 # Banner  ->  configure.py banner
 # The text itself lives in templates/<platform>/banner.j2 so it can differ per
 # platform where it has to; this only says which banners are managed.
+# F5 combines selected text and applies it to both SSH and web login banners.
 # --------------------------------------------------------------------------
 banner:
   motd: true
