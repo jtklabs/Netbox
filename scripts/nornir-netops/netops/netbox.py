@@ -122,13 +122,17 @@ def source_tags(configured: Any) -> Dict[str, str]:
 class Client:
     """Inventory reads and narrowly scoped audit timestamp writes."""
 
-    def __init__(self, url: str, token: str, verify_tls: bool = True, timeout: float = 30.0):
+    def __init__(self, url: str, token: str, verify_tls: bool = False, timeout: float = 30.0):
         if not url:
             raise NetBoxError("no NetBox URL: set $NETBOX_URL or --netbox-url")
         if not token:
             raise NetBoxError("no NetBox token: set $NETBOX_TOKEN or --netbox-secret")
         self.url = url.rstrip("/")
         self.token = token
+        if not verify_tls:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self.verify_tls = verify_tls
         self.timeout = timeout
         self._session = None
@@ -384,7 +388,7 @@ class NetBoxInventory:
         token: Optional[str] = None,
         filters: Optional[Mapping[str, Any]] = None,
         source_tags: Optional[Mapping[str, str]] = None,
-        verify_tls: bool = True,
+        verify_tls: bool = False,
         username: Optional[str] = None,
         password: Optional[str] = None,
         secret: Optional[str] = None,
@@ -518,13 +522,16 @@ def settings_from(standards, args) -> Dict[str, Any]:
     """
     section = standards.section("netbox") if standards is not None else {}
     tags = getattr(args, "netbox_source_tag", None) or section.get("source_tags")
+    tls = str(os.environ.get("NETBOX_VERIFY_TLS", section.get("verify_tls", False))).strip().lower()
+    if tls not in ("true", "false"):
+        raise NetBoxError("NETBOX_VERIFY_TLS / netbox.verify_tls must be true or false")
     return {
         "url": getattr(args, "netbox_url", None) or section.get("url") or os.environ.get("NETBOX_URL"),
         "token": os.environ.get("NETBOX_TOKEN"),
         "filters": parse_filters(getattr(args, "netbox_filter", None) or
                                  shlex.split(os.environ.get("NETBOX_FILTERS", ""))),
         "source_tags": source_tags(tags),
-        "verify_tls": str(section.get("verify_tls", "true")).lower() != "false",
+        "verify_tls": tls == "true",
     }
 
 

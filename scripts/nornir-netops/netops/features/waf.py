@@ -36,7 +36,7 @@ def add_connection_arguments(parser):
                        help="REST request timeout in seconds [$NETOPS_F5_TIMEOUT]")
     tls = group.add_mutually_exclusive_group()
     tls.add_argument("--f5-insecure", action="store_true", default=None,
-                     help="disable BIG-IP certificate verification [$NETOPS_F5_VERIFY_TLS=false]")
+                     help="disable BIG-IP certificate verification (default) [$NETOPS_F5_VERIFY_TLS=false]")
     tls.add_argument("--f5-verify-tls", dest="f5_insecure", action="store_false", default=None,
                      help="enable BIG-IP certificate verification, overriding $NETOPS_F5_VERIFY_TLS")
     group.add_argument("--f5-login-provider", default=os.environ.get("NETOPS_F5_LOGIN_PROVIDER", "tmos"),
@@ -65,7 +65,7 @@ def selected_policy(args):
 
 def connection_settings(args):
     if args.f5_insecure is None:
-        tls = os.environ.get("NETOPS_F5_VERIFY_TLS", "true").strip().lower()
+        tls = os.environ.get("NETOPS_F5_VERIFY_TLS", "false").strip().lower()
         if tls not in ("true", "false"):
             raise ValueError("NETOPS_F5_VERIFY_TLS must be true or false")
         verify_tls = tls == "true"
