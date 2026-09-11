@@ -19,7 +19,7 @@ logging host {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.port
 {% elif item.kind == 'trap' %}
 logging trap {{ item.severity }}
 {% elif item.kind == 'source' %}
-logging source-interface {{ item.source }}
+logging source-interface {{ item.source }}{% if vrf %} vrf {{ vrf }}{% endif %}
 {% elif item.kind == 'origin' %}
 logging origin-id {{ item.arguments }}
 {% endif %}

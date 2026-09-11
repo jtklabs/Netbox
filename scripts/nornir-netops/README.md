@@ -32,7 +32,7 @@ re-run with --apply to push the commands above
 | Subcommand | What it does | Platforms |
 | --- | --- | --- |
 | [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `arista_eos` |
-| [`syslog`](#syslog) | Collectors, trap severity, source interface | `cisco_ios`, `arista_eos` |
+| [`syslog`](#syslog) | Collectors, supported severity/source settings, NetBox policy and check dates | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`waf`](#waf-remote-syslog) | Existing WAF remote logging destinations, NetBox policy and check dates | `f5_tmsh` |
 | [`banner`](#banner) | Login and MOTD banners | `cisco_ios`, `arista_eos` |
 | [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
@@ -258,7 +258,7 @@ The rule that follows:
 
 | Interfaces tagged | Result |
 | --- | --- |
-| none | **The device uses no source interface** -- and this overrides the fleet-wide `ntp.source` in the standards file. No tag is an answer, not a gap to fill. |
+| none | NTP uses no source interface, overriding `ntp.source`. Syslog leaves the current source alone and ignores the fleet-wide source default. |
 | exactly one | That interface is the source. |
 | two or more | **That device fails**, naming the interfaces. |
 
@@ -622,6 +622,75 @@ notifications` clears the setting whatever argument it is given, so negating a
 stale one after setting the new value would undo the change -- setting it
 replaces the old value by itself. Only collectors are removed by `--replace`.
 
+### Cisco and Arista NetBox policies
+
+`syslog` uses the same `--policy audit|add|manage|netbox` selector for Cisco
+IOS/IOS-XE, Arista EOS, and F5. With `--policy netbox`, each device independently
+follows its `syslog-audit`, `syslog-add`, or `syslog-manage` device tag. No tag
+means audit. Explicit audit/add/manage (or the existing `--add` / `--replace`)
+overrides device tags. Without `--apply`, every policy remains a dry run.
+
+```bash
+# Audit a mixed Cisco/Arista inventory using each device's policy.
+./configure.py syslog --netbox --policy netbox \
+  --netbox-filter platform=cisco-ios-xe --netbox-filter platform=arista-eos
+
+# Execute those policies; audit-tagged devices still receive no config changes.
+./configure.py syslog --netbox --policy netbox --apply --yes
+
+# Override the tag for one device.
+./configure.py syslog --netbox --limit my-switch --policy manage --apply --yes
+```
+
+Tag the desired **interface** in NetBox with `syslog-source`: for example,
+`Loopback0` on a Cisco device and `Management1` on an Arista device. The script
+joins interfaces to devices by NetBox device ID and uses the tagged interface
+name for `logging source-interface`. Device policy tags and interface source
+tags are independent; selecting `--policy manage` does not override the source
+interface tag.
+
+- One tagged interface supplies the source and overrides `syslog.source` / `--source`.
+- No tagged interface leaves the current source setting alone and ignores the
+  fleet-wide source default for that NetBox device.
+- Multiple tagged interfaces fail that device before SSH. Other devices proceed.
+
+To use another tag, set `NETBOX_SYSLOG_SOURCE_TAG` in `.env` or pass
+`--syslog-source-tag`. The flag overrides the environment and the existing
+`netbox.source_tags.syslog` standards mapping. Interface lookups use pagination
+and are independent of device filters.
+
+```dotenv
+NETOPS_INVENTORY=netbox
+NETOPS_SYSLOG_POLICY=netbox
+NETBOX_SYSLOG_SOURCE_TAG=syslog-source
+```
+
+`NETOPS_SYSLOG_POLICY` supplies the shared default; the existing
+`NETOPS_F5_POLICY` is a fallback when the shared variable is unset. CLI policy
+flags override both. Cisco and Arista continue to use SSH, with device login
+credentials from the existing environment or AWS Secrets Manager key mappings.
+
+After a successful check, `--apply` writes `syslog_last_checked` and
+`syslog_compliant` to NetBox. Cisco/Arista compliance compares the exact remote
+collector list, configured severity, and the selected source interface; Cisco
+also checks `origin_id` when requested. Arista excludes the unsupported
+origin-id setting. Add mode can succeed while remaining noncompliant if it
+preserves extra collectors. Console/buffer/facility settings are outside this
+comparison. Missing source tags leave source selection outside its scope.
+
+Changes are read back before saving and stamping NetBox. A failed read, change,
+verification or requested save leaves that device's previous fields unchanged.
+Applied `--no-verify` runs do not stamp; `--no-save` still verifies and records
+the observed running configuration. Dry runs only preview the field values.
+Rollback reports preserve the previous source interface, severity and collectors.
+
+When `syslog.vrf` is configured in the standards file, collectors and tagged
+sources are rendered and verified in that VRF. VRF membership is not inferred
+from an interface name. Cisco uses `logging source-interface INTERFACE vrf VRF`;
+Arista uses `logging vrf VRF source-interface INTERFACE`. See the
+[Cisco VRF syslog guide](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/mp_l3_vpns/configuration/15-mt/mp-l3-vpns-15-mt-book/mp-ipv6-vrf-aware-syslog.html)
+and [Arista logging commands](https://www.arista.com/en/um-eos/eos-switch-administration-commands).
+
 ### F5 system syslog
 
 `configure.py syslog` also supports F5 BIG-IP (`f5_tmsh` / `f5-tmos`) over
@@ -648,8 +717,8 @@ list can be populated. Retained entries keep their names, local source IPs,
 descriptions, and other options; new entries receive stable unique names.
 System logging facility/severity settings, custom `include` configuration,
 and other properties are preserved. Cisco/Arista severity, source interface,
-origin-id and VRF options are not applied to F5. Existing Cisco/Arista behavior
-and SSH transport remain unchanged, including in mixed inventories.
+origin-id and VRF options are not applied to F5. Mixed inventories resolve each
+device's policy and use the appropriate SSH or REST transport.
 
 Install `requests` (or the `waf` extra) for direct-IP/CSV F5 use. Supply an
 explicit F5 platform in inventory or via `--platform`. Changes are read back
@@ -698,13 +767,13 @@ For NetBox inventory, assign **one** of these tags to each F5 device:
 | `syslog-manage` | Add missing standard destinations and remove extras. |
 | None of these tags | Audit only. |
 
-Select the action explicitly with **`--policy`** on either F5 command:
+Select the action explicitly with **`--policy`** on `syslog` or `waf`:
 
 | Policy | Behavior |
 | --- | --- |
-| `audit` | Compare the fully managed destination list; never change F5 settings, even with `--apply`. |
-| `add` | Add missing destinations on every targeted F5, overriding device tags; preserve extras. |
-| `manage` | Add missing and remove extra/duplicate destinations on every targeted F5, overriding device tags. |
+| `audit` | Compare the fully managed settings; never change device configuration, even with `--apply`. |
+| `add` | Add missing destinations and set requested supported settings, overriding device tags; preserve extra collectors. |
+| `manage` | Add missing and remove extra/duplicate destinations and set requested supported settings, overriding device tags. |
 | `netbox` | Resolve each device's own tag independently: audit, add, or manage as listed above. Requires NetBox inventory. |
 
 ```bash
@@ -717,19 +786,19 @@ Select the action explicitly with **`--policy`** on either F5 command:
 ./configure.py waf --netbox --limit my-bigip --policy manage --apply --yes
 ```
 
-Set `NETOPS_F5_POLICY=netbox` (or `audit`, `add`, `manage`) in `.env` for a
+Set `NETOPS_SYSLOG_POLICY=netbox` (or `audit`, `add`, `manage`) in `.env` for a
 default policy. Explicit `--policy` overrides it. The existing `--add` and
-`--replace` flags are aliases for selecting F5 add/manage and now also override
+`--replace` flags are aliases for selecting add/manage and also override
 NetBox tags and the environment policy. Do not combine them with `--policy`.
 If no policy or mode is selected, existing defaults remain: follow tags for
-NetBox inventory, add for CSV/direct IP. This selector applies only to F5;
-Cisco/Arista syslog behavior still follows the existing CLI mode.
+NetBox inventory, add for CSV/direct IP. The selector applies to syslog on
+Cisco IOS/IOS-XE, Arista EOS, and F5, and to F5 WAF logging.
 
-Conflicting policy tags fail that device before F5 login when following tags;
+Conflicting policy tags fail that device before login when following tags;
 an explicit audit/add/manage selection ignores them. Untagged devices audit
 when following tags. **Without `--apply`, every policy is a dry run, including
 NetBox writeback.** Audit with `--apply` records completed checks in NetBox but
-does not change F5 configuration. The tool reads policy tags; it never assigns
+does not change device configuration. The tool reads policy tags; it never assigns
 or removes them.
 
 ```bash

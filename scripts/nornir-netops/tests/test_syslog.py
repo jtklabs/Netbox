@@ -251,3 +251,39 @@ def test_replace_still_removes_only_collectors_from_the_fuller_output():
     current = parse_logging(IOS_SAMPLE)
     _, remove = plan_syslog(current, ["host:10.1.1.50:514"], MODE_REPLACE)
     assert [e.data["kind"] for e in remove] == ["host"]
+
+
+@pytest.mark.parametrize("line", [
+    "logging host vrf MGMT 192.0.2.50 transport udp port 1514",
+    "logging host 192.0.2.50 vrf MGMT transport udp port 1514",
+    "logging vrf MGMT host 192.0.2.50 1514",
+])
+def test_vrf_collector_forms_share_a_key(line):
+    assert parse_logging(line)[0].key == "host:192.0.2.50:1514:vrf:MGMT"
+
+
+@pytest.mark.parametrize("line", [
+    "logging source-interface Loopback0 vrf MGMT",
+    "logging vrf MGMT source-interface Loopback0",
+    "logging vrf MGMT local-interface Loopback0",
+])
+def test_vrf_source_forms_share_a_key(line):
+    assert parse_logging(line)[0].key == "source:Loopback0:vrf:MGMT"
+
+
+def test_origin_id_text_containing_vrf_is_preserved():
+    assert parse_logging("logging origin-id string my vrf label")[0].key == "origin:string my vrf label"
+
+
+def test_same_collector_in_another_vrf_is_not_compliant():
+    from netops.features.syslog import audit_fields
+    args = parse_args([], {"syslog": {"destinations": ["192.0.2.50"], "vrf": "MGMT"}})
+    desired = FEATURE.build_desired(args)
+    current = parse_logging("logging host 192.0.2.50")
+    assert not audit_fields(current, desired.keys, {"variables": desired.variables})["syslog_compliant"]
+
+
+def test_duplicate_collector_is_noncompliant_and_managed_away():
+    current = parse_logging("logging host 192.0.2.50\nlogging host 192.0.2.50 transport udp port 514")
+    add, remove = plan_syslog(current, ["host:192.0.2.50:514"], MODE_REPLACE)
+    assert add == [] and len(remove) == 1

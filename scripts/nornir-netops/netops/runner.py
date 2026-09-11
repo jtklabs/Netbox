@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Sequence
 
 from nornir.core.task import Result, Task
@@ -222,6 +223,15 @@ def configure_feature(
         "save_output": None,
     }
 
+    audit_only = False
+    policy_notes = []
+    if feature.execution_policy is not None:
+        mode, audit_only, policy = feature.execution_policy(task.host, mode, variables)
+        payload.update(mode="audit" if audit_only else mode, audit_only=audit_only, policy=policy)
+        policy_notes.append(f"policy: {policy}")
+    if feature.audit_fields is not None:
+        payload.update(checked_at=None, syslog_compliant=None)
+
     try:
         support = feature.support_for(platform)  # raises UnsupportedPlatform
     except NotApplicable as exc:
@@ -237,6 +247,7 @@ def configure_feature(
         # Before touching the device: an inventory that cannot say what this
         # device's source interface is should stop here, not halfway through.
         desired, variables = feature.per_device(list(desired), dict(variables), task.host)
+    payload["desired"] = list(desired)
 
     current = _read_state(task, support)
     # A parser can flag a value it read off the device as sensitive -- an SNMP
@@ -256,7 +267,7 @@ def configure_feature(
         "advisories": [],
         # ...and here when it has something to say that is not a problem: how
         # many interfaces it looked at, say. Notes never affect compliance.
-        "notes": [],
+        "notes": policy_notes,
     }
     to_add, to_remove = feature.plan(current, desired, mode, context)
     advisories: List[str] = list(context["advisories"])
@@ -273,7 +284,7 @@ def configure_feature(
         add=list(to_add),
         remove=[entry.shown for entry in to_remove],
         commands=[scrub(command, secrets) for command in commands],
-        save_command=SAVE_COMMANDS.get(platform) if (commands and save) else None,
+        save_command=SAVE_COMMANDS.get(platform) if (commands and save and not audit_only) else None,
         advisories=advisories,
         notes=notes,
         # Drift we are not fixing is still drift: this device is not compliant.
@@ -286,7 +297,10 @@ def configure_feature(
     if commands and not feature.reversible:
         payload["notes"].append("rollback: this change cannot be undone")
 
-    if not commands or dry_run:
+    if not commands or dry_run or audit_only:
+        if feature.audit_fields is not None:
+            payload.update(feature.audit_fields(current, desired, context))
+            payload["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return Result(host=task.host, result=payload, changed=False)
 
     # Worked out now rather than later: once the device is changed it no longer
@@ -359,6 +373,10 @@ def configure_feature(
             payload["saved"] = True
         elif payload["save_command"]:
             payload["saved"] = False
+
+        if feature.audit_fields is not None and verify and payload["verified"]:
+            payload.update(feature.audit_fields(after, desired, context))
+            payload["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     except Exception as exc:
         # Preserve pre-change evidence even if the push, read-back or save

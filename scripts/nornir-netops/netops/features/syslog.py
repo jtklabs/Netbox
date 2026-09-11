@@ -23,6 +23,7 @@ the device generates more.
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, normalize
@@ -30,7 +31,7 @@ from ..core import validate_address, validate_text, validate_word
 from ..netbox import source_for
 from ..standards import host_and_port, of as standards_of
 from .. import f5_syslog
-from .waf import add_arguments as f5_arguments, connection_settings, selected_policy
+from .waf import add_arguments as f5_arguments, connection_settings, selected_policy, device_policy
 
 SHOW_COMMAND = "show running-config all | include ^logging"
 
@@ -76,8 +77,12 @@ logging host 10.9.9.9 1514
 """
 
 
-def _destination_key(host: str, port: int) -> str:
-    return f"host:{normalize(host)}:{port}"
+def _destination_key(host: str, port: int, vrf=None) -> str:
+    return f"host:{normalize(host)}:{port}" + (f":vrf:{vrf}" if vrf else "")
+
+
+def _source_key(source, vrf=None):
+    return f"source:{source}" + (f":vrf:{vrf}" if vrf else "")
 
 
 def parse_logging(output: str) -> List[Entry]:
@@ -92,6 +97,17 @@ def parse_logging(output: str) -> List[Entry]:
         if not line.startswith("logging "):
             continue
         tokens = line.split()
+        if len(tokens) < 2:
+            continue
+        vrf = None
+        if tokens[1] in ("vrf", "host", "source-interface", "local-interface") and "vrf" in tokens:
+            index = tokens.index("vrf")
+            if index + 1 == len(tokens):
+                raise ValueError(f"invalid syslog VRF configuration: {line}")
+            vrf = tokens[index + 1]
+            tokens = tokens[:index] + tokens[index + 2:]
+            if len(tokens) < 3:
+                raise ValueError(f"invalid syslog VRF configuration: {line}")
 
         if tokens[1] == "trap" and len(tokens) >= 3:
             entries.append(Entry(key=f"trap:{tokens[2]}", line=line, data={"kind": "trap"}))
@@ -100,11 +116,16 @@ def parse_logging(output: str) -> List[Entry]:
             entries.append(
                 Entry(key=f"origin:{arguments}", line=line, data={"kind": "origin"})
             )
-        elif tokens[1] == "source-interface" and len(tokens) >= 3:
+        elif tokens[1] in ("source-interface", "local-interface") and len(tokens) >= 3:
             entries.append(
-                Entry(key=f"source:{tokens[2]}", line=line, data={"kind": "source"})
+                Entry(key=_source_key(tokens[2], vrf), line=line,
+                      data={"kind": "source", "source": tokens[2], "vrf": vrf})
             )
         elif tokens[1] == "host" and len(tokens) >= 3:
+            if tokens[2] == "ipv6":
+                tokens.pop(2)
+                if len(tokens) < 3:
+                    raise ValueError(f"invalid syslog host configuration: {line}")
             host = tokens[2]
             port = DEFAULT_PORT
             rest = tokens[3:]
@@ -116,9 +137,9 @@ def parse_logging(output: str) -> List[Entry]:
                 port = int(rest[0])
             entries.append(
                 Entry(
-                    key=_destination_key(host, port),
+                    key=_destination_key(host, port, vrf),
                     line=line,
-                    data={"kind": "host", "host": host, "port": port},
+                    data={"kind": "host", "host": host, "port": port, "vrf": vrf},
                 )
             )
     return entries
@@ -144,15 +165,39 @@ def plan_syslog(
     to_remove: List[Entry] = []
     if mode == MODE_REPLACE:
         wanted = set(desired)
+        retained = set()
         for entry in current:
-            if entry.key in wanted or entry.data.get("kind") != "host":
+            if entry.data.get("kind") != "host":
                 continue  # scalars are replaced by setting them, never negated
-            to_remove.append(entry)
+            if entry.key not in wanted or entry.key in retained:
+                to_remove.append(entry)
+            else:
+                retained.add(entry.key)
     return to_add, to_remove
+
+
+def execution_policy(host, mode, variables):
+    return device_policy(host, mode, variables["netbox_policy"], variables["logging_policy"])
+
+
+def audit_fields(current, desired, context):
+    missing, extra = plan_syslog(current, desired, MODE_REPLACE, context)
+    variables = context["variables"]
+    source = next((e["source"] for e in variables["entries"].values() if e["kind"] == "source"), None)
+    return {
+        "syslog_compliant": not missing and not extra,
+        "syslog_audit": {"missing": missing, "extra": [e.shown for e in extra],
+                         "source_interface": source},
+    }
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     f5_arguments(parser)
+    parser.add_argument(
+        "--syslog-source-tag", default=os.environ.get("NETBOX_SYSLOG_SOURCE_TAG"),
+        metavar="TAG", help="NetBox interface tag for the syslog source "
+        "[$NETBOX_SYSLOG_SOURCE_TAG; default: syslog-source]",
+    )
     parser.add_argument(
         "-d",
         "--destination",
@@ -182,6 +227,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def build_desired(args: argparse.Namespace) -> Desired:
     standards = standards_of(args)
+    vrf = standards.value("syslog.vrf")
+    vrf = validate_word(str(vrf), "vrf") if vrf else None
 
     raw: List[Any] = []
     if args.destination:
@@ -199,7 +246,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
         record = host_and_port(item, DEFAULT_PORT)
         host = validate_address(str(record["host"]))
         port = int(record["port"])
-        key = _destination_key(host, port)
+        key = _destination_key(host, port, vrf)
         if key not in entries:
             keys.append(key)
             entries[key] = {"kind": "host", "host": normalize(host), "port": port}
@@ -226,11 +273,9 @@ def build_desired(args: argparse.Namespace) -> Desired:
     source = args.source or standards.value("syslog.source")
     if source:
         source = validate_word(str(source), "interface")
-        key = f"source:{source}"
+        key = _source_key(source, vrf)
         keys.append(key)
         entries[key] = {"kind": "source", "source": source}
-
-    vrf = standards.value("syslog.vrf")
 
     if not keys:
         raise ValueError(
@@ -240,7 +285,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
 
     return Desired(
         keys=keys,
-        variables={"entries": entries, "vrf": validate_word(str(vrf), "vrf") if vrf else None,
+        variables={"entries": entries, "vrf": vrf,
                    "f5": connection_settings(args),
                    "logging_policy": selected_policy(args),
                    "netbox_policy": bool(getattr(args, "netbox", False))},
@@ -262,7 +307,7 @@ def per_device(keys, variables, host):
     entries = {k: v for k, v in variables["entries"].items() if v["kind"] != "source"}
     keys = [k for k in keys if variables["entries"][k]["kind"] != "source"]
     if source:
-        key = f"source:{source}"
+        key = _source_key(source, variables.get("vrf"))
         keys.append(key)
         entries[key] = {"kind": "source", "source": source}
     return keys, {**variables, "entries": entries}
@@ -287,4 +332,7 @@ FEATURE = Feature(
     per_device=per_device,
     selftest_args=[],
     platform_runs={"f5_tmsh": f5_syslog.run},
+    execution_policy=execution_policy,
+    audit_fields=audit_fields,
+    verify_with_plan=True,
 )

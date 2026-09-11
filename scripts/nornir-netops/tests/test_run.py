@@ -1619,6 +1619,15 @@ def netbox(monkeypatch, tmp_path):
         def __init__(self, *args, **kwargs):
             pass
 
+        def ensure_datetime_field(self, name, apply=False):
+            return False
+
+        def require_boolean_field(self, name):
+            pass
+
+        def stamp_device(self, device_id, field, checked_at, compliant=None):
+            state.setdefault("stamps", []).append((device_id, field, checked_at, compliant))
+
         def get(self, path, params=None):
             if path.startswith("dcim/devices"):
                 return state["devices"]
