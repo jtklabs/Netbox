@@ -35,6 +35,7 @@ adds missing keys), so a running dev host keeps a stale `VERSION`. That is inert
    ```bash
    # bump pins in a branch, then
    docker exec netbox-postgres-1 pg_dump -U netbox netbox > /tmp/pre-upgrade.sql
+   # Set PYTHON_INDEX_URL in the root .env to the internal /simple index.
    docker compose build netbox
    docker compose up -d --force-recreate netbox netbox-worker
    ```

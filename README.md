@@ -5,9 +5,12 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERS
 
 ## Dev quickstart
 
-One command does everything — env files, image build, stack, and waiting for NetBox:
+On first setup, initialize the environment and set the Python package index.
+Then `dev-up.sh` manages the image build, stack, and health check:
 
 ```bash
+bash scripts/init-dev-env.sh
+# Edit .env: set PYTHON_INDEX_URL to your internal Python index /simple URL.
 bash scripts/dev-up.sh
 ```
 
@@ -21,6 +24,7 @@ Doing it by hand is the same three steps:
 
 ```bash
 ./scripts/init-dev-env.sh   # generates .env + env/*.env with fresh local secrets
+# Set PYTHON_INDEX_URL in .env before building.
 docker compose build
 docker compose up -d
 ```
@@ -30,6 +34,41 @@ docker compose up -d
 without it compose runs the base file alone, which has no database. Re-running the
 script is safe: it creates only what is missing and keeps the shared passwords in
 `env/netbox.env`, `postgres.env`, `redis.env` and `redis-cache.env` consistent.
+
+### Python package index for image builds
+
+Set this in the **root `.env`** (the file containing `COMPOSE_FILE`):
+
+```dotenv
+PYTHON_INDEX_URL=https://packages.example.com/repository/pypi/simple/
+```
+
+Use your internal index's actual `/simple/` URL. In production this `.env` is
+normally linked to `/mnt/data_disk/netbox-secrets/.env`. This is a build setting,
+so putting it in `env/prod.env` or the remote netops script's `.env` does not apply.
+Compose and bootstrap pass it to both plugin installation steps as a BuildKit
+secret. It replaces the default package index; there is no public PyPI fallback.
+The index must serve build dependencies such as `setuptools`, even though our
+plugins are copied from this repository. A missing or empty setting stops builds.
+
+The URL may include URL-encoded basic-auth credentials when required by the
+index. Use single quotes around the `.env` value if it contains a literal `$`.
+The value is not written into the image's environment or Docker build arguments.
+Existing host `pip.conf` / `PIP_INDEX_URL` settings are not inherited by this build.
+
+After setting or changing the index, rebuild and recreate the app containers:
+
+```bash
+docker compose build --no-cache netbox
+docker compose up -d --force-recreate netbox netbox-worker
+```
+
+`--no-cache` forces package installation to run again: BuildKit secret-value
+changes alone do not invalidate cached layers. Bootstrap still skips building
+when an image is already present. For AMI builds with `scripts/prod-build.sh`,
+export `PYTHON_INDEX_URL` in the build process environment; that script deliberately
+does not load runtime `.env` files. If using `sudo`, preserve that variable with
+`sudo --preserve-env=PYTHON_INDEX_URL ./scripts/prod-build.sh`.
 
 ### Deployed from a ZIP rather than a clone?
 
