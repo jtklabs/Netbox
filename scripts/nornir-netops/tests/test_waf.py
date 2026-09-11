@@ -329,7 +329,7 @@ def test_direct_ip_uses_inventory_credentials_over_https(setup):
     assert setup.run("--apply", direct=True)[0] == cli.EXIT_OK
     assert setup.box.logins[0][1:4] == ("192.0.2.1", "network-admin", "test-login-password")
     assert setup.box.logins[0][4]["port"] == 443
-    assert setup.box.logins[0][4]["verify_tls"] is True
+    assert setup.box.logins[0][4]["verify_tls"] is False
 
 
 def test_discovery_follows_pages_and_handles_expanded_reference(setup):
@@ -528,7 +528,8 @@ def test_repeated_or_malformed_discovery_pages_fail():
         f5_waf.plan_waf(box, [("192.0.2.50", 514)], False)
 
 
-def test_rest_client_authentication_tls_ipv6_and_logout(monkeypatch):
+@pytest.mark.parametrize("tls_options,expected", [({}, False), ({"verify_tls": True}, True)])
+def test_rest_client_authentication_tls_ipv6_and_logout(monkeypatch, tls_options, expected):
     import requests
 
     calls = []
@@ -550,13 +551,13 @@ def test_rest_client_authentication_tls_ipv6_and_logout(monkeypatch):
     session = Session()
     monkeypatch.setattr(requests, "Session", lambda: session)
     host = SimpleNamespace(hostname="2001:db8::1", username="admin", password="password")
-    with f5_waf.Client(host, port=8443, provider="radius") as client:
+    with f5_waf.Client(host, port=8443, provider="radius", **tls_options) as client:
         assert session.headers["X-F5-Auth-Token"] == "session-token"
         client.patch_json(APP, {"servers": COLLECTORS})
         client.save_config()
     assert calls[0][1] == "https://[2001:db8::1]:8443/mgmt/shared/authn/login"
     assert calls[0][2]["json"]["loginProviderName"] == "radius"
-    assert calls[0][2]["verify"] is True
+    assert all(call[2]["verify"] is expected for call in calls if call[0] != "CLOSE")
     assert calls[1][2]["json"] == {"servers": COLLECTORS}
     assert calls[2][2]["timeout"] >= 120
     assert calls[-2][0] == "DELETE"

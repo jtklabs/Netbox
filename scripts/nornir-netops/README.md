@@ -826,7 +826,7 @@ NET_AWS_PASSWORD_KEY=your_password_key
 # Optional F5 defaults:
 NETOPS_F5_PORT=443
 NETOPS_F5_TIMEOUT=30
-NETOPS_F5_VERIFY_TLS=true
+NETOPS_F5_VERIFY_TLS=false
 NETOPS_F5_LOGIN_PROVIDER=tmos
 NETBOX_CHECKED_FIELD=syslog_last_checked
 ```
@@ -841,7 +841,12 @@ list such as `"platform=f5-tmos site=atl"`. Repeated keys are supported; any
 These inventory defaults apply to other features too, so use `--env-file` for
 a dedicated F5 configuration if needed. Shell environment variables override
 `.env`, and explicit command-line options override their environment defaults.
-`--f5-verify-tls` can re-enable TLS verification when the environment disables it.
+TLS certificate verification defaults to **false** for NetBox and F5 device
+connections (WAF, syslog and SNMP). Set `NETBOX_VERIFY_TLS=true` and
+`NETOPS_F5_VERIFY_TLS=true` in `.env` to enable it. NetBox also accepts
+`netbox.verify_tls: true` in the standards file; the environment takes precedence.
+`--f5-verify-tls` enables F5 verification even when the environment disables it.
+Existing explicit true settings continue to enable verification.
 The execution flags `--apply` and `--yes` remain on the command line.
 
 On **Python 3.10+**, both `configure.py` and the installed `netops` command call
@@ -874,7 +879,8 @@ to supply an additional CA bundle to Requests:
 | Ubuntu 24.04 | `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt` |
 | RHEL 9 | `REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt` |
 
-Keep `NETOPS_F5_VERIFY_TLS=true` and select only the bundle for the operating
+Set `NETBOX_VERIFY_TLS=true` and `NETOPS_F5_VERIFY_TLS=true`, then select
+only the bundle for the operating
 system running the script. If the internal CA is already in the system trust
 store, no installation is needed. Otherwise, install its PEM certificate
 (`internal-root-ca.crt` below) on that machine:

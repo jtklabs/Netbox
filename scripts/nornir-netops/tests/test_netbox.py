@@ -13,7 +13,34 @@ from netops.netbox import (
     platform_of,
     resolve_sources,
     source_for,
+    settings_from,
 )
+
+
+@pytest.mark.parametrize("configured,environment,expected", [
+    ({}, None, False), ({"verify_tls": True}, None, True),
+    ({"verify_tls": False}, None, False), ({}, "true", True),
+    ({"verify_tls": True}, "false", False), ({"verify_tls": False}, "true", True),
+])
+def test_tls_defaults_and_explicit_overrides(monkeypatch, configured, environment, expected):
+    from netops.standards import Standards
+
+    monkeypatch.delenv("NETBOX_VERIFY_TLS", raising=False)
+    if environment is not None:
+        monkeypatch.setenv("NETBOX_VERIFY_TLS", environment)
+    standards = Standards(document={"netbox": configured})
+    assert settings_from(standards, SimpleNamespace())["verify_tls"] is expected
+
+
+def test_invalid_tls_environment_is_rejected(monkeypatch):
+    monkeypatch.setenv("NETBOX_VERIFY_TLS", "typo")
+    with pytest.raises(NetBoxError, match="must be true or false"):
+        settings_from(None, SimpleNamespace())
+
+
+def test_client_tls_default_can_be_overridden():
+    assert Client("https://netbox", "token").verify_tls is False
+    assert Client("https://netbox", "token", verify_tls=True).verify_tls is True
 
 
 class FakeClient:

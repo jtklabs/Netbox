@@ -16,13 +16,13 @@ WAF_PROFILES = "/mgmt/tm/security/log/profile"
 class Client:
     """One token-authenticated HTTPS session, using inventory credentials."""
 
-    def __init__(self, host, port=443, verify_tls=True, timeout=30, provider="tmos"):
+    def __init__(self, host, port=443, verify_tls=False, timeout=30, provider="tmos"):
         import requests
 
         if not verify_tls:
             import urllib3
 
-            # Verification was explicitly disabled. Install a process-wide
+            # Certificate verification is disabled. Install a process-wide
             # category filter so concurrent F5 requests and logout stay quiet.
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
