@@ -688,6 +688,39 @@ a dedicated F5 configuration if needed. Shell environment variables override
 `--f5-verify-tls` can re-enable TLS verification when the environment disables it.
 The execution flags `--apply` and `--yes` remain on the command line.
 
+To trust internal certificates on **Ubuntu 24.04** or **RHEL 9**, point
+Requests at the system CA bundle in `.env`. This applies to the NetBox and F5
+HTTPS connections, including inside a Python virtual environment:
+
+| Operating system | Setting in `.env` |
+| --- | --- |
+| Ubuntu 24.04 | `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt` |
+| RHEL 9 | `REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt` |
+
+Keep `NETOPS_F5_VERIFY_TLS=true` and select only the bundle for the operating
+system running the script. If the internal CA is already in the system trust
+store, no installation is needed. Otherwise, install its PEM certificate
+(`internal-root-ca.crt` below) on that machine:
+
+```bash
+# Ubuntu 24.04
+sudo cp internal-root-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+```
+
+```bash
+# RHEL 9
+sudo cp internal-root-ca.crt /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust
+```
+
+See the [Ubuntu CA installation instructions](https://ubuntu.com/server/docs/how-to/security/install-a-root-ca-certificate-in-the-trust-store/),
+[RHEL 9 system trust documentation](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/securing_networks/using-shared-system-certificates_securing-networks),
+and [Requests CA bundle documentation](https://requests.readthedocs.io/en/stable/user/advanced/#ssl-cert-verification).
+The certificate must also match the address used to connect. Since F5 inventory
+uses the NetBox primary IP, its certificate needs that IP in a subject alternative
+name; trusting the CA alone does not fix an address mismatch.
+
 NetBox supplies device IDs, primary management IPs and platform mappings. The
 usual `--netbox-filter`, `--filter` and `--limit` options narrow the inventory.
 Authentication uses the existing `NET_USER`/`NET_PASS`, AWS secret, or CSV
