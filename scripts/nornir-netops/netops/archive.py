@@ -157,6 +157,7 @@ def device_document(name, record, args, desired, host):
                  "snmp": ["/mgmt/tm/sys/snmp", "/mgmt/tm/sys/snmp/users", "/mgmt/tm/sys/snmp/communities"],
                  "banner": ["/mgmt/tm/sys/sshd", "/mgmt/tm/sys/global-settings"]}.get(feature, [])
         read_steps = [{"transport": "rest", "method": "GET", "path": p, "purpose": "read_config"} for p in paths]
+    read_steps = row.get("read_steps", read_steps)
     before = row.get("config_before")
     after = row.get("config_after")
     rollback_steps = list(row.get("rollback_steps", []))
@@ -217,7 +218,7 @@ def device_document(name, record, args, desired, host):
         current_config={"status": "observed" if before is not None else "unavailable", "config": before,
                         "read_steps": read_steps},
         implementation={"steps": implementation, "changes_needed": bool(row.get("commands")),
-                        "will_execute": bool(implementation) and bool(getattr(args, "apply", False)) and row["action"] != "audit"},
+                        "will_execute": bool(implementation) and bool(getattr(args, "apply", False)) and row["action"] != "audit" and not row.get("blocked")},
         backout={"steps": rollback_steps, "complete": not limitations and (bool(rollback_steps) or not implementation),
                  "limitations": limitations,
                  "instructions": "Run restore steps in order, then read the feature configuration again and compare with current_config. Secret placeholders must be supplied before execution."},
@@ -257,7 +258,22 @@ class Run:
                     options[key] = candidate
         slug = re.sub(r"[^a-zA-Z0-9_-]", "_", self.args.command)[:80]
         filename = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + slug + "_" + self.document["run_id"][:8] + ".json"
-        self.path = Path(options["--report"]).expanduser() if options["--report"] else Path(options["--report-dir"] or self.root / "reports").expanduser() / filename
+        path = Path(options["--report"]).expanduser() if options["--report"] else Path(options["--report-dir"] or self.root / "reports").expanduser() / filename
+        if self.args.command == "rollback" and hasattr(self.args, "journal"):
+            from .rollback import journal_directory, latest, RollbackError
+            self.rollback_input = None
+            self.rollback_input_error = None
+            try:
+                self.rollback_input = Path(self.args.journal).expanduser() if self.args.journal else latest(
+                    journal_directory(self.args.rollback_dir, self.root))
+            except RollbackError as exc:
+                self.rollback_input_error = str(exc)
+            source = self.rollback_input
+            if source is not None:
+                if source.resolve() == path.resolve() or (source.is_file() and path.is_file() and source.samefile(path)):
+                    raise ValueError("rollback input and report output must use different files")
+                self.document["rollback_source"] = str(source)
+        self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.write()
 

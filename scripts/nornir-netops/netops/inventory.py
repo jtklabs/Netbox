@@ -216,7 +216,9 @@ class RecordsInventory:
                 name=name,
                 hostname=record.get("hostname") or name,
                 platform=canonical_platform(record.get("platform")) or None,
-                data={"rollback": list(record["rollback"] or [])} if "rollback" in record else {},
+                data={**({"rollback": list(record["rollback"] or [])} if "rollback" in record else {}),
+                      **{key: record[key] for key in ("transport", "feature", "restore_steps", "original_config", "unsupported")
+                         if key in record}},
                 defaults=defaults,
             )
         if not hosts:

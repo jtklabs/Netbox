@@ -123,8 +123,6 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                     payload["save_command"] = 'POST /mgmt/tm/sys/config {"command": "save"}'
                 if not dry_run and not audit_only:
                     attempted = True
-                    payload["rollback_unsupported"] = ["REST rollback is manual; before_servers in --report records the original list"]
-                    payload["notes"].extend(payload["rollback_unsupported"])
                     archive.checkpoint(task, payload)
                     client.patch_json(SYSLOG, plan.payload)
                     payload["applied"] = True

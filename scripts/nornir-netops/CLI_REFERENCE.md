@@ -50,7 +50,7 @@ and 9300), Arista EOS and F5 BIG-IP. Support varies by feature:
 | `check-ntp` | Yes | Yes | No |
 
 Feature commands accept the [shared flags](#shared-flags). F5 HTTPS flags are
-available only on `waf`, `syslog`, `snmp` and `banner`. A flag being accepted by
+available only on `waf`, `syslog`, `snmp`, `banner` and `rollback`. A flag being accepted by
 the parser does not mean every platform implements that setting; the details
 below identify the differences.
 
@@ -321,23 +321,28 @@ cache use; unlike `--refresh`, it also prevents remembering the result.
 
 ### rollback
 
-Replay restorable SSH commands recorded in a previous journal. Devices and
-addresses come from that journal, not current CSV/NetBox inventory.
+Replay recorded SSH reversals or F5 REST restoration steps. Devices and
+addresses come from the journal or applied-run archive, not current CSV/NetBox
+inventory. F5 supports syslog, WAF, banner and SNMP; see [F5 rollback](F5_ROLLBACK.md).
 
 | Argument/flag | Meaning and default |
 | --- | --- |
-| `journal` | Optional positional path. Default: most recent journal in the rollback directory. |
+| `journal` | Optional journal or applied-run JSON archive path. Default: most recent journal in the rollback directory. |
 | `--rollback-dir DIR` | Directory searched when no journal is named. Defaults to `NETOPS_ROLLBACK_DIR`, then `<project>/.rollback`. |
 | `--limit NAME[,NAME...]` | Select exact device keys **from the journal**. Unlike ordinary feature selection, this does not match management addresses. |
 | `--apply` | Replay the commands. Without it, print the reversal. |
 | `-y`, `--yes` | Skip the interactive confirmation. |
 | `--no-save` | Leave the restored running configuration unsaved. Default: save. |
 
-Uses the shared login/AWS/environment, SSH port/timeout, worker and logging
+| `--rollback-secrets FILE` | JSON file containing previous SNMP secrets. Environment: `NETOPS_ROLLBACK_SECRETS_FILE`. |
+| `--rollback-secret NAME` | AWS Secrets Manager JSON secret containing previous SNMP secrets. Environment: `NETOPS_ROLLBACK_SECRET`. Mutually exclusive with the file option. |
+
+Uses the shared login/AWS/environment, SSH port/timeout, F5 connection, worker and logging
 flags. Inventory/filter/platform flags inherited in help do not select or
 replace journal devices. It does not accept `--standards`,
-`--no-verify`, `--add`, `--replace` or ServiceNow flags. F5 REST rollback is
-manual; consult the feature's report and README instructions.
+`--no-verify`, `--add`, `--replace` or ServiceNow flags. F5 REST restoration
+always reads back the affected settings before saving. Explicit rollback-secret
+flags override environment defaults; these secrets are separate from login credentials.
 
 ```bash
 ./configure.py rollback .rollback/EXISTING-JOURNAL.json --limit core-sw1
@@ -427,7 +432,7 @@ the normal SDK credential chain (for example, an instance role or AWS profile).
 
 ### F5 HTTPS
 
-Accepted by `waf`, `syslog`, `snmp` and `banner`:
+Accepted by `waf`, `syslog`, `snmp`, `banner` and `rollback`:
 
 | Flag | Meaning and default |
 | --- | --- |
@@ -506,8 +511,9 @@ state, effective action, and whether its action came from NetBox. See
 | `--no-rollback-file` | Do not write a reversal journal for this run. Does not suppress the automatic JSON archive. Configuration features only. |
 
 Journals record supported reversals; they cannot recover unreadable previous
-passwords. F5 REST features describe manual rollback in their reports instead
-of generating executable SSH reversal commands.
+passwords. F5 features write REST reversal journals, including changes attempted
+before a partial failure. Previous SNMP credentials can be supplied at rollback
+time; missing original settings or secrets block that device's REST writes.
 
 ### Platform cache
 

@@ -71,8 +71,6 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             payload["commands"] = ["PATCH " + row["endpoint"] + " " + json.dumps(row["desired"])
                                    for row in changes]
             if changes:
-                payload["rollback_unsupported"] = ["F5 banner rollback is manual: PATCH each banner's before fields from --report"]
-                payload["notes"].extend(payload["rollback_unsupported"])
                 if save:
                     payload["save_command"] = 'POST /mgmt/tm/sys/config {"command": "save"}'
             if changes and not dry_run:

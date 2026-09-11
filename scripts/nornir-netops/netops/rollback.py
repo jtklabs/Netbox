@@ -115,7 +115,7 @@ class Journal:
 
     @property
     def restorable(self) -> Dict[str, Dict[str, Any]]:
-        return {n: r for n, r in self.devices.items() if r.get("rollback")}
+        return {n: r for n, r in self.devices.items() if r.get("rollback") or r.get("restore_steps")}
 
     def save(self, directory: Path) -> Optional[Path]:
         """Write the journal. Nothing changed means nothing to write."""
@@ -155,11 +155,34 @@ def load(path: Path) -> Journal:
         raise RollbackError(f"{path} is not a readable journal: {exc}") from exc
     if not isinstance(document, dict) or not isinstance(document.get("devices"), dict):
         raise RollbackError(f"{path} does not look like a rollback journal")
+    devices = document["devices"]
+    feature = str(document.get("rollback_feature") or document.get("feature", ""))
+    if document.get("schema_version") == 2:
+        from .f5_rollback import journal_record
+        selected = {}
+        for name, row in devices.items():
+            if not isinstance(row, dict):
+                raise RollbackError("invalid device record in run archive")
+            if not (row.get("change_attempted") or row.get("applied")):
+                continue
+            if row.get("platform") == "f5_tmsh":
+                selected[name] = journal_record(feature, row)
+            elif row.get("rollback"):
+                selected[name] = {"hostname": row.get("hostname"), "platform": row.get("platform"),
+                                  "rollback": row["rollback"], "applied": row.get("commands", []),
+                                  "unsupported": row.get("rollback_unsupported", [])}
+        devices = selected
+    for row in devices.values():
+        if not isinstance(row, dict):
+            raise RollbackError("invalid device record in rollback journal")
+        if row.get("transport") == "rest":
+            from .f5_rollback import steps_for
+            steps_for(row)
     return Journal(
-        feature=str(document.get("feature", "")),
+        feature=feature,
         mode=str(document.get("mode", "")),
-        recorded_at=str(document.get("recorded_at", "")),
-        devices=document["devices"],
+        recorded_at=str(document.get("recorded_at") or document.get("started_at", "")),
+        devices=devices,
         path=path,
     )
 
