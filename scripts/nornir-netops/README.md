@@ -1,7 +1,7 @@
 # nornir-netops
 
-Push configuration to network devices from CSV or NetBox inventory, one feature at a time,
-from a per-platform Jinja template. **Dry run by default** -- without `--apply`
+Push configuration to network devices from a direct IP, CSV, or NetBox inventory, one feature at a time,
+using per-platform Jinja templates or the BIG-IP REST API. **Dry run by default** -- without `--apply`
 it connects read-only, works out the delta, and prints the exact commands it
 would send.
 
@@ -33,6 +33,7 @@ re-run with --apply to push the commands above
 | --- | --- | --- |
 | [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `arista_eos` |
 | [`syslog`](#syslog) | Collectors, trap severity, source interface | `cisco_ios`, `arista_eos` |
+| [`waf`](#waf-remote-syslog) | Existing WAF remote logging destinations, NetBox policy and check dates | `f5_tmsh` |
 | [`banner`](#banner) | Login and MOTD banners | `cisco_ios`, `arista_eos` |
 | [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
 | [`nac`](#nac) | Audit access ports for 802.1X / MAB, and fix what is missing | `cisco_ios`, `arista_eos` |
@@ -53,7 +54,8 @@ feature module plus two templates -- see [Adding a feature](#adding-a-feature).
 [`scripts/ios/`](../ios/README.md) checks devices against the standards **held
 in NetBox** and records a per-device verdict; [`scripts/f5/`](../f5/README.md)
 maps `scripts/standards.yaml` onto BIG-IPs. This one is the fleet-push half:
-it defaults to CSV inventory and can read inventory from NetBox with `--netbox`.
+it defaults to CSV inventory, reads NetBox with `--netbox`, or targets one
+address with `--ip`.
 Desired configuration comes from this folder's standards file and templates.
 Reach for it when the question is "set this on
 these devices", and for `scripts/ios/` when it is "which devices are out of
@@ -66,7 +68,7 @@ Run these commands from `scripts/nornir-netops`:
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pip install 'requests>=2.31'  # for NetBox or ServiceNow
+python -m pip install 'requests>=2.31'  # for WAF, NetBox or ServiceNow
 python -m pip install 'boto3>=1.34'     # for AWS Secrets Manager
 cp .env.example .env
 cp standards.yaml.example standards.yaml
@@ -81,7 +83,7 @@ An editable package install also provides the `netops` command and optional
 dependency groups:
 
 ```bash
-python -m pip install -e '.[netbox,aws,servicenow]'
+python -m pip install -e '.[netbox,aws,servicenow,waf]'
 ```
 
 Install only the groups you use; the base CSV workflow needs none of them.
@@ -618,6 +620,103 @@ the severity and source interface are never negated. `no logging trap
 notifications` clears the setting whatever argument it is given, so negating a
 stale one after setting the new value would undo the change -- setting it
 replaces the old value by itself. Only collectors are removed by `--replace`.
+
+## WAF remote syslog
+
+`configure.py waf` discovers BIG-IP Application Security logging profiles that
+already have remote storage enabled and at least one remote server configured.
+It uses the existing **`syslog.destinations`** IPs and ports in the standards file
+(514 for a bare IP), through iControl REST over management HTTPS. Local-only
+profiles, empty remote server lists, and non-F5 devices are skipped. It does not
+create logging profiles or attach profiles to virtual servers.
+
+For NetBox inventory, assign **one** of these tags to each F5 device:
+
+| Device tag | Policy when `--apply` is given |
+| --- | --- |
+| `syslog-audit` | Compare the full destination list and report missing/extra servers; leave F5 settings unchanged. |
+| `syslog-add` | Add missing standard destinations; retain existing extras. |
+| `syslog-manage` | Add missing standard destinations and remove extras. |
+| None of these tags | Audit only. |
+
+Conflicting policy tags fail that device before logging into the F5. These tags
+control this `waf` feature; they do not change the existing Cisco/Arista `syslog`
+command. NetBox policy takes precedence over `--add`/`--replace`. **Without
+`--apply`, every policy is a dry run, including NetBox writeback.** The tool reads
+policy tags; it never assigns or removes them.
+
+```bash
+# Preview the policy selected by each F5's NetBox tag.
+./configure.py waf --netbox --netbox-filter platform=f5-tmos --report waf-plan.json
+
+# Execute those policies and record completed checks in NetBox.
+./configure.py waf --netbox --netbox-filter platform=f5-tmos --apply --yes --report waf-results.json
+```
+
+NetBox supplies device IDs, primary management IPs and platform mappings. The
+usual `--netbox-filter`, `--filter` and `--limit` options narrow the inventory.
+Authentication uses the existing `NET_USER`/`NET_PASS`, AWS secret, or CSV
+credentials. F5 uses HTTPS port 443; `--f5-port`, `--f5-timeout`, and
+`--f5-login-provider` override connection settings. Certificate verification is
+on by default; `--f5-insecure` explicitly disables it. SSH port/key options do
+not control this REST connection. Platforms must be present in NetBox/CSV, or
+specified with `--platform f5_tmsh` for a direct IP; WAF does not autodetect over
+SSH. `f5-tmos`, `f5`, `bigip`, and `f5_ltm` also map to `f5_tmsh`.
+
+The **`syslog_last_checked`** device custom field, labeled **Syslog last checked**,
+stores the UTC date and time of a completed audit or verified check. It is a `datetime` field assigned
+to `dcim.device`; `--netbox-checked-field NAME` selects another field name. A
+dry run previews creation if it is missing; the first `--apply` creates it.
+An existing field with the wrong type or object assignment stops the run before
+device changes. The NetBox token needs device update permission and, for initial
+setup only, custom-field creation permission. Alternatively, create the field
+in NetBox's Custom Fields UI before running.
+
+The existing **`syslog_compliant`** boolean custom field must also be assigned to
+`dcim.device`. The script validates its type before making changes. A completed
+check sets it to **true only when every eligible WAF logging profile matches the
+fully managed destination list exactly**: all standard IP/port pairs present,
+with no extra or duplicate destinations. Otherwise it sets it to false. This
+comparison is independent of the device's policy tag: add-only can succeed while
+remaining noncompliant because it preserves extras. After changes, the value is
+calculated from the verified device configuration, not the planned payload.
+
+The timestamp means **last successfully checked**, not necessarily compliant:
+an audit can find drift, and a completed discovery can find no eligible remote
+profiles. A discovery, configuration, verification, or requested save failure
+leaves both previous field values unchanged. Changes made with `--no-verify`
+do not update either field. A completed discovery with no eligible profiles
+updates the date but leaves the boolean unchanged, since compliance is not
+applicable. Both values are sent in one PATCH and read back for verification;
+a failed NetBox writeback makes the run fail while preserving F5 results in the
+report. Only these custom-field keys are patched, leaving other fields and tags
+intact. Dry runs preview the date and compliance value without writing them.
+NetBox documents [datetime custom fields](https://netboxlabs.com/docs/netbox/customization/custom-fields/)
+and [REST updates](https://netboxlabs.com/docs/netbox/v4.4/integrations/rest-api/).
+
+For CSV or a direct IP, the normal CLI modes apply and no NetBox data is written:
+
+```bash
+./configure.py waf --ip 192.0.2.10 --platform f5_tmsh                  # dry run
+./configure.py waf --ip 192.0.2.10 --platform f5_tmsh --apply          # add
+./configure.py waf --ip 192.0.2.10 --platform f5_tmsh --replace --apply # add/remove
+```
+
+Each changed application's `servers` list is patched and read back directly.
+The protocol, storage format, filters, local logging, and other security logging
+categories remain as configured. Discovery follows paginated profile and
+application collections across partitions and folders. IPv4 and IPv6 are
+supported; syslog hostnames are rejected before connecting because WAF requires
+literal server IPs. The implementation follows the
+[F5 application logging API](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_security_log_profile_application.html).
+
+Writes are saved once per device after successful verification, unless
+`--no-save` is set. One failed application does not stop the other discovered
+applications, but any failure prevents the device save and timestamp. Partial
+changes remain in the running configuration and are identified in `--report`.
+The report includes each profile's original `before_servers`, plan, and result.
+REST rollback is manual; this feature does not produce an SSH rollback journal.
+No ConfigSync operation is issued.
 
 ## Banner
 
@@ -1382,6 +1481,7 @@ plain set of lines. Reach for one only when the domain needs it:
 | `PlatformSupport(extra_commands=...)` | State that is not in the running config -- `show snmp user`. |
 | `config_options=` | netmiko keywords for the push, e.g. `cmd_verify=False` for a banner. |
 | `keep_blank_lines=` | A blank line in the template is content, not layout. |
+| `run=` / `selftest=` | A device API replaces SSH/template execution, while inventory and reporting remain shared (`waf`). The feature implements its own verification and offline selftest. |
 
 ## Tests
 

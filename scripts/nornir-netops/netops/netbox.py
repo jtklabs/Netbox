@@ -119,7 +119,7 @@ def source_tags(configured: Any) -> Dict[str, str]:
 
 
 class Client:
-    """The handful of NetBox reads this needs."""
+    """Inventory reads and narrowly scoped audit timestamp writes."""
 
     def __init__(self, url: str, token: str, verify_tls: bool = True, timeout: float = 30.0):
         if not url:
@@ -131,6 +131,8 @@ class Client:
         self.verify_tls = verify_tls
         self.timeout = timeout
         self._session = None
+        from .debuglog import protect
+        protect([token])
 
     def session(self):
         if self._session is None:
@@ -183,6 +185,81 @@ class Client:
             url = document.get("next")
             query = {}  # the `next` URL already carries the query
         return results
+
+    def request_object(self, method: str, path: str, payload=None) -> Dict[str, Any]:
+        from requests import RequestException
+
+        try:
+            response = self.session().request(
+                method, f"{self.url}/api/{path.lstrip('/')}", json=payload,
+                timeout=self.timeout, verify=self.verify_tls,
+            )
+        except RequestException as exc:
+            raise NetBoxError(f"{method} {path}: could not reach NetBox: {exc}") from exc
+        if response.status_code >= 400:
+            raise NetBoxError(f"{method} {path} failed ({response.status_code}): "
+                              f"{' '.join(response.text.split())[:200]}")
+        try:
+            document = response.json()
+        except ValueError as exc:
+            raise NetBoxError(f"{method} {path}: response was not JSON") from exc
+        if not isinstance(document, dict):
+            raise NetBoxError(f"{method} {path}: expected a NetBox object")
+        return document
+
+    def _has_device_field(self, name: str, expected_type: str) -> bool:
+        """Validate an existing device field's type and object assignment."""
+        fields = self.get("extras/custom-fields/", {"name": name})
+        if fields:
+            if len(fields) != 1 or fields[0].get("name") != name:
+                raise NetBoxError(f"custom field lookup for {name!r} was ambiguous")
+            field = fields[0]
+            kind = field.get("type")
+            if isinstance(kind, dict):
+                kind = kind.get("value")
+            if kind != expected_type or "dcim.device" not in field.get("object_types", []):
+                raise NetBoxError(f"{name} must be a {expected_type} custom field assigned to dcim.device")
+            return True
+        return False
+
+    def require_boolean_field(self, name: str) -> None:
+        if not self._has_device_field(name, "boolean"):
+            raise NetBoxError(f"missing boolean device custom field {name}")
+
+    def ensure_datetime_field(self, name: str, apply: bool = False) -> bool:
+        """Validate the device field. Return True when it needs creating."""
+        if self._has_device_field(name, "datetime"):
+            return False
+        if apply:
+            self.request_object("POST", "extras/custom-fields/", {
+                "name": name, "label": "Syslog last checked", "type": "datetime",
+                "object_types": ["dcim.device"], "required": False,
+                "description": "Last completed syslog audit or verified configuration check; "
+                               "does not imply compliance. Failed checks leave this date unchanged.",
+            })
+        return True
+
+    def stamp_device(self, device_id: int, field: str, checked_at: str,
+                     compliant: Optional[bool] = None) -> None:
+        """Write the check date and known exact-match verdict in one PATCH."""
+        from datetime import datetime
+
+        path = f"dcim/devices/{int(device_id)}/"
+        fields = {field: checked_at}
+        if compliant is not None:
+            fields["syslog_compliant"] = compliant
+        self.request_object("PATCH", path, {"custom_fields": fields})
+        device = self.request_object("GET", path)
+        observed = (device.get("custom_fields") or {}).get(field)
+        try:
+            matches = (datetime.fromisoformat(str(observed).replace("Z", "+00:00")) ==
+                       datetime.fromisoformat(checked_at.replace("Z", "+00:00")))
+        except ValueError:
+            matches = False
+        if not matches:
+            raise NetBoxError(f"device {device_id}: {field} timestamp did not verify after the write")
+        if compliant is not None and (device.get("custom_fields") or {}).get("syslog_compliant") is not compliant:
+            raise NetBoxError(f"device {device_id}: syslog_compliant did not verify after the write")
 
 
 # --------------------------------------------------------------------------- #
@@ -464,12 +541,18 @@ def init_nornir(args, credentials, standards, workers: int):
         settings["token"] = settings["token"] or document.get("token")
         settings["url"] = settings["url"] or document.get("url")
 
+    if getattr(getattr(args, "feature", None), "name", None) == "waf":
+        # WAF reads device policy tags, not source-interface tags.
+        settings["source_tags"] = {}
+    args._netbox_client = Client(settings["url"], settings["token"], settings["verify_tls"])
+
     return InitNornir(
         runner={"plugin": "threaded", "options": {"num_workers": workers}},
         inventory={
             "plugin": "netbox",
             "options": {
                 **settings,
+                "client": args._netbox_client,
                 "username": credentials.username,
                 "password": credentials.password,
                 "secret": credentials.secret,

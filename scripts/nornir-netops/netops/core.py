@@ -95,6 +95,10 @@ PLATFORM_ALIASES = {
     "eos": "arista_eos",
     "arista": "arista_eos",
     "arista_eos_telnet": "arista_eos",
+    "f5": "f5_tmsh",
+    "f5-tmos": "f5_tmsh",
+    "bigip": "f5_tmsh",
+    "f5_ltm": "f5_tmsh",
 }
 
 # How each platform is told to persist the running config. Kept explicit rather
@@ -350,6 +354,12 @@ class Feature:
     #: not a plain default: a bare function default on a dataclass is a class
     #: attribute, and would bind `self` as its first argument.
     plan: PlanFunc = field(default_factory=lambda: plan_changes)
+    #: A feature using a device API can supply its own Nornir task instead of
+    #: the SSH/template pipeline. Inventory, reports and change tracking remain
+    #: shared. Such features require a known platform; no SSH autodetection.
+    run: Optional[Callable[..., Any]] = None
+    #: Offline validation for an API feature which has no CLI templates.
+    selftest: Optional[Callable[[Desired], int]] = None
 
     def support_for(self, platform: str) -> PlatformSupport:
         if platform in self.not_applicable:

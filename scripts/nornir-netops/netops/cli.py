@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
@@ -114,11 +115,28 @@ def bootstrap_log(argv: List[str]) -> DebugLog:
 def _connection_arguments(parent: argparse.ArgumentParser) -> None:
     """How to reach the devices. Shared by the features and by `discover`."""
     inv = parent.add_argument_group("inventory")
-    inv.add_argument(
+    source = inv.add_mutually_exclusive_group()
+    source.add_argument(
         "-c",
         "--csv",
         default=os.environ.get("NETOPS_CSV", "inventory/hosts.csv"),
         help="CSV of devices [$NETOPS_CSV]",
+    )
+    source.add_argument(
+        "--netbox",
+        action="store_true",
+        help="use NetBox as the inventory rather than --csv",
+    )
+    source.add_argument(
+        "--ip",
+        type=_ip_address,
+        metavar="ADDRESS",
+        help="audit/configure one IPv4 or IPv6 address directly",
+    )
+    inv.add_argument(
+        "--platform",
+        metavar="PLATFORM",
+        help="platform for --ip, e.g. cisco_ios or arista_eos (otherwise autodetect)",
     )
     inv.add_argument(
         "--limit", metavar="NAME[,NAME...]", help="only these devices, by name or address"
@@ -134,11 +152,6 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         "netbox",
         "Take the inventory from NetBox instead of a CSV. The token comes from "
         "$NETBOX_TOKEN or --netbox-secret, never from the standards file.",
-    )
-    box.add_argument(
-        "--netbox",
-        action="store_true",
-        help="use NetBox as the inventory rather than --csv",
     )
     box.add_argument(
         "--netbox-url",
@@ -274,6 +287,13 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         action="store_true",
         help="print full tracebacks, and log the SSH transcript to the log file",
     )
+
+
+def _ip_address(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise argparse.ArgumentTypeError("--ip requires a single IPv4 or IPv6 address") from None
 
 
 def _common_arguments() -> argparse.ArgumentParser:
@@ -536,6 +556,8 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
 
     if status == "skipped":
         print(f"{header} {style.dim('skipped')} -- {record['skip_reason']}")
+        for note in record.get("notes") or ():
+            print(style.dim(f"    {note}"))
         return
 
     if status == "ok":
@@ -553,7 +575,9 @@ def _print_host(style: Style, name: str, record: Dict[str, Any], verbose: bool) 
             print(style.warn(f"    {note}"))
         return
 
-    if status == "unverified":
+    if record.get("audit_only"):
+        label = style.warn("audit findings")
+    elif status == "unverified":
         label = style.bad("APPLIED BUT NOT VERIFIED")
     elif status == "changed":
         label = style.ok("applied")
@@ -609,6 +633,8 @@ def _print_report(
         summary.append(style.warn(f"{counts['pending']} with pending changes"))
     else:
         summary.append(style.ok(f"{counts['changed']} changed"))
+        if counts["pending"]:
+            summary.append(style.warn(f"{counts['pending']} with pending changes"))
     if counts["skipped"]:
         summary.append(style.dim(f"{counts['skipped']} not applicable"))
     if counts["attention"]:
@@ -619,7 +645,11 @@ def _print_report(
         summary.append(style.bad(f"{counts['failed']} failed"))
     print(style.bold("summary: ") + ", ".join(summary))
     if dry_run and counts["pending"]:
-        print(style.dim("re-run with --apply to push the commands above"))
+        if all(r.get("audit_only") for r in records.values() if r["status"] == "pending"):
+            print(style.dim("audit policy leaves device configuration unchanged; "
+                            "--apply records completed checks in NetBox"))
+        else:
+            print(style.dim("re-run with --apply to execute the selected policies"))
 
 
 # --------------------------------------------------------------------------- #
@@ -660,6 +690,10 @@ def selftest() -> int:
         desired = feature.build_desired(namespace)
         print(f"### {feature.name}  {' '.join(feature.selftest_args)}")
         print()
+
+        if feature.selftest is not None:
+            failures += feature.selftest(desired)
+            continue
 
         for platform, reason in sorted(feature.not_applicable.items()):
             print(f"--- {platform} --- not applicable: {reason}")
@@ -811,6 +845,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         return _rollback(args, style, log)
 
     feature: Feature = args.feature
+    args.policy_mode = "netbox-tags" if feature.name == "waf" and args.netbox else args.mode
     try:
         args.standards = (
             Standards() if args.no_standards else load_standards(args.standards, PROJECT_ROOT)
@@ -845,6 +880,20 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         return code
 
     dry_run = not args.apply
+
+    waf_netbox = None
+    if feature.name == "waf" and args.netbox:
+        from .netbox import NetBoxError
+
+        waf_netbox = args._netbox_client
+        try:
+            field_missing = waf_netbox.ensure_datetime_field(args.netbox_checked_field)
+            waf_netbox.require_boolean_field("syslog_compliant")
+        except NetBoxError as exc:
+            print(style.bad(f"error: NetBox audit field: {exc}"), file=sys.stderr)
+            return EXIT_USAGE
+        if field_missing:
+            print(style.dim(f"NetBox: would create device datetime field {args.netbox_checked_field}"))
 
     if args.open_change and args.change:
         print(
@@ -892,8 +941,10 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     )
     if args.netbox:
         print(style.dim(f"inventory: NetBox ({count} device(s))"))
+    elif args.ip:
+        print(style.dim(f"inventory: direct IP ({args.ip})"))
     print(
-        f"{banner}  |  {feature.name}, mode={args.mode}, {count} device(s), "
+        f"{banner}  |  {feature.name}, mode={args.policy_mode}, {count} device(s), "
         f"{min(args.workers, count)} at a time"
     )
     if change:
@@ -905,7 +956,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         )
     log.note(
         "run: feature=%s mode=%s devices=%d workers=%d apply=%s",
-        feature.name, args.mode, count, args.workers, args.apply,
+        feature.name, args.policy_mode, count, args.workers, args.apply,
     )
     if env_note:
         print(style.dim(f"env file: {env_note}"))
@@ -913,9 +964,16 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         print(style.dim(f"standards: {args.standards.path}"))
     print(style.dim(f"credentials: {credentials.describe()}"))
 
-    if not dry_run and not args.yes and not _confirm(style, count, feature.name, args.mode):
+    if not dry_run and not args.yes and not _confirm(style, count, feature.name, args.policy_mode):
         print("aborted")
         return EXIT_USAGE
+
+    if waf_netbox is not None and not dry_run and field_missing:
+        try:
+            waf_netbox.ensure_datetime_field(args.netbox_checked_field, apply=True)
+        except NetBoxError as exc:
+            print(style.bad(f"error: NetBox audit field: {exc}"), file=sys.stderr)
+            return EXIT_USAGE
 
     records: Dict[str, Dict[str, Any]] = {
         name: {
@@ -943,7 +1001,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         enabled=not args.no_platform_cache,
     )
     for host in targets.inventory.hosts.values():
-        if host.platform:
+        if host.platform or feature.run is not None:
             continue
         remembered = cache.get(host)
         if remembered:
@@ -952,7 +1010,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     if cache.hits:
         print(style.dim(f"platform: {cache.hits} remembered, {cache.path}"))
 
-    unknown = targets.filter(filter_func=lambda h: not h.platform)
+    unknown = targets.filter(filter_func=lambda h: not h.platform and feature.run is None)
     if unknown.inventory.hosts:
         print(f"detecting platform on {len(unknown.inventory.hosts)} device(s)...")
         for name, result in unknown.run(task=detect_platform).items():
@@ -967,7 +1025,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
 
     from .runner import configure_feature
 
-    ready = targets.filter(filter_func=lambda h: bool(h.platform))
+    ready = targets.filter(filter_func=lambda h: bool(h.platform) or feature.run is not None)
     if ready.inventory.hosts:
         results = ready.run(
             task=configure_feature,
@@ -991,6 +1049,34 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
             payload["error"] = None
             payload["status"] = _status_of(payload)
             records[name] = payload
+
+    if waf_netbox is not None:
+        for name, record in records.items():
+            checked_at = record.get("checked_at")
+            if not checked_at or record["status"] in ("failed", "unverified"):
+                continue
+            field = args.netbox_checked_field
+            compliant = record.get("syslog_compliant")
+            verdict_note = (f", syslog_compliant = {str(compliant).lower()}"
+                            if compliant is not None else ", syslog_compliant unchanged (no applicable profiles)")
+            record["netbox_writeback"] = {
+                "device_id": targets.inventory.hosts[name].data["netbox_id"],
+                "field": field, "value": checked_at, "status": "planned",
+                "syslog_compliant": compliant,
+            }
+            if dry_run:
+                record["notes"].append(f"NetBox: would stamp {field} = {checked_at}{verdict_note}")
+                continue
+            try:
+                waf_netbox.stamp_device(record["netbox_writeback"]["device_id"], field, checked_at,
+                                        compliant=compliant)
+                record["netbox_writeback"]["status"] = "written"
+                record["notes"].append(f"NetBox: stamped {field} = {checked_at}{verdict_note}")
+            except NetBoxError as exc:
+                record["netbox_writeback"]["status"] = "failed"
+                record["error"] = f"NetBox syslog writeback failed: {exc}"
+                record["status"] = "failed"
+                log.failure(name, record["error"], exc)
 
     _print_report(style, records, dry_run, args.verbose)
 
@@ -1376,17 +1462,32 @@ def _connect(args: argparse.Namespace, style: Style):
     Shared by a feature run and by `discover`, which need exactly the same
     setup and differ only in what they do once connected.
     """
+    if args.platform and not args.ip:
+        print(style.bad("error: --platform requires --ip"), file=sys.stderr)
+        return None, None, EXIT_USAGE
+
     credentials, code = _login(args, style)
     if credentials is None:
         return None, None, code
 
     # nornir is imported here so `selftest` and --help work without it installed.
-    from .inventory import InventoryError, init_nornir, missing_credentials
+    from .inventory import InventoryError, init_from_records, init_nornir, missing_credentials
     from .netbox import NetBoxError
     from .netbox import init_nornir as init_netbox
 
     try:
-        if args.netbox:
+        if args.ip:
+            nr = init_from_records(
+                records={args.ip: {"hostname": args.ip, "platform": args.platform}},
+                username=credentials.username,
+                password=credentials.password,
+                secret=credentials.secret,
+                key_file=args.key_file,
+                port=args.port,
+                workers=args.workers,
+                conn_timeout=args.conn_timeout,
+            )
+        elif args.netbox:
             nr = init_netbox(
                 args, credentials, getattr(args, "standards", None), args.workers
             )
@@ -1447,7 +1548,7 @@ def _record_change(
     counts: Dict[str, int] = {}
     for record in records.values():
         counts[record["status"]] = counts.get(record["status"], 0) + 1
-    plan = servicenow.describe_plan(feature.name, args.mode, records)
+    plan = servicenow.describe_plan(feature.name, getattr(args, "policy_mode", args.mode), records)
 
     if args.open_change:
         pending = counts.get("pending", 0)
@@ -1561,7 +1662,7 @@ def _report_text(
     document = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "feature": feature.name,
-        "mode": args.mode,
+        "mode": getattr(args, "policy_mode", args.mode),
         "dry_run": dry_run,
         "change": change,
         "desired": desired.keys,

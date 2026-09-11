@@ -6,7 +6,7 @@ netmiko>=4.2.0
 Jinja2>=3.1.2
 PyYAML>=6.0
 
-# Only needed for --netbox or --open-change / --change (ServiceNow):
+# Only needed for waf, --netbox or --open-change / --change (ServiceNow):
 #   pip install 'requests>=2.31'
 # Only needed for AWS Secrets Manager:
 #   pip install 'boto3>=1.34'

@@ -23,6 +23,7 @@ dependencies = [
 # lazily with a clear message if the package is missing.
 servicenow = ["requests>=2.31"]
 netbox = ["requests>=2.31"]
+waf = ["requests>=2.31"]
 aws = ["boto3>=1.34"]
 dev = ["pytest>=8.0", "requests>=2.31"]
 
