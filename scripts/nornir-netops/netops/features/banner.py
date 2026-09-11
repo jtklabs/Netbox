@@ -17,7 +17,9 @@ import argparse
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, render
+from .. import f5_banner
 from ..standards import of as standards_of
+from .waf import add_connection_arguments, connection_settings
 
 SHOW_COMMAND = "show running-config | section ^banner"
 
@@ -168,6 +170,7 @@ def reverse(commands, current, removed, context):
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    add_connection_arguments(parser)
     parser.add_argument(
         "-b",
         "--banner",
@@ -190,7 +193,8 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "no banners selected: pass --banner motd or set banner.motd: true "
             "in the standards file"
         )
-    delimiter: Dict[str, Any] = {"delimiter": standards.value("banner.delimiter")}
+    delimiter: Dict[str, Any] = {"delimiter": standards.value("banner.delimiter"),
+                                 "f5": connection_settings(args)}
     return Desired(keys=kinds, variables=delimiter)
 
 
@@ -201,6 +205,7 @@ FEATURE = Feature(
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_banners, IOS_SAMPLE),
         "arista_eos": PlatformSupport(SHOW_COMMAND, parse_banners, EOS_SAMPLE),
     },
+    platform_runs={"f5_tmsh": f5_banner.run},
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_banner,

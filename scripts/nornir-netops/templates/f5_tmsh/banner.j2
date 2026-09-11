@@ -1,0 +1,9 @@
+{# F5 SSH and web login banner text. Edit the standard text below. #}
+{% for kind in add %}{% if kind == 'login' %}
+  Authorised access only.
+{% else %}
+  This system is for the use of authorised users only. Activity on this system
+  is monitored and recorded. Anyone using it consents to that monitoring.
+
+  Disconnect immediately if you are not an authorised user.
+{% endif %}{% endfor %}

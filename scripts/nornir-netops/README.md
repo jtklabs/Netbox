@@ -34,7 +34,7 @@ re-run with --apply to push the commands above
 | [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `arista_eos` |
 | [`syslog`](#syslog) | Collectors, supported severity/source settings, NetBox policy and check dates | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`waf`](#waf-remote-syslog) | Existing WAF remote logging destinations, NetBox policy and check dates | `f5_tmsh` |
-| [`banner`](#banner) | Login and MOTD banners | `cisco_ios`, `arista_eos` |
+| [`banner`](#banner) | Login and MOTD banners; F5 SSH and web login notices | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`acl`](#acls) | Access lists, **order enforced** | `cisco_ios`, `arista_eos` |
 | [`nac`](#nac) | Audit access ports for 802.1X / MAB, and fix what is missing | `cisco_ios`, `arista_eos` |
 | [`users`](#local-users) | Local accounts and password rotation | `cisco_ios`, `arista_eos` |
@@ -993,6 +993,47 @@ differently does not look like a change on every run.
 IOS is wrapped in a `^C` delimiter and EOS terminated with `EOF`; both are the
 template's business. The config push runs with netmiko's `cmd_verify` off,
 because the device stops offering a prompt between the delimiters.
+
+### F5 SSH and web login banners
+
+`configure.py banner` supports Cisco IOS/IOS-XE (including Catalyst 3850 and
+9300), Arista EOS and F5 BIG-IP. The same inventory and AWS login credentials
+used by the other features apply:
+
+```bash
+# Preview across selected NetBox devices
+./configure.py banner --netbox
+
+# Apply, verify and save
+./configure.py banner --netbox --apply
+
+# Limit to one device, or override the selected banner kind
+./configure.py banner --netbox --limit DEVICE --apply
+./configure.py banner --netbox --banner login --apply
+```
+
+`banner.motd` and `banner.login` in `standards.yaml` select the text to manage.
+Edit the text in `templates/<platform>/banner.j2`; F5's template is
+`templates/f5_tmsh/banner.j2`. Its shipped text matches the switch templates.
+F5 applies the selected text to **both SSH and web login**. If both kinds are
+selected, their text is joined with a blank line, in selection order. F5 uses
+one combined message on each login surface rather than separate MOTD and login
+banner objects. Both `--add` and `--replace` reconcile these two F5 settings.
+
+F5 uses the existing REST login and HTTPS options. TLS verification defaults
+to false; `--f5-verify-tls` enables it. The task reads both settings before any
+write, changes only banner enablement/text, and reads both back before saving.
+`--no-verify` and `--no-save` keep their usual meanings. NetBox is used for
+inventory; banner runs do not write syslog custom fields or use syslog tags.
+
+`--report banner-results.json` records each F5 banner's original fields,
+planned values and apply/verification results. A failure may leave partial
+changes; failed verification prevents saving. F5 rollback is manual: PATCH the
+recorded `before` fields to their recorded endpoint and save the configuration.
+Cisco and Arista retain their existing SSH templates and rollback journals.
+
+API references: [F5 SSH banner](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_sshd.html)
+and [F5 web login banner](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_global-settings.html).
 
 ## ACLs
 
