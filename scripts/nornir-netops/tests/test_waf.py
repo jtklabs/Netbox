@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from netops import cli, f5_waf, netbox, runner
+from netops import cli, f5_waf, f5_syslog, netbox, runner
 from netops.features import waf
 
 ROOT = f5_waf.WAF_PROFILES
@@ -34,9 +34,13 @@ class FakeF5:
         self.app = application()
         self.responses = {
             ROOT: {"items": [{"name": "logging", "fullPath": "/Tenant/folder/logging",
+                              "builtIn": "disabled",
                               "applicationReference": {
                                   "link": "https://localhost" + PROFILE + "/application"}}]},
             PROFILE + "/application": {"items": [self.app]}, APP: self.app,
+            f5_syslog.SYSLOG: {"remoteServers": [
+                {"name": "standard1", "host": "192.0.2.50", "remotePort": 514},
+                {"name": "standard2", "host": "192.0.2.51", "remotePort": 1514}]},
         }
         self.reads, self.writes, self.logins = [], [], []
         self.saves = 0
@@ -154,11 +158,11 @@ def setup(tmp_path, monkeypatch):
     csv.write_text("host,name,platform\n192.0.2.1,f5,f5_tmsh\n")
     report = tmp_path / "report.json"
 
-    def run(*extra, netbox_inventory=False, direct=False):
+    def run(*extra, netbox_inventory=False, direct=False, feature="waf"):
         inventory = (["--netbox"] if netbox_inventory else
                      ["--ip", "192.0.2.1", "--platform", "f5_tmsh"] if direct else
                      ["--csv", str(csv)])
-        code = cli.main(["waf", "--no-env-file", "--no-rollback-file", "--yes",
+        code = cli.main([feature, "--no-env-file", "--no-rollback-file", "--yes",
                          "--standards", str(standards), "--report", str(report),
                          *inventory, *extra])
         data = json.loads(report.read_text()) if report.exists() else None
@@ -310,7 +314,7 @@ def test_local_only_and_empty_remote_profiles_are_not_enabled(setup, app):
     assert report["devices"]["f5"]["status"] == "skipped"
     assert setup.box.writes == []
     assert report["devices"]["f5"]["netbox_writeback"]["status"] == "written"
-    assert report["devices"]["f5"]["syslog_compliant"] is None
+    assert report["devices"]["f5"]["syslog_compliant"] is True
     assert setup.nb.device["custom_fields"]["syslog_compliant"] is True
 
 
@@ -339,6 +343,71 @@ def test_discovery_follows_pages_and_handles_expanded_reference(setup):
     plans = f5_waf.plan_waf(box, [("192.0.2.50", 514)], False)
     assert len(plans) == 1
     assert plans[0].endpoint == APP
+
+
+@pytest.mark.parametrize("policy", ["syslog-audit", "syslog-add", "syslog-manage"])
+def test_builtin_profiles_never_enter_plans_or_compliance(setup, policy):
+    setup.nb.device["tags"] = [{"slug": policy}]
+    setup.box.app["servers"] = copy.deepcopy(COLLECTORS)
+    for name, flag in (("internal remote logger", "enabled"),
+                       ("cloud security services", True),
+                       ("future-system-profile", "enabled")):
+        setup.box.responses[ROOT]["items"].append({
+            "name": name, "fullPath": "/Common/" + name, "builtIn": flag,
+            # No fake response: fetching these subresources would fail.
+            "applicationReference": {"link": ROOT + "/system/application"},
+        })
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    record = report["devices"]["f5"]
+    assert len(record["profiles"]) == 1
+    assert len(record["skipped_profiles"]) == 3
+    assert all(row["built_in"] is True for row in record["skipped_profiles"])
+    assert record["syslog_compliant"] is True
+    assert setup.box.writes == []
+    assert ROOT + "/system/application" not in setup.box.reads
+
+
+def test_only_builtin_profiles_never_write_f5_and_use_system_compliance(setup):
+    setup.box.responses[ROOT]["items"][0]["builtIn"] = "enabled"
+    setup.nb.device["custom_fields"]["syslog_compliant"] = False
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    record = report["devices"]["f5"]
+    assert record["status"] == "skipped"
+    assert record["profiles"] == []
+    assert record["syslog_compliant"] is True
+    assert setup.box.reads == [ROOT, f5_syslog.SYSLOG]
+    assert setup.box.writes == [] and setup.box.saves == 0
+    assert setup.nb.device["custom_fields"]["syslog_compliant"] is True
+    assert setup.nb.device["custom_fields"][waf.CHECKED_FIELD] != OLD_DATE
+
+
+@pytest.mark.parametrize("flag", [None, "unexpected", ""])
+def test_unknown_profile_ownership_is_skipped_without_claiming_compliance(setup, flag):
+    profile = {"name": "unknown", "application": [application()]}
+    if flag is not None:
+        profile["builtIn"] = flag
+    setup.box.responses[ROOT]["items"].append(profile)
+    setup.nb.device["custom_fields"]["syslog_compliant"] = False
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    record = report["devices"]["f5"]
+    assert len(record["profiles"]) == 1
+    assert record["skipped_profiles"][0]["built_in"] is None
+    assert record["syslog_compliant"] is None
+    assert [path for path, _ in setup.box.writes] == [APP]
+    assert setup.nb.device["custom_fields"]["syslog_compliant"] is False
+
+
+@pytest.mark.parametrize("flag", ["disabled", False])
+def test_custom_profiles_in_common_remain_eligible(setup, flag):
+    profile = setup.box.responses[ROOT]["items"][0]
+    profile.update(fullPath="/Common/our-remote-logger", builtIn=flag)
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    assert [path for path, _ in setup.box.writes] == [APP]
+    assert report["devices"]["f5"]["skipped_profiles"] == []
 
 
 def test_ipv6_and_route_domain_keys():
@@ -591,3 +660,21 @@ def test_shell_environment_wins_over_env_file(setup, monkeypatch, tmp_path):
     assert cli.main(["waf", "--env-file", str(env), "--csv", str(setup.csv),
                      "--standards", str(setup.standards)]) == cli.EXIT_OK
     assert setup.box.logins[0][4]["port"] == 8443
+
+
+def test_system_syslog_drift_prevents_combined_waf_compliance(setup):
+    setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = []
+    code, report = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_OK
+    row = report["devices"]["f5"]
+    assert row["profiles"][0]["fully_managed_compliant"] is True
+    assert row["system_syslog_audit"]["compliant"] is False
+    assert row["syslog_compliant"] is False
+    assert [path for path, _ in setup.box.writes] == [APP]
+
+
+def test_system_syslog_read_failure_prevents_waf_changes(setup):
+    setup.box.responses[f5_syslog.SYSLOG] = RuntimeError("cannot audit system syslog")
+    code, _ = setup.run("--apply", netbox_inventory=True)
+    assert code == cli.EXIT_FAILED
+    assert setup.box.writes == setup.nb.writes == []

@@ -19,6 +19,13 @@ class Client:
     def __init__(self, host, port=443, verify_tls=True, timeout=30, provider="tmos"):
         import requests
 
+        if not verify_tls:
+            import urllib3
+
+            # Verification was explicitly disabled. Install a process-wide
+            # category filter so concurrent F5 requests and logout stay quiet.
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
         address = host.hostname
         if ":" in address and not address.startswith("["):
             address = f"[{address}]"
@@ -188,12 +195,26 @@ def plan_waf_application(application, wanted, clean, label, endpoint):
     return plan
 
 
-def plan_waf(client, wanted, clean):
-    """Discover application-security profiles already logging to remote servers."""
+def plan_waf(client, wanted, clean, skipped_profiles=None):
+    """Discover user-defined application profiles already logging remotely."""
     plans = []
     for profile in _waf_collection(client, WAF_PROFILES):
         endpoint = _waf_resource(WAF_PROFILES, profile)
         label = profile.get("fullPath") or profile.get("name") or endpoint
+        # F5's builtIn flag identifies predefined profiles independently of
+        # names, partitions and release-specific additions. Never infer that a
+        # profile belongs to the operator merely because its name is unfamiliar.
+        built_in = str(profile.get("builtIn", "")).strip().lower()
+        if built_in not in ("disabled", "false"):
+            known_builtin = built_in in ("enabled", "true")
+            if skipped_profiles is not None:
+                skipped_profiles.append({
+                    "profile": label,
+                    "reason": "F5 built-in profile" if known_builtin else
+                              "cannot confirm user-defined profile: builtIn missing or unrecognized",
+                    "built_in": True if known_builtin else None,
+                })
+            continue
         reference = profile.get("applicationReference")
         if reference is not None:
             path = reference.get("link") or endpoint + "/application"

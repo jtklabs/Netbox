@@ -437,7 +437,7 @@ class NetBoxInventory:
 
         sources = (
             source_interfaces(self.client, self.source_tags)
-            if self.source_tags
+            if self.source_tags and any(platform_of(device) != "f5_tmsh" for device in devices)
             else {}
         )
 

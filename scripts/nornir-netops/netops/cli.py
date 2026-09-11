@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub
+from .core import MODE_ADD, MODE_REPLACE, Desired, Feature, scrub, canonical_platform
 from .debuglog import DEFAULT_LOG_FILE, DebugLog, configure as configure_log
 from .debuglog import protect, redact
 from .platform_cache import DEFAULT_FILENAME as DEFAULT_CACHE_FILE
@@ -892,8 +892,12 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
 
     dry_run = not args.apply
 
+    f5_syslog = feature.name == "syslog" and any(
+        canonical_platform(host.platform) == "f5_tmsh" for host in targets.inventory.hosts.values())
+    if f5_syslog and args.netbox:
+        args.policy_mode = f"F5=netbox-tags, other-platforms={args.mode}"
     waf_netbox = None
-    if feature.name == "waf" and args.netbox:
+    if (feature.name == "waf" or f5_syslog) and args.netbox:
         from .netbox import NetBoxError
 
         waf_netbox = args._netbox_client
@@ -1069,7 +1073,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
             field = args.netbox_checked_field
             compliant = record.get("syslog_compliant")
             verdict_note = (f", syslog_compliant = {str(compliant).lower()}"
-                            if compliant is not None else ", syslog_compliant unchanged (no applicable profiles)")
+                            if compliant is not None else ", syslog_compliant unchanged (no complete verdict)")
             record["netbox_writeback"] = {
                 "device_id": targets.inventory.hosts[name].data["netbox_id"],
                 "field": field, "value": checked_at, "status": "planned",

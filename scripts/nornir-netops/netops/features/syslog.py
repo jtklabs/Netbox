@@ -29,6 +29,8 @@ from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, norma
 from ..core import validate_address, validate_text, validate_word
 from ..netbox import source_for
 from ..standards import host_and_port, of as standards_of
+from .. import f5_syslog
+from .waf import add_arguments as f5_arguments, connection_settings
 
 SHOW_COMMAND = "show running-config all | include ^logging"
 
@@ -150,6 +152,7 @@ def plan_syslog(
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    f5_arguments(parser)
     parser.add_argument(
         "-d",
         "--destination",
@@ -237,7 +240,9 @@ def build_desired(args: argparse.Namespace) -> Desired:
 
     return Desired(
         keys=keys,
-        variables={"entries": entries, "vrf": validate_word(str(vrf), "vrf") if vrf else None},
+        variables={"entries": entries, "vrf": validate_word(str(vrf), "vrf") if vrf else None,
+                   "f5": connection_settings(args),
+                   "netbox_policy": bool(getattr(args, "netbox", False))},
     )
 
 
@@ -280,4 +285,5 @@ FEATURE = Feature(
     plan=plan_syslog,
     per_device=per_device,
     selftest_args=[],
+    platform_runs={"f5_tmsh": f5_syslog.run},
 )

@@ -358,6 +358,8 @@ class Feature:
     #: the SSH/template pipeline. Inventory, reports and change tracking remain
     #: shared. Such features require a known platform; no SSH autodetection.
     run: Optional[Callable[..., Any]] = None
+    #: API task overrides for individual platforms in an otherwise SSH feature.
+    platform_runs: Dict[str, Callable[..., Any]] = field(default_factory=dict)
     #: Offline validation for an API feature which has no CLI templates.
     selftest: Optional[Callable[[Desired], int]] = None
 

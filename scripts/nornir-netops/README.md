@@ -74,7 +74,8 @@ cp .env.example .env
 cp standards.yaml.example standards.yaml
 ```
 
-Python 3.9+. Edit `.env` and `standards.yaml` with your real settings before
+Python 3.9+; automatic system certificate trust requires Python 3.10+.
+Edit `.env` and `standards.yaml` with your real settings before
 running against devices. For CSV inventory, also copy and edit
 `inventory/hosts.csv.example` as described below. For NetBox, use the
 [NetBox setup](#netbox-as-the-inventory).
@@ -621,14 +622,72 @@ notifications` clears the setting whatever argument it is given, so negating a
 stale one after setting the new value would undo the change -- setting it
 replaces the old value by itself. Only collectors are removed by `--replace`.
 
+### F5 system syslog
+
+`configure.py syslog` also supports F5 BIG-IP (`f5_tmsh` / `f5-tmos`) over
+iControl REST. It manages the `remoteServers` IP/port list at
+`/mgmt/tm/sys/syslog`, using `syslog.destinations` from the standards file or
+an explicit `--destination`. Ports default to 514. F5 requires literal IPs;
+IPv6 and route domains are supported for existing destinations.
+
+```bash
+# NetBox inventory and AWS credentials use the same .env settings as WAF.
+./configure.py syslog --netbox --limit my-bigip --f5-insecure
+./configure.py syslog --netbox --limit my-bigip --f5-insecure --apply --yes
+
+# Direct IP: dry run by default, then add, or add/remove with --replace.
+./configure.py syslog --ip 192.0.2.10 --platform f5_tmsh
+./configure.py syslog --ip 192.0.2.10 --platform f5_tmsh --apply
+./configure.py syslog --ip 192.0.2.10 --platform f5_tmsh --replace --apply
+```
+
+The same F5 HTTPS options, `NETOPS_F5_*` settings, and NetBox policy tags
+(`syslog-audit`, `syslog-add`, `syslog-manage`; untagged means audit) apply.
+For CSV/direct IP, the usual CLI add/replace modes apply. An empty remote server
+list can be populated. Retained entries keep their names, local source IPs,
+descriptions, and other options; new entries receive stable unique names.
+System logging facility/severity settings, custom `include` configuration,
+and other properties are preserved. Cisco/Arista severity, source interface,
+origin-id and VRF options are not applied to F5. Existing Cisco/Arista behavior
+and SSH transport remain unchanged, including in mixed inventories.
+
+Install `requests` (or the `waf` extra) for direct-IP/CSV F5 use. Supply an
+explicit F5 platform in inventory or via `--platform`. Changes are read back
+and saved by default; `--no-verify` and `--no-save` retain their usual meanings.
+REST rollback is manual; `before_servers` in the report preserves the original
+remote server list. ConfigSync is not triggered.
+
+Both F5 commands audit **system syslog plus eligible user-defined WAF profiles**
+for the shared NetBox compliance field, but each changes only its selected
+logging type. Run both commands to converge both configurations. The JSON report
+includes the other logging type's audit (`waf_audit` or `system_syslog_audit`).
+An unreadable counterpart fails the device before any configuration change.
+See [F5's system syslog API](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_syslog.html)
+and the field/writeback rules below.
+
 ## WAF remote syslog
 
-`configure.py waf` discovers BIG-IP Application Security logging profiles that
+`configure.py waf` discovers user-defined BIG-IP Application Security logging profiles that
 already have remote storage enabled and at least one remote server configured.
 It uses the existing **`syslog.destinations`** IPs and ports in the standards file
 (514 for a bare IP), through iControl REST over management HTTPS. Local-only
 profiles, empty remote server lists, and non-F5 devices are skipped. It does not
 create logging profiles or attach profiles to virtual servers.
+
+Only profiles explicitly identified as user-defined by F5's `builtIn` flag
+(`disabled`, or boolean `false`) are eligible. Built-in profiles, including
+internal remote loggers and cloud security service logging profiles, are
+excluded before their application subresources are read. The filter uses F5's
+metadata rather than profile names, so custom profiles in `/Common` remain
+eligible. See [F5's built-in profile flag](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/security/security_log_profile.html).
+
+Excluded profiles appear in `skipped_profiles` in the JSON report and in the
+device notes. They never contribute destinations to the plan or compliance
+comparison. Missing or unrecognized `builtIn` values are also skipped; in that
+case `syslog_compliant` is left unchanged because the full user-defined scope
+could not be confirmed. A completed discovery still records `syslog_last_checked`.
+If only built-in profiles exist, the WAF command makes no F5 changes and
+combined compliance is determined by the system syslog destinations.
 
 For NetBox inventory, assign **one** of these tags to each F5 device:
 
@@ -640,8 +699,8 @@ For NetBox inventory, assign **one** of these tags to each F5 device:
 | None of these tags | Audit only. |
 
 Conflicting policy tags fail that device before logging into the F5. These tags
-control this `waf` feature; they do not change the existing Cisco/Arista `syslog`
-command. NetBox policy takes precedence over `--add`/`--replace`. **Without
+control F5 `waf` and `syslog`; they do not change Cisco/Arista syslog behavior.
+NetBox policy takes precedence over `--add`/`--replace` on F5. **Without
 `--apply`, every policy is a dry run, including NetBox writeback.** The tool reads
 policy tags; it never assigns or removes them.
 
@@ -688,9 +747,30 @@ a dedicated F5 configuration if needed. Shell environment variables override
 `--f5-verify-tls` can re-enable TLS verification when the environment disables it.
 The execution flags `--apply` and `--yes` remain on the command line.
 
-To trust internal certificates on **Ubuntu 24.04** or **RHEL 9**, point
-Requests at the system CA bundle in `.env`. This applies to the NetBox and F5
-HTTPS connections, including inside a Python virtual environment:
+On **Python 3.10+**, both `configure.py` and the installed `netops` command call
+`truststore.inject_into_ssl()` before loading the network clients. The
+`truststore` dependency is installed automatically with either installation
+method above. NetBox, F5, and AWS HTTPS clients can use the system trust store,
+including inside a virtual environment; `REQUESTS_CA_BUNDLE` is not needed.
+Importing the `netops` package alone does not modify global SSL behavior.
+
+**RHEL 9's default Python 3.9** cannot use `truststore`. For automatic system
+trust, use Python 3.11 (available on RHEL 9.2+) and recreate the virtual
+environment with that interpreter before installing the dependencies:
+
+```bash
+sudo dnf install python3.11 python3.11-pip
+python3.11 -m venv .venv-311
+. .venv-311/bin/activate
+python -m pip install -e '.[netbox,aws,waf]'
+```
+
+See [RHEL's Python versions](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/installing_and_using_dynamic_programming_languages/index)
+and the [truststore application startup guide](https://truststore.readthedocs.io/en/latest/#user-guide).
+
+For **Python 3.9**, retain the system CA bundle setting in `.env` for NetBox
+and F5 HTTPS connections. It also remains available on newer Python versions
+to supply an additional CA bundle to Requests:
 
 | Operating system | Setting in `.env` |
 | --- | --- |
@@ -726,7 +806,10 @@ usual `--netbox-filter`, `--filter` and `--limit` options narrow the inventory.
 Authentication uses the existing `NET_USER`/`NET_PASS`, AWS secret, or CSV
 credentials. F5 uses HTTPS port 443; `--f5-port`, `--f5-timeout`, and
 `--f5-login-provider` override connection settings. Certificate verification is
-on by default; `--f5-insecure` explicitly disables it. SSH port/key options do
+on by default; `--f5-insecure` explicitly disables it. With F5 verification
+disabled (by that flag or `NETOPS_F5_VERIFY_TLS=false`), urllib3's repeated
+`InsecureRequestWarning` messages are suppressed for the process. Other warning
+categories and connection errors remain visible. SSH port/key options do
 not control this REST connection. Platforms must be present in NetBox/CSV, or
 specified with `--platform f5_tmsh` for a direct IP; WAF does not autodetect over
 SSH. `f5-tmos`, `f5`, `bigip`, and `f5_ltm` also map to `f5_tmsh`.
@@ -742,8 +825,9 @@ in NetBox's Custom Fields UI before running.
 
 The existing **`syslog_compliant`** boolean custom field must also be assigned to
 `dcim.device`. The script validates its type before making changes. A completed
-check sets it to **true only when every eligible WAF logging profile matches the
-fully managed destination list exactly**: all standard IP/port pairs present,
+check sets it to **true only when system syslog and every eligible user-defined
+WAF logging profile match the fully managed destination list exactly**:
+all standard IP/port pairs present,
 with no extra or duplicate destinations. Otherwise it sets it to false. This
 comparison is independent of the device's policy tag: add-only can succeed while
 remaining noncompliant because it preserves extras. After changes, the value is
@@ -753,9 +837,10 @@ The timestamp means **last successfully checked**, not necessarily compliant:
 an audit can find drift, and a completed discovery can find no eligible remote
 profiles. A discovery, configuration, verification, or requested save failure
 leaves both previous field values unchanged. Changes made with `--no-verify`
-do not update either field. A completed discovery with no eligible profiles
-updates the date but leaves the boolean unchanged, since compliance is not
-applicable. Both values are sent in one PATCH and read back for verification;
+do not update either field. With no eligible WAF profiles, the system syslog
+comparison determines compliance. Unknown WAF profile ownership leaves the
+boolean unchanged and records the completed check date. When a verdict is
+available, both values are sent in one PATCH and read back for verification;
 a failed NetBox writeback makes the run fail while preserving F5 results in the
 report. Only these custom-field keys are patched, leaving other fields and tags
 intact. Dry runs preview the date and compliance value without writing them.
