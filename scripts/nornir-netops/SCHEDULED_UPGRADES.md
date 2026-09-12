@@ -69,7 +69,7 @@ Then install a cron entry under the same account. **Including `--apply` permits 
 
 Create the log location with suitable ownership first and rotate it. Set `NETOPS_POLLER` in the shared `.env`, or add `--poller NAME` to the command. The built-in process lock makes overlapping cron ticks exit quietly. At most `--workers` jobs (1–20, default 3) are claimed in a tick and run concurrently through Nornir. Long-running jobs send a heartbeat every 30 seconds. An idle tick makes one check-in, creates no run archive, and does not fetch device credentials or connect over SSH.
 
-`--show-timeout`, `--config-timeout`, `--install-timeout`, `--reload-timeout`, `--settle-seconds`, `--validation-timeout`, and `--poll-interval` also apply. Target/profile flags belong on manually invoked `upgrade`; `upgrade-poll` gets them from NetBox. Use `--report-dir` for per-job archives, not `--report`.
+`--show-timeout`, `--config-timeout`, `--install-timeout`, `--reload-timeout`, `--settle-seconds`, `--validation-timeout`, and `--poll-interval` also apply, as does `--allow-config-mismatch`, which then covers every job the worker runs. Target/profile flags belong on manually invoked `upgrade`; `upgrade-poll` gets them from NetBox. Use `--report-dir` for per-job archives, not `--report`.
 
 ## Progress and interrupted runs
 

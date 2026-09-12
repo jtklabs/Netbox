@@ -31,20 +31,35 @@ CONFIG_HEADER = re.compile(r"^(Building configuration|Current configuration|Usin
                            r"|version \d|ntp clock-period )")
 
 
+# `show running-config` prints each certificate's DER dump under its
+# `crypto pki certificate chain`; `show startup-config` names the NVRAM file
+# that holds it instead (`certificate self-signed 01 nvram:IOS-Self-Sig#1.cer`).
+# Compare chains by trustpoint and certificate identity, not representation.
+CERTIFICATE_REFERENCE = re.compile(r"^(\s*certificate(?:\s+(?:self-signed|ca))?\s+\S+)\s+nvram:\S+\s*$")
+CERTIFICATE_BODY = re.compile(r"^\s+(?:[0-9A-Fa-f]{2,8}(?:\s+[0-9A-Fa-f]{2,8})*|quit)\s*$")
+
+
 def normalized_config(text, boot=False):
     lines = text.splitlines()
     for index, line in enumerate(lines):
         if re.match(r"^version \d", line):
             lines = lines[index + 1:]
             break
-    kept = []
+    kept, in_chain = [], False
     for line in lines:
         if CONFIG_HEADER.match(line):
             continue
         if boot and re.match(r"^(?:no )?boot (?:system|manual)(?: |$)", line):
             continue
-        if line.strip():
-            kept.append(line.rstrip())
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            in_chain = line.startswith("crypto pki certificate chain ")
+        elif in_chain:
+            if CERTIFICATE_BODY.match(line):
+                continue
+            line = CERTIFICATE_REFERENCE.sub(r"\1", line)
+        kept.append(line.rstrip())
     return "\n".join(kept)
 
 

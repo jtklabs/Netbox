@@ -19,6 +19,8 @@ def add_arguments(parser, scheduled=False):
     parser.add_argument("--profile", required=not scheduled, help="YAML describing a locally validated model/version/image path")
     parser.add_argument("--apply", action="store_true", help="perform the selected operation; default is read-only")
     parser.add_argument("--stage-only", action="store_true", help="only check/copy/verify the image on active flash; never install or reload (copy requires --apply)")
+    parser.add_argument("--allow-config-mismatch", action="store_true",
+                        help="continue when running and startup configuration still differ after write memory; the difference is recorded in the report")
     parser.add_argument("--standards", default=os.environ.get("NETOPS_STANDARDS"), help="shared standards file for NetBox settings")
     parser.add_argument("--show-timeout", type=positive, default=60, help="seconds per show command")
     parser.add_argument("--config-timeout", type=positive, default=300, help="seconds for show running-config/startup-config, the slowest reads on a large stack")

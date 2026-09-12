@@ -34,7 +34,7 @@ def device_lock(directory, address):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def preflight(snapshot, profile, stage_only=False, saved=False):
+def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=False):
     blockers = [f"{key}: {value}" for key, value in snapshot["errors"].items()]
     members = snapshot.get("software", {})
     stack = snapshot.get("stack", {})
@@ -71,12 +71,15 @@ def preflight(snapshot, profile, stage_only=False, saved=False):
     # save has been made. A failed read is already reported by its own error.
     plan["unsaved_changes"] = ("config" in snapshot and "startup_config" in snapshot
                                and snapshot["config"] != snapshot["startup_config"])
+    plan["config_mismatch_overridden"] = False
     if plan["unsaved_changes"]:
         # Keep config evidence in the private archive, not progress messages.
         plan["saved_config_diff"] = "\n".join(difflib.unified_diff(
             snapshot["startup_config"].splitlines(), snapshot["config"].splitlines(),
             fromfile="startup-config", tofile="running-config", lineterm=""))
-        if saved:
+        if saved and allow_mismatch:
+            plan["config_mismatch_overridden"] = True
+        elif saved:
             blockers.append("running/startup configuration still differ after write memory; "
                             "see upgrade_plan.saved_config_diff in the local report")
     for cmd in ("show boot", "show install summary"):
@@ -254,7 +257,7 @@ def verify_image(device, profile, snapshot, plan, apply):
                 raise ValueError(f"member {member}: insufficient expansion space after transfer")
 
 
-def target_findings(snapshot, profile, before):
+def target_findings(snapshot, profile, before, saved=True):
     findings = []
     members = snapshot.get("software", {})
     if set(members) != set(before.get("software", {})) or not all(
@@ -267,7 +270,7 @@ def target_findings(snapshot, profile, before):
     if (set(committed) != set(before.get("software", {})) or any(not release_matches(value, profile.target_version) for value in committed.values())
             or re.search(r"(?m)^\s*IMG\s+[UAID]\s+", summary)):
         findings.append({"check": "install_commit", "severity": "error", "message": "target image commit was not confirmed"})
-    findings.extend(boot_findings(snapshot))
+    findings.extend(boot_findings(snapshot, saved=saved))
     return findings
 
 
@@ -306,6 +309,7 @@ def upgrade_device(task, profile, options, reporter):
     changed = False
     plan = {}
     stage_only = getattr(options, "stage_only", False)
+    allow_mismatch = getattr(options, "allow_config_mismatch", False)
 
     def emit(stage, message, payload=None):
         return reporter.emit(task.host, stage, message, payload, changed=changed)
@@ -331,7 +335,7 @@ def upgrade_device(task, profile, options, reporter):
                 configuration_saved = True
             collect = checks.collect_staging if stage_only else checks.collect
             before = collect(device.read, lambda cmd: emit("precheck", cmd))
-            plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved)
+            plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved, allow_mismatch=allow_mismatch)
             plan["configuration_saved"] = configuration_saved
             plan["commands"] = [] if stage_only else ["write memory"] + BOOT_COMMANDS + ["write memory", f"install add file flash:{profile.image} activate commit"]
             emit("precheck_complete", "Image staging checks captured" if stage_only else "Baseline and upgrade plan captured", {"pre": before, "upgrade_plan": plan,
@@ -342,8 +346,9 @@ def upgrade_device(task, profile, options, reporter):
             if plan["bundle_conversion"]:
                 emit("bundle_mode_flagged", "BUNDLE mode detected; staging will leave it unchanged" if stage_only else "Device requires BUNDLE to INSTALL conversion")
             if plan.get("unsaved_changes"):
-                emit("unsaved_changes", "Running configuration still differs from startup-config after write memory" if configuration_saved
-                     else "Running configuration has unsaved changes; --apply saves them at the start of prechecks")
+                emit("unsaved_changes", ("Running configuration still differs from startup-config after write memory"
+                                         + ("; continuing because --allow-config-mismatch is set" if plan["config_mismatch_overridden"] else ""))
+                     if configuration_saved else "Running configuration has unsaved changes; --apply saves them at the start of prechecks")
             if plan["already_current"] and not plan["blockers"] and not stage_only:
                 emit("already_current", "Already running target release in INSTALL mode")
                 return Result(host=task.host, result=plan)
@@ -392,7 +397,7 @@ def upgrade_device(task, profile, options, reporter):
                 raise ValueError("configuration save was not acknowledged")
             saved_state = {"config": checks.normalized_config(device.read("show running-config")),
                            "startup_config": checks.normalized_config(device.read("show startup-config"))}
-            if boot_findings(saved_state):
+            if boot_findings(saved_state, saved=not allow_mismatch):
                 raise ValueError("saved packages.conf/autoboot settings could not be verified; install not started")
             if checks.normalized_config(saved_state["config"], boot=True) != checks.normalized_config(before["config"], boot=True):
                 raise ValueError("unexpected configuration change during boot preparation; install not started")
@@ -412,7 +417,7 @@ def upgrade_device(task, profile, options, reporter):
             deadline, consecutive = time.monotonic() + options.validation_timeout, 0
             while True:
                 after = checks.collect(device.read, lambda cmd: emit("postcheck", cmd), before["routing_commands"])
-                findings = checks.compare(before, after) + target_findings(after, profile, before)
+                findings = checks.compare(before, after) + target_findings(after, profile, before, saved=not allow_mismatch)
                 emit("validating", "Post-upgrade comparison captured", {"post": after, "findings": findings,
                      "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
                                           "error_count": sum(f["severity"] == "error" for f in findings)}})
