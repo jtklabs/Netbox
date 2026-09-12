@@ -1050,3 +1050,132 @@ def test_cli_config_timeout_default_and_override():
     from netops.cli import build_parser
     assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).config_timeout == 300
     assert build_parser().parse_args(["upgrade-poll", "--config-timeout", "900"]).config_timeout == 900
+
+
+
+CHAIN_RUNNING = """crypto pki trustpoint TP-self-signed-1234567890
+ enrollment selfsigned
+ subject-name cn=IOS-Self-Signed-Certificate-1234567890
+ revocation-check none
+ rsakeypair TP-self-signed-1234567890
+!
+crypto pki certificate chain TP-self-signed-1234567890
+ certificate self-signed 01
+  30820330 30820218 A0030201 02020101 300D0609 2A864886 F70D0101 05050030
+  31312F30 2D060355 04031326 494F532D 53656C66 2D536967 6E65642D 43657274
+  A1B2C3
+  \tquit
+crypto pki certificate chain SLA-TrustPoint
+ certificate ca 01
+  30820321 30820209 A0030201 02020101 300D0609 2A864886 F70D0101 0B050030
+  \tquit
+!
+crypto key pubkey-chain rsa
+ named-key peer.example.com
+  key-string
+   30820122 300D0609 2A864886 F70D0101 01050003 82010F00 3082010A 02820101
+  quit
+!
+"""
+CHAIN_STARTUP = """crypto pki trustpoint TP-self-signed-1234567890
+ enrollment selfsigned
+ subject-name cn=IOS-Self-Signed-Certificate-1234567890
+ revocation-check none
+ rsakeypair TP-self-signed-1234567890
+!
+crypto pki certificate chain TP-self-signed-1234567890
+ certificate self-signed 01 nvram:IOS-Self-Sig#1.cer
+crypto pki certificate chain SLA-TrustPoint
+ certificate ca 01 nvram:CiscoLicensi#1CA.cer
+!
+crypto key pubkey-chain rsa
+ named-key peer.example.com
+  key-string
+   30820122 300D0609 2A864886 F70D0101 01050003 82010F00 3082010A 02820101
+  quit
+!
+"""
+
+
+def with_certificates(config, chain):
+    return config.replace("hostname sw1\n", "hostname sw1\n" + chain)
+
+
+def test_certificate_chains_compare_by_identity_not_representation():
+    raw = transcript()
+    running = checks.normalized_config(with_certificates(raw["show running-config"], CHAIN_RUNNING))
+    startup = checks.normalized_config(with_certificates(raw["show startup-config"], CHAIN_STARTUP))
+    assert running == startup
+    assert " certificate self-signed 01" in running and " certificate ca 01" in running
+    assert "nvram:" not in running and "30820330" not in running
+    # Key material outside a certificate chain is still compared verbatim.
+    assert "   30820122 300D0609" in running
+    other_key = CHAIN_STARTUP.replace("30820122 300D0609", "30820122 DEADBEEF")
+    assert checks.normalized_config(with_certificates(raw["show startup-config"], other_key)) != running
+    # A different trustpoint or certificate is still a difference.
+    other_chain = CHAIN_STARTUP.replace("certificate self-signed 01 nvram", "certificate self-signed 02 nvram")
+    assert checks.normalized_config(with_certificates(raw["show startup-config"], other_chain)) != running
+
+
+def test_saved_certificates_do_not_block_after_write_memory(profile):
+    raw = transcript()
+    raw["show running-config"] = with_certificates(raw["show running-config"], CHAIN_RUNNING)
+    raw["show startup-config"] = with_certificates(raw["show startup-config"], CHAIN_STARTUP)
+    plan = workflow.preflight(baseline(raw), profile, saved=True)
+    assert not plan["blockers"] and not plan["unsaved_changes"]
+
+
+
+def test_override_continues_past_a_remaining_mismatch_and_records_it(profile):
+    snapshot = baseline()
+    snapshot["config"] = snapshot["config"].replace("switchport access vlan 10", "switchport access vlan 20")
+    plan = workflow.preflight(snapshot, profile, saved=True, allow_mismatch=True)
+    assert not plan["blockers"]
+    assert plan["unsaved_changes"] and plan["config_mismatch_overridden"]
+    assert "+ switchport access vlan 20" in plan["saved_config_diff"]
+    # Without the save nothing is overridden; a dry run just records the diff.
+    assert not workflow.preflight(snapshot, profile, allow_mismatch=True)["config_mismatch_overridden"]
+
+
+def test_override_skips_only_the_saved_config_equality_checks():
+    snapshot = {"config": "boot system flash:wrong.bin\nhostname a", "startup_config": "boot system flash:packages.conf\nhostname b"}
+    checks_run = [f["check"] for f in workflow.target_findings({"software": {}, "raw": {}, **snapshot}, None, {"software": {}}, saved=False)]
+    assert "config_boot" in checks_run and "saved_config" not in checks_run
+
+
+def test_override_upgrade_completes_when_startup_never_matches_running(profile, options, fake_device, monkeypatch):
+    # NVRAM stores a representation that never equals running-config, before
+    # or after the reload, the way certificate references used to differ.
+    options.apply = True
+    options.allow_config_mismatch = True
+    original_write, original_wait = fake_device.write, fake_device.wait_for_target
+
+    def nvram_representation(self):
+        self.raw["show startup-config"] = self.raw["show running-config"] + "\nline nvram-only-representation"
+
+    def write(self, command, timeout=120):
+        output = original_write(self, command, timeout)
+        if command == "write memory":
+            nvram_representation(self)
+        return output
+
+    def reload(self, profile):
+        original_wait(self, profile)
+        nvram_representation(self)
+
+    monkeypatch.setattr(fake_device, "write", write)
+    monkeypatch.setattr(fake_device, "wait_for_target", reload)
+    result, reporter = run_device(profile, options)
+    assert not result.failed and result.changed
+    assert fake_device.instances[0].mutations == ["write memory", "write memory", f"install add file flash:{profile.image} activate commit"]
+    seen = stages(reporter)
+    assert "unsaved_changes" in seen and seen[-1] in ("completed", "completed_with_warnings")
+    note = next(call.args[2] for call in reporter.emit.call_args_list if call.args[1] == "unsaved_changes")
+    assert "continuing because --allow-config-mismatch" in note
+    assert plan_from(reporter)["config_mismatch_overridden"]
+
+
+def test_cli_override_flag_defaults_off():
+    from netops.cli import build_parser
+    assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).allow_config_mismatch is False
+    assert build_parser().parse_args(["upgrade-poll", "--apply", "--allow-config-mismatch"]).allow_config_mismatch is True

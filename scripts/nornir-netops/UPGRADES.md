@@ -102,6 +102,14 @@ A dry run performs no save. It records the same diff, emits the
 `unsaved_changes` stage, and notes in `dry_run_complete` that apply will save
 first. Already-current devices are saved by `--apply` as well, then left alone.
 
+`--allow-config-mismatch` continues past a difference that remains after the
+save. The device is not blocked, and the running/startup equality checks after
+boot preparation and after the upgrade are skipped; every other check, including
+the saved autoboot settings, still applies. The diff is still recorded, the
+`unsaved_changes` stage says the override was used, and
+`upgrade_plan.config_mismatch_overridden` is set. Read the diff first and use
+the flag only when you know why the two dumps differ.
+
 ## Pre-stage the installer only
 
 Set the switch-reachable download URL in your upgrade profile:
@@ -182,7 +190,7 @@ they flag additions and removals, including replacements with equal totals.
 
 | Check | What is compared |
 | --- | --- |
-| Running/startup config | Ordered configuration diff of everything after the `version` line; the byte-count, `service compress-config`, timestamp and post-reload headers above it and NTP clock-period are omitted. Intended boot changes are checked separately against the exact saved settings. |
+| Running/startup config | Ordered configuration diff of everything after the `version` line; the byte-count, `service compress-config`, timestamp and post-reload headers above it and NTP clock-period are omitted. Certificate chains are compared by trustpoint and certificate identity, because startup-config stores certificate bodies as NVRAM file references while running-config prints them in full. Intended boot changes are checked separately against the exact saved settings. |
 | NAC | Interface, MAC, authentication method, domain and authorization status; total/status counts and sessions per port. Session IDs are excluded because they regenerate. |
 | MAC table | MAC, VLAN, type and destination ports; total and per-port counts. Parsed MAC identities and device-reported totals are cross-checked. |
 | Interfaces | Link status, access/trunk VLAN, duplex, speed; IPv4 and, when enabled, IPv6 interface/address state. |
