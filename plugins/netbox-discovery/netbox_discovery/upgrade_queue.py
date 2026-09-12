@@ -144,6 +144,31 @@ def check_target(job):
         raise QueueError('Device is no longer the virtual chassis master.')
 
 
+@transaction.atomic
+def edit_pending(user, pk, data):
+    # Serialize edits with claims so a worker's captured assignment cannot change.
+    job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
+    if job.status != 'pending':
+        raise QueueError('Only pending jobs can be edited. This job has already been claimed or closed.')
+    if data['last_updated'] != job.last_updated:
+        raise QueueError('This job changed while the form was open. Reload the page before editing again.')
+    if job.operation != 'audit' and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
+        raise QueueError('Editing staged-image or upgrade jobs requires apply permission.')
+    check_target(job)
+    # Reuse scheduling validation and device visibility without retargeting the job.
+    prepare(user, {**data, 'filters': {'id': [job.device_id]}, 'poller': job.poller.name})
+    job.snapshot()
+    for field in ('operation', 'scheduled_at', 'start_before', 'profile', 'description'):
+        setattr(job, field, data[field])
+    job.full_clean()
+    job.save()
+    if not UpgradeJob.objects.restrict(user, 'change').filter(pk=pk).exists():
+        raise QueueError('The updated job is outside your change permissions.')
+    if job.operation != 'audit' and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
+        raise QueueError('The updated job is outside your apply permissions.')
+    return job
+
+
 def expire(queryset, now):
     # Queryset is permission-restricted and poller-scoped by the caller.
     queryset.filter(status='pending', start_before__lte=now).update(

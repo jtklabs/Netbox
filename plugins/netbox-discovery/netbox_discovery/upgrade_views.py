@@ -2,7 +2,7 @@
 from django import forms
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
 from django.core.exceptions import ValidationError
@@ -11,6 +11,7 @@ import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from netbox.forms import NetBoxModelFilterSetForm
 from netbox.views.generic import ObjectListView, ObjectView
+from netbox.object_actions import AddObject, EditObject
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
 from utilities.views import register_model_view
 
@@ -20,14 +21,7 @@ from .upgrade_filtersets import UpgradeJobFilterSet
 from . import upgrade_queue as queue
 
 
-class ScheduleForm(forms.Form):
-    site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False)
-    role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
-    platform = DynamicModelChoiceField(queryset=Platform.objects.all(), required=False)
-    devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False,
-                                              help_text='Optional explicit devices; combined with the filters above.')
-    poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
-                                    help_text='Normally automatic; choose one when devices have multiple poller tags.')
+class UpgradePlanForm(forms.Form):
     operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
     scheduled_at = forms.DateTimeField(help_text='Include a UTC offset, for example 2026-09-20T22:00:00-04:00.')
     start_before = forms.DateTimeField(help_text='Latest start for device changes. Running jobs continue past this time.')
@@ -44,6 +38,18 @@ class ScheduleForm(forms.Form):
         except (yaml.YAMLError, ValueError, TypeError) as exc:
             raise forms.ValidationError(str(exc)) from exc
 
+
+class ScheduleForm(UpgradePlanForm):
+    site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False)
+    role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    platform = DynamicModelChoiceField(queryset=Platform.objects.all(), required=False)
+    devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False,
+                                              help_text='Optional explicit devices; combined with the filters above.')
+    poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
+                                    help_text='Normally automatic; choose one when devices have multiple poller tags.')
+    field_order = ('site', 'role', 'platform', 'devices', 'poller', 'operation',
+                   'scheduled_at', 'start_before', 'profile', 'description')
+
     def schedule_data(self):
         data = dict(self.cleaned_data)
         data['filters'] = {key + '_id': [data[key].pk] for key in ('site', 'role', 'platform') if data[key]}
@@ -51,6 +57,43 @@ class ScheduleForm(forms.Form):
             data['filters']['id'] = [obj.pk for obj in data['devices']]
         data['poller'] = data['poller'].name if data['poller'] else ''
         return data
+
+
+class UpgradeJobEditForm(UpgradePlanForm):
+    last_updated = forms.DateTimeField(widget=forms.HiddenInput)
+
+
+class UpgradeJobEditView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_discovery.change_upgradejob'
+    raise_exception = True
+
+    def get_job(self, request, pk):
+        return get_object_or_404(UpgradeJob.objects.restrict(request.user, 'change'), pk=pk)
+
+    def get(self, request, pk):
+        import yaml
+        job = self.get_job(request, pk)
+        if job.status != 'pending':
+            messages.error(request, 'Only pending jobs can be edited. This job has already been claimed or closed.')
+            return redirect(job.get_absolute_url())
+        form = UpgradeJobEditForm(initial={
+            'operation': job.operation, 'scheduled_at': job.scheduled_at.isoformat(),
+            'start_before': job.start_before.isoformat(), 'description': job.description,
+            'profile': yaml.safe_dump(job.profile, sort_keys=False), 'last_updated': job.last_updated.isoformat(),
+        })
+        return render(request, 'netbox_discovery/upgradejob_edit.html', {'object': job, 'form': form})
+
+    def post(self, request, pk):
+        job = self.get_job(request, pk)
+        form = UpgradeJobEditForm(request.POST)
+        if form.is_valid():
+            try:
+                job = queue.edit_pending(request.user, pk, form.cleaned_data)
+                messages.success(request, 'Upgrade job updated.')
+                return redirect(job.get_absolute_url())
+            except (queue.QueueError, ValidationError) as exc:
+                form.add_error(None, str(exc))
+        return render(request, 'netbox_discovery/upgradejob_edit.html', {'object': job, 'form': form})
 
 
 class UpgradeScheduleView(PermissionRequiredMixin, View):
@@ -106,12 +149,18 @@ class UpgradeJobListView(ObjectListView):
     table = UpgradeJobTable
     filterset = UpgradeJobFilterSet
     filterset_form = UpgradeFilterForm
-    actions = ()
+    actions = (AddObject,)
 
 
 @register_model_view(UpgradeJob)
 class UpgradeJobView(ObjectView):
     queryset = UpgradeJob.objects.select_related('device', 'poller', 'requested_by')
+    actions = (EditObject,)
+
+    def get_permitted_actions(self, user, model=None):
+        if model.status != 'pending' or not UpgradeJob.objects.restrict(user, 'change').filter(pk=model.pk).exists():
+            return ()
+        return super().get_permitted_actions(user, model)
 
     def get_extra_context(self, request, instance):
         import json

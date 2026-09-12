@@ -216,6 +216,121 @@ class UpgradeQueueTest(UpgradeFixture, TestCase):
             self.assertEqual(response.status_code, 200, url)
 
 
+class UpgradeJobUiTest(UpgradeFixture, TestCase):
+    def setUp(self):
+        from django.test import Client
+        self.setup_data()
+        self.client = Client()
+        self.client.force_login(self.user)
+        self.job = self.scheduled()
+        self.edit_url = reverse('plugins:netbox_discovery:upgradejob_edit', args=[self.job.pk])
+
+    def payload(self, **changes):
+        import yaml
+        return {'operation': 'audit', 'profile': yaml.safe_dump(PROFILE),
+                'scheduled_at': self.job.scheduled_at.isoformat(),
+                'start_before': self.job.start_before.isoformat(),
+                'last_updated': self.job.last_updated.isoformat(), 'description': 'Updated job', **changes}
+
+    def grant(self, user, model, actions, constraints=None):
+        permission = ObjectPermission.objects.create(name=str(uuid.uuid4()), actions=actions, constraints=constraints)
+        permission.object_types.add(ContentType.objects.get_for_model(model))
+        permission.users.add(user)
+
+    def test_list_has_create_control_and_pending_detail_has_only_working_edit_action(self):
+        from netbox.object_actions import AddObject, EditObject
+        response = self.client.get(reverse('plugins:netbox_discovery:upgradejob_list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(AddObject, response.context['actions'])
+        self.assertContains(response, '/plugins/discovery/upgrades/add/', count=2)
+        response = self.client.get(self.job.get_absolute_url())
+        self.assertEqual(list(response.context['actions']), [EditObject])
+        self.assertContains(response, self.edit_url)
+        response = self.client.get(self.edit_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['form'].initial['operation'], 'upgrade')
+        self.assertContains(response, PROFILE['image'])
+
+    def test_edit_saves_plan_for_next_claim_without_changing_device_or_other_jobs(self):
+        other = self.scheduled()
+        profile = {**PROFILE, 'target_version': '17.18.5', 'image': 'cisco9k_iosxe.17.18.05.SPA.bin'}
+        import yaml
+        response = self.client.post(self.edit_url, self.payload(profile=yaml.safe_dump(profile), device=999,
+                                    poller=999, status='running', claim_token=str(uuid.uuid4())))
+        self.assertRedirects(response, self.job.get_absolute_url())
+        self.job.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(self.job.profile, profile)
+        self.assertEqual(self.job.operation, 'audit')
+        self.assertEqual(self.job.description, 'Updated job')
+        self.assertEqual(self.job.device_id, self.device.pk)
+        self.assertEqual(self.job.poller_id, self.poller.pk)
+        self.assertEqual(self.job.status, 'pending')
+        self.assertIsNone(self.job.claim_token)
+        self.assertEqual(other.profile, PROFILE)
+        self.assertEqual(queue.assignment(self.take()[0])['profile'], profile)
+
+    def test_invalid_profile_and_window_do_not_save(self):
+        for changes in ({'profile': 'invalid: true'}, {'start_before': self.job.scheduled_at.isoformat()}):
+            response = self.client.post(self.edit_url, self.payload(**changes))
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.context['form'].errors)
+            self.job.refresh_from_db()
+            self.assertEqual(self.job.operation, 'upgrade')
+
+    def test_claim_between_loading_form_and_saving_rejects_edit(self):
+        data = self.payload()
+        self.take()
+        response = self.client.post(self.edit_url, data)
+        self.assertContains(response, 'Only pending jobs can be edited')
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, 'claimed')
+        self.assertEqual(self.job.operation, 'upgrade')
+
+    def test_active_and_closed_jobs_do_not_offer_edit_or_allow_direct_edit(self):
+        for status in ('claimed', 'running', 'completed', 'cancelled', 'recovery_required'):
+            UpgradeJob.objects.filter(pk=self.job.pk).update(status=status)
+            response = self.client.get(self.job.get_absolute_url())
+            self.assertNotContains(response, self.edit_url)
+            self.assertRedirects(self.client.get(self.edit_url), self.job.get_absolute_url())
+            response = self.client.post(self.edit_url, self.payload())
+            self.assertContains(response, 'Only pending jobs can be edited')
+
+    def test_stale_browser_form_cannot_overwrite_another_edit(self):
+        data = self.payload()
+        self.assertEqual(self.client.post(self.edit_url, data).status_code, 302)
+        response = self.client.post(self.edit_url, {**data, 'description': 'Stale edit'})
+        self.assertContains(response, 'changed while the form was open')
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.description, 'Updated job')
+
+    def test_view_only_user_has_no_create_or_edit_controls(self):
+        user = get_user_model().objects.create_user('upgrade-viewer')
+        self.grant(user, UpgradeJob, ['view'])
+        self.client.force_login(user)
+        response = self.client.get(reverse('plugins:netbox_discovery:upgradejob_list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context['actions']), [])
+        self.assertEqual(self.client.get(self.edit_url).status_code, 403)
+        self.assertEqual(self.client.post(self.edit_url, self.payload()).status_code, 403)
+
+    def test_change_and_apply_object_constraints_are_enforced(self):
+        user = get_user_model().objects.create_user('upgrade-editor')
+        self.grant(user, Device, ['view'])
+        self.grant(user, UpgradeJob, ['view', 'change'])
+        self.grant(user, UpgradeJob, ['apply'], {'poller__name': 'other'})
+        self.client.force_login(user)
+        response = self.client.post(self.edit_url, self.payload())
+        self.assertContains(response, 'requires apply permission')
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.operation, 'upgrade')
+        UpgradeJob.objects.filter(pk=self.job.pk).update(operation='audit')
+        response = self.client.post(self.edit_url, self.payload(operation='upgrade'))
+        self.assertContains(response, 'outside your apply permissions')
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.operation, 'audit')
+
+
 class UpgradeClaimConcurrencyTest(UpgradeFixture, TransactionTestCase):
     def setUp(self):
         self.setup_data()

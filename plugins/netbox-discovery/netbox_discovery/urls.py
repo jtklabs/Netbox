@@ -86,6 +86,7 @@ urlpatterns += [
     path('upgrades/', upgrade_views.UpgradeJobListView.as_view(), name='upgradejob_list'),
     path('upgrades/add/', upgrade_views.UpgradeScheduleView.as_view(), name='upgradejob_add'),
     path('upgrades/<int:pk>/', upgrade_views.UpgradeJobView.as_view(), name='upgradejob'),
+    path('upgrades/<int:pk>/edit/', upgrade_views.UpgradeJobEditView.as_view(), name='upgradejob_edit'),
     path('upgrades/<int:pk>/cancel/', upgrade_views.UpgradeCancelView.as_view(), name='upgradejob_cancel'),
     path('upgrades/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradejob_changelog',
          kwargs={'model': UpgradeJob}),
