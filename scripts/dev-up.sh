@@ -70,7 +70,7 @@ elif [ -n "$host" ]; then
 fi
 
 echo '==> building the NetBox image (plugins are compiled in)'
-docker compose build
+bash scripts/compose-build.sh
 
 echo '==> starting the stack'
 # Not fatal: netbox-worker waits on netbox's healthcheck, which does not pass

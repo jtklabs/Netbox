@@ -10,9 +10,9 @@
 #   ./scripts/prod-build.sh --tag NAME   build under a different tag
 #   ./scripts/prod-build.sh --no-verify  skip the plugin load check
 #
-# Deliberately uses `docker build` rather than compose: the image has no
-# dependency on any env file, while the prod compose chain expects
-# env/prod.env, which lives on the data disk and is absent at bake time.
+# Reads PYTHON_INDEX_URL from the root .env or exported environment. Uses
+# docker build so the runtime prod compose chain and env/prod.env are not
+# required during an AMI bake.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,12 +41,8 @@ fi
 
 echo "==> base image:  $base_image"
 echo "==> building:    $image"
-if [ -z "${PYTHON_INDEX_URL:-}" ]; then
-  echo 'Set PYTHON_INDEX_URL in the build environment (the Python package index /simple URL).' >&2
-  echo 'For builds using the root .env, use docker compose build netbox.' >&2
-  exit 1
-fi
-export PYTHON_INDEX_URL
+source scripts/load-build-index.sh
+load_python_build_index
 docker build --secret id=python_index_url,env=PYTHON_INDEX_URL -f Dockerfile-Plugins -t "$image" .
 
 if [ "$verify" = true ]; then

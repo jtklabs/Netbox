@@ -2,13 +2,12 @@
 # The index exists only for this BuildKit RUN; it is never image configuration.
 set -eu
 index_file=/run/secrets/python_index_url
-if [ ! -s "$index_file" ]; then
-    echo 'Set PYTHON_INDEX_URL in the root .env before building NetBox.' >&2
+if ! UV_DEFAULT_INDEX=$(cat "$index_file" 2>/dev/null); then
+    echo 'The Python index build secret could not be read. Build with scripts/compose-build.sh.' >&2
     exit 1
 fi
-UV_DEFAULT_INDEX=$(cat "$index_file")
 if [ -z "$UV_DEFAULT_INDEX" ]; then
-    echo 'PYTHON_INDEX_URL must not be empty.' >&2
+    echo 'The Python index build secret is empty. Build with scripts/compose-build.sh to forward PYTHON_INDEX_URL from .env.' >&2
     exit 1
 fi
 # Override the default index, rather than adding a secondary index while

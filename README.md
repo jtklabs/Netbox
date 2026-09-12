@@ -25,7 +25,7 @@ Doing it by hand is the same three steps:
 ```bash
 ./scripts/init-dev-env.sh   # generates .env + env/*.env with fresh local secrets
 # Set PYTHON_INDEX_URL in .env before building.
-docker compose build
+bash scripts/compose-build.sh
 docker compose up -d
 ```
 
@@ -44,9 +44,10 @@ PYTHON_INDEX_URL=https://packages.example.com/repository/pypi/simple/
 ```
 
 Use your internal index's actual `/simple/` URL. In production this `.env` is
-normally linked to `/mnt/data_disk/netbox-secrets/.env`. This is a build setting,
+linked to the data disk, for example `/data/netbox-secrets/.env` (the bootstrap
+default is `/mnt/data_disk/netbox-secrets/.env`). This is a build setting,
 so putting it in `env/prod.env` or the remote netops script's `.env` does not apply.
-Compose and bootstrap pass it to both plugin installation steps as a BuildKit
+The build scripts and bootstrap pass it to both plugin installation steps as a BuildKit
 secret. It replaces the default package index; there is no public PyPI fallback.
 The index must serve build dependencies such as `setuptools`, even though our
 plugins are copied from this repository. A missing or empty setting stops builds.
@@ -59,15 +60,30 @@ Existing host `pip.conf` / `PIP_INDEX_URL` settings are not inherited by this bu
 After setting or changing the index, rebuild and recreate the app containers:
 
 ```bash
-docker compose build --no-cache netbox
+bash scripts/compose-build.sh --no-cache netbox
 docker compose up -d --force-recreate netbox netbox-worker
 ```
 
 `--no-cache` forces package installation to run again: BuildKit secret-value
 changes alone do not invalidate cached layers. Bootstrap still skips building
-when an image is already present. For AMI builds with `scripts/prod-build.sh`,
-export `PYTHON_INDEX_URL` in the build process environment; that script deliberately
-does not load runtime `.env` files. If using `sudo`, preserve that variable with
+when an image is already present. The wrapper resolves dotenv values using
+Compose, then explicitly exports only `PYTHON_INDEX_URL` to the builder. This
+avoids builders that pass an empty secret when the value exists only in `.env`.
+It works with both Compose Bake and the internal builder; no `COMPOSE_BAKE`
+override is needed. It does not source the env file as shell code or print the URL.
+
+For an explicit production env path, run from the repository:
+
+```bash
+sudo bash scripts/compose-build.sh --env-file /data/netbox-secrets/.env --no-cache netbox
+sudo docker compose up -d --force-recreate netbox netbox-worker
+```
+
+`scripts/prod-build.sh` also reads the root `.env` (symlinks work), or accepts an
+exported `PYTHON_INDEX_URL` for AMI builds without env files. It does not require
+the runtime `env/prod.env`. As with Compose, an exported setting takes precedence
+over the file, even when empty: unset an empty `PYTHON_INDEX_URL` before building.
+When using an exported value with `sudo`, preserve it with
 `sudo --preserve-env=PYTHON_INDEX_URL ./scripts/prod-build.sh`.
 
 ### Deployed from a ZIP rather than a clone?

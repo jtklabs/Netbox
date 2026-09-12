@@ -20,7 +20,44 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @unittest.skipUnless(os.environ.get('NETBOX_TEST_DOCKER') == '1', 'requires local Docker')
 class BuildIndexTest(unittest.TestCase):
+    def test_loader_without_runtime_env_files(self):
+        with tempfile.TemporaryDirectory(prefix='python-index-loader-') as directory:
+            root = Path(directory)
+            # AMI builds need no runtime compose files or database credentials.
+            (root / '.env').write_text(
+                'COMPOSE_FILE=missing-runtime-compose.yml\n'
+                'INDEX_HOST=packages.invalid\n'
+                'PYTHON_INDEX_URL=https://${INDEX_HOST}/simple/\n'
+                'UNRELATED_SECRET=not-for-the-build\n')
+            env = dict(os.environ)
+            for key in ('PYTHON_INDEX_URL', 'COMPOSE_FILE', 'COMPOSE_ENV_FILES'):
+                env.pop(key, None)
+            command = ['bash', '-c', '''set -euo pipefail
+source "$1"
+load_python_build_index
+test "$PYTHON_INDEX_URL" = "$EXPECTED_INDEX"
+test -z "${UNRELATED_SECRET+x}"
+''', 'loader-test', str(ROOT / 'scripts/load-build-index.sh')]
+            for override in (None, 'https://override.invalid/simple/', ''):
+                with self.subTest(override=override):
+                    case_env = dict(env, EXPECTED_INDEX=override or 'https://packages.invalid/simple/')
+                    if override is not None:
+                        case_env['PYTHON_INDEX_URL'] = override
+                    result = subprocess.run(command, cwd=root, env=case_env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1 if override == '' else 0, result.stderr)
+                    self.assertNotIn('https://', result.stdout + result.stderr)
+                    self.assertNotIn('not-for-the-build', result.stdout + result.stderr)
+            (root / '.env').unlink()
+            env.update(PYTHON_INDEX_URL='https://bake.invalid/simple/', EXPECTED_INDEX='https://bake.invalid/simple/')
+            result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_env_index_is_used_for_packages_and_build_dependencies(self):
+        for bake in ('false', 'true'):
+            with self.subTest(COMPOSE_BAKE=bake):
+                self.build_with_index(bake)
+
+    def build_with_index(self, bake):
         with tempfile.TemporaryDirectory(prefix='python-index-test-') as directory:
             root = Path(directory)
             context, registry = root / 'context', root / 'registry'
@@ -45,6 +82,9 @@ class BuildIndexTest(unittest.TestCase):
                 (context / 'local-plugin/pyproject.toml').write_text(
                     '[build-system]\nrequires=["index-probe==1.0.0"]\nbuild-backend="index_probe"\n')
                 shutil.copy2(ROOT / 'scripts/install-build-packages.sh', context / 'install.sh')
+                (context / 'scripts').mkdir()
+                for name in ('compose-build.sh', 'load-build-index.sh'):
+                    shutil.copy2(ROOT / 'scripts' / name, context / 'scripts' / name)
                 (context / 'Dockerfile').write_text('''FROM netboxcommunity/netbox:v4.6.7-5.0.2
 COPY install.sh /install.sh
 COPY local-plugin /local-plugin
@@ -65,13 +105,19 @@ secrets:
   python_index_url:
     environment: PYTHON_INDEX_URL
 ''')
-                secret = 'test-password-' + uuid.uuid4().hex
+                secret = 'test-password-$literal-' + uuid.uuid4().hex
                 index = f'http://test:{secret}@host.docker.internal:{server.server_port}/simple/'
-                (context / '.env').write_text('PYTHON_INDEX_URL=' + index + '\n')
+                env_file = root / 'persistent.env'
+                env_file.write_text("PYTHON_INDEX_URL='" + index + "'\n")
+                (context / '.env').symlink_to(env_file)
                 env = dict(os.environ)
                 env.pop('PYTHON_INDEX_URL', None)
-                command = ['docker', 'compose', '-f', str(context / 'compose.yml'),
-                           '--project-directory', str(context), 'build', '--no-cache']
+                env.pop('COMPOSE_FILE', None)
+                env.pop('COMPOSE_ENV_FILES', None)
+                env['COMPOSE_BAKE'] = bake
+                command = ['bash', str(context / 'scripts/compose-build.sh'), '--no-cache']
+                if bake == 'false':
+                    command[2:2] = ['--env-file', str(env_file)]
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 output = result.stdout + result.stderr
                 self.assertNotIn(secret, output)
