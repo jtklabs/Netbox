@@ -1,5 +1,6 @@
 """One independently recoverable Nornir task per switch or management stack."""
 
+import difflib
 import fcntl
 import hashlib
 import re
@@ -66,7 +67,13 @@ def preflight(snapshot, profile, stage_only=False):
     if at_target and not conversion and boot_findings(snapshot):
         blockers.append("target is running but saved install-mode autoboot settings are not healthy")
     if snapshot.get("config") != snapshot.get("startup_config"):
-        blockers.append("running/startup configuration differ; resolve unsaved changes before upgrading")
+        blockers.append("running/startup configuration differ; resolve unsaved changes before upgrading; "
+                        "see upgrade_plan.saved_config_diff in the local report")
+        if 'config' in snapshot and 'startup_config' in snapshot:
+            # Keep config evidence in the private archive, not progress messages.
+            plan['saved_config_diff'] = '\n'.join(difflib.unified_diff(
+                snapshot['startup_config'].splitlines(), snapshot['config'].splitlines(),
+                fromfile='startup-config', tofile='running-config', lineterm=''))
     for cmd in ("show boot", "show install summary"):
         if cmd in snapshot["warnings"]:
             blockers.append(f"required install preflight unavailable: {cmd}")

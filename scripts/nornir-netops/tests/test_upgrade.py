@@ -56,6 +56,23 @@ def test_baseline_parses_realistic_tables_without_losing_endpoints():
     assert snapshot["config"] == snapshot["startup_config"]
 
 
+@pytest.mark.parametrize('port', ['Fi1/0/49', 'Ap1/0/1', 'Tw1/0/1', 'AppGigabitEthernet1/0/1', 'TwoHundredGigE1/1/1'])
+def test_interface_check_does_not_require_a_known_port_abbreviation(port):
+    raw = transcript()
+    raw['show interfaces status'] += f'{port:<31} connected    10         a-full a-1000 10/100/1000BaseTX\n'
+    snapshot = baseline(raw)
+    assert 'interfaces' not in snapshot['errors']
+    assert {row['port'] for row in snapshot['tables']['interfaces']} == {'Gi1/0/1', port}
+
+
+@pytest.mark.parametrize('ports', [[], ['Gi1/0/99'], ['Gi1/0/1', 'Gi1/0/1']])
+def test_interface_check_rejects_missing_replaced_or_duplicated_records(monkeypatch, ports):
+    monkeypatch.setattr(checks, 'parse_output', lambda **kwargs: [dict(port=port) for port in ports])
+    with pytest.raises(ValueError, match='parser (returned no records|did not account for every table row)'):
+        checks.table('show interfaces status', *checks.TABLES['interfaces'][1:4],
+                     transcript()['show interfaces status'])
+
+
 @pytest.mark.parametrize("change,expected", [
     (lambda s: s["software"]["1"].update(version="17.6.5"), "starting version"),
     (lambda s: s["software"]["1"].update(model="C9500-24Y4C"), "PID"),
@@ -68,6 +85,16 @@ def test_preflight_gates(profile, change, expected):
     snapshot = baseline()
     change(snapshot)
     assert expected in " ".join(workflow.preflight(snapshot, profile)["blockers"])
+
+
+def test_unsaved_configuration_remains_blocked_with_local_diff(profile):
+    snapshot = baseline()
+    snapshot['config'] = snapshot['config'].replace('switchport access vlan 10', 'switchport access vlan 20')
+    plan = workflow.preflight(snapshot, profile)
+    assert any('running/startup configuration differ' in reason for reason in plan['blockers'])
+    assert '- switchport access vlan 10' in plan['saved_config_diff']
+    assert '+ switchport access vlan 20' in plan['saved_config_diff']
+    assert not any('switchport access vlan' in reason for reason in plan['blockers'])
 
 
 def test_target_is_a_noop_and_versions_normalize(profile):
