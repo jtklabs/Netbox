@@ -140,7 +140,7 @@ fi
 # passed to the container and are invisible to substitution. A compose-level
 # setting put in prod.env is therefore silently ignored, and for BIND_ADDRESS
 # that means NetBox quietly stays on loopback where Apache cannot reach it.
-for v in BIND_ADDRESS PROD_IMAGE PROD_PULL_POLICY COMPOSE_FILE VERSION; do
+for v in BIND_ADDRESS PROD_IMAGE PROD_PULL_POLICY COMPOSE_FILE VERSION PYTHON_INDEX_URL; do
   if grep -q "^${v}=" "$SECRETS_DIR/prod.env" 2>/dev/null; then
     log "WARN: ${v} is set in prod.env, where compose cannot see it."
     log "      Move it to $SECRETS_DIR/.env or it will have no effect."
@@ -196,7 +196,7 @@ else
     log "image $img already present (baked into the AMI) — not rebuilding"
   else
     log "building image locally (slower boot; prefer baking it in with scripts/prod-build.sh)"
-    docker compose build
+    bash scripts/compose-build.sh
   fi
 fi
 # --remove-orphans because dropping a service from the compose files does not
