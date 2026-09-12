@@ -92,6 +92,17 @@ def table(command, template, fields, header, output):
     rows = parse_output(platform="cisco_ios", command=template, data=output)
     if not rows and command in {"show inventory", "show interfaces status", "show ip interface brief", "show vlan brief"}:
         raise ValueError(f"{command}: parser returned no records")
+    if command == 'show interfaces status':
+        # IOS XE uses more port prefixes than Gi/Te/Twe/Fo/Hu (including
+        # application ports). Validate identities without an abbreviation list.
+        raw_ports = Counter(re.findall(r'(?m)^\s*([A-Za-z][A-Za-z-]*\d\S*)\s+', output))
+        parsed_ports = Counter(row.get('port', '') for row in rows)
+        if raw_ports != parsed_ports:
+            missing = ', '.join(list((raw_ports - parsed_ports).elements())[:10]) or 'none'
+            unexpected = ', '.join(list((parsed_ports - raw_ports).elements())[:10]) or 'none'
+            raise ValueError(f'{command}: parser did not account for every table row '
+                             f'(raw={sum(raw_ports.values())}, parsed={len(rows)}; '
+                             f'missing ports: {missing}; unexpected ports: {unexpected})')
     if command in {"show access-session", "show authentication sessions", "show mac address-table"}:
         addresses = re.findall(MAC, output)
         parsed_addresses = [row.get("mac_address", row.get("destination_address", "")) for row in rows]
@@ -102,7 +113,6 @@ def table(command, template, fields, header, output):
             raise ValueError(f"{command}: parsed count differs from device count")
     count_patterns = {
         "show inventory": r"(?m)^\s*NAME:",
-        "show interfaces status": r"(?m)^\s*(?:Gi|Te|Twe|Fo|Hu|Eth|Fa|Po)[A-Za-z-]*\d\S*\s+",
         "show ip interface brief": r"(?m)^\S+\s+(?:unassigned|\d+\.\d+\.\d+\.\d+)\s+",
         "show vlan brief": r"(?m)^\d+\s+\S+\s+(?:active|suspend|act/unsup|shutdown)",
         "show etherchannel summary": r"(?m)^\s*\d+\s+Po\d+\(",

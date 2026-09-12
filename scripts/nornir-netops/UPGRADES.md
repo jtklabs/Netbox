@@ -266,6 +266,12 @@ values and common configuration secrets are redacted. Treat the archive as
 sensitive device configuration even after redaction. It is not a restorable
 full-secret configuration backup.
 
+If running/startup configuration differs, `upgrade_plan.saved_config_diff` in
+the local report shows the normalized difference from startup to running config.
+Review it locally before deciding whether to save or revert the changes. The
+diff is not sent in the NetBox progress message or webhook, and the upgrade
+remains blocked until running and startup agree.
+
 Exit 0 means all device workflows passed without delivery failures; dry-run
 pending upgrades are not an error. `completed_with_warnings` also exits 0 when
 there are no error findings. Blocked devices, failures, validation errors or
