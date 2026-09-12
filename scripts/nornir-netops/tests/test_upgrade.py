@@ -879,3 +879,50 @@ def test_c9350_workflows_use_cisco9k_image(c9350_profile, options, fake_device, 
         device.connection.send_config_set.assert_not_called()
     else:
         assert not device.mutations
+
+
+
+def test_normalization_ignores_compressed_startup_and_post_reload_headers():
+    body = "hostname sw1\n!\ninterface GigabitEthernet1/0/1\n switchport access vlan 10\n!\nend"
+    running = ("Building configuration...\n\nCurrent configuration : 140898 bytes\n!\n"
+               "! No configuration change since last restart\n"
+               "! NVRAM config last updated at 23:28:02 EDT Fri Sep 11 2026 by admin\n!\nversion 17.18\n" + body)
+    startup = ("Using 140898 out of 2097152 bytes, uncompressed size = 140898 bytes\n"
+               "Uncompressed configuration from 30125 bytes to 140898 bytes\n!\n"
+               "! Last configuration change at 18:22:49 EDT Fri Sep 11 2026\n"
+               "! NVRAM config last updated at 23:28:02 EDT Fri Sep 11 2026 by admin\n!\nversion 17.18\n" + body)
+    assert checks.normalized_config(running) == checks.normalized_config(startup)
+    assert checks.normalized_config(running).startswith("hostname sw1")
+    assert checks.normalized_config(running) != checks.normalized_config(startup.replace("vlan 10", "vlan 20"))
+
+
+def test_normalization_without_a_version_line_still_strips_known_headers():
+    text = "Building configuration...\n! Last configuration change at 12:00\nhostname sw1\n"
+    assert checks.normalized_config(text) == "hostname sw1"
+
+
+def test_compressed_startup_config_is_not_reported_as_unsaved(profile):
+    raw = transcript()
+    raw["show startup-config"] = ("Using 222 out of 2097152 bytes, uncompressed size = 222 bytes\n"
+                                  "Uncompressed configuration from 100 bytes to 222 bytes\n" + raw["show startup-config"])
+    raw["show running-config"] = raw["show running-config"].replace(
+        "! Last configuration change at 12:00", "! No configuration change since last restart")
+    plan = workflow.preflight(baseline(raw), profile)
+    assert not any("running/startup configuration differ" in reason for reason in plan["blockers"])
+    assert "saved_config_diff" not in plan
+
+
+@pytest.mark.parametrize("status", ["act/lshut", "sus/lshut", "act/ishut", "suspended"])
+def test_vlan_rows_with_local_shutdown_statuses_are_counted(status):
+    raw = transcript()
+    raw["show vlan brief"] += f"30   QUARANTINE                       {status} Gi1/0/3\n"
+    snapshot = baseline(raw)
+    assert "vlans" not in snapshot["errors"]
+    assert {row["vlan_id"] for row in snapshot["tables"]["vlans"]} == {"1", "10", "30"}
+
+
+def test_vlan_count_still_fails_closed_when_the_parser_drops_a_row(monkeypatch):
+    monkeypatch.setattr(checks, "parse_output",
+                        lambda **kwargs: [{"vlan_id": "1", "vlan_name": "default", "status": "active", "interfaces": []}])
+    with pytest.raises(ValueError, match="did not account for every table row"):
+        checks.table("show vlan brief", *checks.TABLES["vlans"][1:4], transcript()["show vlan brief"])
