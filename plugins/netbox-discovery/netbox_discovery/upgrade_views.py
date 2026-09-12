@@ -125,13 +125,16 @@ class UpgradeJobTable(NetBoxTable):
     status = columns.ChoiceFieldColumn()
     operation = columns.ChoiceFieldColumn()
     scheduled_at = columns.DateTimeColumn()
-    last_seen_at = columns.DateTimeColumn()
+    last_seen_at = columns.DateTimeColumn(verbose_name='Job last update', default='No job updates yet')
+    poller_last_seen_at = columns.DateTimeColumn(accessor='poller__upgrade_last_seen_at',
+                                                verbose_name='Upgrade poller last seen', default='Never checked in')
 
     class Meta(NetBoxTable.Meta):
         model = UpgradeJob
         fields = ('pk', 'id', 'device_name', 'poller', 'operation', 'status', 'scheduled_at',
-                  'start_before', 'stage', 'message', 'last_seen_at', 'description', 'batch_id')
-        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'status', 'stage', 'last_seen_at')
+                  'start_before', 'stage', 'message', 'poller_last_seen_at', 'last_seen_at', 'description', 'batch_id')
+        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'status', 'stage',
+                           'poller_last_seen_at', 'last_seen_at')
 
 
 class UpgradeFilterForm(NetBoxModelFilterSetForm):

@@ -23,6 +23,7 @@
                 {% endif %}
               </td></tr>
             <tr><th>Scanner version</th><td>{{ object.version|placeholder }}</td></tr>
+            <tr><th>Upgrade worker last seen</th><td>{% if object.upgrade_last_seen_at %}{{ object.upgrade_last_seen_at }} ({{ object.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
             <tr><th>Last run</th><td>{{ object.last_scan_summary|placeholder }}</td></tr>
           </table>
           {% if object.is_stale %}

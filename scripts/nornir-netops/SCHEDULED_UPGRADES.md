@@ -75,6 +75,13 @@ Create the log location with suitable ownership first and rotate it. Set `NETOPS
 
 Each device has its own NetBox status, phase, baseline and post-validation counts, timestamps, run ID, and event history. Filter the job list by batch, poller, site, role, status or operation. The detail page shows the most recent 500 events; refresh to see updates. The separate bearer-authenticated webhook remains available for a future dashboard and includes `scheduled_job_id` and `batch_id` for scheduled work. Full baseline/configuration snapshots stay in the private remote archive.
 
+The job list and detail page show two separate timestamps:
+
+- **Upgrade poller last seen** records the server's receipt of an `upgrade-poll` queue check-in (including idle ticks), or an accepted job heartbeat/progress report. It applies to every job assigned to that poller. SNMP-only check-ins do not update it.
+- **Job last update** is specific to that job and starts when the worker claims it. Pending jobs show **No job updates yet** even when their poller is checking in normally.
+
+These timestamps refresh when the page reloads. Manual `configure.py upgrade` runs do not check in to the scheduling queue. After installing migration `0008_upgrade_poller_last_seen`, the poller timestamp starts at **Never checked in** until new upgrade-worker contact arrives; older shared SNMP/poller timestamps are not treated as proof that the upgrade worker was running.
+
 The queue claims under database row locks and allows only one active job per NetBox device, including across batches and pollers. This coordinates scheduled workers; it cannot prevent a separate operator or manual script from accessing a switch.
 
 There is **no automatic replay of a claimed upgrade**:
@@ -98,4 +105,4 @@ All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the nor
 - `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
 - `GET /` and `GET {id}/`: current queue and progress for a dashboard. These endpoints never expose claim tokens and reject ordinary PATCH/DELETE operations.
 
-Deployment requires plugin migration `0007_upgradejob` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.
+Deployment requires plugin migrations through `0008_upgrade_poller_last_seen` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.

@@ -222,15 +222,17 @@ def report(user, pk, data):
     job = UpgradeJob.objects.restrict(user, 'run').select_for_update().get(pk=pk)
     if not job.claim_token or str(job.claim_token) != str(data['claim_token']):
         raise QueueError('Claim token does not match.')
+    # Server receive time shows upgrade-worker activity independently of SNMP.
+    # Invalid reports roll this back with the surrounding transaction.
+    now = timezone.now()
+    DiscoveryPoller.objects.filter(pk=job.poller_id).update(last_seen_at=now, upgrade_last_seen_at=now)
     # Terminal event retries acknowledge without changing the completed result.
     if job.status in TERMINAL:
         if data.get('sequence', 0) and data['sequence'] <= job.sequence:
             return job
         raise QueueError('This job has already ended.')
-    now = timezone.now()
     if data.get('heartbeat'):
         UpgradeJob.objects.filter(pk=pk).update(last_seen_at=now)
-        DiscoveryPoller.objects.filter(pk=job.poller_id).update(last_seen_at=now)
         return job
     sequence = data['sequence']
     if sequence <= job.sequence:
