@@ -16,13 +16,13 @@ Operations:
 | --- | --- | --- |
 | Pre-upgrade audit | Full baseline, version/mode/path checks and image readiness; no device writes | No |
 | Stage image only | Check flash; download a missing image and verify its checksum; no install/reload | Yes |
-| Install upgrade | Full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
+| Install upgrade | Saves the running configuration, full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
 
 The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
 Select only the virtual chassis **master** for a stack. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
 
-**Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
+**Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. The `write memory` that an install job runs at the start of its prechecks is the one device write that precedes that check. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
 
 ## Permissions
 
@@ -69,7 +69,7 @@ Then install a cron entry under the same account. **Including `--apply` permits 
 
 Create the log location with suitable ownership first and rotate it. Set `NETOPS_POLLER` in the shared `.env`, or add `--poller NAME` to the command. The built-in process lock makes overlapping cron ticks exit quietly. At most `--workers` jobs (1–20, default 3) are claimed in a tick and run concurrently through Nornir. Long-running jobs send a heartbeat every 30 seconds. An idle tick makes one check-in, creates no run archive, and does not fetch device credentials or connect over SSH.
 
-`--show-timeout`, `--install-timeout`, `--reload-timeout`, `--settle-seconds`, `--validation-timeout`, and `--poll-interval` also apply. Target/profile flags belong on manually invoked `upgrade`; `upgrade-poll` gets them from NetBox. Use `--report-dir` for per-job archives, not `--report`.
+`--show-timeout`, `--config-timeout`, `--install-timeout`, `--reload-timeout`, `--settle-seconds`, `--validation-timeout`, and `--poll-interval` also apply. Target/profile flags belong on manually invoked `upgrade`; `upgrade-poll` gets them from NetBox. Use `--report-dir` for per-job archives, not `--report`.
 
 ## Progress and interrupted runs
 

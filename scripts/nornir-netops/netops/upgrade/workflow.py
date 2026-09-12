@@ -34,7 +34,7 @@ def device_lock(directory, address):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def preflight(snapshot, profile, stage_only=False):
+def preflight(snapshot, profile, stage_only=False, saved=False):
     blockers = [f"{key}: {value}" for key, value in snapshot["errors"].items()]
     members = snapshot.get("software", {})
     stack = snapshot.get("stack", {})
@@ -64,16 +64,21 @@ def preflight(snapshot, profile, stage_only=False):
         blockers.append("BUNDLE mode: conversion is not validated in this profile")
     if at_target and conversion:
         blockers.append("already at target in BUNDLE mode; requires a separately validated conversion path")
-    if at_target and not conversion and boot_findings(snapshot):
+    if at_target and not conversion and boot_findings(snapshot, saved=False):
         blockers.append("target is running but saved install-mode autoboot settings are not healthy")
-    if snapshot.get("config") != snapshot.get("startup_config"):
-        blockers.append("running/startup configuration differ; resolve unsaved changes before upgrading; "
-                        "see upgrade_plan.saved_config_diff in the local report")
-        if 'config' in snapshot and 'startup_config' in snapshot:
-            # Keep config evidence in the private archive, not progress messages.
-            plan['saved_config_diff'] = '\n'.join(difflib.unified_diff(
-                snapshot['startup_config'].splitlines(), snapshot['config'].splitlines(),
-                fromfile='startup-config', tofile='running-config', lineterm=''))
+    # --apply saves the running configuration before the two configurations are
+    # read, so a difference is informational on a dry run and an error once a
+    # save has been made. A failed read is already reported by its own error.
+    plan["unsaved_changes"] = ("config" in snapshot and "startup_config" in snapshot
+                               and snapshot["config"] != snapshot["startup_config"])
+    if plan["unsaved_changes"]:
+        # Keep config evidence in the private archive, not progress messages.
+        plan["saved_config_diff"] = "\n".join(difflib.unified_diff(
+            snapshot["startup_config"].splitlines(), snapshot["config"].splitlines(),
+            fromfile="startup-config", tofile="running-config", lineterm=""))
+        if saved:
+            blockers.append("running/startup configuration still differ after write memory; "
+                            "see upgrade_plan.saved_config_diff in the local report")
     for cmd in ("show boot", "show install summary"):
         if cmd in snapshot["warnings"]:
             blockers.append(f"required install preflight unavailable: {cmd}")
@@ -110,7 +115,11 @@ class Device:
             self.connection = None
 
     def read(self, command):
-        return self.connection.send_command(command, read_timeout=self.options.show_timeout)
+        timeout = self.options.show_timeout
+        if command in ("show running-config", "show startup-config"):
+            # Configuration dumps are the slowest reads on a large stack.
+            timeout = max(timeout, getattr(self.options, "config_timeout", 0) or 0)
+        return self.connection.send_command(command, read_timeout=timeout)
 
     def write(self, command, timeout=120):
         output = self.connection.send_command(command, read_timeout=timeout)
@@ -262,13 +271,13 @@ def target_findings(snapshot, profile, before):
     return findings
 
 
-def boot_findings(snapshot):
+def boot_findings(snapshot, saved=True):
     findings = []
     for key in ("config", "startup_config"):
         boot = re.findall(r"(?m)^boot system (.+)$", snapshot.get(key, ""))
         if boot not in (["flash:packages.conf"], ["switch all flash:packages.conf"]) or re.search(r"(?m)^boot manual", snapshot.get(key, "")):
             findings.append({"check": key + "_boot", "severity": "error", "message": "saved autoboot settings are not the intended packages.conf settings"})
-    if snapshot.get("config") != snapshot.get("startup_config"):
+    if saved and snapshot.get("config") != snapshot.get("startup_config"):
         findings.append({"check": "saved_config", "severity": "error", "message": "running/startup configuration differ after upgrade"})
     return findings
 
@@ -311,16 +320,30 @@ def upgrade_device(task, profile, options, reporter):
             task.host.platform = "cisco_ios"
             emit("connecting", "Connecting for image staging checks" if stage_only else "Connecting for pre-upgrade verification")
             device.connect()
+            configuration_saved = False
+            if options.apply and not stage_only:
+                # The upgrade persists the running configuration before install
+                # anyway. Saving first turns the running/startup comparison into
+                # a check that the save took, rather than a blocker on unsaved work.
+                emit("saving_config", "Saving running configuration before comparing it with startup-config")
+                if "[OK]" not in device.write("write memory"):
+                    raise ValueError("configuration save was not acknowledged")
+                configuration_saved = True
             collect = checks.collect_staging if stage_only else checks.collect
             before = collect(device.read, lambda cmd: emit("precheck", cmd))
-            plan = preflight(before, profile, stage_only=stage_only)
-            plan["commands"] = [] if stage_only else BOOT_COMMANDS + ["write memory", f"install add file flash:{profile.image} activate commit"]
+            plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved)
+            plan["configuration_saved"] = configuration_saved
+            plan["commands"] = [] if stage_only else ["write memory"] + BOOT_COMMANDS + ["write memory", f"install add file flash:{profile.image} activate commit"]
             emit("precheck_complete", "Image staging checks captured" if stage_only else "Baseline and upgrade plan captured", {"pre": before, "upgrade_plan": plan,
                  "progress_summary": {"counts": before["metrics"]["counts"], "target_version": profile.target_version,
-                                      "starting_versions": plan["starting_versions"], "bundle_conversion": plan["bundle_conversion"]},
+                                      "starting_versions": plan["starting_versions"], "bundle_conversion": plan["bundle_conversion"],
+                                      "unsaved_changes": plan.get("unsaved_changes", False)},
                  "rollback_unsupported": ["Staged image files are retained for inspection; there are no configuration changes to roll back." if stage_only else "IOS XE upgrades require a separately validated recovery/downgrade procedure; configuration rollback is not an image rollback."]})
             if plan["bundle_conversion"]:
                 emit("bundle_mode_flagged", "BUNDLE mode detected; staging will leave it unchanged" if stage_only else "Device requires BUNDLE to INSTALL conversion")
+            if plan.get("unsaved_changes"):
+                emit("unsaved_changes", "Running configuration still differs from startup-config after write memory" if configuration_saved
+                     else "Running configuration has unsaved changes; --apply saves them at the start of prechecks")
             if plan["already_current"] and not plan["blockers"] and not stage_only:
                 emit("already_current", "Already running target release in INSTALL mode")
                 return Result(host=task.host, result=plan)
@@ -336,16 +359,18 @@ def upgrade_device(task, profile, options, reporter):
                 emit("blocked", "; ".join(plan["blockers"]), {"upgrade_plan": plan})
                 return Result(host=task.host, result=plan, failed=True)
             if not options.apply:
-                message = ("Image verified on active flash" if plan["image_verification"] == "verified" else "Image missing; copy planned") if stage_only else "Prechecks passed; upgrade planned"
+                message = (("Image verified on active flash" if plan["image_verification"] == "verified" else "Image missing; copy planned") if stage_only
+                           else "Prechecks passed; upgrade planned; --apply saves the unsaved running configuration first" if plan.get("unsaved_changes")
+                           else "Prechecks passed; upgrade planned")
                 emit("dry_run_complete", message, {"upgrade_plan": plan})
                 return Result(host=task.host, result=plan)
             if stage_only and plan["image_verification"] == "verified":
                 emit("staged", "Image already present and checksum verified; no copy needed", {"upgrade_plan": plan})
                 return Result(host=task.host, result=plan)
-            # Delivery failure at the final gate blocks writes. After starting,
-            # persist locally and continue recovery even if the UI is down.
+            # Delivery failure at the final gate blocks boot and install changes.
+            # After starting, persist locally and continue recovery even if the UI is down.
             if not emit("ready", "Staging checks passed; copying image only" if stage_only else "Prechecks passed; starting approved upgrade", {"upgrade_plan": plan}):
-                raise ValueError("progress webhook unavailable before apply; device unchanged")
+                raise ValueError("progress webhook unavailable before apply; no boot or install changes made")
             if plan["image_verification"] == "pending_transfer":
                 changed = True
                 verify_image(device, profile, before, plan, apply=True)
