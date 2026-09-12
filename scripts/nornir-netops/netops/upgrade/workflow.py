@@ -11,7 +11,7 @@ from pathlib import Path
 
 from nornir.core.task import Result
 
-from . import checks
+from . import checks, report
 from .profile import version
 
 BOOT_COMMANDS = ["no boot system", "boot system flash:packages.conf", "no boot manual"]
@@ -305,14 +305,34 @@ def release_matches(value, target):
     return bool(match and version(match[1]) == version(target))
 
 
+def comparison_report(reporter, host, before, after, findings, plan, status):
+    """Build the readable before/after report; a report problem never changes the outcome.
+
+    Returns the archive fields for the final event and the webhook-only attachment.
+    """
+    try:
+        built = report.generate(reporter, host, before, after, findings, plan, status)
+    except Exception as exc:
+        from ..debuglog import redact
+        print(f"{host.name}: comparison report could not be written: {redact(str(exc))}", flush=True)
+        return {}, None
+    fields = {}
+    if built.path is not None:
+        print(f"{host.name}: comparison report written to {built.path}", flush=True)
+        fields["diff_report"] = str(built.path)
+    attachment = {"report": {"format": "text/html", "html": built.html, "markdown": built.markdown,
+                             "path": str(built.path) if built.path else None}}
+    return fields, attachment
+
+
 def upgrade_device(task, profile, options, reporter):
     changed = False
     plan = {}
     stage_only = getattr(options, "stage_only", False)
     allow_mismatch = getattr(options, "allow_config_mismatch", False)
 
-    def emit(stage, message, payload=None):
-        return reporter.emit(task.host, stage, message, payload, changed=changed)
+    def emit(stage, message, payload=None, attachment=None):
+        return reporter.emit(task.host, stage, message, payload, changed=changed, attachment=attachment)
 
     device = Device(task, options, emit)
     try:
@@ -414,23 +434,41 @@ def upgrade_device(task, profile, options, reporter):
                 time.sleep(pause)
                 remaining -= pause
                 emit("converging", f"Initial settling time remaining: {remaining}s")
-            deadline, consecutive = time.monotonic() + options.validation_timeout, 0
+            deadline, consecutive, attempt = time.monotonic() + options.validation_timeout, 0, 0
             while True:
+                attempt += 1
                 after = checks.collect(device.read, lambda cmd: emit("postcheck", cmd), before["routing_commands"])
                 findings = checks.compare(before, after) + target_findings(after, profile, before, saved=not allow_mismatch)
-                emit("validating", "Post-upgrade comparison captured", {"post": after, "findings": findings,
-                     "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
-                                          "error_count": sum(f["severity"] == "error" for f in findings)}})
                 errors = [f for f in findings if f["severity"] == "error"]
                 consecutive = 0 if errors else consecutive + 1
+                reasons = checks.describe_findings(errors)
+                seconds_left = max(0, int(deadline - time.monotonic()))
+                # Say why validation has not passed: the checks that differ, the
+                # clean passes still needed and the time left, in every event.
+                emit("validating", f"Comparison {attempt}: " + ("no differences from baseline" if not errors
+                                                                else f"{len(errors)} check(s) differ from baseline"),
+                     {"post": after, "findings": findings,
+                      "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
+                                           "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
+                                           "seconds_remaining": seconds_left,
+                                           "pending": [checks.describe_finding(f) for f in errors[:10]]}})
                 if consecutive >= 2:
                     status = "completed_with_warnings" if findings else "completed"
-                    emit(status, "Target installed and baseline restored", {"upgrade_plan": plan})
+                    fields, attachment = comparison_report(reporter, task.host, before, after, findings, plan, status)
+                    emit(status, "Target installed and baseline restored", {"upgrade_plan": plan, **fields}, attachment)
                     return Result(host=task.host, result={"status": status, "findings": findings}, changed=True)
                 if time.monotonic() >= deadline:
-                    emit("validation_failed", "Upgrade returned, but baseline validation did not pass", {"findings": findings})
+                    fields, attachment = comparison_report(reporter, task.host, before, after, findings, plan, "validation_failed")
+                    emit("validation_failed", f"Upgrade returned, but baseline validation did not pass within "
+                                              f"{int(options.validation_timeout)}s after settling; still differing: {reasons}",
+                         {"findings": findings, **fields}, attachment)
                     return Result(host=task.host, result={"findings": findings}, failed=True, changed=True)
-                emit("converging", "Waiting before another baseline comparison")
+                if errors:
+                    emit("converging", f"Still differs from baseline after comparison {attempt}: {reasons}. "
+                                       f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails")
+                else:
+                    emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
+                                       f"({seconds_left}s left)")
                 time.sleep(options.poll_interval)
     except Exception as exc:
         # Transport exceptions may embed passwords; the archive and debuglog

@@ -1,6 +1,7 @@
 """Durable per-device progress events, suitable for an at-least-once UI feed."""
 
 import json
+import os
 import threading
 import time
 
@@ -13,8 +14,16 @@ def settings_from_env():
     return webhook.settings_from_env(prefix="NETOPS_UPGRADE_WEBHOOK")
 
 
+def report_in_webhook():
+    """Whether the final comparison report rides along on the last webhook event."""
+    value = os.environ.get("NETOPS_UPGRADE_WEBHOOK_REPORT", "true").strip().lower()
+    if value not in ("true", "false"):
+        raise webhook.WebhookError("NETOPS_UPGRADE_WEBHOOK_REPORT must be true or false")
+    return value == "true"
+
+
 class Reporter:
-    def __init__(self, run, settings=None, retries=3, event_sink=None):
+    def __init__(self, run, settings=None, retries=3, event_sink=None, attach_reports=None):
         self.run = run
         self.settings = settings
         self.retries = retries
@@ -22,8 +31,10 @@ class Reporter:
         self.sequences = {}
         self.delivery_failed = False
         self.event_sink = event_sink
+        self.attach_reports = report_in_webhook() if attach_reports is None else attach_reports
 
-    def emit(self, host, stage, message, payload=None, changed=False):
+    def emit(self, host, stage, message, payload=None, changed=False, attachment=None):
+        """Record and deliver one event. An attachment goes only to the webhook body."""
         with self.lock:
             sequence = self.sequences.get(host.name, 0) + 1
             self.sequences[host.name] = sequence
@@ -49,7 +60,7 @@ class Reporter:
         print(f"{host.name}: {stage} — {message}", flush=True)
         delivered = self.settings is None
         if self.settings:
-            body = json.dumps(archive.clean(event))
+            body = json.dumps(archive.clean(dict(event, **attachment) if attachment and self.attach_reports else event))
             for attempt in range(self.retries):
                 try:
                     webhook.send(self.settings, body)

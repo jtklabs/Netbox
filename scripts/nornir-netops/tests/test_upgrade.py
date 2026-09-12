@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
+from netops import archive
 from netops.upgrade import checks, workflow
 from netops.upgrade.profile import Profile
 
@@ -1179,3 +1181,189 @@ def test_cli_override_flag_defaults_off():
     from netops.cli import build_parser
     assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).allow_config_mismatch is False
     assert build_parser().parse_args(["upgrade-poll", "--apply", "--allow-config-mismatch"]).allow_config_mismatch is True
+
+
+def test_describe_findings_names_checks_without_endpoint_identities():
+    findings = [
+        {"check": "interfaces", "severity": "error", "before_count": 48, "after_count": 46,
+         "removed": [{"port": "Gi1/0/5", "status": "connected"}, {"port": "Gi1/0/12", "status": "connected"}], "added": []},
+        {"check": "mac", "severity": "error", "before_count": 47, "after_count": 41,
+         "removed": [{"destination_address": "aaaa.bbbb.cccc", "destination_port": ["Gi1/0/5"]}] * 6, "added": []},
+        {"check": "ntp", "severity": "error",
+         "before": [{"server": "10.50.0.10", "selected": True, "reachable": True, "stratum": 2}],
+         "after": [{"server": "10.50.0.10", "selected": False, "reachable": True, "stratum": 2}]},
+        {"check": "config", "severity": "error", "diff": "--- before\n+++ after\n@@\n-a\n+b\n c"},
+        {"check": "cpu", "severity": "error", "message": "one-minute CPU utilization is at least 90%"},
+        {"check": "interface_errors", "severity": "warning", "message": "ignored"},
+    ]
+    text = checks.describe_findings(findings)
+    assert "interfaces: 48->46 rows (removed Gi1/0/5, Gi1/0/12)" in text
+    assert "mac: 47->41 rows (removed Gi1/0/5)" in text and "aaaa.bbbb.cccc" not in text
+    assert "ntp: 10.50.0.10 not selected yet" in text
+    assert "config: 2 lines differ" in text and "+b" not in text
+    assert "cpu: one-minute CPU utilization is at least 90%" in text
+    assert "ignored" not in text
+    assert checks.describe_findings([]) == "no differences"
+    many = [{"check": f"t{i}", "severity": "error", "message": "x"} for i in range(12)]
+    assert checks.describe_findings(many).endswith("; +4 more")
+
+
+def test_convergence_events_say_what_still_differs(profile, options, fake_device):
+    options.apply = True
+    fake_device.lose_mac = True
+    result, reporter = run_device(profile, options)
+    assert result.failed
+    events = [(call.args[1], call.args[2]) for call in reporter.emit.call_args_list]
+    waiting = [message for stage, message in events if stage == "converging" and "Still differs" in message]
+    assert waiting and "mac: 1->0 rows (removed Gi1/0/1)" in waiting[0]
+    assert "Needs 2 consecutive clean comparisons" in waiting[0] and "left before validation fails" in waiting[0]
+    assert events[-1][0] == "validation_failed" and "still differing: mac: 1->0 rows" in events[-1][1]
+    summary = next(call.args[3]["progress_summary"] for call in reporter.emit.call_args_list if call.args[1] == "validating")
+    assert summary["pending"] == ["mac: 1->0 rows (removed Gi1/0/1)"]
+    assert summary["attempt"] == 1 and summary["consecutive_clean"] == 0 and "seconds_remaining" in summary
+
+
+def test_clean_pass_reports_that_one_more_is_needed(profile, options, fake_device):
+    options.apply = True
+    result, reporter = run_device(profile, options)
+    assert not result.failed
+    messages = [call.args[2] for call in reporter.emit.call_args_list if call.args[1] == "converging"]
+    assert any("matched the baseline; one more clean comparison needed" in m for m in messages)
+
+
+
+from netops.upgrade import report
+
+
+def two_endpoint_transcript(release="17.9.4a", first_port="Gi1/0/1", second_port="Gi1/0/2", arp_age="5", reverse=False):
+    raw = transcript(release)
+    rows = [f"  10    aaaa.bbbb.cccc    DYNAMIC     {first_port}\n", f"  10    dddd.eeee.ffff    DYNAMIC     {second_port}\n"]
+    raw["show mac address-table"] = ("          Mac Address Table\n-------------------------------------------\n"
+                                     "Vlan    Mac Address       Type        Ports\n----    -----------       --------    -----\n"
+                                     + "".join(reversed(rows) if reverse else rows) + "Total Mac Addresses for this criterion: 2\n")
+    raw["show ip arp"] = ("Protocol  Address          Age (min)  Hardware Addr   Type   Interface\n"
+                          f"Internet  10.0.0.2         {arp_age:<10} aaaa.bbbb.cccc  ARPA   Vlan10\n")
+    raw["show clock detail"] = f"*10:{'22' if reverse else '01'}:03.117 UTC Fri Sep 12 2026\nTime source is NTP\n"
+    raw["show boot"] = "BOOT variable = flash:packages.conf;\nManual Boot = no\n"
+    raw["show switch stack-ports summary"] = f"Sw#/Port#  Port Status  Neighbor  Uptime\n1/1        OK           2         {'3w2d' if reverse else '1d02h'}\n"
+    return raw
+
+
+def test_report_ignores_row_order_ages_and_times(profile):
+    before = baseline(two_endpoint_transcript())
+    after = baseline(two_endpoint_transcript(profile.target_version, arp_age="0", reverse=True))
+    findings = checks.compare(before, after)
+    assert not [f for f in findings if f["severity"] == "error"]
+    host = SimpleNamespace(name="sw1", hostname="192.0.2.1")
+    text = report.build(host, before, after, findings, {"profile": "lab-approved", "target_version": profile.target_version}, "completed")
+    assert "| mac | 2 | 2 | 2 | 0 | 0 |" in text and "| arp | 1 | 1 | 1 | 0 | 0 |" in text
+    assert "No differences (boot settings excluded)." in text
+    assert "- `show switch stack-ports summary`: no differences" in text
+    assert "show clock detail (clock)" in text
+    assert f"| 1 | C9300-48P | 17.9.4a | {profile.target_version} | INSTALL | INSTALL | Ready | Ready |" in text
+
+
+def test_report_lists_removed_rows_and_config_changes(profile):
+    before = baseline(two_endpoint_transcript())
+    after_raw = two_endpoint_transcript(profile.target_version, second_port="Gi1/0/3")
+    after_raw["show running-config"] = after_raw["show running-config"].replace("switchport access vlan 10", "switchport access vlan 20")
+    after = baseline(after_raw)
+    text = report.build(SimpleNamespace(name="sw1", hostname="192.0.2.1"), before, after, checks.compare(before, after), {}, "validation_failed")
+    assert "| mac | 2 | 2 | 1 | 1 | 1 |" in text
+    assert "- destination_address=dddd.eeee.ffff, destination_port=Gi1/0/2, type=DYNAMIC, vlan_id=10" in text
+    assert "- destination_address=dddd.eeee.ffff, destination_port=Gi1/0/3, type=DYNAMIC, vlan_id=10" in text
+    assert "- switchport access vlan 10" in text and "+ switchport access vlan 20" in text
+    assert "Errors (2):" in text and "- mac: 2->2 rows (removed Gi1/0/2; added Gi1/0/3)" in text
+
+
+def test_masking_removes_times_dates_uptimes_and_readings():
+    line = "Uptime is 2 weeks, 3 days, 4 hours at 10:22:01.500 UTC Fri Sep 12 2026, 1d02h, temp 45C fan 3200 RPM Gi1/0/1"
+    assert report.masked(line) == "Uptime is <uptime> at <time> UTC <date>, <uptime>, temp <reading> fan <reading> Gi1/0/1"
+
+
+def test_report_is_written_beside_the_archive_with_private_permissions(tmp_path):
+    run = archive.Run(["upgrade", "--apply", "--report-dir", str(tmp_path)], tmp_path)
+    run.args = SimpleNamespace(command="upgrade", apply=True, stage_only=False)
+    run.prepare()
+    before, after = baseline(), baseline(transcript("17.12.04"))
+    host = SimpleNamespace(name="atl sw/1", hostname="192.0.2.1")
+    built = report.generate(SimpleNamespace(run=run), host, before, after, [], {"profile": "p"}, "completed")
+    path = built.path
+    assert path.parent == run.path.parent and path.name == run.path.stem + "_atl_sw_1.diff.md"
+    assert os.stat(path).st_mode & 0o777 == 0o600
+    assert path.read_text().startswith("# Upgrade comparison: atl sw/1") and path.read_text() == built.markdown
+    page = path.with_suffix(".html")
+    assert os.stat(page).st_mode & 0o777 == 0o600 and page.read_text() == built.html
+    assert built.html.startswith("<!DOCTYPE html>") and "<title>Upgrade comparison: atl sw/1</title>" in built.html
+    unwritten = report.generate(Mock(), host, before, after, [], {"profile": "p"}, "completed")
+    assert unwritten.path is None and unwritten.markdown == built.markdown
+
+
+@pytest.mark.parametrize("lose_mac,final", [(False, "completed_with_warnings"), (True, "validation_failed")])
+def test_workflow_records_the_report_path_in_the_final_event(profile, options, fake_device, monkeypatch, tmp_path, lose_mac, final):
+    options.apply = True
+    options.validation_timeout = 0 if lose_mac else 1
+    fake_device.lose_mac = lose_mac
+    written = tmp_path / "sw1.diff.md"
+    calls = []
+    monkeypatch.setattr(workflow.report, "generate",
+                        lambda *args: calls.append(args[-1]) or report.Built("# md", "<!DOCTYPE html>", written))
+    result, reporter = run_device(profile, options)
+    assert reporter.emit.call_args.args[1] == final
+    assert reporter.emit.call_args.args[3]["diff_report"] == str(written)
+    attachment = reporter.emit.call_args.kwargs["attachment"]
+    assert attachment["report"] == {"format": "text/html", "html": "<!DOCTYPE html>", "markdown": "# md", "path": str(written)}
+    assert calls == [final]
+
+
+def test_report_failure_never_changes_the_outcome(profile, options, fake_device, monkeypatch):
+    options.apply = True
+    monkeypatch.setattr(workflow.report, "generate", Mock(side_effect=OSError("disk full")))
+    result, reporter = run_device(profile, options)
+    assert not result.failed
+    assert "diff_report" not in reporter.emit.call_args.args[3]
+    assert reporter.emit.call_args.kwargs["attachment"] is None
+
+
+
+def test_html_rendering_covers_the_report_markdown_subset():
+    markdown = ("# Upgrade comparison: sw1 (192.0.2.1)\n\n- Outcome: **completed**\n\n## Tables\n\n"
+                "| Item | Before |\n| --- | --- |\n| mac \\| odd | 2 |\n\n### mac\n\nRemoved (1):\n- a=<b>\n"
+                "- `show boot`: 1 line(s)\n    - only before: `x`\n\n```diff\n--- before\n+++ after\n@@ -1 +1 @@\n- old\n+ new\n c\n```\n")
+    page = report.to_html(markdown, "Upgrade comparison: sw1")
+    assert "<h1>Upgrade comparison: sw1 (192.0.2.1)</h1>" in page and "<strong>completed</strong>" in page
+    assert "<th>Item</th>" in page and "<td>mac | odd</td>" in page and "<td>2</td>" in page and "---" not in page.split("<table>")[1].split("</table>")[0]
+    assert "<li>a=&lt;b&gt;</li>" in page
+    assert "<li><code>show boot</code>: 1 line(s)</li>" in page and "<ul>\n<li>only before: <code>x</code></li>" in page
+    assert '<span class="del">- old</span>' in page and '<span class="add">+ new</span>' in page and '<span class="hunk">@@ -1 +1 @@</span>' in page
+    assert "<script" not in page and "http" not in page.split("</style>")[1]
+
+
+def test_final_webhook_event_carries_the_report_but_the_archive_does_not(tmp_path, monkeypatch):
+    from netops.upgrade import progress
+    run = archive.Run(["upgrade", "--apply"], tmp_path)
+    run.args = SimpleNamespace(command="upgrade", apply=True, stage_only=False)
+    run.prepare()
+    sent = []
+    monkeypatch.setattr(progress.webhook, "send", lambda settings, body: sent.append(json.loads(body)))
+    settings = progress.webhook.Settings("https://ui.example/hook", "token")
+    host = SimpleNamespace(name="sw1", hostname="192.0.2.1", platform="cisco_ios", data={})
+    attachment = {"report": {"format": "text/html", "html": "<!DOCTYPE html>x", "markdown": "# x", "path": None}}
+    assert progress.Reporter(run, settings, attach_reports=True).emit(host, "completed", "done", {"upgrade_plan": {}}, attachment=attachment)
+    assert sent[-1]["report"]["html"] == "<!DOCTYPE html>x" and sent[-1]["stage"] == "completed"
+    assert "report" not in run.records["sw1"]["upgrade_events"][-1] and "<!DOCTYPE" not in json.dumps(run.document)
+    progress.Reporter(run, settings, attach_reports=False).emit(host, "completed", "done", None, attachment=attachment)
+    assert "report" not in sent[-1]
+
+
+@pytest.mark.parametrize("value,expected", [("", True), ("true", True), ("false", False)])
+def test_report_attachment_setting(monkeypatch, value, expected):
+    from netops.upgrade import progress
+    if value:
+        monkeypatch.setenv("NETOPS_UPGRADE_WEBHOOK_REPORT", value)
+    else:
+        monkeypatch.delenv("NETOPS_UPGRADE_WEBHOOK_REPORT", raising=False)
+    assert progress.report_in_webhook() is expected
+    monkeypatch.setenv("NETOPS_UPGRADE_WEBHOOK_REPORT", "maybe")
+    with pytest.raises(progress.webhook.WebhookError):
+        progress.report_in_webhook()

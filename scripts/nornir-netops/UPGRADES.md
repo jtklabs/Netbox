@@ -181,6 +181,13 @@ stack. Two consecutive comparisons without errors are required. Use
 `--config-timeout` for your tested environment. Deadlines are checked between individual bounded operations; they
 are not hard wall-clock process limits.
 
+While it waits, every `converging` event says why: the checks that still differ
+from the baseline with their row counts and the affected interfaces or
+neighbors, how many clean comparisons are still needed, and how long remains
+before validation fails. The final `validation_failed` message carries the same
+list, and the NetBox summary's `post_validation.pending` holds it per check.
+MAC and IP addresses and configuration lines stay in the local archive.
+
 ## Baseline and comparison coverage
 
 Both snapshots contain raw command evidence, parsed tables, counts, errors and
@@ -276,7 +283,14 @@ The receiver should deduplicate by `event_id`, keep per-device state using
 response. Delivery retries reuse the exact event three times with short backoff.
 The archive records each event before delivery, with `pending`, `delivered`,
 `failed` or `disabled` delivery status. Configurations and raw command output
-stay in the archive; they are not included in the webhook event.
+stay in the archive and are not included in progress events, with one
+exception: the final `completed`, `completed_with_warnings` or
+`validation_failed` event also carries `report`, with `format` (`text/html`),
+`html` (a self-contained page), `markdown` and `path`, so a receiver can store
+or display the comparison. It contains the normalized configuration diff and
+the changed table rows, redacted like the archive, and can run to a few hundred
+kilobytes. Set `NETOPS_UPGRADE_WEBHOOK_REPORT=false` to leave it out. NetBox
+never receives it, and it is not stored in the archive's event list.
 
 A failure to deliver the final `ready` event blocks boot and install changes. Once a
 device is changing, webhook outages do not interrupt its recovery/validation.
@@ -287,7 +301,18 @@ for reconciliation. Cross-process/distributed UI events may arrive out of order.
 ## Archives, failures and recovery
 
 Use `--report` or `--report-dir` (or `NETOPS_REPORT_DIR`) as with standards
-deployment. Each device record includes `pre`, `post`, `upgrade_plan`,
+deployment. Every upgrade that reaches post-validation, whether it completes or
+fails validation, also writes a readable comparison beside the archive, named
+`<archive stem>_<device>.diff.md`, with the same content rendered as a
+self-contained web page in `<archive stem>_<device>.diff.html`, and recorded as
+`diff_report` in the device's final event. It lists the findings, software and stack members before and
+after, the normalized running-config diff with boot settings shown separately,
+every table as an unordered comparison of stable fields with the removed and
+added rows, routing neighbors, health, and a line-level comparison of the raw
+diagnostics with times, dates, uptimes and readings masked. Reordered tables are
+not differences; ages, uptimes, timers and timestamps are excluded; log and
+counter output is listed as not compared. It carries the same redaction and
+file permissions as the archive and is as sensitive. Each device record includes `pre`, `post`, `upgrade_plan`,
 `findings`, `upgrade_events`, install/copy transcripts and `change_attempted`.
 Archives are written atomically with private file permissions; known credential
 values and common configuration secrets are redacted. Treat the archive as
