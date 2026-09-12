@@ -6,15 +6,17 @@
     <table class="table attr-table">
       <tr><th>Device</th><td>{{ object.device|linkify }} ({{ object.address }})</td></tr>
       <tr><th>Poller</th><td>{{ object.poller|linkify }}</td></tr>
+      <tr><th>Upgrade poller last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
       <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
       <tr><th>Status</th><td>{{ object.get_status_display }}</td></tr>
       <tr><th>Scheduled start</th><td>{{ object.scheduled_at }}</td></tr>
       <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>
-      <tr><th>Last heartbeat</th><td>{{ object.last_seen_at|placeholder }}</td></tr>
+      <tr><th>Job last update</th><td>{{ object.last_seen_at|default:'No job updates yet' }}</td></tr>
       <tr><th>Requested by</th><td>{{ object.requested_by|placeholder }}</td></tr>
       <tr><th>Batch</th><td><a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a></td></tr>
       <tr><th>Remote run</th><td>{{ object.run_id|placeholder }}</td></tr>
     </table>
+    <p class="text-muted">Upgrade poller last seen includes queue check-ins, even when no jobs are due, and active-job heartbeats or progress reports. Job last update starts when this job is claimed. Refresh to see new activity.</p>
     <p><strong>{{ object.stage }}</strong> {{ object.message }}</p>
     {% if object.heartbeat_stale %}<p class="text-danger">This worker has not sent a heartbeat for over five minutes. Check the remote and the switch before taking further action.</p>{% endif %}
     {% if perms.netbox_discovery.change_upgradejob %}

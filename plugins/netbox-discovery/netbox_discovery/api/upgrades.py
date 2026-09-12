@@ -18,13 +18,14 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:upgradejob-detail')
     heartbeat_stale = serializers.BooleanField(read_only=True)
     needs_recovery = serializers.BooleanField(read_only=True)
+    poller_last_seen_at = serializers.DateTimeField(source='poller.upgrade_last_seen_at', read_only=True)
 
     class Meta:
         model = UpgradeJob
         fields = ('id', 'url', 'display', 'batch_id', 'device', 'device_name', 'poller', 'address',
                   'profile', 'operation', 'scheduled_at', 'start_before', 'status', 'stage', 'message',
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
-                  'completed_at', 'last_seen_at', 'heartbeat_stale', 'needs_recovery',
+                  'completed_at', 'last_seen_at', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
         read_only_fields = fields
@@ -115,7 +116,7 @@ class UpgradeCheckInView(QueueView):
     def execute(self, request, data):
         name = data['name'].removeprefix('poller-')
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
-        poller.touch(summary='Upgrade worker checked in')
+        poller.touch(summary='Upgrade worker checked in', upgrade=True)
         jobs = queue.claim(request.user, poller, data['limit'], data['apply'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})
 

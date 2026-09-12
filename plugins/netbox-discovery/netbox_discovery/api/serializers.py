@@ -37,7 +37,7 @@ class DiscoveryPollerSerializer(NetBoxModelSerializer):
     class Meta:
         model = DiscoveryPoller
         fields = (
-            'url', 'id', 'display', 'name', 'tenant', 'last_seen_at', 'version',
+            'url', 'id', 'display', 'name', 'tenant', 'last_seen_at', 'upgrade_last_seen_at', 'version',
             'last_scan_summary', 'is_stale',
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )

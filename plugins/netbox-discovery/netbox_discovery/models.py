@@ -48,6 +48,10 @@ class DiscoveryPoller(PrimaryModel):
     last_seen_at = models.DateTimeField(
         blank=True, null=True, help_text='When this poller last checked in'
     )
+    upgrade_last_seen_at = models.DateTimeField(
+        blank=True, null=True, editable=False,
+        help_text='Last upgrade-worker check-in, heartbeat or accepted progress report; excludes SNMP-only activity',
+    )
     version = models.CharField(
         max_length=50, blank=True, help_text='Scanner version reported at check-in'
     )
@@ -119,7 +123,7 @@ class DiscoveryPoller(PrimaryModel):
 
         return sites_for_poller(self.name)
 
-    def touch(self, version='', summary=''):
+    def touch(self, version='', summary='', upgrade=False):
         """Record a check-in without writing a changelog entry.
 
         Deliberately a queryset update. A poller checking in every few minutes
@@ -128,6 +132,8 @@ class DiscoveryPoller(PrimaryModel):
         """
         now = timezone.now()
         fields = {'last_seen_at': now}
+        if upgrade:
+            fields['upgrade_last_seen_at'] = now
         if version:
             fields['version'] = version
         if summary:
