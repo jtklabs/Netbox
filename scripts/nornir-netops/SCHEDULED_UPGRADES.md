@@ -6,7 +6,9 @@ NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing i
 
 Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in.
 
-Open **Discovery → Software → Upgrade Jobs → +**. Choose a site and role, optionally a platform or explicit devices. Paste the same validated YAML profile used by `configure.py upgrade --profile`; specify the scheduled start and **start before**, including a UTC offset. Preview shows the matching devices and pollers. Scheduling captures those devices, management addresses, poller assignments, and a separate copy of the profile. Later inventory changes cannot add devices to a batch.
+Open **Discovery → Software → Upgrade Jobs → Add** on the list page (the sidebar **+** also works). Choose a site and role, optionally a platform or explicit devices. Paste the same validated YAML profile used by `configure.py upgrade --profile`; specify the scheduled start and **start before**, including a UTC offset. Preview shows the matching devices and pollers. Scheduling captures those devices, management addresses, poller assignments, and a separate copy of the profile. Later inventory changes cannot add devices to a batch.
+
+Open a pending job and click **Edit** to change its operation, profile, scheduled window or description. This updates only that device's job; its device and poller stay fixed, and other jobs in the batch are unchanged. Editing requires `change` permission, plus `apply` permission when the existing or new operation stages an image or installs an upgrade. The worker receives the updated profile when it claims the job. Claimed, running and closed jobs cannot be edited. A stale browser form is rejected if another edit or worker claim happened in the meantime.
 
 Operations:
 

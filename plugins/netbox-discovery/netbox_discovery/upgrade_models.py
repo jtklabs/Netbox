@@ -1,4 +1,4 @@
-"""Immutable per-device schedules. Only the queue service changes execution state."""
+"""Per-device schedules, frozen on claim. Only the queue service changes state."""
 import uuid
 from datetime import timedelta
 
