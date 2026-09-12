@@ -21,16 +21,31 @@ def understood(command, output):
     return output
 
 
+# IOS prints only metadata above the `version` line, and it legitimately differs
+# between running-config, startup-config and reboots: byte counts, the
+# `Uncompressed configuration from ...` line added by `service compress-config`,
+# the change/NVRAM timestamps and `! No configuration change since last restart`.
+# The list below is the fallback for output that carries no `version` line.
+CONFIG_HEADER = re.compile(r"^(Building configuration|Current configuration|Using \d+|Uncompressed configuration"
+                           r"|! Last configuration change|! NVRAM config|! No configuration change"
+                           r"|version \d|ntp clock-period )")
+
+
 def normalized_config(text, boot=False):
-    lines = []
-    for line in text.splitlines():
-        if re.match(r"^(Building configuration|Current configuration|Using \d+|! Last configuration change|! NVRAM config|version \d|ntp clock-period )", line):
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^version \d", line):
+            lines = lines[index + 1:]
+            break
+    kept = []
+    for line in lines:
+        if CONFIG_HEADER.match(line):
             continue
         if boot and re.match(r"^(?:no )?boot (?:system|manual)(?: |$)", line):
             continue
         if line.strip():
-            lines.append(line.rstrip())
-    return "\n".join(lines)
+            kept.append(line.rstrip())
+    return "\n".join(kept)
 
 
 def software(text):
@@ -114,7 +129,10 @@ def table(command, template, fields, header, output):
     count_patterns = {
         "show inventory": r"(?m)^\s*NAME:",
         "show ip interface brief": r"(?m)^\S+\s+(?:unassigned|\d+\.\d+\.\d+\.\d+)\s+",
-        "show vlan brief": r"(?m)^\d+\s+\S+\s+(?:active|suspend|act/unsup|shutdown)",
+        # One status token after the name, exactly what the template records:
+        # active, suspended, act/unsup, and the act/lshut, sus/lshut, act/ishut
+        # forms IOS uses for VLANs configured with `shutdown`.
+        "show vlan brief": r"(?m)^\d+\s+\S+\s+\S+",
         "show etherchannel summary": r"(?m)^\s*\d+\s+Po\d+\(",
     }
     if command in count_patterns and len(re.findall(count_patterns[command], output)) != len(rows):

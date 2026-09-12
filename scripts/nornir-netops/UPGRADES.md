@@ -163,7 +163,7 @@ they flag additions and removals, including replacements with equal totals.
 
 | Check | What is compared |
 | --- | --- |
-| Running/startup config | Ordered configuration diff; volatile headers, IOS `version` and NTP clock-period omitted. Intended boot changes are checked separately against the exact saved settings. |
+| Running/startup config | Ordered configuration diff of everything after the `version` line; the byte-count, `service compress-config`, timestamp and post-reload headers above it and NTP clock-period are omitted. Intended boot changes are checked separately against the exact saved settings. |
 | NAC | Interface, MAC, authentication method, domain and authorization status; total/status counts and sessions per port. Session IDs are excluded because they regenerate. |
 | MAC table | MAC, VLAN, type and destination ports; total and per-port counts. Parsed MAC identities and device-reported totals are cross-checked. |
 | Interfaces | Link status, access/trunk VLAN, duplex, speed; IPv4 and, when enabled, IPv6 interface/address state. |
