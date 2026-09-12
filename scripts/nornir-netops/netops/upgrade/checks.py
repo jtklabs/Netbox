@@ -12,6 +12,14 @@ from collections import Counter
 from ntc_templates.parse import parse_output
 
 MAC = r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}"
+# Fields that change with time rather than state; never part of a row's identity.
+VOLATILE_FIELDS = {"age", "uptime", "holdtime", "hold_time", "time", "last_change", "dead_time", "expires", "updown", "up_down"}
+
+
+def canonical(row):
+    """Order-independent identity of a table row: stable fields only, lists sorted."""
+    return json.dumps({key: sorted(value) if isinstance(value, list) else value
+                       for key, value in row.items() if key not in VOLATILE_FIELDS}, sort_keys=True)
 ERROR = re.compile(r"(?im)^\s*(?:%\s*(?:Invalid|Incomplete|Ambiguous|Unknown|Error|Authorization|Permission)|Error:|FAILED:)")
 
 
@@ -156,6 +164,8 @@ def table(command, template, fields, header, output):
         if rows and not all(set(fields) <= set(row) for row in rows):
             raise ValueError(f"{command}: parser is missing required fields")
         rows = [{key: row[key] for key in fields} for row in rows]
+    else:
+        rows = [{key: value for key, value in row.items() if key not in VOLATILE_FIELDS} for row in rows]
     return rows
 
 
@@ -410,8 +420,8 @@ def compare(before, after):
             if old is None or new is None:
                 findings.append({"check": key, "severity": "error", "message": "baseline or post-check unavailable"})
                 continue
-            a = Counter(json.dumps(row, sort_keys=True) for row in old)
-            b = Counter(json.dumps(row, sort_keys=True) for row in new)
+            a = Counter(canonical(row) for row in old)
+            b = Counter(canonical(row) for row in new)
             if a != b:
                 findings.append({"check": key, "severity": "error", "before_count": len(old), "after_count": len(new),
                                  "removed": [json.loads(row) for row in (a-b).elements()],
@@ -444,3 +454,64 @@ def compare(before, after):
             findings.append({"check": "interface_errors", "severity": "warning", "interface": interface,
                              "message": "error counters exceed baseline", "counters": active})
     return findings
+
+
+# Row identities that are safe to name in a progress message. Endpoint MAC and
+# IP addresses and configuration text stay in the archive.
+IDENTITY_KEYS = ("port", "interface", "local_interface", "destination_port", "name", "neighbor_name", "neighbor",
+                 "system_id", "network", "group", "server", "vlan_id")
+
+
+def _identity(row):
+    for key in IDENTITY_KEYS:
+        value = row.get(key)
+        if value:
+            return ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+    return None
+
+
+def describe_finding(finding):
+    """One short reason for an error finding, without addresses or config lines."""
+    check = finding["check"]
+    if "before_count" in finding:
+        text = f"{check}: {finding['before_count']}->{finding['after_count']} rows"
+        details = []
+        for label in ("removed", "added"):
+            names = list(dict.fromkeys(name for name in (_identity(row) for row in finding.get(label, [])) if name))
+            if names:
+                details.append(f"{label} " + ", ".join(names[:3]) + (", ..." if len(names) > 3 else ""))
+        return text + (f" ({'; '.join(details)})" if details else "")
+    if "diff" in finding:
+        changed = sum(1 for line in finding["diff"].splitlines()
+                      if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        return f"{check}: {changed} lines differ"
+    if check == "ntp":
+        before = {row["server"]: row for row in finding.get("before", [])}
+        after = {row["server"]: row for row in finding.get("after", [])}
+        states = []
+        for server, was in before.items():
+            now = after.get(server)
+            if now is None:
+                states.append(f"{server} missing")
+            elif not now["reachable"]:
+                states.append(f"{server} unreachable")
+            elif was["selected"] and not now["selected"]:
+                states.append(f"{server} not selected yet")
+            elif was["stratum"] != now["stratum"]:
+                states.append(f"{server} stratum {was['stratum']}->{now['stratum']}")
+        states.extend(f"{server} new" for server in after.keys() - before.keys())
+        return "ntp: " + (", ".join(states) or "peer state changed")
+    if finding.get("interface"):
+        return f"{check}: {finding['interface']} {finding.get('message', '')}".strip()
+    return f"{check}: {finding.get('message', 'differs')}"[:160]
+
+
+def describe_findings(findings, limit=8, width=700):
+    """Why validation has not passed yet, bounded for a progress message."""
+    reasons = [describe_finding(f) for f in findings if f.get("severity") == "error"]
+    if not reasons:
+        return "no differences"
+    text = "; ".join(reasons[:limit])
+    if len(reasons) > limit:
+        text += f"; +{len(reasons) - limit} more"
+    return text if len(text) <= width else text[:width - 3] + "..."
