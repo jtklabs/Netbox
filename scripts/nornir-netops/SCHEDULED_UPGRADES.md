@@ -18,7 +18,7 @@ Operations:
 | Stage image only | Check flash; download a missing image and verify its checksum; no install/reload | Yes |
 | Install upgrade | Saves the running configuration, full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
 
-The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
+A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way; see [BIG-IP upgrades](UPGRADES.md#big-ip-upgrades). The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
 Select only the virtual chassis **master** for a stack. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
 

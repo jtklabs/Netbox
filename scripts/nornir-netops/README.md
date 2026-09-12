@@ -47,7 +47,7 @@ re-run with --apply to push the commands above
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
-| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, reload and operational comparison | C9350 and C9300 family |
+| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
 What each of them should converge on comes from

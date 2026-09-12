@@ -49,8 +49,10 @@ def validate_profile(profile):
     # The remote uses the full IOS XE Profile validator before connecting.
     # Reject scripts, credential fields and malformed structures at intake too.
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
-            'minimum_free_bytes', 'bundle_conversion_validated', 'image_source'}
-    required = keys - {'bundle_conversion_validated', 'image_source'}
+            'minimum_free_bytes', 'bundle_conversion_validated', 'image_source',
+            # BIG-IP profiles; the worker's validator applies the family rules.
+            'volume', 'allow_active', 'ucs_backup', 'license_check_date'}
+    required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup', 'license_check_date'}
     if not isinstance(profile, dict) or set(profile) - keys or required - set(profile):
         raise QueueError('Provide a complete upgrade profile with only supported profile fields.')
     if len(json.dumps(profile)) > 16000:

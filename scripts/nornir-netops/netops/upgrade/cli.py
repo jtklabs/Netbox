@@ -29,6 +29,13 @@ def add_arguments(parser, scheduled=False):
     parser.add_argument("--settle-seconds", type=positive, default=120, help="initial post-reload settling time")
     parser.add_argument("--validation-timeout", type=positive, default=600, help="window for two passing post-checks")
     parser.add_argument("--poll-interval", type=positive, default=30, help="seconds between reconnect/convergence checks")
+    from ..features.waf import add_connection_arguments
+    add_connection_arguments(parser)
+    bigip = parser.add_argument_group("BIG-IP upgrades")
+    bigip.add_argument("--ucs-dir", default=os.environ.get("NETOPS_UCS_DIR"),
+                       help="download each unit's pre-upgrade UCS archive here; otherwise it stays on the unit [$NETOPS_UCS_DIR]")
+    bigip.add_argument("--image-cache", default=os.environ.get("NETOPS_IMAGE_CACHE"),
+                       help="worker directory for images downloaded from an image_source URL [$NETOPS_IMAGE_CACHE; default: <project>/.images]")
     parser.set_defaults(workers=3)
 
 
@@ -40,7 +47,9 @@ def run(args, style):
 
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
+    from ..features.waf import connection_settings
     profile = Profile.load(args.profile)
+    args.f5 = connection_settings(args)
     settings = settings_from_env()
     args.standards = load_standards(args.standards, PROJECT_ROOT)
     args.lock_dir = PROJECT_ROOT / ".upgrade-locks"
@@ -48,7 +57,7 @@ def run(args, style):
     if targets is None:
         return code
     reporter = Reporter(archive.current(), settings)
-    print(f"{'APPLY' if args.apply else 'DRY RUN'} {'STAGE ONLY' if args.stage_only else 'UPGRADE'}: {profile.name}; "
+    print(f"{'APPLY' if args.apply else 'DRY RUN'} {'STAGE ONLY' if args.stage_only else 'UPGRADE'}: {profile.name} ({'BIG-IP' if profile.family == 'f5' else profile.family}); "
           f"{len(targets.inventory.hosts)} device(s), {args.workers} at a time")
     print(f"credentials: {credentials.describe()}")
     if not settings:

@@ -39,6 +39,8 @@ scripts/nornir-netops/*.log
 scripts/nornir-netops/.venv/
 scripts/nornir-netops/.pytest_cache/
 scripts/nornir-netops/.upgrade-locks/
+scripts/nornir-netops/.images/
+scripts/nornir-netops/ucs-backups/
 
 # Import/export drop zone — CSVs carry pricing and quotes
 csv/*

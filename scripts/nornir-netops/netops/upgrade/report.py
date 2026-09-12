@@ -149,7 +149,9 @@ def diagnostics_section(before, after):
             skipped.append(f"{command} ({NOT_COMPARED[command]})")
             continue
         old, new = before.get("raw", {}).get(command), after.get("raw", {}).get(command)
-        if old is None or new is None:
+        if old is None and new is None:
+            continue
+        if old is None or new is None or not isinstance(old, str) or not isinstance(new, str):
             lines.append(f"- `{command}`: not collected on one side")
             continue
         only_before, only_after = line_delta(old, new)
