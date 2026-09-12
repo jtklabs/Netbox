@@ -51,9 +51,11 @@ save configuration, change boot variables, remove packages or reload.
 Progress webhooks and local report writes occur during dry run too.
 
 Already-current devices still get a baseline and become `already_current`
-without image staging or configuration writes. Unexpected starting releases,
-mixed stack versions/modes, unapproved PIDs, incomplete critical output, unsaved
-configuration and insufficient flash produce `blocked` with reasons.
+without image staging or boot changes. Unexpected starting releases,
+mixed stack versions/modes, unapproved PIDs, incomplete critical output and
+insufficient flash produce `blocked` with reasons. Unsaved running-configuration
+changes are recorded and flagged rather than blocked; see
+[Saving the running configuration](#saving-the-running-configuration).
 
 `BUNDLE` is explicitly flagged in the plan and progress feed. A conversion may
 run only when `bundle_conversion_validated: true` is set for the profile.
@@ -83,6 +85,22 @@ Without a source URL, pre-stage the image on active flash. Dry run records
 `pending_transfer` when the image is missing but a source is configured; source
 reachability, checksum and final space remain unverified until apply copies it.
 The script never automatically deletes old software to free space.
+
+## Saving the running configuration
+
+`--apply` runs `write memory` as its first step after connecting, before the
+running and startup configurations are read and compared. The upgrade persists
+the running configuration ahead of the install in any case, so unsaved changes
+are saved rather than treated as a blocker, and the comparison then confirms
+that the save took. This is the one device write that happens before image
+verification and, for scheduled jobs, before the NetBox `ready` authorization:
+a device that is later blocked has still had its running configuration saved.
+If the two configurations still differ after the save, the device is blocked
+and the normalized difference is recorded in `upgrade_plan.saved_config_diff`.
+
+A dry run performs no save. It records the same diff, emits the
+`unsaved_changes` stage, and notes in `dry_run_complete` that apply will save
+first. Already-current devices are saved by `--apply` as well, then left alone.
 
 ## Pre-stage the installer only
 
@@ -147,11 +165,12 @@ in install mode, all original members and their committed image state, and the
 saved `packages.conf` autoboot configuration.
 
 The defaults allow 30 minutes per install/copy/checksum operation, 30 minutes for
-reconnection, an initial 120-second settling period and a 600-second validation
-window. Two consecutive comparisons without errors are required. Use
+reconnection, an initial 120-second settling period, a 600-second validation
+window and 300 seconds for each configuration dump, the slowest read on a large
+stack. Two consecutive comparisons without errors are required. Use
 `--install-timeout`, `--reload-timeout`, `--settle-seconds`,
-`--validation-timeout`, `--poll-interval` and `--show-timeout` for your tested
-environment. Deadlines are checked between individual bounded operations; they
+`--validation-timeout`, `--poll-interval`, `--show-timeout` and
+`--config-timeout` for your tested environment. Deadlines are checked between individual bounded operations; they
 are not hard wall-clock process limits.
 
 ## Baseline and comparison coverage
@@ -232,7 +251,8 @@ Example event (IDs/timestamps abbreviated for readability):
 ```
 
 All devices emit `queued` before workers start. Active stages include
-`connecting`, `precheck`, `precheck_complete`, `bundle_mode_flagged`,
+`connecting`, `saving_config`, `precheck`, `precheck_complete`,
+`bundle_mode_flagged`, `unsaved_changes`,
 `image_verification`, `ready`, `staging`, `configuring_boot`, `installing`,
 `reconnecting`, `converging`, `postcheck` and `validating`.
 Terminal stages are `dry_run_complete`, `already_current`, `blocked`, `staged`, `staging_failed`,
@@ -250,7 +270,7 @@ The archive records each event before delivery, with `pending`, `delivered`,
 `failed` or `disabled` delivery status. Configurations and raw command output
 stay in the archive; they are not included in the webhook event.
 
-A failure to deliver the final `ready` event blocks new device writes. Once a
+A failure to deliver the final `ready` event blocks boot and install changes. Once a
 device is changing, webhook outages do not interrupt its recovery/validation.
 An undelivered event causes a nonzero run exit even if the upgrade succeeds.
 There is no background event replay daemon; failed events remain in the report
@@ -266,11 +286,11 @@ values and common configuration secrets are redacted. Treat the archive as
 sensitive device configuration even after redaction. It is not a restorable
 full-secret configuration backup.
 
-If running/startup configuration differs, `upgrade_plan.saved_config_diff` in
-the local report shows the normalized difference from startup to running config.
-Review it locally before deciding whether to save or revert the changes. The
-diff is not sent in the NetBox progress message or webhook, and the upgrade
-remains blocked until running and startup agree.
+Whenever running and startup configuration differed when they were read,
+`upgrade_plan.saved_config_diff` in the local report holds the normalized
+difference from startup to running config, and `upgrade_plan.configuration_saved`
+records whether `--apply` had already saved. The diff is not sent in the NetBox
+progress message or webhook.
 
 Exit 0 means all device workflows passed without delivery failures; dry-run
 pending upgrades are not an error. `completed_with_warnings` also exits 0 when

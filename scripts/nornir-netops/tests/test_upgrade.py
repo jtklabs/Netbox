@@ -78,7 +78,6 @@ def test_interface_check_rejects_missing_replaced_or_duplicated_records(monkeypa
     (lambda s: s["software"]["1"].update(model="C9500-24Y4C"), "PID"),
     (lambda s: s["software"]["1"].update(mode="BUNDLE"), "BUNDLE"),
     (lambda s: s["stack"]["1"].update(state="Provisioned"), "Ready"),
-    (lambda s: s.update(startup_config="hostname unsaved"), "running/startup"),
     (lambda s: s["errors"].update(nac="unreadable"), "nac"),
 ])
 def test_preflight_gates(profile, change, expected):
@@ -87,14 +86,45 @@ def test_preflight_gates(profile, change, expected):
     assert expected in " ".join(workflow.preflight(snapshot, profile)["blockers"])
 
 
-def test_unsaved_configuration_remains_blocked_with_local_diff(profile):
+def test_unsaved_configuration_is_recorded_without_blocking_a_dry_run(profile):
     snapshot = baseline()
     snapshot['config'] = snapshot['config'].replace('switchport access vlan 10', 'switchport access vlan 20')
     plan = workflow.preflight(snapshot, profile)
-    assert any('running/startup configuration differ' in reason for reason in plan['blockers'])
+    assert plan['unsaved_changes'] and not plan['blockers']
     assert '- switchport access vlan 10' in plan['saved_config_diff']
     assert '+ switchport access vlan 20' in plan['saved_config_diff']
+
+
+def test_configuration_still_unsaved_after_write_memory_blocks(profile):
+    snapshot = baseline()
+    snapshot['config'] = snapshot['config'].replace('switchport access vlan 10', 'switchport access vlan 20')
+    plan = workflow.preflight(snapshot, profile, saved=True)
+    assert any('still differ after write memory' in reason for reason in plan['blockers'])
     assert not any('switchport access vlan' in reason for reason in plan['blockers'])
+    assert '+ switchport access vlan 20' in plan['saved_config_diff']
+
+
+def test_failed_config_read_is_not_reported_as_unsaved(profile):
+    snapshot = baseline()
+    del snapshot['config']
+    snapshot['errors']['config'] = 'show running-config: read timed out'
+    plan = workflow.preflight(snapshot, profile, saved=True)
+    assert any(reason.startswith('config: ') for reason in plan['blockers'])
+    assert not any('differ' in reason for reason in plan['blockers'])
+    assert not plan['unsaved_changes'] and 'saved_config_diff' not in plan
+
+
+def test_already_current_device_with_unsaved_changes_is_not_blocked(profile):
+    snapshot = baseline(transcript('17.12.04'))
+    snapshot['config'] += '\ninterface Vlan99'
+    plan = workflow.preflight(snapshot, profile)
+    assert plan['already_current'] and not plan['blockers'] and plan['unsaved_changes']
+
+
+def test_boot_findings_can_skip_the_saved_config_check():
+    snapshot = {'config': 'boot system flash:packages.conf\nhostname a', 'startup_config': 'boot system flash:packages.conf\nhostname b'}
+    assert [f['check'] for f in workflow.boot_findings(snapshot)] == ['saved_config']
+    assert workflow.boot_findings(snapshot, saved=False) == []
 
 
 def test_target_is_a_noop_and_versions_normalize(profile):
@@ -284,7 +314,7 @@ def test_apply_success_and_repeat_baseline(profile, options, fake_device):
     result, reporter = run_device(profile, options)
     assert not result.failed
     assert result.changed
-    assert fake_device.instances[0].mutations == ["write memory", f"install add file flash:{profile.image} activate commit"]
+    assert fake_device.instances[0].mutations == ["write memory", "write memory", f"install add file flash:{profile.image} activate commit"]
     stages = [call.args[1] for call in reporter.emit.call_args_list]
     assert stages.count("validating") == 2
     assert stages[-1] == "completed_with_warnings"
@@ -295,7 +325,8 @@ def test_bad_checksum_blocks_all_writes(profile, options, fake_device):
     fake_device.digest = "b" * 32
     result, reporter = run_device(profile, options)
     assert result.failed and not result.changed
-    assert not fake_device.instances[0].mutations
+    # Only the precheck configuration save; no boot or install writes.
+    assert fake_device.instances[0].mutations == ["write memory"]
     fake_device.instances[0].connection.send_config_set.assert_not_called()
 
 
@@ -305,7 +336,7 @@ def test_unsupported_start_blocks_apply(profile, options, fake_device):
     result, reporter = run_device(profile, options)
     assert result.failed
     assert reporter.emit.call_args.args[1] == "blocked"
-    assert not fake_device.instances[0].mutations
+    assert fake_device.instances[0].mutations == ["write memory"]
 
 
 def test_install_failure_is_not_retried(profile, options, fake_device):
@@ -343,7 +374,8 @@ def test_apply_webhook_gate_blocks_writes(profile, options, fake_device):
     reporter.emit.return_value = False
     result = workflow.upgrade_device(SimpleNamespace(host=host), profile, options, reporter)
     assert result.failed and not result.changed
-    assert not fake_device.instances[0].mutations
+    assert fake_device.instances[0].mutations == ["write memory"]
+    fake_device.instances[0].connection.send_config_set.assert_not_called()
 
 
 def test_local_lock_excludes_concurrent_runs(tmp_path):
@@ -496,7 +528,8 @@ def test_image_staging_success(profile, options, fake_device, monkeypatch):
     profile = replace(profile, image_source="https://images.example.com/" + profile.image)
     result, _ = run_device(profile, options)
     assert not result.failed and result.changed
-    assert fake_device.instances[0].mutations[0].startswith("copy https://")
+    assert fake_device.instances[0].mutations[0] == "write memory"
+    assert fake_device.instances[0].mutations[1].startswith("copy https://")
 
 
 def test_stale_configuration_blocks_boot_write(profile, options, fake_device, monkeypatch):
@@ -926,3 +959,94 @@ def test_vlan_count_still_fails_closed_when_the_parser_drops_a_row(monkeypatch):
                         lambda **kwargs: [{"vlan_id": "1", "vlan_name": "default", "status": "active", "interfaces": []}])
     with pytest.raises(ValueError, match="did not account for every table row"):
         checks.table("show vlan brief", *checks.TABLES["vlans"][1:4], transcript()["show vlan brief"])
+
+
+def unsaved_transcript():
+    raw = transcript()
+    raw["show running-config"] = raw["show running-config"].replace("switchport access vlan 10", "switchport access vlan 20")
+    return raw
+
+
+def stages(reporter):
+    return [call.args[1] for call in reporter.emit.call_args_list]
+
+
+def plan_from(reporter, stage="precheck_complete"):
+    return next(call.args[3]["upgrade_plan"] for call in reporter.emit.call_args_list if call.args[1] == stage)
+
+
+def test_apply_saves_running_config_before_comparing_it(profile, options, fake_device, monkeypatch):
+    options.apply = True
+    fake_device.raw = unsaved_transcript()
+    original_wait = fake_device.wait_for_target
+
+    def reload_keeps_saved_config(self, profile):
+        original_wait(self, profile)
+        for command in ("show running-config", "show startup-config"):
+            self.raw[command] = self.raw[command].replace("switchport access vlan 10", "switchport access vlan 20")
+
+    monkeypatch.setattr(fake_device, "wait_for_target", reload_keeps_saved_config)
+    result, reporter = run_device(profile, options)
+    assert not result.failed
+    assert fake_device.instances[0].mutations == ["write memory", "write memory", f"install add file flash:{profile.image} activate commit"]
+    seen = stages(reporter)
+    assert seen.index("saving_config") < seen.index("precheck")
+    assert "unsaved_changes" not in seen
+    plan = plan_from(reporter)
+    assert plan["configuration_saved"] and not plan["unsaved_changes"]
+
+
+def test_dry_run_flags_unsaved_changes_without_saving(profile, options, fake_device):
+    fake_device.raw = unsaved_transcript()
+    result, reporter = run_device(profile, options)
+    assert not result.failed
+    assert not fake_device.instances[0].mutations
+    assert "unsaved_changes" in stages(reporter)
+    assert stages(reporter)[-1] == "dry_run_complete"
+    assert "saves the unsaved running configuration" in reporter.emit.call_args.args[2]
+    plan = plan_from(reporter, "dry_run_complete")
+    assert plan["unsaved_changes"] and not plan["configuration_saved"]
+    assert "+ switchport access vlan 20" in plan["saved_config_diff"]
+
+
+def test_save_that_does_not_take_blocks_before_any_boot_change(profile, options, fake_device, monkeypatch):
+    options.apply = True
+    fake_device.raw = unsaved_transcript()
+    original = fake_device.write
+
+    def nvram_keeps_old_config(self, command, timeout=120):
+        output = original(self, command, timeout)
+        if command == "write memory":
+            self.raw["show startup-config"] = transcript()["show startup-config"]
+        return output
+
+    monkeypatch.setattr(fake_device, "write", nvram_keeps_old_config)
+    result, reporter = run_device(profile, options)
+    assert result.failed and not result.changed
+    assert stages(reporter)[-1] == "blocked"
+    assert "still differ after write memory" in reporter.emit.call_args.args[2]
+    assert fake_device.instances[0].mutations == ["write memory"]
+    fake_device.instances[0].connection.send_config_set.assert_not_called()
+
+
+def test_unacknowledged_save_fails_before_prechecks(profile, options, fake_device, monkeypatch):
+    options.apply = True
+    monkeypatch.setattr(fake_device, "write", lambda self, command, timeout=120: "Building configuration...\n% Error: NVRAM write failed")
+    result, reporter = run_device(profile, options)
+    assert result.failed and not result.changed
+    assert stages(reporter)[-1] == "failed"
+    assert "precheck" not in stages(reporter)
+
+
+def test_config_dumps_use_the_config_timeout():
+    device = workflow.Device(SimpleNamespace(), SimpleNamespace(show_timeout=60, config_timeout=300), Mock())
+    device.connection = Mock()
+    for command in ("show running-config", "show startup-config", "show version"):
+        device.read(command)
+    assert [c.kwargs["read_timeout"] for c in device.connection.send_command.call_args_list] == [300, 300, 60]
+
+
+def test_cli_config_timeout_default_and_override():
+    from netops.cli import build_parser
+    assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).config_timeout == 300
+    assert build_parser().parse_args(["upgrade-poll", "--config-timeout", "900"]).config_timeout == 900

@@ -21,6 +21,7 @@ def add_arguments(parser, scheduled=False):
     parser.add_argument("--stage-only", action="store_true", help="only check/copy/verify the image on active flash; never install or reload (copy requires --apply)")
     parser.add_argument("--standards", default=os.environ.get("NETOPS_STANDARDS"), help="shared standards file for NetBox settings")
     parser.add_argument("--show-timeout", type=positive, default=60, help="seconds per show command")
+    parser.add_argument("--config-timeout", type=positive, default=300, help="seconds for show running-config/startup-config, the slowest reads on a large stack")
     parser.add_argument("--install-timeout", type=positive, default=1800, help="seconds for each copy, checksum or install operation")
     parser.add_argument("--reload-timeout", type=positive, default=1800, help="seconds to reconnect on the target software")
     parser.add_argument("--settle-seconds", type=positive, default=120, help="initial post-reload settling time")

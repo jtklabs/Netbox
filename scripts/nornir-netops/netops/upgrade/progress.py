@@ -68,7 +68,9 @@ class Reporter:
                 self.delivery_failed = True
                 print(f"{host.name}: webhook delivery failed; event retained in archive", flush=True)
         # A scheduled job must receive NetBox's start authorization as well as
-        # deliver its configured UI webhook before the workflow can write.
+        # deliver its configured UI webhook before the workflow changes boot
+        # settings or installs. The --apply configuration save during prechecks
+        # is the one device write that precedes this gate.
         if self.event_sink and (stage != "ready" or delivered):
             acknowledged = self.event_sink(archive.clean(event))
             if not acknowledged:
