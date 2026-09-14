@@ -1,7 +1,8 @@
 import django_filters
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
-from .models import UpgradeJob
+from dcim.models import Device
+from .models import UpgradeDependency, UpgradeGroup, UpgradeJob
 
 
 class UpgradeJobFilterSet(NetBoxModelFilterSet):
@@ -15,3 +16,24 @@ class UpgradeJobFilterSet(NetBoxModelFilterSet):
 
     def search(self, queryset, name, value):
         return queryset.filter(Q(device_name__icontains=value) | Q(description__icontains=value))
+
+
+class UpgradeGroupFilterSet(NetBoxModelFilterSet):
+    member_id = django_filters.ModelMultipleChoiceFilter(field_name='members', queryset=Device.objects.all())
+    depends_on_id = django_filters.ModelMultipleChoiceFilter(field_name='depends_on', queryset=UpgradeGroup.objects.all())
+
+    class Meta:
+        model = UpgradeGroup
+        fields = ('id', 'name', 'source', 'stale', 'max_concurrent', 'key')
+
+    def search(self, queryset, name, value):
+        return queryset.filter(Q(name__icontains=value) | Q(description__icontains=value))
+
+
+class UpgradeDependencyFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = UpgradeDependency
+        fields = ('id', 'upstream_id', 'downstream_id', 'source', 'stale', 'key')
+
+    def search(self, queryset, name, value):
+        return queryset.filter(Q(upstream__name__icontains=value) | Q(downstream__name__icontains=value))

@@ -135,6 +135,9 @@ class SyncOptions:
     # only, and everything filtered is reported rather than dropped.
     sync_cables: bool = True
     cable_neighbor_classes: tuple = DEFAULT_CABLE_CLASSES
+    # Write HSRP/VRRP groups as NetBox FHRP groups with interface assignments,
+    # and ask the discovery plugin to refresh its redundancy groups afterwards.
+    sync_fhrp_groups: bool = True
 
 
 class Syncer:
@@ -210,8 +213,76 @@ class Syncer:
         if self.options.sync_cables and self.options.sync_interfaces and created:
             self.cables.sync_result(result, created)
 
+        if self.options.sync_fhrp_groups and self.options.sync_interfaces and result.fhrp_groups:
+            self._sync_fhrp_groups(result, created)
+
         if self.options.sync_access_points and result.access_points:
             self._sync_access_points(result, site_id, tenant_id)
+
+    # --- first-hop redundancy -----------------------------------------------
+
+    FHRP_GROUPS = "/ipam/fhrp-groups/"
+    FHRP_ASSIGNMENTS = "/ipam/fhrp-group-assignments/"
+    UPGRADE_GROUP_REFRESH = "/plugins/discovery/upgrade-groups/refresh/"
+
+    def _sync_fhrp_groups(self, result: ScanResult, created: list) -> None:
+        """One NetBox FHRP group per protocol, group id and virtual address.
+
+        The group id alone is not an identity: HSRP group 1 exists on every
+        VLAN of a pair. The virtual address is what makes two devices' rows
+        the same group, so it is part of the name and the lookup.
+        """
+        if not self.netbox.endpoint_available(self.FHRP_GROUPS):
+            return
+        for group in result.fhrp_groups:
+            interface = self._interface_named(created, group.interface)
+            if interface is None:
+                log.warning("%s: %s group %s on %s: interface not in NetBox, group skipped",
+                            result.host, group.protocol.upper(), group.group_id, group.interface)
+                continue
+            protocol = "hsrp" if group.protocol == "hsrp" else "vrrp2"
+            name = f"{protocol.upper()} {group.group_id} {group.virtual_ip}".strip()
+            fhrp = self.netbox.ensure(
+                self.FHRP_GROUPS, {"protocol": protocol, "group_id": group.group_id, "name": name},
+                {"protocol": protocol, "group_id": group.group_id, "name": name,
+                 "description": f"discovered by snmp-inventory on {group.interface}"},
+                label=f"FHRP group {name}",
+            )
+            if fhrp is None:
+                continue
+            existing = self.netbox.first(self.FHRP_ASSIGNMENTS, {
+                "group_id": fhrp["id"], "interface_type": "dcim.interface", "interface_id": interface["id"],
+            })
+            priority = group.priority if group.priority is not None else 100
+            if existing is None:
+                self.netbox.create(self.FHRP_ASSIGNMENTS, {
+                    "group": fhrp["id"], "interface_type": "dcim.interface",
+                    "interface_id": interface["id"], "priority": priority,
+                }, label=f"FHRP assignment {name} on {group.interface}")
+            else:
+                self.netbox.ensure_fields(self.FHRP_ASSIGNMENTS, existing, {"priority": priority},
+                                          label=f"FHRP assignment {name} on {group.interface}")
+
+    def _interface_named(self, created: list, name: str) -> dict | None:
+        for record, device in created:
+            if any(interface.name == name for interface in record.interfaces):
+                return self.netbox.first("/dcim/interfaces/", {"device_id": device["id"], "name": name})
+        return None
+
+    def refresh_upgrade_groups(self) -> None:
+        """Ask the discovery plugin to rebuild redundancy groups from FHRP data and cables."""
+        if not self.netbox.endpoint_available("/plugins/discovery/upgrade-groups/"):
+            log.debug("discovery plugin upgrade groups not available; skipping refresh")
+            return
+        try:
+            counts = self.netbox.post_raw(self.UPGRADE_GROUP_REFRESH, {}, label="upgrade group refresh")
+        except NetBoxError as exc:
+            log.warning("upgrade group refresh failed: %s", exc)
+            return
+        if counts:
+            log.info("upgrade groups: %s FHRP group(s), %s cabled dependency(ies), %s stale",
+                     counts.get("groups"), counts.get("dependencies"),
+                     (counts.get("stale_groups") or 0) + (counts.get("stale_dependencies") or 0))
 
     # --- devices ------------------------------------------------------------
 

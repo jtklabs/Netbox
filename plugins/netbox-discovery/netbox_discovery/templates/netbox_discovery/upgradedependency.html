@@ -1,0 +1,15 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Upgrade dependency</h5><div class="card-body">
+    <table class="table attr-table">
+      <tr><th>Upstream (waits)</th><td>{{ object.upstream|linkify }}</td></tr>
+      <tr><th>Downstream (goes first)</th><td>{{ object.downstream|linkify }}</td></tr>
+      <tr><th>Source</th><td>{{ object.get_source_display }}{% if object.stale %} <span class="badge text-bg-warning">stale</span>{% endif %}</td></tr>
+      <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+    </table>
+    <p class="text-muted">Within one batch, the upstream device's job is not claimed until the downstream device's job has completed. A downstream failure holds the upstream job until released.</p>
+  </div></div>
+</div></div>
+{% endblock %}

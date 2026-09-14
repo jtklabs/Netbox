@@ -121,7 +121,7 @@ def action(args, desired, host, record):
         operation = "stage_image" if getattr(args, "stage_only", False) else "upgrade"
         return {"action": operation if getattr(args, "apply", False) else "audit",
                 "action_source": "profile", "action_from_netbox": False, "netbox_policy_tag": None}
-    if feature in ("check-ntp", "discover", "selftest", "rollback"):
+    if feature in ("check-ntp", "discover", "selftest", "rollback", "collect"):
         return {"action": "rollback" if feature == "rollback" else "audit",
                 "action_source": "utility", "action_from_netbox": False, "netbox_policy_tag": None}
     selected = (desired.variables if desired else {}).get("logging_policy")
@@ -216,7 +216,7 @@ def device_document(name, record, args, desired, host):
         after = before
     else:
         after_status = "unavailable"
-    if before is None and feature not in ("selftest", "discover", "check-ntp"):
+    if before is None and feature not in ("selftest", "discover", "check-ntp", "collect"):
         limitations.append("The original feature configuration was not read; a complete reversal cannot be established.")
     row.update(
         configuration_scope=scope,

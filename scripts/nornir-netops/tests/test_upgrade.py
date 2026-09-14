@@ -1367,3 +1367,19 @@ def test_report_attachment_setting(monkeypatch, value, expected):
     monkeypatch.setenv("NETOPS_UPGRADE_WEBHOOK_REPORT", "maybe")
     with pytest.raises(progress.webhook.WebhookError):
         progress.report_in_webhook()
+
+
+def test_group_conflicts_only_flag_groups_over_their_limit():
+    from netops.upgrade.cli import group_conflicts
+    hosts = [SimpleNamespace(name=name, data={"netbox_id": pk}) for name, pk in (("sw3a", 1), ("sw3b", 2), ("core-a", 3))]
+    groups = [{"name": "closet-3", "max_concurrent": 1, "members": [{"id": 1}, {"id": 2}]},
+              {"name": "core-pair", "max_concurrent": 1, "members": [{"id": 3}, {"id": 4}]},
+              {"name": "ilb-pool", "max_concurrent": 2, "members": [{"id": 1}, {"id": 2}, {"id": 5}]}]
+    assert group_conflicts(groups, hosts) == ["redundancy group 'closet-3' allows 1 member(s) at a time; selected: sw3a, sw3b"]
+    assert group_conflicts([], hosts) == []
+
+
+def test_cli_ignore_groups_flag():
+    from netops.cli import build_parser
+    assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).ignore_groups is False
+    assert build_parser().parse_args(["upgrade", "--profile", "p.yaml", "--ignore-groups"]).ignore_groups is True

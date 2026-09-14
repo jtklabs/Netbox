@@ -69,6 +69,17 @@ class DiscoveryConfig(PluginConfig):
         # Reviewing everything sounds safer and is not: it teaches people to
         # click Apply without reading.
         'review_policy': 'exceptions',
+        # Device role slugs from the top of the network down. A cable between
+        # devices of different tiers makes the upper device's upgrade wait for
+        # the lower one's. Roles not listed take no part.
+        'upgrade_tier_roles': ['core', 'distribution', 'access'],
+        # When a device's upgrade fails, hold the other pending jobs at its
+        # site in the same batch until a person releases them, in addition to
+        # its partners and dependents.
+        'hold_site_on_failure': True,
+        # Largest show-command output the API accepts, in bytes. Larger files
+        # stay on the poller and are listed here with a note.
+        'command_output_max_bytes': 16 * 1024 * 1024,
     }
 
 

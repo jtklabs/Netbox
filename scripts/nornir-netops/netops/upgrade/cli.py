@@ -2,6 +2,7 @@
 
 import math
 import os
+import sys
 
 from .. import archive
 from ..standards import load as load_standards
@@ -36,7 +37,38 @@ def add_arguments(parser, scheduled=False):
                        help="download each unit's pre-upgrade UCS archive here; otherwise it stays on the unit [$NETOPS_UCS_DIR]")
     bigip.add_argument("--image-cache", default=os.environ.get("NETOPS_IMAGE_CACHE"),
                        help="worker directory for images downloaded from an image_source URL [$NETOPS_IMAGE_CACHE; default: <project>/.images]")
+    parser.add_argument("--ignore-groups", action="store_true",
+                        help="proceed even when the targets include more members of a NetBox redundancy group than may upgrade at once")
     parser.set_defaults(workers=3)
+
+
+def fetch_groups(args, style):
+    """Redundancy groups from the discovery plugin, or [] when NetBox does not serve them."""
+    from ..credentials import fetch_json_secret
+    from ..netbox import Client, NetBoxError, settings_from
+    settings = settings_from(args.standards, args)
+    if args.netbox_secret:
+        document = fetch_json_secret(args.netbox_secret, args.aws_region)
+        settings["token"] = settings["token"] or document.get("token")
+        settings["url"] = settings["url"] or document.get("url")
+    try:
+        return Client(settings["url"], settings["token"], settings["verify_tls"]).get("plugins/discovery/upgrade-groups/")
+    except NetBoxError as exc:
+        print(style.warn(f"redundancy groups not checked: {exc}"), file=sys.stderr)
+        return []
+
+
+def group_conflicts(groups, hosts):
+    """Lines describing groups whose selected members exceed their limit."""
+    selected = {host.data.get("netbox_id"): host.name for host in hosts if host.data.get("netbox_id") is not None}
+    conflicts = []
+    for group in groups:
+        members = [selected[m["id"]] for m in group.get("members", []) if m.get("id") in selected]
+        limit = int(group.get("max_concurrent") or 1)
+        if len(members) > limit:
+            conflicts.append(f"redundancy group {group.get('name')!r} allows {limit} member(s) at a time; "
+                             f"selected: {', '.join(sorted(members))}")
+    return conflicts
 
 
 def run(args, style):
@@ -56,6 +88,13 @@ def run(args, style):
     targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
+    if args.netbox and not getattr(args, "ignore_groups", False):
+        conflicts = group_conflicts(fetch_groups(args, style), targets.inventory.hosts.values())
+        if conflicts:
+            for line in conflicts:
+                print(style.bad(f"error: {line}"), file=sys.stderr)
+            print(style.dim("run the members separately, schedule them through NetBox, or pass --ignore-groups"), file=sys.stderr)
+            return 3
     reporter = Reporter(archive.current(), settings)
     print(f"{'APPLY' if args.apply else 'DRY RUN'} {'STAGE ONLY' if args.stage_only else 'UPGRADE'}: {profile.name} ({'BIG-IP' if profile.family == 'f5' else profile.family}); "
           f"{len(targets.inventory.hosts)} device(s), {args.workers} at a time")

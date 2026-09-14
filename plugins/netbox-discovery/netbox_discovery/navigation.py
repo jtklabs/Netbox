@@ -48,15 +48,35 @@ menu = PluginMenu(
     groups=(
         ('Onboarding', (onboarding, pollers)),
         ('Changes', (replacements, issues)),
-        ('Software', (PluginMenuItem(
-            link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
-            permissions=['netbox_discovery.view_upgradejob'],
-            buttons=(PluginMenuButton(
-                link='plugins:netbox_discovery:upgradejob_add', title='Schedule upgrades',
-                icon_class='mdi mdi-calendar-plus',
-                permissions=['netbox_discovery.add_upgradejob'],
-            ),),
-        ),)),
+        ('Software', (
+            PluginMenuItem(
+                link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
+                permissions=['netbox_discovery.view_upgradejob'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:upgradejob_add', title='Schedule upgrades',
+                    icon_class='mdi mdi-calendar-plus',
+                    permissions=['netbox_discovery.add_upgradejob'],
+                ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:upgradegroup_list', link_text='Redundancy Groups',
+                permissions=['netbox_discovery.view_upgradegroup'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:upgradegroup_add', title='Add a group',
+                    icon_class='mdi mdi-plus-thick',
+                    permissions=['netbox_discovery.add_upgradegroup'],
+                ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:upgradedependency_list', link_text='Upgrade Dependencies',
+                permissions=['netbox_discovery.view_upgradedependency'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:upgradedependency_add', title='Add a dependency',
+                    icon_class='mdi mdi-plus-thick',
+                    permissions=['netbox_discovery.add_upgradedependency'],
+                ),),
+            ),
+        )),
     ),
     icon_class='mdi mdi-radar',
 )

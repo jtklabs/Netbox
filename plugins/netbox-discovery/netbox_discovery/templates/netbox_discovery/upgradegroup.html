@@ -1,0 +1,23 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Redundancy group</h5><div class="card-body">
+    <table class="table attr-table">
+      <tr><th>Name</th><td>{{ object.name }}</td></tr>
+      <tr><th>Members upgrading at once</th><td>{% if object.max_concurrent %}{{ object.max_concurrent }}{% else %}all of them{% endif %}</td></tr>
+      <tr><th>Waits for groups</th><td>{% for group in object.depends_on.all %}{{ group|linkify }}{% if not forloop.last %}, {% endif %}{% empty %}{{ ''|placeholder }}{% endfor %}</td></tr>
+      <tr><th>Waited for by</th><td>{% for group in object.dependents.all %}{{ group|linkify }}{% if not forloop.last %}, {% endif %}{% empty %}{{ ''|placeholder }}{% endfor %}</td></tr>
+      <tr><th>Source</th><td>{{ object.get_source_display }}{% if object.stale %} <span class="badge text-bg-warning">stale: not seen by the last discovery refresh</span>{% endif %}</td></tr>
+      <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+    </table>
+    <p class="text-muted">{% if object.max_concurrent %}At most {{ object.max_concurrent }} member(s){% else %}Any number of members{% endif %} may hold a claimed, running or recovery-required upgrade job at the same time, across every batch and poller. Members of a group this one waits for go first in a batch, and the two groups never upgrade at the same time. A member whose job fails or needs recovery holds its partners' jobs in the same batch until a person releases them.</p>
+  </div></div>
+</div><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Members ({{ object.members.count }})</h5><div class="card-body">
+    <table class="table table-sm"><thead><tr><th>Device</th><th>Site</th><th>Role</th></tr></thead><tbody>
+    {% for device in object.members.all %}<tr><td>{{ device|linkify }}</td><td>{{ device.site|linkify }}</td><td>{{ device.role|placeholder }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div></div>
+</div></div>
+{% endblock %}

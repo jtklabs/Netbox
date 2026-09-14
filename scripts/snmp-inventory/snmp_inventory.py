@@ -176,6 +176,12 @@ def main(argv=None) -> int:
         # unknown neighbors, unmatched ports — and those belong in the
         # end-of-run summary, not scattered per-device through the log.
         log.info("cables: %s", syncer.cables.summary())
+    if not args.collect_only and scanned and config.commands.run_after_sweep:
+        run_command_collection(config)
+    if not args.collect_only and config.sync.sync_fhrp_groups and scanned:
+        # Groups and dependencies are derived from what the whole sweep wrote,
+        # so this runs once at the end rather than per device.
+        syncer.refresh_upgrade_groups()
     return 0 if scanned else 1
 
 
@@ -309,6 +315,33 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
              time.time() - started, total, summary or "nothing done",
              netbox.summary())
     return 0
+
+
+def run_command_collection(config) -> None:
+    """Hand the freshly synced fleet to nornir-netops for its per-platform show commands."""
+    import shlex
+    import subprocess
+    import sys as _sys
+
+    directory = config.commands.netops_dir
+    if not directory or not os.path.isfile(os.path.join(directory, "configure.py")):
+        log.error("commands.netops_dir does not contain configure.py; skipping command collection")
+        return
+    python = config.commands.python or os.path.join(directory, ".venv", "bin", "python")
+    if not os.path.isfile(python):
+        python = _sys.executable
+    command = [python, "configure.py", "collect", "--netbox", "--netbox-autofilter"]
+    if config.poller_name:
+        command += ["--poller", config.poller_name]
+    command += shlex.split(config.commands.extra_args)
+    log.info("collecting show commands: %s", " ".join(shlex.quote(part) for part in command))
+    try:
+        completed = subprocess.run(command, cwd=directory, check=False)
+    except OSError as exc:
+        log.error("command collection could not start: %s", exc)
+        return
+    if completed.returncode:
+        log.warning("command collection exited %d; see its report for details", completed.returncode)
 
 
 def build_target_list(netbox: NetBox, config, args) -> list[Target]:

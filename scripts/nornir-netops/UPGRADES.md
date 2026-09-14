@@ -37,7 +37,10 @@ python configure.py upgrade --profile campus-upgrade.yaml \
 ```
 
 All existing NetBox selectors work, including repeated filters, `--filter`,
-`--limit`, poller ownership/autofilter and NetBox credentials from AWS.
+`--limit`, poller ownership/autofilter and NetBox credentials from AWS. When
+the discovery plugin serves redundancy groups, a target set holding more
+members of a group than may upgrade at once is refused unless
+`--ignore-groups` is passed; see [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md#redundancy-groups-dependencies-and-holds).
 Device login comes from the same `NET_USER`, `NET_PASS`, `NET_ENABLE`,
 `NET_AWS_SECRET`, `NET_AWS_REGION` and optional custom JSON-key settings used by
 standards deployment. `--env-file` selects an alternate shared file.

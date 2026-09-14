@@ -47,6 +47,7 @@ re-run with --apply to push the commands above
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
+| [`collect`](#collect-show-commands-into-netbox) | Run each platform's show commands read-only and file the outputs on the NetBox device page | every platform in `commands.yaml` |
 | [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
@@ -1956,6 +1957,34 @@ the device and never the terminal, the report, or the logs.
 - The debug log records device names, addresses and command output. Passwords
   are scrubbed from it the same way they are from the terminal, but treat it as
   you would any operational log.
+
+### Collect show commands into NetBox
+
+`collect` runs a fixed set of show commands per platform, writes one text file
+per command under `collected/<device>/`, and posts each file to the discovery
+plugin, which stores it in NetBox's media storage and lists it on the device
+page under **Device Configuration State** with a download link. It changes
+nothing on the device. The platform comes from NetBox or the CSV, or is
+detected over SSH when blank, so the same run covers Cisco, Juniper, Arista,
+Aruba, F5 (tmsh over SSH), Palo Alto, Fortinet, Check Point, Opengear,
+Infoblox and Blue Coat with their own command sets.
+
+```bash
+./configure.py collect --netbox --netbox-autofilter --poller checkmk-us
+./configure.py collect --ip 10.1.10.11 --platform cisco_ios --no-upload
+```
+
+The command sets live in [`netops/commands.yaml`](netops/commands.yaml).
+Copy it to `commands.yaml` in this directory, or pass `--commands FILE`, to
+change them; each entry can carry its own `timeout` for slow dumps, and a
+platform can name a different netmiko `driver` (Opengear uses `linux`,
+Infoblox and Blue Coat use `generic`) and whether `enable` is needed. A
+command the device rejects is recorded as failed with the device's reply and
+the rest of the set still runs; output over 16 MB stays on the poller and is
+listed in NetBox with that note. Known credentials are redacted before the
+text is written or sent. The poller token needs add, change and view
+permission on the plugin's command outputs. `snmp-inventory` can run this
+after every sweep with `run_after_sweep` in its `[commands]` section.
 
 ### NetBox-scheduled upgrades
 

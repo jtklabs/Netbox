@@ -10,8 +10,11 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from .models import DiscoveryPoller, UpgradeJob
+from django.db.models import Q
+
+from .models import DiscoveryPoller, UpgradeGroup, UpgradeJob
 from .upgrade_choices import ACTIVE, TERMINAL
+from .upgrade_groups import GroupError, downstream_of, memberships, plan_waves
 from .utils import plugin_setting
 
 
@@ -109,6 +112,15 @@ def prepare(user, data):
         if poller and poller.tenant_id and poller.tenant_id != device.tenant_id:
             raise QueueError(f'{device}: poller tenant does not match the device.')
         rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device)})
+    devices = [row['device'] for row in rows]
+    groups, downstream = memberships(devices), downstream_of(devices)
+    for row in rows:
+        row['groups'] = groups.get(row['device'].pk, [])
+        row['waits_for'] = downstream.get(row['device'].pk, [])
+    try:
+        plan_waves(rows)
+    except GroupError as exc:
+        raise QueueError(str(exc)) from None
     return rows
 
 
@@ -123,7 +135,8 @@ def schedule(user, data):
                          address=row['address'], poller=poller, batch_id=batch,
                          profile=data['profile'], operation=data['operation'],
                          scheduled_at=data['scheduled_at'], start_before=data['start_before'],
-                         requested_by=user, description=data.get('description', ''))
+                         requested_by=user, description=data.get('description', ''),
+                         groups=row['groups'], waits_for=row['waits_for'], planned_wave=row['wave'])
         job.full_clean()
         job.save()
         if not UpgradeJob.objects.restrict(user, 'add').filter(pk=job.pk).exists():
@@ -171,9 +184,97 @@ def edit_pending(user, pk, data):
     return job
 
 
+def related_jobs(job):
+    """Jobs for this job's partners (shared group) and for the devices it waits for."""
+    if not job.groups and not job.waits_for:
+        return UpgradeJob.objects.none()
+    condition = Q(device_id__in=job.waits_for)
+    for name in job.groups:
+        condition |= Q(groups__contains=[name])
+    return UpgradeJob.objects.filter(condition).exclude(pk=job.pk).exclude(device_id=job.device_id)
+
+
+def hold_reason(job):
+    """Why this job must not start: a fenced partner anywhere, or a failure in its batch.
+
+    Failures a person already acknowledged when releasing this job are not
+    reasons again; a new failure still is.
+    """
+    acknowledged = job.acknowledged or []
+    related = related_jobs(job).exclude(pk__in=acknowledged)
+    fenced = related.filter(status='recovery_required').first()
+    if fenced is not None:
+        return f'{fenced.device_name} requires recovery'
+    failed = related.filter(batch_id=job.batch_id, status='failed').first()
+    if failed is not None:
+        return f'{failed.device_name} ended failed in this batch'
+    if plugin_setting('hold_site_on_failure'):
+        at_site = UpgradeJob.objects.filter(batch_id=job.batch_id, status__in=('failed', 'recovery_required'),
+                                            device__site_id=job.device.site_id).exclude(pk=job.pk).exclude(pk__in=acknowledged).first()
+        if at_site is not None:
+            return f'{at_site.device_name} ended {at_site.status} at the same site in this batch'
+    return ''
+
+
+def capacity_available(job):
+    """Every group of the device has room; a limit of 0 means all members may go at once."""
+    for name in job.groups:
+        group = UpgradeGroup.objects.filter(name=name).first()
+        limit = group.max_concurrent if group is not None else 1
+        if not limit:
+            continue
+        active = UpgradeJob.objects.filter(status__in=ACTIVE, groups__contains=[name]).exclude(device_id=job.device_id).count()
+        if active >= limit:
+            return False
+    return True
+
+
+def exclusion_clear(job):
+    """Nothing this job waits for, and nothing that waits for it, is upgrading right now in any batch."""
+    if job.waits_for and UpgradeJob.objects.filter(status__in=ACTIVE, device_id__in=job.waits_for).exists():
+        return False
+    return not UpgradeJob.objects.filter(status__in=ACTIVE, waits_for__contains=[job.device_id]).exclude(device_id=job.device_id).exists()
+
+
+def dependencies_done(job):
+    """Downstream jobs in the same batch have ended; cancelled or expired ones no longer count."""
+    if not job.waits_for:
+        return True
+    return not UpgradeJob.objects.filter(batch_id=job.batch_id, device_id__in=job.waits_for).exclude(
+        status__in=('completed', 'completed_with_warnings', 'cancelled', 'expired')).exists()
+
+
+def dependents_and_partners(job):
+    """Pending jobs that share a group with this job's device or wait for it."""
+    condition = Q(waits_for__contains=[job.device_id])
+    for name in job.groups:
+        condition |= Q(groups__contains=[name])
+    return UpgradeJob.objects.filter(condition).exclude(pk=job.pk).exclude(device_id=job.device_id)
+
+
+def hold_related(job):
+    """Mark pending partners, dependents and, by default, the rest of the site's batch held when this job fails."""
+    reason = f'{job.device_name} ended {job.status}'
+    pending = dependents_and_partners(job).filter(status='pending').select_for_update()
+    if job.status != 'recovery_required':
+        pending = pending.filter(batch_id=job.batch_id)
+    held = set()
+    for other in pending:
+        detail = reason + (' in this batch' if other.batch_id == job.batch_id else '')
+        other.status, other.held_reason, other.message = 'held', detail, f'Held: {detail}'
+        other.save()
+        held.add(other.pk)
+    if plugin_setting('hold_site_on_failure'):
+        at_site = UpgradeJob.objects.filter(batch_id=job.batch_id, status='pending', device__site_id=job.device.site_id)
+        for other in at_site.exclude(pk=job.pk).exclude(pk__in=held).select_for_update():
+            detail = f'{reason} at the same site in this batch'
+            other.status, other.held_reason, other.message = 'held', detail, f'Held: {detail}'
+            other.save()
+
+
 def expire(queryset, now):
     # Queryset is permission-restricted and poller-scoped by the caller.
-    queryset.filter(status='pending', start_before__lte=now).update(
+    queryset.filter(status__in=('pending', 'held'), start_before__lte=now).update(
         status='expired', completed_at=now, message='Start window missed; no work dispatched.')
     stale = now - timedelta(minutes=5)
     queryset.filter(status='claimed', last_seen_at__lt=stale).update(
@@ -202,6 +303,13 @@ def claim(user, poller, limit, apply):
         except QueueError as exc:
             job.status, job.message, job.completed_at = 'failed', str(exc), now
             job.save()
+            continue
+        reason = hold_reason(job)
+        if reason:
+            job.status, job.held_reason, job.message = 'held', reason, f'Held: {reason}'
+            job.save()
+            continue
+        if not capacity_available(job) or not dependencies_done(job) or not exclusion_clear(job):
             continue
         job.claim_token = uuid.uuid4()
         job.status, job.claimed_at, job.last_seen_at = 'claimed', now, now
@@ -271,6 +379,8 @@ def report(user, pk, data):
     # Bounded event history; every event is retained in the remote archive.
     job.events = (job.events + [event])[-500:]
     job.save()
+    if outcome in ('failed', 'recovery_required'):
+        hold_related(job)
     return job
 
 
@@ -280,9 +390,54 @@ def cancel(user, pk, reason='', recovered=False):
     if recovered:
         if not job.needs_recovery or not reason.strip():
             raise QueueError('Only recovery-required jobs can be released; describe the verified device state.')
-    elif job.status != 'pending':
-        raise QueueError('Only a pending job can be cancelled. An active upgrade must finish recovery.')
+    elif job.status not in ('pending', 'held'):
+        raise QueueError('Only a pending or held job can be cancelled. An active upgrade must finish recovery.')
     job.status, job.completed_at, job.claim_token = 'cancelled', timezone.now(), None
     job.message = reason or 'Cancelled before dispatch.'
     job.save()
     return job
+
+
+@transaction.atomic
+def hold(user, pk, reason):
+    job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
+    if job.status != 'pending':
+        raise QueueError('Only a pending job can be held.')
+    if not reason.strip():
+        raise QueueError('Give a reason for the hold.')
+    job.status, job.held_reason, job.message = 'held', reason.strip()[:1000], f'Held: {reason.strip()}'[:1000]
+    job.save()
+    return job
+
+
+def _release(job, reason):
+    """Return a held job to the schedule, remembering which failures the person accepted."""
+    blamed = set(related_jobs(job).filter(status__in=('failed', 'recovery_required')).values_list('pk', flat=True))
+    blamed |= set(UpgradeJob.objects.filter(batch_id=job.batch_id, status__in=('failed', 'recovery_required'),
+                                            device__site_id=job.device.site_id).exclude(pk=job.pk).values_list('pk', flat=True))
+    job.acknowledged = sorted(set(job.acknowledged or []) | blamed)
+    job.message = f'Released: {reason.strip()} (was held: {job.held_reason})'[:1000]
+    job.status, job.held_reason = 'pending', ''
+    job.save()
+
+
+@transaction.atomic
+def release(user, pk, reason):
+    job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
+    if job.status != 'held':
+        raise QueueError('Only a held job can be released.')
+    if not reason.strip():
+        raise QueueError('Describe why it is safe to continue before releasing the hold.')
+    _release(job, reason)
+    return job
+
+
+@transaction.atomic
+def release_batch(user, batch_id, reason):
+    if not reason.strip():
+        raise QueueError('Describe why it is safe to continue before releasing the batch.')
+    released = 0
+    for job in UpgradeJob.objects.restrict(user, 'change').select_for_update().filter(batch_id=batch_id, status='held'):
+        _release(job, reason)
+        released += 1
+    return released

@@ -35,6 +35,9 @@ netops = "netops.entrypoint:main"
 [tool.setuptools.packages.find]
 include = ["netops*"]
 
+[tool.setuptools.package-data]
+netops = ["commands.yaml"]
+
 # Templates live in ./templates, beside the package, so they stay easy to edit.
 # `pip install -e .` therefore works out of the box; a non-editable install must
 # point $NETOPS_TEMPLATES at a copy of that directory.

@@ -22,6 +22,16 @@ from dataclasses import dataclass, field
 from .snmp import Credential
 from .sync import SyncOptions
 
+
+@dataclass
+class CommandsConfig:
+    """Run `configure.py collect` from nornir-netops after a sweep, for the devices this poller owns."""
+
+    run_after_sweep: bool = False
+    netops_dir: str = ""
+    python: str = ""
+    extra_args: str = ""
+
 log = logging.getLogger(__name__)
 
 CREDENTIAL_SECTION_PREFIX = "credential"
@@ -54,6 +64,7 @@ class Config:
     netbox: NetBoxConfig = field(default_factory=NetBoxConfig)
     snmp: SnmpConfig = field(default_factory=SnmpConfig)
     sync: SyncOptions = field(default_factory=SyncOptions)
+    commands: 'CommandsConfig' = field(default_factory=lambda: CommandsConfig())
     poller_name: str = ""
     scan_tag: str = ""
     credentials: list[Credential] = field(default_factory=list)
@@ -147,8 +158,18 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             retain_replaced_hardware=section.getboolean("retain_replaced_hardware", True),
             retired_device_status=section.get("retired_device_status", "inventory"),
             sync_cables=section.getboolean("sync_cables", True),
+            sync_fhrp_groups=section.getboolean("sync_fhrp_groups", True),
             cable_neighbor_classes=_class_list(
                 section.get("cable_neighbor_classes", "network")),
+        )
+
+    if parser.has_section("commands"):
+        section = parser["commands"]
+        config.commands = CommandsConfig(
+            run_after_sweep=section.getboolean("run_after_sweep", False),
+            netops_dir=section.get("netops_dir", ""),
+            python=section.get("python", ""),
+            extra_args=section.get("extra_args", ""),
         )
 
     if parser.has_section("snmp"):
