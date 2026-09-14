@@ -1,0 +1,5 @@
+{% macro cell(value) -%}"{{ value | default('', true) | string | replace('"', '""') }}"{%- endmacro -%}
+device,interface,status,findings,remediation,last_assessed,last_attempt,poller
+{% for interface in queryset -%}
+{{ cell(interface.device.name) }},{{ cell(interface.name) }},{{ cell(interface.cf.get('nac_status') or 'unknown') }},{{ cell(interface.cf.get('nac_issues')) }},{{ cell(interface.cf.get('nac_remediation')) }},{{ cell(interface.cf.get('nac_checked_at')) }},{{ cell(interface.cf.get('nac_last_attempt')) }},{{ cell(interface.cf.get('nac_poller')) }}
+{% endfor -%}

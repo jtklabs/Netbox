@@ -264,3 +264,29 @@ def test_verification_re_runs_the_planner():
     device has been read."""
     assert FEATURE.verify_with_plan is True
     assert FEATURE.build_desired(parse_args()).keys == []
+
+
+def test_audit_includes_compliant_noncompliant_and_skipped_interfaces():
+    desired, ctx = context()
+    plan_nac(parse_interfaces(IOS_SAMPLE), desired.keys, MODE_ADD, ctx)
+    audit = ctx["audit"]
+    assert audit["status"] == "noncompliant"
+    assert audit["summary"] == {"total": 5, "audited": 2, "compliant": 1, "noncompliant": 1, "skipped": 3}
+    ports = {port["name"]: port for port in audit["interfaces"]}
+    assert ports["GigabitEthernet1/0/1"]["compliant"] is True
+    assert ports["GigabitEthernet1/0/1"]["missing_lines"] == []
+    assert "access-session closed" in ports["GigabitEthernet1/0/2"]["missing_lines"]
+    assert "mab" in ports["GigabitEthernet1/0/2"]["present_lines"]
+    assert ports["GigabitEthernet1/0/3"]["compliant"] is None
+    assert ports["GigabitEthernet1/0/3"]["skip_reason"] == "shut down"
+    assert ports["Vlan10"]["status"] == "skipped"
+    assert "ip address" not in str(audit)
+
+
+@pytest.mark.parametrize("output,status", [("", "unknown"), ("interface Vlan10\n ip address 10.0.0.1 255.255.255.0", "not_applicable")])
+def test_no_audited_interfaces_is_not_reported_as_compliant(output, status):
+    desired, ctx = context()
+    plan_nac(parse_interfaces(output), desired.keys, MODE_ADD, ctx)
+    assert ctx["audit"]["status"] == status
+    assert ctx["audit"]["compliant"] is None
+    assert bool(ctx["advisories"]) == (status == "unknown")

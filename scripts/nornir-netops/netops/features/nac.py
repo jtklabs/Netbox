@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..core import Desired, Entry, Feature, PlatformSupport, render, validate_word
@@ -202,17 +203,57 @@ def plan_nac(
 
     wanted = required_lines(platform, variables)
     missing: Dict[str, List[str]] = {}
+    interfaces: List[Dict[str, Any]] = []
     audited = 0
 
     for entry in current:
-        included, _ = in_scope(entry, rules)
+        included, reason = in_scope(entry, rules)
+        configured = set(entry.data["lines"])
+        absent = [line for line in wanted if line not in configured] if included else []
+        interfaces.append({
+            "name": entry.data["name"],
+            "description": entry.data["description"],
+            "mode": entry.data["mode"],
+            "shutdown": entry.data["shutdown"],
+            "physical": entry.data["physical"],
+            "in_scope": included,
+            "status": ("noncompliant" if absent else "compliant") if included else "skipped",
+            "compliant": not absent if included else None,
+            "skip_reason": reason or None,
+            "missing_lines": absent,
+            "present_lines": [line for line in wanted if line in configured],
+        })
         if not included:
             continue
         audited += 1
-        configured = set(entry.data["lines"])
-        absent = [line for line in wanted if line not in configured]
         if absent:
             missing[entry.data["name"]] = absent
+
+    # A fresh snapshot on every pass preserves before/after evidence without
+    # sending unrelated interface configuration or embedded credentials.
+    context["audit"] = {
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "status": (
+            "unknown" if not current else "not_applicable" if not audited
+            else "noncompliant" if missing else "compliant"
+        ),
+        "compliant": not missing if audited else None,
+        "reason": (
+            "No interface configuration was returned" if not current
+            else "No interfaces are in scope" if not audited else None
+        ),
+        "required_lines": wanted,
+        "summary": {
+            "total": len(current),
+            "audited": audited,
+            "compliant": audited - len(missing),
+            "noncompliant": len(missing),
+            "skipped": len(current) - audited,
+        },
+        "interfaces": sorted(interfaces, key=lambda item: item["name"]),
+    }
+    if not current and context.get("advisories") is not None:
+        context["advisories"].append("No interface configuration was returned; NAC compliance is unknown")
 
     # The template renders from this; the runner gives each host its own copy.
     variables["missing"] = missing
@@ -252,6 +293,13 @@ def reverse(commands, current, removed, context):
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    sync = parser.add_mutually_exclusive_group()
+    sync.add_argument(
+        "--sync-netbox", action="store_true", default=None,
+        help="write NAC results to NetBox interface custom fields, including audit-only runs [$NETOPS_NAC_NETBOX_SYNC]",
+    )
+    sync.add_argument("--no-sync-netbox", dest="sync_netbox", action="store_false",
+                      help="disable NetBox NAC result writes for this run")
     parser.add_argument(
         "--policy",
         help="subscriber control policy name; defaults to nac.policy in the "

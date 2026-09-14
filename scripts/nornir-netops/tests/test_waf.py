@@ -162,9 +162,16 @@ def setup(tmp_path, monkeypatch):
         inventory = (["--netbox"] if netbox_inventory else
                      ["--ip", "192.0.2.1", "--platform", "f5_tmsh"] if direct else
                      ["--csv", str(csv)])
+        reads_before, writes_before = len(box.reads), len(box.writes)
         code = cli.main([feature, "--no-env-file", "--no-rollback-file", "--yes",
                          "--standards", str(standards), "--report", str(report),
                          *inventory, *extra])
+        if feature in ("waf", "syslog"):
+            paths = box.reads[reads_before:] + [p for p, _ in box.writes[writes_before:]]
+            if feature == "waf":
+                assert all(p == ROOT or p.startswith(ROOT + "/") for p in paths)
+            else:
+                assert all(p == f5_syslog.SYSLOG for p in paths)
         data = json.loads(report.read_text()) if report.exists() else None
         return code, data
 
@@ -384,7 +391,7 @@ def test_builtin_profiles_never_enter_plans_or_compliance(setup, policy):
     assert ROOT + "/system/application" not in setup.box.reads
 
 
-def test_only_builtin_profiles_never_write_f5_and_use_system_compliance(setup):
+def test_only_builtin_profiles_never_write_f5_and_have_no_applicable_drift(setup):
     setup.box.responses[ROOT]["items"][0]["builtIn"] = "enabled"
     setup.nb.device["custom_fields"]["syslog_compliant"] = False
     code, report = setup.run("--apply", netbox_inventory=True)
@@ -393,7 +400,7 @@ def test_only_builtin_profiles_never_write_f5_and_use_system_compliance(setup):
     assert record["status"] == "skipped"
     assert record["profiles"] == []
     assert record["syslog_compliant"] is True
-    assert setup.box.reads == [ROOT, f5_syslog.SYSLOG]
+    assert setup.box.reads == [ROOT]
     assert setup.box.writes == [] and setup.box.saves == 0
     assert setup.nb.device["custom_fields"]["syslog_compliant"] is True
     assert setup.nb.device["custom_fields"][waf.CHECKED_FIELD] != OLD_DATE
@@ -679,22 +686,29 @@ def test_shell_environment_wins_over_env_file(setup, monkeypatch, tmp_path):
     assert setup.box.logins[0][4]["port"] == 8443
 
 
-def test_system_syslog_drift_prevents_combined_waf_compliance(setup):
-    setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = []
+@pytest.mark.parametrize("syslog_state", ["drift", "unavailable", "missing"])
+def test_waf_does_not_read_or_depend_on_system_syslog(setup, syslog_state):
+    if syslog_state == "drift":
+        setup.box.responses[f5_syslog.SYSLOG]["remoteServers"] = []
+    elif syslog_state == "unavailable":
+        setup.box.responses[f5_syslog.SYSLOG] = RuntimeError("cannot audit system syslog")
+    else:
+        setup.box.responses.pop(f5_syslog.SYSLOG)
+    before = setup.box.responses.get(f5_syslog.SYSLOG)
     code, report = setup.run("--apply", netbox_inventory=True)
     assert code == cli.EXIT_OK
     row = report["devices"]["f5"]
     assert row["profiles"][0]["fully_managed_compliant"] is True
-    assert row["system_syslog_audit"]["compliant"] is False
-    assert row["syslog_compliant"] is False
+    assert row["syslog_compliant"] is True
+    assert setup.nb.device["custom_fields"]["syslog_compliant"] is True
+    assert "system_syslog_audit" not in row
+    assert all(path.startswith(ROOT) for path in setup.box.reads)
     assert [path for path, _ in setup.box.writes] == [APP]
-
-
-def test_system_syslog_read_failure_prevents_waf_changes(setup):
-    setup.box.responses[f5_syslog.SYSLOG] = RuntimeError("cannot audit system syslog")
-    code, _ = setup.run("--apply", netbox_inventory=True)
-    assert code == cli.EXIT_FAILED
-    assert setup.box.writes == setup.nb.writes == []
+    assert setup.box.responses.get(f5_syslog.SYSLOG) is before
+    assert row["verified"] and setup.box.saves == 1
+    assert row["configuration_scope"] == "waf"
+    assert all(step["path"].startswith(ROOT) for step in row["current_config"]["read_steps"])
+    assert all(step["path"].startswith(ROOT) for step in row["backout"]["steps"] if step["purpose"] == "restore")
 
 
 @pytest.mark.parametrize("feature", ["waf", "syslog"])

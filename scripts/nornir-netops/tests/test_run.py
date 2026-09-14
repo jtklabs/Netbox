@@ -1838,6 +1838,288 @@ def test_a_second_run_finds_nothing_left_to_do(
     assert "2 access port(s) checked, all compliant" in capsys.readouterr().out
 
 
+@pytest.fixture
+def nac_webhook(monkeypatch):
+    monkeypatch.setenv("NETOPS_NAC_WEBHOOK_URL", "https://example.com/nac")
+    monkeypatch.setenv("NETOPS_NAC_WEBHOOK_TOKEN", "webhook-secret-token")
+    sent = []
+    monkeypatch.setattr(cli.webhook, "send", lambda settings, report: sent.append((settings, report)))
+    return sent
+
+
+def test_nac_posts_the_local_report_with_all_ports(
+    ports, csv_file, login, nac_standards, nac_webhook, tmp_path
+):
+    report = tmp_path / "nac.json"
+    assert run_feature("nac", csv_file, "--limit", "sw1", "--report", str(report), "--fail-on-diff") == cli.EXIT_DIFF
+    assert len(nac_webhook) == 1
+    settings, body = nac_webhook[0]
+    assert settings.token == "webhook-secret-token"
+    archived = json.loads(report.read_text())
+    delivered = json.loads(body)
+    assert archived["schema_version"] == 2
+    for key, value in delivered.items():
+        if key not in ("schema_version", "devices"):
+            assert archived[key] == value
+    for name, record in delivered["devices"].items():
+        assert all(archived["devices"][name][key] == value for key, value in record.items())
+    assert settings.token not in body
+    document = json.loads(body)
+    assert document["schema_version"] == 1
+    assert document["dry_run"] is True
+    record = document["devices"]["sw1"]
+    assert record["hostname"] == "10.1.1.1"
+    assert record["audit_before"]["summary"]["total"] == 5
+    assert record["audit_after"] is None
+    assert ports["config"] == {}
+
+
+@pytest.mark.parametrize("source", ["csv", "netbox"])
+def test_nac_inventory_sources_feed_device_and_port_results_to_webhook(
+    ports, csv_file, login, netbox, nac_standards, nac_webhook, monkeypatch, source
+):
+    from netops.features.nac import EOS_SAMPLE
+
+    ports["devices"]["leaf1"].lines.extend(EOS_SAMPLE.splitlines())
+    # Different addresses prove the selected source supplied the hosts.
+    netbox["devices"][0]["primary_ip4"]["address"] = "192.0.2.11/24"
+    netbox["devices"][1]["primary_ip4"]["address"] = "192.0.2.12/24"
+    monkeypatch.setenv("NETOPS_CSV", csv_file if source == "csv" else "does-not-exist.csv")
+    extra = ["--netbox"] if source == "netbox" else []
+
+    assert cli.main([
+        "nac", "--no-env-file", "--standards", str(nac_standards),
+        "--limit", "sw1,leaf1", *extra,
+    ]) == cli.EXIT_OK
+
+    assert len(nac_webhook) == 1
+    devices = json.loads(nac_webhook[0][1])["devices"]
+    assert set(devices) == {"sw1", "leaf1"}
+    assert devices["sw1"]["hostname"] == ("192.0.2.11" if source == "netbox" else "10.1.1.1")
+    assert devices["leaf1"]["hostname"] == ("192.0.2.12" if source == "netbox" else "10.1.1.2")
+    assert devices["sw1"]["platform"] == "cisco_ios"
+    assert devices["leaf1"]["platform"] == "arista_eos"
+    assert devices["sw1"]["audit_before"]["summary"]["audited"] == 2
+    assert devices["leaf1"]["audit_before"]["summary"]["audited"] == 2
+    ios_names = {port["name"] for port in devices["sw1"]["audit_before"]["interfaces"]}
+    eos_names = {port["name"] for port in devices["leaf1"]["audit_before"]["interfaces"]}
+    assert "GigabitEthernet1/0/2" in ios_names
+    assert "Ethernet2" in eos_names
+    assert ios_names.isdisjoint(eos_names)
+    assert ports["config"] == {}
+
+
+@pytest.mark.parametrize("address", ["192.0.2.10", "2001:db8::10"])
+@pytest.mark.parametrize("platform", [None, "ios-xe"])
+def test_nac_direct_ip_audits_and_posts_without_inventory(
+    ports, login, nac_standards, nac_webhook, detector, monkeypatch, address, platform
+):
+    ports["devices"][address] = ports["devices"]["sw1"]
+    monkeypatch.setenv("NETOPS_CSV", "does-not-exist.csv")
+    # Configured NetBox credentials must not select its inventory implicitly.
+    monkeypatch.setenv("NETBOX_URL", "https://unused.example.com")
+    monkeypatch.setenv("NETBOX_TOKEN", "unused-token")
+    extra = ["--platform", platform] if platform else []
+    assert cli.main(["nac", "--no-env-file", "--ip", address, *extra]) == cli.EXIT_OK
+    assert detector == ([] if platform else [address])
+    assert len(nac_webhook) == 1
+    devices = json.loads(nac_webhook[0][1])["devices"]
+    assert set(devices) == {address}
+    assert devices[address]["hostname"] == address
+    assert devices[address]["platform"] == "cisco_ios"
+    assert devices[address]["audit_before"]["summary"] == {
+        "total": 5, "audited": 2, "compliant": 1, "noncompliant": 1, "skipped": 3,
+    }
+    assert set(ports["commands"]) == {address}
+    assert ports["config"] == {}
+
+
+def test_nac_direct_ip_preserves_ssh_connection_settings(
+    ports, login, nac_standards, nac_webhook, monkeypatch
+):
+    address = "192.0.2.10"
+    ports["devices"][address] = ports["devices"]["sw1"]
+    monkeypatch.setenv("NET_ENABLE", "enable-secret")
+    original = runner.netmiko_send_command
+    connections = []
+
+    def capture(task, **kwargs):
+        connections.append(task.host.get_connection_parameters("netmiko"))
+        return original(task, **kwargs)
+
+    monkeypatch.setattr(runner, "netmiko_send_command", capture)
+    assert cli.main([
+        "nac", "--no-env-file", "--ip", address, "--platform", "cisco_ios",
+        "--port", "2222", "--conn-timeout", "4", "--key-file", "/test/key",
+    ]) == cli.EXIT_OK
+    assert len(connections) == 1
+    params = connections[0]
+    assert (params.hostname, params.username, params.password, params.port) == (address, "netauto", "sekrit", 2222)
+    assert params.extras == {"secret": "enable-secret", "use_keys": True, "key_file": "/test/key", "conn_timeout": 4.0}
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_nac_custom_aws_fields_from_env_reach_ssh(
+    ports, nac_standards, nac_webhook, monkeypatch, tmp_path, override
+):
+    address = "192.0.2.10"
+    ports["devices"][address] = ports["devices"]["sw1"]
+    env = tmp_path / "aws.env"
+    env.write_text(
+        "NET_AWS_SECRET=prod/network/custom-login\n"
+        "NET_AWS_REGION=us-east-1\n"
+        "NET_AWS_USERNAME_KEY=ssh_user\n"
+        "NET_AWS_PASSWORD_KEY=ssh_password\n"
+        "NET_AWS_ENABLE_KEY=ssh_enable\n"
+    )
+    fetched = []
+
+    def fetch(name, region):
+        fetched.append((name, region))
+        return {
+            "ssh_user": "env-selected-user", "ssh_password": "env-selected-password",
+            "ssh_enable": "env-selected-enable", "alternate_user": "flag-selected-user",
+            "alternate_password": "flag-selected-password", "alternate_enable": "flag-selected-enable",
+        }
+
+    monkeypatch.setattr("netops.credentials.fetch_json_secret", fetch)
+    original = runner.netmiko_send_command
+    connections = []
+
+    def capture(task, **kwargs):
+        connections.append(task.host.get_connection_parameters("netmiko"))
+        return original(task, **kwargs)
+
+    monkeypatch.setattr(runner, "netmiko_send_command", capture)
+    extra = [
+        "--aws-username-key", "alternate_user", "--aws-password-key", "alternate_password",
+        "--aws-enable-key", "alternate_enable",
+    ] if override else []
+    assert cli.main([
+        "nac", "--env-file", str(env), "--ip", address, "--platform", "cisco_ios", *extra,
+    ]) == cli.EXIT_OK
+    assert fetched == [("prod/network/custom-login", "us-east-1")]
+    assert len(connections) == 1
+    selected = "flag" if override else "env"
+    assert connections[0].username == f"{selected}-selected-user"
+    assert connections[0].password == f"{selected}-selected-password"
+    assert connections[0].extras["secret"] == f"{selected}-selected-enable"
+    assert len(nac_webhook) == 1
+    assert f"{selected}-selected-password" not in nac_webhook[0][1]
+    assert f"{selected}-selected-enable" not in nac_webhook[0][1]
+
+
+@pytest.mark.parametrize("other", [["--csv", "hosts.csv"], ["--netbox"]])
+def test_direct_ip_rejects_conflicting_inventory_sources(other):
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["nac", "--ip", "192.0.2.10", *other])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("address", ["switch.example.com", "192.0.2.10/24", "999.0.0.1", "192.0.2.10,192.0.2.11"])
+def test_direct_ip_rejects_invalid_addresses(address):
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["nac", "--ip", address])
+    assert exc.value.code == 2
+
+
+def test_platform_override_requires_direct_ip(ports, csv_file, login, nac_standards):
+    assert run_feature("nac", csv_file, "--platform", "cisco_ios") == cli.EXIT_USAGE
+    assert ports["commands"] == {}
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_nac_posts_distinct_before_and_after_snapshots(
+    ports, csv_file, login, nac_standards, nac_webhook, verify
+):
+    extra = [] if verify else ["--no-verify"]
+    assert run_feature("nac", csv_file, "--limit", "sw1", "--apply", "-y", "--no-rollback-file", *extra) == cli.EXIT_OK
+    record = json.loads(nac_webhook[0][1])["devices"]["sw1"]
+    assert record["audit_before"]["status"] == "noncompliant"
+    if verify:
+        assert record["audit_after"]["status"] == "compliant"
+        assert record["audit_after"]["summary"]["noncompliant"] == 0
+    else:
+        assert record["audit_after"] is None
+        assert record["verified"] is None
+
+
+def test_nac_posts_failed_devices_with_unknown_audits(
+    ports, csv_file, login, nac_standards, nac_webhook, monkeypatch
+):
+    original = runner.netmiko_send_command
+
+    def unreachable(task, **kwargs):
+        if task.host.name == "leaf1":
+            raise TimeoutError("connection timed out")
+        return original(task, **kwargs)
+
+    monkeypatch.setattr(runner, "netmiko_send_command", unreachable)
+    assert run_feature("nac", csv_file) == cli.EXIT_FAILED
+    devices = json.loads(nac_webhook[0][1])["devices"]
+    assert devices["sw1"]["audit_before"]["summary"]["audited"] == 2
+    assert devices["leaf1"]["status"] == "failed"
+    assert devices["leaf1"]["error"]
+    assert devices["leaf1"]["audit_before"] is None
+
+
+def test_nac_failed_delivery_keeps_report_and_returns_failure(
+    ports, csv_file, login, nac_standards, nac_webhook, monkeypatch, tmp_path, capsys
+):
+    def reject(*args):
+        raise cli.webhook.WebhookError("NAC webhook returned HTTP 401")
+
+    monkeypatch.setattr(cli.webhook, "send", reject)
+    report = tmp_path / "nac.json"
+    assert run_feature("nac", csv_file, "--limit", "sw1", "--report", str(report)) == cli.EXIT_FAILED
+    assert json.loads(report.read_text())["devices"]["sw1"]["audit_before"]
+    assert "HTTP 401" in capsys.readouterr().err
+
+
+def test_nac_loads_webhook_fields_from_env_file(
+    ports, csv_file, login, nac_standards, nac_webhook, monkeypatch, tmp_path
+):
+    monkeypatch.delenv("NETOPS_NAC_WEBHOOK_URL")
+    monkeypatch.delenv("NETOPS_NAC_WEBHOOK_TOKEN")
+    env = tmp_path / "webhook.env"
+    env.write_text("NETOPS_NAC_WEBHOOK_URL=https://example.com/from-env\nNETOPS_NAC_WEBHOOK_TOKEN=from-env-token\n")
+    assert cli.main(["nac", "--env-file", str(env), "--csv", csv_file, "--limit", "sw1"]) == cli.EXIT_OK
+    assert nac_webhook[0][0].url == "https://example.com/from-env"
+    assert nac_webhook[0][0].token == "from-env-token"
+
+
+def test_webhook_settings_do_not_send_other_features(device, csv_file, login, nac_webhook):
+    assert run(csv_file, "-s", "10.99.99.1") == cli.EXIT_OK
+    assert nac_webhook == []
+
+
+def test_nac_missing_token_fails_before_connecting(
+    ports, csv_file, login, nac_standards, nac_webhook, monkeypatch
+):
+    monkeypatch.delenv("NETOPS_NAC_WEBHOOK_TOKEN")
+    assert run_feature("nac", csv_file) == cli.EXIT_USAGE
+    assert ports["commands"] == {}
+    assert nac_webhook == []
+
+
+def test_nac_empty_verification_is_unknown_and_not_saved(
+    ports, csv_file, login, nac_standards, nac_webhook, monkeypatch
+):
+    original = runner.netmiko_send_command
+
+    def empty_after_push(task, command_string, **kwargs):
+        if ports["config"] and command_string.startswith("show"):
+            return Result(host=task.host, result="")
+        return original(task, command_string, **kwargs)
+
+    monkeypatch.setattr(runner, "netmiko_send_command", empty_after_push)
+    assert run_feature("nac", csv_file, "--limit", "sw1", "--apply", "-y", "--no-rollback-file") == cli.EXIT_FAILED
+    record = json.loads(nac_webhook[0][1])["devices"]["sw1"]
+    assert record["audit_after"]["status"] == "unknown"
+    assert record["verified"] is False
+    assert "write memory" not in ports["commands"]["sw1"]
+
+
 # --------------------------------------------------------------------------- #
 # rollback, end to end
 # --------------------------------------------------------------------------- #

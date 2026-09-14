@@ -493,6 +493,31 @@ the defaults are correct. Otherwise name the keys:
 --aws-username-key user --aws-password-key pw --aws-enable-key enable
 ```
 
+For example, if the secret contains:
+
+```json
+{
+  "ssh_user": "netauto",
+  "ssh_password": "your-ssh-password"
+}
+```
+
+Select those fields in `.env`:
+
+```dotenv
+NET_AWS_SECRET=prod/network/netauto
+NET_AWS_REGION=us-east-1
+NET_AWS_USERNAME_KEY=ssh_user
+NET_AWS_PASSWORD_KEY=ssh_password
+```
+
+Then run `./configure.py nac --ip 10.1.10.11`. The mapping settings are exact,
+case-sensitive top-level JSON field names; their values become the SSH username
+and password. An optional `NET_AWS_ENABLE_KEY` selects the enable-secret field.
+The defaults remain `username`, `password`, and `enable_secret`. Command-line
+key options override the mappings in `.env`. A missing username or password
+field stops the run with an error naming the missing field.
+
 Every one of these has an environment equivalent (`NET_AWS_SECRET`,
 `NET_AWS_REGION`, `NET_AWS_USERNAME_KEY`, ...), so a cron job can carry the
 whole configuration in its `.env` and run bare:
@@ -802,11 +827,21 @@ and saved by default; `--no-verify` and `--no-save` retain their usual meanings.
 REST rollback is manual; `before_servers` in the report preserves the original
 remote server list. ConfigSync is not triggered.
 
-Both F5 commands audit **system syslog plus eligible user-defined WAF profiles**
-for the shared NetBox compliance field, but each changes only its selected
-logging type. Run both commands to converge both configurations. The JSON report
-includes the other logging type's audit (`waf_audit` or `system_syslog_audit`).
-An unreadable counterpart fails the device before any configuration change.
+F5 `syslog` and `waf` are independent features that share the destination IPs
+and ports from `syslog.destinations` in the standards file:
+
+- `syslog` reads, configures and verifies only `/mgmt/tm/sys/syslog`.
+- `waf` reads, configures and verifies only eligible remote application logging
+  profiles under `/mgmt/tm/security/log/profile`.
+
+Neither feature reads the other's configuration or includes it in compliance.
+Regular syslog does not query ASM provisioning or require WAF functionality.
+Each run's configuration snapshot, implementation and backout cover only its
+selected feature. There are no `waf_audit` or `system_syslog_audit` cross-audits.
+The existing NetBox field names remain shared: their values describe the most
+recent completed logging feature check. The JSON archive's `feature` and
+`configuration_scope` identify which configuration was evaluated.
+
 See [F5's system syslog API](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_syslog.html)
 and the field/writeback rules below.
 
@@ -831,8 +866,8 @@ device notes. They never contribute destinations to the plan or compliance
 comparison. Missing or unrecognized `builtIn` values are also skipped; in that
 case `syslog_compliant` is left unchanged because the full user-defined scope
 could not be confirmed. A completed discovery still records `syslog_last_checked`.
-If only built-in profiles exist, the WAF command makes no F5 changes and
-combined compliance is determined by the system syslog destinations.
+If only built-in profiles exist, the WAF command makes no F5 changes and reports
+no applicable WAF drift. System syslog is not queried or included in that verdict.
 
 For NetBox inventory, assign **one** of these tags to each F5 device:
 
@@ -1004,9 +1039,10 @@ in NetBox's Custom Fields UI before running.
 
 The existing **`syslog_compliant`** boolean custom field must also be assigned to
 `dcim.device`. The script validates its type before making changes. A completed
-check sets it to **true only when system syslog and every eligible user-defined
-WAF logging profile match the fully managed destination list exactly**:
-all standard IP/port pairs present,
+check sets it to **true when the selected feature matches its fully managed
+destination list exactly**: system syslog for `syslog`, or every eligible
+user-defined remote WAF logging profile for `waf`. All standard IP/port pairs
+must be present,
 with no extra or duplicate destinations. Otherwise it sets it to false. This
 comparison is independent of the device's policy tag: add-only can succeed while
 remaining noncompliant because it preserves extras. After changes, the value is
@@ -1016,9 +1052,12 @@ The timestamp means **last successfully checked**, not necessarily compliant:
 an audit can find drift, and a completed discovery can find no eligible remote
 profiles. A discovery, configuration, verification, or requested save failure
 leaves both previous field values unchanged. Changes made with `--no-verify`
-do not update either field. With no eligible WAF profiles, the system syslog
-comparison determines compliance. Unknown WAF profile ownership leaves the
-boolean unchanged and records the completed check date. When a verdict is
+do not update either field. With no eligible WAF profiles and no unknown
+ownership, the WAF check reports true because there is no applicable WAF drift.
+Unknown WAF profile ownership leaves the boolean unchanged and records the
+completed check date. Both features use the same existing NetBox fields, so
+these fields describe the last completed logging check, not a combined verdict.
+Use the run archive's feature scope when reporting results separately. When a verdict is
 available, both values are sent in one PATCH and read back for verification;
 a failed NetBox writeback makes the run fail while preserving F5 results in the
 report. Only these custom-field keys are patched, leaving other fields and tags
@@ -1265,6 +1304,255 @@ Verification is unusual here too: the desired set is "every in-scope port on
 this device", which is not known until the device has been read, so after
 applying the audit is simply re-run. If any port still wants a line, the device
 is reported unverified and startup-config is not saved.
+
+### Choose the NAC inventory
+
+NAC accepts a direct IP, a CSV, or NetBox inventory. For a single switch:
+
+```bash
+./configure.py nac --ip 10.1.10.11
+./configure.py nac --ip 10.1.10.11 --platform cisco_ios --report nac-results.json
+```
+
+`--ip` accepts one IPv4 or IPv6 address and uses that address as the device key
+in the report. The platform is autodetected unless `--platform` is supplied;
+`ios-xe` and `eos` aliases also work. It uses the existing SSH credentials and
+webhook settings and requires no CSV file or NetBox connection. Choose only one
+of `--ip`, `--csv`, or `--netbox` per run. CSV is the default:
+
+```bash
+./configure.py nac --csv inventory/hosts.csv --report nac-results.json
+```
+
+Alternatively, set `NETOPS_CSV=inventory/hosts.csv` in `.env` and run
+`./configure.py nac`. A minimal CSV with explicit platforms looks like this:
+
+```csv
+host,name,platform
+10.1.10.11,access-sw1,cisco_ios
+10.1.20.21,access-sw2,arista_eos
+```
+
+For NetBox, install the optional dependency with `python -m pip install -e
+'.[netbox]'` and set the API connection in `.env`:
+
+```dotenv
+NETBOX_URL=https://netbox.example.com
+NETBOX_TOKEN=your-netbox-api-token
+```
+
+Then select NetBox explicitly and optionally narrow the device list:
+
+```bash
+./configure.py nac --netbox --netbox-filter site=atl --report nac-results.json
+```
+
+NetBox supplies active devices with a primary IP by default. NAC supports
+Cisco IOS/IOS-XE and Arista EOS; select the appropriate switches with
+`--netbox-filter`, `--filter`, or `--limit`. Device SSH credentials still come
+from `NET_USER`/`NET_PASS`, SSH keys, or the existing AWS credential options.
+The NetBox API token and the NAC webhook bearer token are separate fields.
+All three inventory sources send the same NAC report when the webhook is configured.
+See [NetBox as the inventory](#netbox-as-the-inventory) for platform mapping and
+additional filtering options.
+
+### Save NAC results to NetBox interfaces
+
+The parser already lives in `netops/features/nac.py` and runs through
+`configure.py nac`. It uses this directory's `.env`, AWS secret key mapping,
+inventory defaults, platform cache, poller selection, and run archives.
+SNMP inventory continues to create/update inventory; NAC annotates existing
+NetBox interfaces with its assessment.
+
+Use **custom fields on `dcim.interface`** for the assessment. A single selection
+field provides an unambiguous, filterable status, while long-text fields explain
+the problem and fix. Tags still select poller ownership. NetBox supports these
+field types and exposes them in its interface UI and API
+([custom-field documentation](https://netboxlabs.com/docs/netbox/v4.4/customization/custom-fields/)).
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `nac_status` | Selection | `compliant`, `noncompliant`, `skipped`, or `unknown`; default unknown |
+| `nac_issues` | Long text | Every missing required command, exclusion reason, or collection failure |
+| `nac_remediation` | Long text | Interface context and exact missing commands, or next steps when a verdict is unavailable |
+| `nac_checked_at` | Date/time | Last successful assessment of this interface, including scope exclusions |
+| `nac_last_attempt` | Date/time | Latest attempt to report this interface's state, including unknown results |
+| `nac_poller` | Text | Reporting poller tag/name, falling back to the remote hostname |
+
+Enable reporting in `.env` with `NETOPS_NAC_NETBOX_SYNC=true`, or per run:
+
+```bash
+./configure.py nac --netbox --sync-netbox
+```
+
+This reads switches and writes NetBox assessment data. Switch configuration
+changes still require `--apply`. Use `--no-sync-netbox` to override the `.env`
+and preview without NetBox writes. The existing webhook remains independent
+and receives the assessment plus NetBox write results.
+
+The first enabled run creates any missing NAC custom fields and the status
+choice set, grouped under **NAC compliance**. Existing incompatible field
+definitions fail validation instead of being overwritten. Initial setup needs
+permission to add custom fields/choice sets. Subsequent runs need read access
+to those definitions, read access to inventory and ownership objects, and
+permission to change interfaces. Only NAC custom-field values are patched;
+interface tags and other custom fields are preserved. Each write is read back
+to verify it. Run initial provisioning on one poller before enabling all timers.
+
+Results use the verified after-state when available. An attempted configuration
+change with no completed read-back is **unknown**. Failed collection, empty
+config output, or a NetBox interface absent from the config also becomes
+unknown; `nac_checked_at` remains at the last successful assessment while
+`nac_last_attempt` advances. A verified compliant port clears old findings and
+remediation. Skipped ports carry the exclusion reason and are not counted as
+compliant. Pollers that do not run cannot update timestamps, so report on stale
+`nac_last_attempt` values as well as status. Historical results stay in run archives.
+
+NetBox inventory supplies device IDs directly. CSV/IP runs use an existing
+`netbox_id` host-data value when supplied, otherwise resolve the address through
+IPAM's assigned device interfaces. Ambiguous addresses (including duplicate
+IP space across devices) fail rather than guessing. CSV hosts using DNS names
+require a unique matching NetBox device name. Interfaces must have exact names
+matching the parsed configuration; missing inventory interfaces are reported as
+errors and are not created. Run SNMP inventory to repair inventory gaps. A partial
+or failed NetBox update exits 1 and is recorded per interface in the run report.
+
+### Schedule NAC on the existing remote pollers
+
+Use the same poller name as SNMP inventory. NetOps already resolves ownership
+from device tags, then site/nearest-region tags, plus owned-prefix membership;
+explicit foreign device tags exclude a device. Add this to the poller's `.env`
+(adjust the paths, name, platform filters and secret names):
+
+```dotenv
+NETOPS_INVENTORY=netbox
+NETOPS_POLLER=checkmk-us
+NETBOX_AUTOFILTER=true
+NETBOX_FILTERS="platform=cisco-ios platform=cisco-ios-xe platform=arista-eos"
+NETBOX_URL=https://netbox.example.com
+NETBOX_SECRET=prod/network/netbox
+NET_AWS_SECRET=prod/network/netauto
+NET_AWS_REGION=us-east-1
+NET_AWS_USERNAME_KEY=ssh_user
+NET_AWS_PASSWORD_KEY=ssh_password
+NETOPS_NAC_NETBOX_SYNC=true
+NETOPS_REPORT_DIR=/var/lib/netops/reports
+```
+
+`NETBOX_SECRET` selects the NetBox API credentials; `NET_AWS_SECRET` selects
+the switch SSH credentials. Alternatively set `NETBOX_TOKEN` and/or
+`NET_USER`/`NET_PASS` directly. The remote's AWS role/profile must be able to
+read the configured secrets. Keep each job's platform filters appropriate for
+its feature; for a shared `.env`, CLI `--netbox-filter` flags override its filters.
+
+Example hourly Linux crontab entry, with a lock to prevent overlapping local
+runs (create writable state/log directories and adjust installation paths):
+
+```cron
+15 * * * * /usr/bin/flock -n /var/lib/netops/nac.lock /opt/nornir-netops/.venv/bin/python /opt/nornir-netops/configure.py nac --env-file /etc/netops/nac.env >> /var/log/netops/nac.log 2>&1
+```
+
+This command audits and records results without applying switch changes. It
+inherits standard/template paths from the installation and keeps the existing
+run archives. Use `--fail-on-diff` if the scheduler should also treat detected
+drift as exit 2.
+
+### Report on interface NAC compliance
+
+In NetBox's interface list, filter the `nac_status` custom field to
+`noncompliant`, and inspect **NAC findings** and **NAC remediation**. Review
+`unknown`, never-assessed, and stale records separately from compliant ports.
+The API equivalent for noncompliant ports is:
+
+```text
+GET /api/dcim/interfaces/?cf_nac_status=noncompliant
+```
+
+For a CSV with device, interface, status, findings, fix, both timestamps and
+poller, create a NetBox export template for **DCIM > Interface**, with MIME
+type `text/csv` and extension `csv`, using
+[`export-templates/nac-interfaces.csv.j2`](export-templates/nac-interfaces.csv.j2). Export from
+the interface list after selecting the desired status/site/device filters.
+The template includes quoted multiline remediation, so spreadsheet imports
+retain the full command block.
+
+Compliance still means exact matching against your platform's `nac.j2` block.
+Review that standard before scheduling; this is not a live 802.1X/RADIUS
+authentication test.
+
+### Send NAC results to a webhook
+
+Set these fields in the existing `.env` file (or export them):
+
+```dotenv
+NETOPS_NAC_WEBHOOK_URL=https://inventory.example.com/hooks/nac
+NETOPS_NAC_WEBHOOK_TOKEN=your-bearer-token
+NETOPS_NAC_WEBHOOK_TIMEOUT=15
+```
+
+Both URL and token are required to enable delivery; leave both unset to disable
+it. These settings apply only to `nac`. The existing `--env-file` and
+`--no-env-file` options also apply. Use HTTPS to protect the bearer token.
+
+```bash
+./configure.py nac --report nac-results.json
+```
+
+After device processing finishes, this sends one HTTP POST containing the feature
+report, with `Content-Type: application/json` and
+`Authorization: Bearer <token>`. Dry runs send reports too. The report includes
+`schema_version: 1`, a UTC `generated_at`, the run mode, `dry_run`, the desired
+settings, and `devices` keyed by inventory name. The local JSON archive retains
+this data and adds schema version 2 metadata and implementation/backout steps;
+the webhook retains its existing schema version 1 payload. Each device includes its
+hostname/address, platform, execution status, errors, planned commands, apply
+and verification results, and these audit snapshots:
+
+| Field | Meaning |
+| --- | --- |
+| `audit_before` | Configuration observed before any changes; null if the initial audit could not complete |
+| `audit_after` | Configuration read during verification after applying changes; null if that read/audit did not complete or was not needed/requested |
+| `audit_*.status` | `compliant`, `noncompliant`, `not_applicable` (no interfaces in scope), or `unknown` (no interface configuration returned) |
+| `audit_*.compliant` | True/false when interfaces were audited; otherwise null |
+| `audit_*.reason` | Explanation for an unknown or not-applicable audit |
+| `audit_*.summary` | Counts: `total`, `audited`, `compliant`, `noncompliant`, `skipped` |
+| `audit_*.required_lines` | Exact configuration required by the platform template |
+| `audit_*.interfaces` | All parsed interfaces, including compliant and skipped ones |
+
+Each interface contains `name`, `description`, `mode`, `shutdown`, `physical`,
+`in_scope`, `status`, `compliant`, `skip_reason`, `missing_lines`, and
+`present_lines`. For example, a noncompliant interface might contain:
+
+```json
+{
+  "name": "GigabitEthernet1/0/2",
+  "description": "User port",
+  "mode": "access",
+  "shutdown": false,
+  "physical": true,
+  "in_scope": true,
+  "status": "noncompliant",
+  "compliant": false,
+  "skip_reason": null,
+  "missing_lines": ["access-session closed"],
+  "present_lines": ["switchport mode access", "mab"]
+}
+```
+
+The arrays above are abbreviated; actual results contain every required line
+that is present or missing. Skipped interfaces have `compliant: null` and an
+exclusion reason. Unreachable devices have `status: failed`, an `error`, and
+null audits. Use the audit snapshots for port compliance; the existing device
+`compliant` field describes the initial plan and remains unchanged after a fix.
+`audit_after: null` does not mean a fix succeeded. Empty configuration output is
+reported as unknown and cannot verify a change successfully.
+
+Compliance uses exact template-line matching; it does not validate global
+RADIUS/AAA settings or live authentication. Unrelated interface configuration
+is omitted. Delivery accepts only HTTP 2xx, verifies TLS certificates, and does
+not follow redirects or retry automatically. A failed delivery exits 1; the
+local `--report` file and any rollback journal remain available. A configuration
+error exits 3 before connecting to devices. The token is never added to reports.
 
 ## Local users
 

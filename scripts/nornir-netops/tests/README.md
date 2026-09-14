@@ -30,6 +30,7 @@ and verification against simulated devices.
 | F5 system syslog policy and archived REST restoration | `test_f5_syslog.py` |
 | F5 banner apply, verification, idempotence and archived restoration | `test_f5_banner.py` |
 | F5 SNMP configuration, redaction and incomplete restoration of old secrets | `test_f5_snmp.py` |
+| Poller ownership, prefix membership, scanner parity, CLI selection and archives | `test_poller.py` |
 | TLS startup and import order in fresh Python processes | `test_entrypoint.py` |
 
 For example, while changing syslog:

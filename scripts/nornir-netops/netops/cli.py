@@ -39,6 +39,7 @@ from .credentials import (
 from .features import FEATURES
 from .standards import Standards, StandardsError, load as load_standards
 from . import servicenow
+from . import webhook
 from .checks import CHECKS, FAIL, OK, WARN
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -964,11 +965,30 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         selected = desired.variables["logging_policy"]
         args.policy_mode = "netbox-tags" if selected == "netbox" else selected
     archive.configure(args, desired)
+    try:
+        webhook_settings = webhook.settings_from_env() if feature.name == "nac" else None
+    except webhook.WebhookError as exc:
+        print(style.bad(f"error: {exc}"), file=sys.stderr)
+        return EXIT_USAGE
+    nac_client = None
+    if feature.name == "nac":
+        from . import nac_netbox
+        from .netbox import Client, NetBoxError, connection_settings
+
+        try:
+            nac_sync = nac_netbox.enabled(args)
+            if nac_sync and not args.netbox:
+                nac_client = Client(**connection_settings(args.standards, args))
+        except (NetBoxError, CredentialError) as exc:
+            print(style.bad(f"error: NAC NetBox reporting: {redact(str(exc))}"), file=sys.stderr)
+            return EXIT_USAGE
     targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
 
     dry_run = not args.apply
+    if feature.name == "nac" and nac_sync and args.netbox:
+        nac_client = args._netbox_client
 
     waf_netbox = None
     if feature.name in ("waf", "syslog") and args.netbox:
@@ -1056,6 +1076,14 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     if not dry_run and not args.yes and not _confirm(style, count, feature.name, args.policy_mode):
         print("aborted")
         return EXIT_USAGE
+
+    if nac_client is not None:
+        try:
+            nac_netbox.ensure_fields(nac_client)
+        except NetBoxError as exc:
+            print(style.bad(f"error: NAC NetBox fields: {redact(str(exc))}"), file=sys.stderr)
+            return EXIT_USAGE
+        print("NAC results will be saved to NetBox interfaces; switch changes still require --apply")
 
     if waf_netbox is not None and not dry_run and field_missing:
         try:
@@ -1168,6 +1196,23 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
                 record["status"] = "failed"
                 log.failure(name, record["error"], exc)
 
+    nac_sync_failed = False
+    if nac_client is not None:
+        for name, record in records.items():
+            result = nac_netbox.sync_device(
+                nac_client, targets.inventory.hosts[name], record, applying=args.apply,
+                poller=args.poller or os.environ.get("NETOPS_POLLER"),
+            )
+            if result["status"] == "failed":
+                nac_sync_failed = True
+                message = "; ".join(result["errors"])
+                print(style.bad(f"{name}: NAC NetBox reporting failed: {message}"), file=sys.stderr)
+                log.failure(name, message, None)
+            else:
+                record.setdefault("notes", []).append(
+                    f"NetBox: saved NAC results for {len(result['interfaces'])} interface(s)"
+                )
+
     _print_report(style, records, dry_run, args.verbose)
 
     number = change.get("number") if change else None
@@ -1215,7 +1260,17 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
                     file=sys.stderr,
                 )
 
-    if snow_failed:
+    webhook_failed = False
+    if webhook_settings is not None:
+        try:
+            webhook.send(webhook_settings, report)
+            print("NAC report delivered to webhook")
+        except webhook.WebhookError as exc:
+            webhook_failed = True
+            print(style.bad(str(exc)), file=sys.stderr)
+            log.failure("webhook", str(exc), None)
+
+    if snow_failed or webhook_failed or nac_sync_failed:
         return EXIT_FAILED
     if any(r["status"] in ("failed", "unverified") for r in records.values()):
         return EXIT_FAILED
@@ -1774,6 +1829,12 @@ def _report_text(
         "variables": desired.variables,
         "devices": records,
     }
+    if feature.name == "nac":
+        document["schema_version"] = 1
+        # A failed connection is an unknown audit, never a compliant device.
+        for record in records.values():
+            record.setdefault("audit_before", None)
+            record.setdefault("audit_after", None)
     # Serialize then scrub, covering both the raw secret and its JSON-escaped
     # form -- a password containing a quote or a backslash is written escaped.
     text = json.dumps(document, indent=2, sort_keys=True, default=str)

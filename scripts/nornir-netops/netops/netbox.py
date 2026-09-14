@@ -537,6 +537,26 @@ def source_for(host, feature: str) -> Tuple[Optional[str], bool]:
     return (data.get("source_interface") or {}).get(feature), True
 
 
+def connection_settings(standards, args) -> Dict[str, Any]:
+    """Shared NetBox endpoint, token/secret and TLS settings for reads and writes."""
+    section = standards.section("netbox") if standards is not None else {}
+    tls = str(os.environ.get("NETBOX_VERIFY_TLS", section.get("verify_tls", False))).strip().lower()
+    if tls not in ("true", "false"):
+        raise NetBoxError("NETBOX_VERIFY_TLS / netbox.verify_tls must be true or false")
+    settings = {
+        "url": getattr(args, "netbox_url", None) or section.get("url") or os.environ.get("NETBOX_URL"),
+        "token": os.environ.get("NETBOX_TOKEN"),
+        "verify_tls": tls == "true",
+    }
+    if getattr(args, "netbox_secret", None):
+        from .credentials import fetch_json_secret
+
+        document = fetch_json_secret(args.netbox_secret, getattr(args, "aws_region", None))
+        settings["token"] = settings["token"] or document.get("token")
+        settings["url"] = settings["url"] or document.get("url")
+    return settings
+
+
 def settings_from(standards, args) -> Dict[str, Any]:
     """Where NetBox is and what to ask it, from the standards file and flags.
 
@@ -547,17 +567,12 @@ def settings_from(standards, args) -> Dict[str, Any]:
     selection = poller_settings(args)
     section = standards.section("netbox") if standards is not None else {}
     tags = getattr(args, "netbox_source_tag", None) or section.get("source_tags")
-    tls = str(os.environ.get("NETBOX_VERIFY_TLS", section.get("verify_tls", False))).strip().lower()
-    if tls not in ("true", "false"):
-        raise NetBoxError("NETBOX_VERIFY_TLS / netbox.verify_tls must be true or false")
     return {
-        "url": getattr(args, "netbox_url", None) or section.get("url") or os.environ.get("NETBOX_URL"),
-        "token": os.environ.get("NETBOX_TOKEN"),
+        **connection_settings(standards, args),
         "filters": parse_filters(getattr(args, "netbox_filter", None) or
                                  shlex.split(os.environ.get("NETBOX_FILTERS", ""))),
         **selection,
         "source_tags": source_tags(tags),
-        "verify_tls": tls == "true",
     }
 
 
@@ -569,15 +584,8 @@ def init_nornir(args, credentials, standards, workers: int):
     InventoryPluginRegister.register("netbox", NetBoxInventory)
 
     settings = settings_from(standards, args)
-    if getattr(args, "netbox_secret", None):
-        from .credentials import fetch_json_secret
-
-        document = fetch_json_secret(args.netbox_secret, getattr(args, "aws_region", None))
-        settings["token"] = settings["token"] or document.get("token")
-        settings["url"] = settings["url"] or document.get("url")
-
-    if getattr(getattr(args, "feature", None), "name", None) == "waf":
-        # WAF reads device policy tags, not source-interface tags.
+    if getattr(getattr(args, "feature", None), "name", None) in ("waf", "nac"):
+        # WAF and NAC do not use NTP/syslog source-interface tags.
         settings["source_tags"] = {}
     elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
         tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")

@@ -293,6 +293,9 @@ def _configure_feature(
         "notes": policy_notes,
     }
     to_add, to_remove = feature.plan(current, desired, mode, context)
+    if "audit" in context:
+        payload["audit_before"] = context["audit"]
+        payload["audit_after"] = None
     advisories: List[str] = list(context["advisories"])
     notes: List[str] = list(context["notes"])
 
@@ -367,6 +370,8 @@ def _configure_feature(
                 # only question worth asking, and its own planner is what answers it.
                 verification_context = {**context, "advisories": [], "notes": []}
                 again, remaining = feature.plan(after, desired, mode, verification_context)
+                if "audit" in verification_context:
+                    payload["audit_after"] = verification_context["audit"]
                 outstanding = list(again) + [f"remove {entry.key}" for entry in remaining]
                 outstanding.extend(verification_context["advisories"])
                 payload["verified"] = not outstanding

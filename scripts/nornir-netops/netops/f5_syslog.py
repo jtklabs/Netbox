@@ -102,17 +102,6 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         clean = mode == MODE_REPLACE
         with f5_waf.Client(host, **variables["f5"]) as client:
             plan = plan_syslog(client.get_json(SYSLOG), wanted, clean)
-            skipped = []
-            waf_plans = f5_waf.plan_waf(client, wanted, True, skipped_profiles=skipped)
-            waf_exact = (None if any(row["built_in"] is None for row in skipped) else
-                         all(not row.drift(True) for row in waf_plans))
-            payload["waf_audit"] = {
-                "compliant": waf_exact, "applicable_profiles": len(waf_plans),
-                "skipped_profiles": skipped,
-                "profiles": [{"profile": row.label, "missing": row.add, "extra": row.extra}
-                             for row in waf_plans],
-            }
-            payload["notes"].append("WAF destinations audited for combined compliance; use configure.py waf to change them")
             payload.update(current=plan.current, add=plan.add,
                            remove=plan.extra if clean else [], before_servers=plan.before_servers)
             exact = not plan.drift(True)
@@ -144,7 +133,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             if payload["verified"] is not False and (not attempted or verify):
                 payload["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 payload["system_syslog_compliant"] = exact
-                payload["syslog_compliant"] = exact and waf_exact if waf_exact is not None else None
+                payload["syslog_compliant"] = exact
         return Result(host=host, result=payload, changed=attempted)
     except Exception as exc:
         payload["checked_at"] = None

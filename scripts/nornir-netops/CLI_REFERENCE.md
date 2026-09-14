@@ -127,7 +127,9 @@ previews the managed configuration. With NetBox inventory, `--apply` can write
 logging audit fields even under `--policy audit`; without it, NetBox writes are
 only previewed. The boolean field is always `syslog_compliant`, indicating
 whether the observed configuration matches the fully managed standard. For
-F5 it covers both system syslog and eligible WAF destinations. Failed or
+F5 each run evaluates only its selected feature: system syslog or eligible WAF
+destinations. The existing NetBox fields describe the most recent logging check;
+use the JSON archive's feature scope to distinguish their results. Failed or
 incomplete checks leave the applicable audit fields unchanged.
 
 ```bash
@@ -149,9 +151,12 @@ unknown ownership is not treated as permission to change a profile.
 
 Use the [F5 HTTPS flags](#f5-https) for the connection. Destinations come from
 `syslog.destinations` in the standards file; **WAF has no `--destination`
-override**. It does not create new remote logging profiles. It audits system
-syslog for combined compliance but changes only WAF destinations. `syslog`
-does the reverse. Neither operation triggers ConfigSync.
+override**. It does not create new remote logging profiles. WAF and system
+syslog independently read, configure, verify and report their own sections.
+Neither audits or requires access to the other, and regular syslog does not
+query ASM provisioning. They share standards destinations, NetBox policy tags and audit
+field names; compliance is calculated only for the selected feature.
+Neither operation triggers ConfigSync.
 
 ```bash
 ./configure.py waf --netbox --limit bigip1 --policy manage --apply
@@ -248,6 +253,8 @@ live in each platform's `nac.j2` template. Scope rules live under `nac.scope`.
 | `--policy NAME` | Subscriber control policy name; defaults to `nac.policy`. **This is a policy name, not the syslog action selector.** |
 | `--include-trunks` | Include trunk ports in the audit/configuration scope. Default: excluded. |
 | `--include-shutdown` | Include administratively shut ports. Default: excluded. |
+| `--sync-netbox` | Save NAC status, findings, remediation and timestamps to NetBox interfaces. Also writes during audit-only runs. Defaults to `NETOPS_NAC_NETBOX_SYNC=false`. |
+| `--no-sync-netbox` | Disable NAC NetBox writes even when enabled in `.env`. |
 
 SVIs, port channels, loopbacks, tunnels and management interfaces are excluded.
 These flags expand which physical ports are considered; review a dry run before
@@ -255,7 +262,12 @@ applying to the broader scope.
 
 ```bash
 ./configure.py nac --netbox --netbox-filter site=atl
+./configure.py nac --netbox --sync-netbox
 ```
+
+`--sync-netbox` publishes assessment results; `--apply` enables switch changes.
+See [NAC NetBox reporting](README.md#save-nac-results-to-netbox-interfaces) for
+the interface fields, scheduled-run configuration and CSV export template.
 
 ### users
 
