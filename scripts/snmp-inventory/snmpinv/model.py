@@ -81,6 +81,19 @@ class DeviceRecord:
 
 
 @dataclass
+class FhrpRecord:
+    """An HSRP/VRRP group with its interface named the way NetBox knows it."""
+
+    protocol: str
+    group_id: int
+    interface: str
+    virtual_ip: str = ""
+    priority: int | None = None
+    state: str = ""
+    peer_address: str = ""
+
+
+@dataclass
 class ScanResult:
     """Everything one scanned host turns into."""
 
@@ -89,6 +102,7 @@ class ScanResult:
     devices: list[DeviceRecord] = field(default_factory=list)
     virtual_chassis_name: str = ""
     access_points: list[DeviceRecord] = field(default_factory=list)
+    fhrp_groups: list[FhrpRecord] = field(default_factory=list)
     credential_name: str = ""
     facts: DeviceFacts | None = None
 
@@ -131,6 +145,14 @@ def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True) -> ScanR
     if ap_role_enabled and facts.access_points:
         result.access_points = _build_access_points(facts)
 
+    for group in facts.fhrp_groups:
+        interface = facts.interfaces.get(group.if_index)
+        result.fhrp_groups.append(FhrpRecord(
+            protocol=group.protocol, group_id=group.group_id,
+            interface=interface.display_name() if interface else f"ifIndex {group.if_index}",
+            virtual_ip=group.virtual_ip, priority=group.priority, state=group.state,
+            peer_address=group.peer_address,
+        ))
     return result
 
 

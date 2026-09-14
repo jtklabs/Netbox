@@ -79,8 +79,14 @@ urlpatterns = [
          name='discoveryissue_changelog', kwargs={'model': DiscoveryIssue}),
 ]
 
-from . import upgrade_views
-from .models import UpgradeJob
+from . import command_views, upgrade_views
+from .models import UpgradeDependency, UpgradeGroup, UpgradeJob
+
+urlpatterns += [
+    path('command-outputs/<int:pk>/', command_views.CommandOutputRawView.as_view(), name='commandoutput_raw'),
+    path('command-outputs/<int:pk>/download/', command_views.CommandOutputDownloadView.as_view(), name='commandoutput_download'),
+    path('devices/<int:pk>/command-outputs/', command_views.DeviceCommandOutputsView.as_view(), name='device_command_outputs'),
+]
 
 urlpatterns += [
     path('upgrades/', upgrade_views.UpgradeJobListView.as_view(), name='upgradejob_list'),
@@ -90,4 +96,21 @@ urlpatterns += [
     path('upgrades/<int:pk>/cancel/', upgrade_views.UpgradeCancelView.as_view(), name='upgradejob_cancel'),
     path('upgrades/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradejob_changelog',
          kwargs={'model': UpgradeJob}),
+    path('upgrades/<int:pk>/hold/', upgrade_views.UpgradeHoldView.as_view(), name='upgradejob_hold'),
+    path('upgrades/<int:pk>/release/', upgrade_views.UpgradeReleaseView.as_view(), name='upgradejob_release'),
+    path('upgrade-groups/', upgrade_views.UpgradeGroupListView.as_view(), name='upgradegroup_list'),
+    path('upgrade-groups/add/', upgrade_views.UpgradeGroupEditView.as_view(), name='upgradegroup_add'),
+    path('upgrade-groups/refresh/', upgrade_views.UpgradeGroupRefreshView.as_view(), name='upgradegroup_refresh'),
+    path('upgrade-groups/<int:pk>/', upgrade_views.UpgradeGroupView.as_view(), name='upgradegroup'),
+    path('upgrade-groups/<int:pk>/edit/', upgrade_views.UpgradeGroupEditView.as_view(), name='upgradegroup_edit'),
+    path('upgrade-groups/<int:pk>/delete/', upgrade_views.UpgradeGroupDeleteView.as_view(), name='upgradegroup_delete'),
+    path('upgrade-groups/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradegroup_changelog',
+         kwargs={'model': UpgradeGroup}),
+    path('upgrade-dependencies/', upgrade_views.UpgradeDependencyListView.as_view(), name='upgradedependency_list'),
+    path('upgrade-dependencies/add/', upgrade_views.UpgradeDependencyEditView.as_view(), name='upgradedependency_add'),
+    path('upgrade-dependencies/<int:pk>/', upgrade_views.UpgradeDependencyView.as_view(), name='upgradedependency'),
+    path('upgrade-dependencies/<int:pk>/edit/', upgrade_views.UpgradeDependencyEditView.as_view(), name='upgradedependency_edit'),
+    path('upgrade-dependencies/<int:pk>/delete/', upgrade_views.UpgradeDependencyDeleteView.as_view(), name='upgradedependency_delete'),
+    path('upgrade-dependencies/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradedependency_changelog',
+         kwargs={'model': UpgradeDependency}),
 ]

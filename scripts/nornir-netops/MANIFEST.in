@@ -4,3 +4,4 @@ recursive-include inventory *.example
 recursive-include templates *.j2
 recursive-include tests *.py
 include SCHEDULED_UPGRADES.md
+include netops/commands.yaml

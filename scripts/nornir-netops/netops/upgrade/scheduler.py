@@ -145,6 +145,12 @@ class Heartbeat:
         self.thread.join(timeout=35)
 
 
+def platform_for(profile):
+    """Nornir platform for a job: a BIG-IP profile is recognized by its .iso image."""
+    image = str((profile or {}).get('image', '')) if isinstance(profile, dict) else ''
+    return 'f5_tmsh' if image.lower().endswith('.iso') else 'cisco_ios'
+
+
 def validate_assignment(job, apply):
     if type(job.get('id')) is not int or job['id'] <= 0 or type(job.get('device_id')) is not int:
         raise ValueError('Upgrade queue returned invalid job/device IDs')
@@ -170,6 +176,8 @@ def execute_job(task, args, client, outbox):
     options.apply, options.stage_only = job['operation'] != 'audit', job['operation'] == 'stage'
     options.lock_dir = PROJECT_ROOT / '.upgrade-locks'
     options.profile = None
+    from ..features.waf import connection_settings
+    options.f5 = connection_settings(args)
     # Independent archives prevent mixed audit/apply jobs from misreporting mode.
     run = archive.Run(['upgrade', '--scheduled-job', str(job['id'])] +
                       (['--apply'] if options.apply else []) +
@@ -248,7 +256,7 @@ def run(args, style):
                 key = f'{job["device"]} [job {job["id"]}]'
                 if key in records:
                     raise NetBoxError('Upgrade queue returned a duplicate job')
-                records[key] = {'hostname': job['hostname'], 'platform': 'cisco_ios'}
+                records[key] = {'hostname': job['hostname'], 'platform': platform_for(job.get('profile'))}
             nr = init_from_records(records, credentials.username, credentials.password, credentials.secret,
                                    args.key_file, args.port, args.workers, args.conn_timeout)
             for host, job in zip(nr.inventory.hosts.values(), jobs):

@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 from netbox.models import PrimaryModel
 
-from .upgrade_choices import ACTIVE, UpgradeOperationChoices, UpgradeStatusChoices
+from .upgrade_choices import ACTIVE, UpgradeGroupSourceChoices, UpgradeOperationChoices, UpgradeStatusChoices
 
 
 class UpgradeJob(PrimaryModel):
@@ -36,6 +36,15 @@ class UpgradeJob(PrimaryModel):
     summary = models.JSONField(default=dict, blank=True)
     events = models.JSONField(default=list, blank=True)
     run_id = models.CharField(max_length=100, blank=True)
+    # Frozen at scheduling, like the address and poller: the redundancy groups
+    # this device was in and the downstream devices it waits for.
+    groups = models.JSONField(default=list, blank=True)
+    waits_for = models.JSONField(default=list, blank=True)
+    held_reason = models.CharField(max_length=1000, blank=True)
+    planned_wave = models.PositiveSmallIntegerField(default=1)
+    # Job ids whose failure a person acknowledged when releasing this job's
+    # hold, so the queue does not hold it again for the same reason.
+    acknowledged = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ('-scheduled_at', '-pk')
@@ -63,3 +72,49 @@ class UpgradeJob(PrimaryModel):
     @property
     def needs_recovery(self):
         return self.status == 'recovery_required' or bool(self.started_at and self.heartbeat_stale)
+
+
+class UpgradeGroup(PrimaryModel):
+    """Devices of which at most max_concurrent may be upgrading at once; a pair is a limit of 1."""
+    name = models.CharField(max_length=100, unique=True)
+    max_concurrent = models.PositiveSmallIntegerField(default=1, help_text='Members that may hold an active upgrade job at the same time; 0 for all of them')
+    source = models.CharField(max_length=20, choices=UpgradeGroupSourceChoices, default='manual')
+    key = models.CharField(max_length=200, blank=True, db_index=True, help_text='Identity of a discovered group, so a refresh updates it in place')
+    stale = models.BooleanField(default=False, help_text='A discovered group the last refresh no longer saw')
+    members = models.ManyToManyField('dcim.Device', related_name='upgrade_groups', blank=True)
+    depends_on = models.ManyToManyField('self', symmetrical=False, related_name='dependents', blank=True,
+                                        help_text='Groups whose members go first; the two groups never upgrade at the same time')
+
+    class Meta:
+        ordering = ('name',)
+
+    def __str__(self):
+        return self.name
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:upgradegroup', args=[self.pk])
+
+
+class UpgradeDependency(PrimaryModel):
+    """The upstream device's job waits for the downstream device's job in the same batch."""
+    upstream = models.ForeignKey('dcim.Device', on_delete=models.CASCADE, related_name='upgrade_downstream')
+    downstream = models.ForeignKey('dcim.Device', on_delete=models.CASCADE, related_name='upgrade_upstream')
+    source = models.CharField(max_length=20, choices=UpgradeGroupSourceChoices, default='manual')
+    key = models.CharField(max_length=200, blank=True, db_index=True)
+    stale = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ('upstream__name', 'downstream__name')
+        constraints = [models.UniqueConstraint(fields=('upstream', 'downstream'), name='upgrade_dependency_unique')]
+
+    def __str__(self):
+        return f'{self.upstream} waits for {self.downstream}'
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:upgradedependency', args=[self.pk])
+
+    def clean(self):
+        super().clean()
+        if self.upstream_id and self.upstream_id == self.downstream_id:
+            from django.core.exceptions import ValidationError
+            raise ValidationError('A device cannot wait for itself.')

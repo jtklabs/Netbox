@@ -10,14 +10,18 @@ from dcim.models import Device, Site, DeviceRole, Platform
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from netbox.forms import NetBoxModelFilterSetForm
-from netbox.views.generic import ObjectListView, ObjectView
-from netbox.object_actions import AddObject, EditObject
+from django.db.models import Count
+from netbox.views.generic import ObjectDeleteView, ObjectEditView, ObjectListView, ObjectView
+from netbox.object_actions import AddObject, DeleteObject, EditObject
+from netbox.forms import NetBoxModelForm
+from utilities.forms.rendering import FieldSet
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
 from utilities.views import register_model_view
 
-from .models import UpgradeJob, DiscoveryPoller
+from .models import UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
+from . import upgrade_groups
 from .upgrade_choices import UpgradeOperationChoices, UpgradeStatusChoices
-from .upgrade_filtersets import UpgradeJobFilterSet
+from .upgrade_filtersets import UpgradeDependencyFilterSet, UpgradeGroupFilterSet, UpgradeJobFilterSet
 from . import upgrade_queue as queue
 
 
@@ -126,14 +130,16 @@ class UpgradeJobTable(NetBoxTable):
     operation = columns.ChoiceFieldColumn()
     scheduled_at = columns.DateTimeColumn()
     last_seen_at = columns.DateTimeColumn(verbose_name='Job last update', default='No job updates yet')
+    groups = columns.TemplateColumn(template_code='{{ value|join:", " }}', verbose_name='Groups', orderable=False)
+    planned_wave = tables.Column(verbose_name='Wave')
     poller_last_seen_at = columns.DateTimeColumn(accessor='poller__upgrade_last_seen_at',
                                                 verbose_name='Upgrade poller last seen', default='Never checked in')
 
     class Meta(NetBoxTable.Meta):
         model = UpgradeJob
-        fields = ('pk', 'id', 'device_name', 'poller', 'operation', 'status', 'scheduled_at',
-                  'start_before', 'stage', 'message', 'poller_last_seen_at', 'last_seen_at', 'description', 'batch_id')
-        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'status', 'stage',
+        fields = ('pk', 'id', 'device_name', 'poller', 'operation', 'status', 'scheduled_at', 'planned_wave', 'groups',
+                  'held_reason', 'start_before', 'stage', 'message', 'poller_last_seen_at', 'last_seen_at', 'description', 'batch_id')
+        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'planned_wave', 'status', 'stage',
                            'poller_last_seen_at', 'last_seen_at')
 
 
@@ -168,7 +174,9 @@ class UpgradeJobView(ObjectView):
     def get_extra_context(self, request, instance):
         import json
         return {'profile_text': json.dumps(instance.profile, indent=2),
-                'summary_text': json.dumps(instance.summary, indent=2)}
+                'summary_text': json.dumps(instance.summary, indent=2),
+                'waits_for_devices': Device.objects.filter(pk__in=instance.waits_for),
+                'held_in_batch': UpgradeJob.objects.filter(batch_id=instance.batch_id, status='held').count()}
 
 
 class UpgradeCancelView(PermissionRequiredMixin, View):
@@ -185,3 +193,152 @@ class UpgradeCancelView(PermissionRequiredMixin, View):
         except queue.QueueError as exc:
             messages.error(request, str(exc))
         return redirect(entry.get_absolute_url())
+
+
+class UpgradeHoldView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_discovery.change_upgradejob'
+    raise_exception = True
+
+    def post(self, request, pk):
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'change'), pk=pk)
+        try:
+            queue.hold(request.user, pk, request.POST.get('reason', ''))
+            messages.success(request, 'Job held.')
+        except queue.QueueError as exc:
+            messages.error(request, str(exc))
+        return redirect(entry.get_absolute_url())
+
+
+class UpgradeReleaseView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_discovery.change_upgradejob'
+    raise_exception = True
+
+    def post(self, request, pk):
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'change'), pk=pk)
+        try:
+            if request.POST.get('scope') == 'batch':
+                count = queue.release_batch(request.user, entry.batch_id, request.POST.get('reason', ''))
+                messages.success(request, f'Released {count} held job(s) in this batch.')
+            else:
+                queue.release(request.user, pk, request.POST.get('reason', ''))
+                messages.success(request, 'Hold released; the job is scheduled again.')
+        except queue.QueueError as exc:
+            messages.error(request, str(exc))
+        return redirect(entry.get_absolute_url())
+
+
+class UpgradeGroupForm(NetBoxModelForm):
+    members = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False)
+    depends_on = DynamicModelMultipleChoiceField(queryset=UpgradeGroup.objects.all(), required=False, label='Waits for groups',
+                                                 help_text='Their members go first, and the groups never upgrade at the same time')
+    fieldsets = (FieldSet('name', 'max_concurrent', 'members', 'depends_on', 'description', name='Redundancy group'),
+                 FieldSet('tags', name='Tags'))
+
+    class Meta:
+        model = UpgradeGroup
+        fields = ('name', 'max_concurrent', 'members', 'depends_on', 'description', 'comments', 'tags')
+        help_texts = {'max_concurrent': 'A pair is 1; 0 lets every member go at once, for example all access switches in an office.'}
+
+    def clean_depends_on(self):
+        groups = self.cleaned_data['depends_on']
+        if self.instance.pk and self.instance in groups:
+            raise forms.ValidationError('A group cannot wait for itself.')
+        return groups
+
+
+class UpgradeGroupTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+    source = columns.ChoiceFieldColumn()
+    stale = columns.BooleanColumn()
+    member_count = tables.Column(accessor='members__count', verbose_name='Members', orderable=False)
+    depends_on = columns.ManyToManyColumn(linkify_item=True, verbose_name='Waits for')
+
+    class Meta(NetBoxTable.Meta):
+        model = UpgradeGroup
+        fields = ('pk', 'id', 'name', 'max_concurrent', 'source', 'stale', 'member_count', 'depends_on', 'description')
+        default_columns = ('name', 'max_concurrent', 'source', 'stale', 'member_count', 'depends_on')
+
+
+@register_model_view(UpgradeGroup, name='list')
+class UpgradeGroupListView(ObjectListView):
+    queryset = UpgradeGroup.objects.annotate(Count('members'))
+    table = UpgradeGroupTable
+    filterset = UpgradeGroupFilterSet
+    actions = (AddObject,)
+    template_name = 'netbox_discovery/upgradegroup_list.html'
+
+
+@register_model_view(UpgradeGroup)
+class UpgradeGroupView(ObjectView):
+    queryset = UpgradeGroup.objects.prefetch_related('members__site', 'members__role', 'depends_on', 'dependents')
+    actions = (EditObject, DeleteObject)
+
+
+@register_model_view(UpgradeGroup, 'edit')
+class UpgradeGroupEditView(ObjectEditView):
+    queryset = UpgradeGroup.objects.all()
+    form = UpgradeGroupForm
+
+
+@register_model_view(UpgradeGroup, 'delete')
+class UpgradeGroupDeleteView(ObjectDeleteView):
+    queryset = UpgradeGroup.objects.all()
+
+
+class UpgradeGroupRefreshView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_discovery.change_upgradegroup'
+    raise_exception = True
+
+    def post(self, request):
+        counts = upgrade_groups.refresh_discovered()
+        messages.success(request, f"Discovered groups refreshed: {counts['groups']} FHRP group(s), "
+                                  f"{counts['dependencies']} cabled dependency(ies); "
+                                  f"{counts['stale_groups'] + counts['stale_dependencies']} marked stale.")
+        return redirect(reverse('plugins:netbox_discovery:upgradegroup_list'))
+
+
+class UpgradeDependencyForm(NetBoxModelForm):
+    upstream = DynamicModelChoiceField(queryset=Device.objects.all(), help_text='Waits: upgraded only after the downstream device')
+    downstream = DynamicModelChoiceField(queryset=Device.objects.all(), help_text='Goes first')
+    fieldsets = (FieldSet('upstream', 'downstream', 'description', name='Dependency'), FieldSet('tags', name='Tags'))
+
+    class Meta:
+        model = UpgradeDependency
+        fields = ('upstream', 'downstream', 'description', 'comments', 'tags')
+
+
+class UpgradeDependencyTable(NetBoxTable):
+    upstream = tables.Column(linkify=True)
+    downstream = tables.Column(linkify=True)
+    source = columns.ChoiceFieldColumn()
+    stale = columns.BooleanColumn()
+
+    class Meta(NetBoxTable.Meta):
+        model = UpgradeDependency
+        fields = ('pk', 'id', 'upstream', 'downstream', 'source', 'stale', 'description')
+        default_columns = ('upstream', 'downstream', 'source', 'stale')
+
+
+@register_model_view(UpgradeDependency, name='list')
+class UpgradeDependencyListView(ObjectListView):
+    queryset = UpgradeDependency.objects.select_related('upstream', 'downstream')
+    table = UpgradeDependencyTable
+    filterset = UpgradeDependencyFilterSet
+    actions = (AddObject,)
+
+
+@register_model_view(UpgradeDependency)
+class UpgradeDependencyView(ObjectView):
+    queryset = UpgradeDependency.objects.select_related('upstream', 'downstream')
+    actions = (EditObject, DeleteObject)
+
+
+@register_model_view(UpgradeDependency, 'edit')
+class UpgradeDependencyEditView(ObjectEditView):
+    queryset = UpgradeDependency.objects.all()
+    form = UpgradeDependencyForm
+
+
+@register_model_view(UpgradeDependency, 'delete')
+class UpgradeDependencyDeleteView(ObjectDeleteView):
+    queryset = UpgradeDependency.objects.all()

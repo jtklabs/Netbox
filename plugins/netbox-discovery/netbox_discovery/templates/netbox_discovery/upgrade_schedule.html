@@ -13,8 +13,9 @@
 </div></div>
 {% if preview %}
 <h2 class="mt-4">{{ preview|length }} device(s) currently match</h2>
-<table class="table"><thead><tr><th>Device</th><th>Address</th><th>Poller</th></tr></thead><tbody>
-{% for row in preview %}<tr><td><a href="{{ row.device.get_absolute_url }}">{{ row.device }}</a></td><td>{{ row.address }}</td><td>{{ row.poller_name }}</td></tr>{% endfor %}
+<p class="text-muted">Waves show the order the queue will enforce: members of a redundancy group go one at a time, and a device waits for the downstream devices it depends on. Jobs in the same wave may run together.</p>
+<table class="table"><thead><tr><th>Wave</th><th>Device</th><th>Address</th><th>Poller</th><th>Redundancy groups</th></tr></thead><tbody>
+{% for row in preview %}<tr><td>{{ row.wave }}</td><td><a href="{{ row.device.get_absolute_url }}">{{ row.device }}</a></td><td>{{ row.address }}</td><td>{{ row.poller_name }}</td><td>{{ row.groups|join:", " }}</td></tr>{% endfor %}
 </tbody></table>
 {% endif %}
 {% endblock %}

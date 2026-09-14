@@ -1,5 +1,12 @@
 # F5 image push
 
+> **Migrated.** The upload, checksum, free-space and UCS logic now lives in
+> `scripts/nornir-netops` as part of `configure.py upgrade`, which adds
+> prechecks, install to a boot volume, reboot, post-checks, NetBox scheduling
+> and a comparison report for BIG-IP profiles. See
+> [UPGRADES.md](../nornir-netops/UPGRADES.md#big-ip-upgrades). The scripts
+> below still work standalone for a plain image push, disk report or UCS pull.
+
 Distributes a BIG-IP software image (`.iso`) to a list of units so it shows up
 in each unit's GUI ready to install. Pure iControl REST over the management
 interface — no SSH/SCP access to the boxes required.

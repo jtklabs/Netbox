@@ -1,0 +1,11 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% block title %}{{ output.filename }}{% endblock %}
+{% block content %}
+<h1 class="h4">{{ output.filename }}</h1>
+<p class="text-muted">{{ output.device|linkify }} &middot; <code>{{ output.command }}</code> &middot; {{ output.platform|placeholder }} &middot; collected {{ output.collected_at }}{% if output.poller %} by {{ output.poller|linkify }}{% endif %} &middot; {{ output.size|filesizeformat }}
+  &middot; <a href="{% url 'plugins:netbox_discovery:commandoutput_download' pk=output.pk %}"><i class="mdi mdi-download"></i> Download</a>
+  &middot; <a href="{% url 'plugins:netbox_discovery:device_command_outputs' pk=output.device_id %}">All outputs for this device</a></p>
+{% if not output.ok %}<div class="alert alert-warning">The device rejected this command: {{ output.error }}</div>{% endif %}
+<pre class="card card-body" style="white-space: pre; overflow-x: auto">{{ text }}</pre>
+{% endblock %}

@@ -493,6 +493,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="detect again even for devices already remembered",
     )
 
+    gather = subs.add_parser(
+        "collect",
+        parents=[_discover_arguments()],
+        help="run each platform's show commands read-only and file the outputs in NetBox",
+        description="Identify the platform, run the command set defined for it, write one text file "
+        "per command, and post each file to the discovery plugin so it appears on the device page.",
+        formatter_class=HelpFormatter,
+    )
+    gather.add_argument("--standards", metavar="FILE", default=os.environ.get("NETOPS_STANDARDS"),
+                        help="settings file, including NetBox connection settings [$NETOPS_STANDARDS]")
+    gather.add_argument("--no-standards", action="store_true", help=argparse.SUPPRESS)
+    gather.add_argument("--commands", metavar="FILE", default=os.environ.get("NETOPS_COMMANDS"),
+                        help="command catalog YAML [$NETOPS_COMMANDS; default: <project>/commands.yaml, else the packaged set]")
+    gather.add_argument("--output-dir", metavar="DIR", default=os.environ.get("NETOPS_COLLECT_DIR"),
+                        help="where the text files are written [$NETOPS_COLLECT_DIR; default: <project>/collected]")
+    gather.add_argument("--no-upload", action="store_true", help="keep the files on this host only; do not post them to NetBox")
+
     for check in CHECKS.values():
         checker = subs.add_parser(
             f"check-{check.name}",
@@ -925,6 +942,9 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         return run(args, style)
     if args.command == "discover":
         return _discover(args, style, log)
+    if args.command == "collect":
+        from .collect import run as collect_run
+        return collect_run(args, style, log)
     if args.command.startswith("check-"):
         return _check(args, style, log)
     if args.command == "rollback":

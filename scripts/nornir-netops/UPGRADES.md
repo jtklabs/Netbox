@@ -37,7 +37,10 @@ python configure.py upgrade --profile campus-upgrade.yaml \
 ```
 
 All existing NetBox selectors work, including repeated filters, `--filter`,
-`--limit`, poller ownership/autofilter and NetBox credentials from AWS.
+`--limit`, poller ownership/autofilter and NetBox credentials from AWS. When
+the discovery plugin serves redundancy groups, a target set holding more
+members of a group than may upgrade at once is refused unless
+`--ignore-groups` is passed; see [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md#redundancy-groups-dependencies-and-holds).
 Device login comes from the same `NET_USER`, `NET_PASS`, `NET_ENABLE`,
 `NET_AWS_SECRET`, `NET_AWS_REGION` and optional custom JSON-key settings used by
 standards deployment. `--env-file` selects an alternate shared file.
@@ -376,6 +379,69 @@ for install states and conversion details. The C9350 tests use synthetic
 transcripts with its PIDs and image names; they are not a live C9350 lab
 qualification. A profile records your team's tested path; the script does not
 infer approval from release ordering or a shared IOS XE command alone.
+
+## BIG-IP upgrades
+
+The same command, profile shape, NetBox scheduling, progress events, archive
+and comparison report drive F5 BIG-IP units over iControl REST. A profile is a
+BIG-IP profile when its `image` is a `BIGIP-<version>-<build>.iso`; the image
+upload, checksum and free-space checks come from the former
+`scripts/f5-image-push` tool. Devices need the `f5-tmos` platform in NetBox
+(or a blank platform) and the same `NET_*` credentials with the Administrator
+role. The `--f5-port`, `--f5-timeout`, `--f5-verify-tls`/`--f5-insecure` and
+`--f5-login-provider` flags and their `NETOPS_F5_*` settings apply.
+
+```yaml
+name: bigip-17.5
+models:
+  - BIG-IP i5800          # marketing names from cm/device, or platform IDs such as C119
+  - BIG-IP Virtual Edition
+starting_versions:
+  - "17.1.1.3"
+target_version: "17.5.1.8"
+image: BIGIP-17.5.1.8-0.0.19.iso
+md5: REPLACE_WITH_F5_PUBLISHED_MD5
+minimum_free_bytes: 1500000000       # reserve in /shared/images beyond the ISO
+image_source: /var/lib/netops/images/BIGIP-17.5.1.8-0.0.19.iso   # or an https URL the worker downloads
+license_check_date: "2025-03-01"     # from F5 K7727 for the target; blocks units whose license predates it
+volume: HD1.2                        # optional; default is the inactive volume, or a new one
+allow_active: false                  # true: an active HA member fails over to its peer before installing
+ucs_backup: true
+```
+
+Order of operations under `--apply`: `save sys config`; baseline; image
+verified in `/shared/images` or uploaded from `image_source` and md5-checked
+on the unit (an existing file with a different checksum is never overwritten);
+the `ready` gate; a UCS archive saved on the unit as
+`<device>-pre-<target>.ucs` and, with `--ucs-dir` or `NETOPS_UCS_DIR`,
+downloaded and checksum-verified (set `NETOPS_F5_UCS_PASSPHRASE` to encrypt
+it; UCS files contain private keys); then install to the boot volume, reboot
+to it, reconnect, the same convergence loop and the comparison report.
+`--stage-only` uploads and verifies the image only. A dry run reads
+everything and writes nothing.
+
+Prechecks block on: an unapproved platform, a release outside
+`starting_versions`, an install already in progress on a volume, a device
+group that is not `In Sync`, an active HA member unless `allow_active` is set,
+and a license service check date older than `license_check_date`. With
+`allow_active`, the unit runs `failover standby` and waits to become standby
+before installing, so upgrade the standby first and schedule the active unit
+afterwards. Reboots are not coordinated across a pair beyond that check; a
+standalone unit is upgraded with the outage that implies.
+
+The baseline compares virtual server, pool and node availability and enabled
+state, pool active member counts, interface status, VLANs, self IPs, routes,
+trunks, provisioning, iRule names and certificate names and expiry, all as
+unordered sets. Post-checks additionally require the target release on the
+planned volume and a readable license, and warn when the failover state or
+sync status is not what the plan expected, since sync is normally pending
+until both members are upgraded. Configuration text is not compared; the UCS
+is the configuration record. Hotfix ISOs, vCMP guests, multi-blade chassis,
+and `install` to a volume without a reboot are not implemented.
+
+This flow has been exercised against synthetic iControl REST responses only.
+Validate your exact platform, release path and HA configuration in a lab
+before scheduling production units.
 
 ## Schedule through NetBox
 

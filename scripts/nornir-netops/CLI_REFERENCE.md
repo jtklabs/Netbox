@@ -20,7 +20,8 @@ standards-file examples.
   [banner](#banner), [SNMP](#snmp), [SNMP packet size](#snmp-packetsize),
   [ACL](#acl), [NAC](#nac), [local accounts](#users).
 - [Utility commands](#utility-commands): [NTP check](#check-ntp),
-  [discovery](#discover), [rollback](#rollback), [selftest](#selftest).
+  [discovery](#discover), [rollback](#rollback), [selftest](#selftest),
+  [collect](README.md#collect-show-commands-into-netbox).
 - [IOS XE upgrades](UPGRADES.md): approved profiles, NetBox targeting, install
   mode/conversion, parallel execution, pre/post validation and progress webhooks.
 - [Shared flags](#shared-flags): [inventory](#inventory-and-device-selection),

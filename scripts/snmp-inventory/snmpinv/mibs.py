@@ -170,6 +170,33 @@ CSW_STATE_NAMES = {
 # been removed should not become a Device in NetBox — there is no hardware.
 CSW_STATES_PRESENT = {1, 2, 3, CSW_STATE_READY, 5, 6, 7, 8}
 
+# --- First-hop redundancy: CISCO-HSRP-MIB and VRRP-MIB (RFC 2787) ------------
+#
+# Which devices share a gateway is what an upgrade must not break, so the
+# groups are read here and written to NetBox as FHRP groups; the discovery
+# plugin turns them into redundancy groups. See docs/OID-SOURCES.md.
+
+# cHsrpGrpTable: INDEX { ifIndex, cHsrpGrpNumber }; row suffix <ifIndex>.<group>.
+CISCO_HSRP_GRP_ENTRY = "1.3.6.1.4.1.9.9.106.1.2.1.1"
+CISCO_HSRP_GRP_PRIORITY = f"{CISCO_HSRP_GRP_ENTRY}.3"
+CISCO_HSRP_GRP_VIRTUAL_IP = f"{CISCO_HSRP_GRP_ENTRY}.11"
+CISCO_HSRP_GRP_ACTIVE_ROUTER = f"{CISCO_HSRP_GRP_ENTRY}.13"
+CISCO_HSRP_GRP_STANDBY_ROUTER = f"{CISCO_HSRP_GRP_ENTRY}.14"
+CISCO_HSRP_GRP_STANDBY_STATE = f"{CISCO_HSRP_GRP_ENTRY}.15"
+# HsrpState TEXTUAL-CONVENTION.
+HSRP_STATES = {1: "initial", 2: "learn", 3: "listen", 4: "speak", 5: "standby", 6: "active"}
+
+# vrrpOperTable: INDEX { ifIndex, vrrpOperVrId }; row suffix <ifIndex>.<vrid>.
+VRRP_OPER_ENTRY = "1.3.6.1.2.1.68.1.3.1"
+VRRP_OPER_STATE = f"{VRRP_OPER_ENTRY}.3"
+VRRP_OPER_PRIORITY = f"{VRRP_OPER_ENTRY}.5"
+VRRP_OPER_MASTER_IP = f"{VRRP_OPER_ENTRY}.7"
+# vrrpAssoIpAddrTable: INDEX { ifIndex, vrrpOperVrId, vrrpAssoIpAddr }; the
+# virtual address is the last four arcs of the row suffix, the value a RowStatus.
+VRRP_ASSO_IP_ADDR_ENTRY = "1.3.6.1.2.1.68.1.4.1"
+VRRP_ASSO_IP_ADDR_ROW_STATUS = f"{VRRP_ASSO_IP_ADDR_ENTRY}.2"
+VRRP_STATES = {1: "initialize", 2: "backup", 3: "master"}
+
 # --- LLDP-MIB (IEEE 802.1AB) ------------------------------------------------
 #
 # An IEEE MIB, so its root is 1.0.8802.1.1.2 — outside 1.3.6.1 entirely. A

@@ -61,6 +61,9 @@ manage_software_version = true
 # reported as drift and never rewired, and a previously discovered cable
 # whose adjacency disappears is flagged, not deleted.
 sync_cables = true
+# Write HSRP/VRRP groups as NetBox FHRP groups and refresh the discovery
+# plugin's redundancy groups at the end of the sweep.
+sync_fhrp_groups = true
 # Which neighbor classes get cabled. Phones, APs and servers announce
 # themselves over CDP/LLDP too, and cabling them is a choice, not a fact:
 # the default is network gear only. Add from: phone, ap, host, unknown.
@@ -88,3 +91,11 @@ bulk_state_file = /var/lib/snmp-inventory/getbulk-limits.json
 bulk_state_ttl_days = 7
 # How many devices to scan at once.
 workers = 8
+
+[commands]
+# After each sweep, run nornir-netops's `configure.py collect` for the devices
+# this poller owns: per-platform show commands, filed on the NetBox device page.
+run_after_sweep = false
+netops_dir = /opt/nornir-netops
+# python = /opt/nornir-netops/.venv/bin/python
+# extra_args = --workers 5

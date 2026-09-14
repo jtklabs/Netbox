@@ -1,0 +1,8 @@
+{% extends 'generic/object_list.html' %}
+{% block extra_controls %}
+  {% if perms.netbox_discovery.change_upgradegroup %}
+  <form method="post" action="{% url 'plugins:netbox_discovery:upgradegroup_refresh' %}" class="d-inline">{% csrf_token %}
+    <button class="btn btn-secondary"><i class="mdi mdi-refresh"></i> Refresh discovered groups</button>
+  </form>
+  {% endif %}
+{% endblock %}

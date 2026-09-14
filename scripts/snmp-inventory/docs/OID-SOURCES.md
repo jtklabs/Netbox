@@ -75,6 +75,30 @@ No raw observations are modified. Unknown models remain blank.
 `tests/test_audiocodes.py` exercises synthetic replies; a live M800C walk has
 not yet been validated.
 
+## First-hop redundancy (HSRP and VRRP)
+
+Verified on 2026-09-12 from Cisco's published
+[CISCO-HSRP-MIB](https://github.com/cisco/cisco-mibs/blob/main/v2/CISCO-HSRP-MIB.my)
+and the IETF [VRRP-MIB, RFC 2787](https://www.rfc-editor.org/rfc/rfc2787).
+Both tables are indexed by ifIndex and group number, so the row suffix is
+`<ifIndex>.<group>`; the VRRP associated-address table adds the address as
+four further arcs.
+
+| Object | OID | MIB |
+|---|---|---|
+| `cHsrpGrpPriority` | 1.3.6.1.4.1.9.9.106.1.2.1.1.3 | CISCO-HSRP-MIB |
+| `cHsrpGrpVirtualIpAddr` | 1.3.6.1.4.1.9.9.106.1.2.1.1.11 | CISCO-HSRP-MIB |
+| `cHsrpGrpActiveRouter` | 1.3.6.1.4.1.9.9.106.1.2.1.1.13 | CISCO-HSRP-MIB |
+| `cHsrpGrpStandbyRouter` | 1.3.6.1.4.1.9.9.106.1.2.1.1.14 | CISCO-HSRP-MIB |
+| `cHsrpGrpStandbyState` | 1.3.6.1.4.1.9.9.106.1.2.1.1.15 | CISCO-HSRP-MIB (HsrpState: 5 standby, 6 active) |
+| `vrrpOperState` | 1.3.6.1.2.1.68.1.3.1.3 | VRRP-MIB (1 initialize, 2 backup, 3 master) |
+| `vrrpOperPriority` | 1.3.6.1.2.1.68.1.3.1.5 | VRRP-MIB |
+| `vrrpOperMasterIpAddr` | 1.3.6.1.2.1.68.1.3.1.7 | VRRP-MIB |
+| `vrrpAssoIpAddrRowStatus` | 1.3.6.1.2.1.68.1.4.1.2 | VRRP-MIB; the virtual address is in the index |
+
+VRRPv3 (RFC 6527, VRRPV3-MIB) is not read yet; devices that publish only the
+v3 table produce no groups and are reported as having none.
+
 ## Standard MIBs
 
 | Object | OID | MIB |

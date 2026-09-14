@@ -13,14 +13,30 @@
       <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>
       <tr><th>Job last update</th><td>{{ object.last_seen_at|default:'No job updates yet' }}</td></tr>
       <tr><th>Requested by</th><td>{{ object.requested_by|placeholder }}</td></tr>
-      <tr><th>Batch</th><td><a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a></td></tr>
+      <tr><th>Batch</th><td><a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a> (wave {{ object.planned_wave }})</td></tr>
+      <tr><th>Redundancy groups</th><td>{{ object.groups|join:", "|placeholder }}</td></tr>
+      <tr><th>Waits for</th><td>{% for device in waits_for_devices %}{{ device|linkify }}{% if not forloop.last %}, {% endif %}{% empty %}{{ ''|placeholder }}{% endfor %}</td></tr>
+      {% if object.held_reason %}<tr><th>Held because</th><td class="text-warning">{{ object.held_reason }}</td></tr>{% endif %}
       <tr><th>Remote run</th><td>{{ object.run_id|placeholder }}</td></tr>
     </table>
     <p class="text-muted">Upgrade poller last seen includes queue check-ins, even when no jobs are due, and active-job heartbeats or progress reports. Job last update starts when this job is claimed. Refresh to see new activity.</p>
     <p><strong>{{ object.stage }}</strong> {{ object.message }}</p>
     {% if object.heartbeat_stale %}<p class="text-danger">This worker has not sent a heartbeat for over five minutes. Check the remote and the switch before taking further action.</p>{% endif %}
     {% if perms.netbox_discovery.change_upgradejob %}
-      {% if object.status == 'pending' %}
+      {% if object.status == 'held' %}
+      <p class="text-warning">This job is held. Check the device named above, then release it with a reason; it returns to the schedule and the normal gates still apply.</p>
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_release' pk=object.pk %}" class="mb-2">{% csrf_token %}
+        <label for="release-reason">Why it is safe to continue</label>
+        <textarea id="release-reason" name="reason" class="form-control" maxlength="1000" required></textarea>
+        <button class="btn btn-warning mt-2">Release this job</button>
+        {% if held_in_batch > 1 %}<button class="btn btn-outline-warning mt-2" name="scope" value="batch">Release all {{ held_in_batch }} held jobs in this batch</button>{% endif %}
+      </form>
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_cancel' pk=object.pk %}">{% csrf_token %}<button class="btn btn-danger">Cancel held job</button></form>
+      {% elif object.status == 'pending' %}
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_hold' pk=object.pk %}" class="mb-2">{% csrf_token %}
+        <input name="reason" class="form-control" maxlength="1000" placeholder="Reason to hold this job" required>
+        <button class="btn btn-outline-warning mt-2">Hold job</button>
+      </form>
       <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_cancel' pk=object.pk %}">{% csrf_token %}<button class="btn btn-danger">Cancel pending job</button></form>
       {% elif object.needs_recovery %}
       <p class="text-danger">This device stays locked against further scheduled work. Verify the switch and stop any surviving worker before releasing it.</p>

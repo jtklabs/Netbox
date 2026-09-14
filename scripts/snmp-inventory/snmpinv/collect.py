@@ -28,6 +28,7 @@ from .snmp import (
     SnmpTimeoutError,
     VarBind,
     collect_column,
+    column_index,
 )
 
 log = logging.getLogger(__name__)
@@ -173,6 +174,19 @@ class Neighbor:
 
 
 @dataclass
+class FhrpGroup:
+    """One HSRP or VRRP group this device takes part in, as it reported it."""
+
+    protocol: str                   # "hsrp" or "vrrp"
+    if_index: int
+    group_id: int
+    virtual_ip: str = ""
+    priority: int | None = None
+    state: str = ""                 # HSRP active/standby/...; VRRP master/backup
+    peer_address: str = ""          # the other router's address when the device names it
+
+
+@dataclass
 class DeviceFacts:
     """Everything one device told us about itself."""
 
@@ -196,6 +210,7 @@ class DeviceFacts:
     stack_members: list[StackMember] = field(default_factory=list)
     access_points: list[AccessPoint] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
+    fhrp_groups: list[FhrpGroup] = field(default_factory=list)
 
     software_version: str = ""
     vendor_serial: str = ""
@@ -354,6 +369,12 @@ class Collector:
             facts.neighbors = _walk_lldp_neighbors(session, host, facts.interfaces)
             if profile is not None and profile.name == "cisco":
                 facts.neighbors += _walk_cdp_neighbors(session, host, facts.interfaces)
+            # Gateway redundancy, for the same reason as neighbors: it is the
+            # topology an upgrade must respect. VRRP is standard and cheap to
+            # try everywhere; HSRP is Cisco's.
+            facts.fhrp_groups = _walk_vrrp_groups(session, host)
+            if profile is not None and profile.name == "cisco":
+                facts.fhrp_groups += _walk_hsrp_groups(session, host)
 
         if profile is not None:
             _apply_vendor_scalars(session, host, facts, profile)
@@ -599,6 +620,74 @@ def _walk_stack_members(session: CredentialSession, host: str) -> list[StackMemb
             mac_address=_text(macs.get(key)),
         ))
     return members
+
+
+# --- HSRP / VRRP groups -----------------------------------------------------
+
+def _walk_hsrp_groups(session: CredentialSession, host: str) -> list[FhrpGroup]:
+    """CISCO-HSRP-MIB cHsrpGrpTable: one row per interface and group."""
+    try:
+        binds = session.walk(host, mibs.CISCO_HSRP_GRP_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: cHsrpGrpTable unavailable (%s)", host, exc)
+        return []
+    if not binds:
+        return []
+    vips = collect_column(binds, mibs.CISCO_HSRP_GRP_VIRTUAL_IP)
+    priorities = collect_column(binds, mibs.CISCO_HSRP_GRP_PRIORITY)
+    states = collect_column(binds, mibs.CISCO_HSRP_GRP_STANDBY_STATE)
+    actives = collect_column(binds, mibs.CISCO_HSRP_GRP_ACTIVE_ROUTER)
+    standbys = collect_column(binds, mibs.CISCO_HSRP_GRP_STANDBY_ROUTER)
+    groups = []
+    for row in sorted(set(vips) | set(states), key=_row_key):
+        parts = row.split(".")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            continue
+        state = mibs.HSRP_STATES.get(_int(states.get(row), 0), "")
+        peer = _text(standbys.get(row)) if state == "active" else _text(actives.get(row))
+        groups.append(FhrpGroup(
+            protocol="hsrp", if_index=int(parts[0]), group_id=int(parts[1]),
+            virtual_ip=_text(vips.get(row)), priority=_int(priorities.get(row), None), state=state,
+            peer_address="" if peer in ("", "0.0.0.0") else peer,
+        ))
+    return groups
+
+
+def _walk_vrrp_groups(session: CredentialSession, host: str) -> list[FhrpGroup]:
+    """VRRP-MIB vrrpOperTable plus the associated-address table for the virtual IP."""
+    try:
+        binds = session.walk(host, mibs.VRRP_OPER_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: vrrpOperTable unavailable (%s)", host, exc)
+        return []
+    if not binds:
+        return []
+    states = collect_column(binds, mibs.VRRP_OPER_STATE)
+    priorities = collect_column(binds, mibs.VRRP_OPER_PRIORITY)
+    masters = collect_column(binds, mibs.VRRP_OPER_MASTER_IP)
+    addresses: dict[tuple[int, int], str] = {}
+    try:
+        for bind in session.walk(host, mibs.VRRP_ASSO_IP_ADDR_ENTRY):
+            index = column_index(bind.oid, mibs.VRRP_ASSO_IP_ADDR_ROW_STATUS)
+            parts = index.split(".") if index else []
+            if len(parts) == 6 and all(p.isdigit() for p in parts):
+                addresses.setdefault((int(parts[0]), int(parts[1])), ".".join(parts[2:]))
+    except SnmpError as exc:
+        log.debug("%s: vrrpAssoIpAddrTable unavailable (%s)", host, exc)
+    groups = []
+    for row in sorted(states, key=_row_key):
+        parts = row.split(".")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            continue
+        if_index, vrid = int(parts[0]), int(parts[1])
+        state = mibs.VRRP_STATES.get(_int(states.get(row), 0), "")
+        master = _text(masters.get(row))
+        groups.append(FhrpGroup(
+            protocol="vrrp", if_index=if_index, group_id=vrid, virtual_ip=addresses.get((if_index, vrid), ""),
+            priority=_int(priorities.get(row), None), state=state,
+            peer_address="" if state == "master" or master in ("", "0.0.0.0") else master,
+        ))
+    return groups
 
 
 # --- CDP / LLDP neighbors ---------------------------------------------------

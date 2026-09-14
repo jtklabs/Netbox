@@ -1,0 +1,7 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% block title %}{{ device }} command outputs{% endblock %}
+{% block content %}
+<h1 class="h4">Device Configuration State: {{ device|linkify }}</h1>
+{% include 'netbox_discovery/inc/device_command_outputs.html' with outputs=outputs latest=None %}
+{% endblock %}

@@ -305,6 +305,59 @@ def release_matches(value, target):
     return bool(match and version(match[1]) == version(target))
 
 
+def settle(emit, options):
+    """Give services time to reconverge after the reload before the first comparison."""
+    emit("converging", "Target is reachable; allowing services to reconverge")
+    remaining = options.settle_seconds
+    while remaining > 0:
+        pause = min(30, remaining)
+        time.sleep(pause)
+        remaining -= pause
+        emit("converging", f"Initial settling time remaining: {remaining}s")
+
+
+def converge(emit, options, before, plan, reporter, host, collect_after, extra_findings):
+    """Compare fresh baselines until two consecutive clean passes, or the deadline.
+
+    Every event says why validation has not passed: the checks that differ,
+    the clean passes still needed and the time left.
+    """
+    deadline, consecutive, attempt = time.monotonic() + options.validation_timeout, 0, 0
+    while True:
+        attempt += 1
+        after = collect_after()
+        findings = checks.compare(before, after) + extra_findings(after)
+        errors = [f for f in findings if f["severity"] == "error"]
+        consecutive = 0 if errors else consecutive + 1
+        reasons = checks.describe_findings(errors)
+        seconds_left = max(0, int(deadline - time.monotonic()))
+        emit("validating", f"Comparison {attempt}: " + ("no differences from baseline" if not errors
+                                                        else f"{len(errors)} check(s) differ from baseline"),
+             {"post": after, "findings": findings,
+              "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
+                                   "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
+                                   "seconds_remaining": seconds_left,
+                                   "pending": [checks.describe_finding(f) for f in errors[:10]]}})
+        if consecutive >= 2:
+            status = "completed_with_warnings" if findings else "completed"
+            fields, attachment = comparison_report(reporter, host, before, after, findings, plan, status)
+            emit(status, "Target installed and baseline restored", {"upgrade_plan": plan, **fields}, attachment)
+            return Result(host=host, result={"status": status, "findings": findings}, changed=True)
+        if time.monotonic() >= deadline:
+            fields, attachment = comparison_report(reporter, host, before, after, findings, plan, "validation_failed")
+            emit("validation_failed", f"Upgrade returned, but baseline validation did not pass within "
+                                      f"{int(options.validation_timeout)}s after settling; still differing: {reasons}",
+                 {"findings": findings, **fields}, attachment)
+            return Result(host=host, result={"findings": findings}, failed=True, changed=True)
+        if errors:
+            emit("converging", f"Still differs from baseline after comparison {attempt}: {reasons}. "
+                               f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails")
+        else:
+            emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
+                               f"({seconds_left}s left)")
+        time.sleep(options.poll_interval)
+
+
 def comparison_report(reporter, host, before, after, findings, plan, status):
     """Build the readable before/after report; a report problem never changes the outcome.
 
@@ -326,6 +379,9 @@ def comparison_report(reporter, host, before, after, findings, plan, status):
 
 
 def upgrade_device(task, profile, options, reporter):
+    if profile.family == "f5":
+        from . import f5_workflow
+        return f5_workflow.upgrade_device(task, profile, options, reporter)
     changed = False
     plan = {}
     stage_only = getattr(options, "stage_only", False)
@@ -427,49 +483,10 @@ def upgrade_device(task, profile, options, reporter):
             except (TimeoutError, OSError, EOFError):
                 emit("reconnecting", "Install dialogue interrupted; checking outcome without resending install")
             device.wait_for_target(profile)
-            emit("converging", "Target is reachable; allowing services to reconverge")
-            remaining = options.settle_seconds
-            while remaining > 0:
-                pause = min(30, remaining)
-                time.sleep(pause)
-                remaining -= pause
-                emit("converging", f"Initial settling time remaining: {remaining}s")
-            deadline, consecutive, attempt = time.monotonic() + options.validation_timeout, 0, 0
-            while True:
-                attempt += 1
-                after = checks.collect(device.read, lambda cmd: emit("postcheck", cmd), before["routing_commands"])
-                findings = checks.compare(before, after) + target_findings(after, profile, before, saved=not allow_mismatch)
-                errors = [f for f in findings if f["severity"] == "error"]
-                consecutive = 0 if errors else consecutive + 1
-                reasons = checks.describe_findings(errors)
-                seconds_left = max(0, int(deadline - time.monotonic()))
-                # Say why validation has not passed: the checks that differ, the
-                # clean passes still needed and the time left, in every event.
-                emit("validating", f"Comparison {attempt}: " + ("no differences from baseline" if not errors
-                                                                else f"{len(errors)} check(s) differ from baseline"),
-                     {"post": after, "findings": findings,
-                      "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
-                                           "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
-                                           "seconds_remaining": seconds_left,
-                                           "pending": [checks.describe_finding(f) for f in errors[:10]]}})
-                if consecutive >= 2:
-                    status = "completed_with_warnings" if findings else "completed"
-                    fields, attachment = comparison_report(reporter, task.host, before, after, findings, plan, status)
-                    emit(status, "Target installed and baseline restored", {"upgrade_plan": plan, **fields}, attachment)
-                    return Result(host=task.host, result={"status": status, "findings": findings}, changed=True)
-                if time.monotonic() >= deadline:
-                    fields, attachment = comparison_report(reporter, task.host, before, after, findings, plan, "validation_failed")
-                    emit("validation_failed", f"Upgrade returned, but baseline validation did not pass within "
-                                              f"{int(options.validation_timeout)}s after settling; still differing: {reasons}",
-                         {"findings": findings, **fields}, attachment)
-                    return Result(host=task.host, result={"findings": findings}, failed=True, changed=True)
-                if errors:
-                    emit("converging", f"Still differs from baseline after comparison {attempt}: {reasons}. "
-                                       f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails")
-                else:
-                    emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
-                                       f"({seconds_left}s left)")
-                time.sleep(options.poll_interval)
+            settle(emit, options)
+            return converge(emit, options, before, plan, reporter, task.host,
+                            lambda: checks.collect(device.read, lambda cmd: emit("postcheck", cmd), before["routing_commands"]),
+                            lambda after: target_findings(after, profile, before, saved=not allow_mismatch))
     except Exception as exc:
         # Transport exceptions may embed passwords; the archive and debuglog
         # redactor know login secrets. Do not expose raw exceptions in the UI.

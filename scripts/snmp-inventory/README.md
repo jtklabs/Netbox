@@ -49,6 +49,45 @@ serial matching, Hardware Lifecycle EoL), so owning discovery fits.
 - **CDP/LLDP neighbors**, synced into NetBox as tagged Cable objects — see
   [Cables from CDP/LLDP](#cables-from-cdplldp)
 
+### Show-command collection
+
+With `[commands] run_after_sweep = true`, the end of every sweep runs
+`configure.py collect` from the nornir-netops checkout named by `netops_dir`
+for the devices this poller owns. That command has its own per-platform
+command sets and posts each output to the discovery plugin, which stores the
+files in NetBox and lists them on the device page. See the nornir-netops
+README, "Collect show commands into NetBox".
+
+On the NetBox side, the poller posts each output to
+`POST /api/plugins/discovery/command-outputs/` (JSON: `device`, `command`,
+`filename`, `content`, plus `platform`, `poller`, `ok`, `error` and
+`collected_at`). The plugin stores the text as a file in NetBox's media
+storage under `discovery/commands/<device id>/` and keeps one row per device
+and command, replaced on every collection, so the device page always shows
+the latest run; the rows are not change-logged, which keeps configuration
+text out of the changelog. Every device page gets a **Device Configuration
+State** card listing the files with a check for a clean collection, a
+warning carrying the device's reply when it rejected the command, the size,
+the collection time, and a download link; the filename opens the text in the
+browser, `/plugins/discovery/devices/<id>/command-outputs/` lists everything
+for one device, and `GET /api/plugins/discovery/command-outputs/?device_id=<id>`
+returns the metadata with a `download_url` per file. Viewing needs `view` on
+the plugin's command outputs plus `view` on the device; the poller token
+needs `add`, `change` and `view` on command outputs. Uploads larger than the
+plugin's `command_output_max_bytes` (16 MB by default) are refused, and the
+poller lists such files here with a note while keeping them locally.
+
+### Gateway redundancy
+
+HSRP (Cisco) and VRRP groups are read on every sweep and written to NetBox as
+FHRP groups, one per protocol, group number and virtual address, with an
+interface assignment carrying the device's priority. At the end of the sweep
+the scanner asks the discovery plugin to refresh its redundancy groups, which
+turns those FHRP groups and the discovered cables into the groups and
+dependencies the upgrade queue enforces. `sync_fhrp_groups = false` in
+`[sync]` turns both off. See
+[docs/OID-SOURCES.md](docs/OID-SOURCES.md#first-hop-redundancy-hsrp-and-vrrp).
+
 ### Vendors
 
 Cisco (IOS, IOS-XE, NX-OS), Arista EOS, Aruba (ArubaOS controllers, ClearPass,

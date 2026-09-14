@@ -1,0 +1,211 @@
+# Commands collected by `configure.py collect`, keyed by netmiko platform.
+# Copy to <project>/commands.yaml (or point --commands / NETOPS_COMMANDS at a
+# copy) to change the sets; that copy replaces this file entirely.
+#
+# Per platform:
+#   driver:   netmiko device_type to connect with, when it differs from the key
+#   enable:   enter enable mode first (needs the device secret)
+#   commands: strings, or {command, timeout} for slow commands
+juniper_junos:
+  commands:
+    - show version
+    - show chassis hardware
+    - {command: "show configuration | display set", timeout: 300}
+    - {command: "show configuration | display json", timeout: 300}
+    - show interfaces terse
+    - show vlan
+    - show spanning-tree
+    - show lldp neighbors
+    - show arp
+    - show route
+    - show dot1x interface
+    - show dot1x interface detail
+cisco_ios:
+  enable: true
+  commands:
+    - show version
+    - show inventory
+    - {command: show running-config, timeout: 300}
+    - show interfaces status
+    - show ip int brief
+    - show vlan
+    - show spanning-tree
+    - show cdp neighbors
+    - show lldp neighbors
+    - show mac address-table
+    - show ip arp
+    - show ip route
+    - show ip bgp summary
+    - show authentication sessions
+    - show dot1x all
+cisco_nxos:
+  enable: true
+  commands:
+    - show version
+    - show inventory
+    - {command: show running-config, timeout: 300}
+    - show interface status
+    - show ip interface brief
+    - show vlan
+    - show spanning-tree
+    - show cdp neighbors
+    - show lldp neighbors
+    - show mac address-table
+    - show ip arp
+    - show ip route
+    - show ip bgp summary
+    - show vpc
+    - show port-channel summary
+cisco_asa:
+  enable: true
+  commands:
+    - show version
+    - show inventory
+    - {command: show running-config, timeout: 300}
+    - show interface ip brief
+    - show nameif
+    - show route
+    - show arp
+    - show failover
+    - show vpn-sessiondb summary
+cisco_xr:
+  commands:
+    - show version
+    - show inventory
+    - {command: show running-config, timeout: 300}
+    - show ipv4 interface brief
+    - show route
+    - show arp
+    - show lldp neighbors
+    - show bgp summary
+arista_eos:
+  enable: true
+  commands:
+    - show version
+    - show inventory
+    - {command: show running-config, timeout: 300}
+    - show interfaces status
+    - show ip interface brief
+    - show vlan
+    - show spanning-tree
+    - show lldp neighbors
+    - show mac address-table
+    - show arp
+    - show ip route
+    - show ip bgp summary
+    - show mlag
+    - show port-channel summary
+aruba_aoscx:
+  commands:
+    - show version
+    - show system
+    - {command: show running-config, timeout: 300}
+    - show interface brief
+    - show ip interface brief
+    - show vlan
+    - show spanning-tree
+    - show lldp neighbor-info
+    - show mac-address-table
+    - show arp all-vrfs
+    - show ip route all-vrfs
+    - show vsx status
+aruba_os:            # ArubaOS mobility controllers (WLC)
+  enable: true
+  commands:
+    - show version
+    - show inventory
+    - show switches
+    - show ap database
+    - show ap active
+    - show ip interface brief
+    - show ip route
+    - show vlan
+    - show license
+    - {command: show running-config, timeout: 300}
+f5_tmsh:             # tmsh over SSH
+  commands:
+    - show sys version
+    - show sys hardware
+    - show sys software
+    - show sys license
+    - show sys failover
+    - show cm sync-status
+    - show cm device
+    - show net interface
+    - list net vlan
+    - list net self
+    - show net route
+    - list ltm virtual
+    - show ltm virtual
+    - list ltm pool
+    - show ltm pool
+    - show ltm node
+    - list sys ntp
+    - list sys dns
+paloalto_panos:
+  commands:
+    - show system info
+    - show interface all
+    - show arp all
+    - show routing route
+    - show high-availability state
+    - show ntp
+    - show clock
+    - show system disk-space
+    - {command: show config running, timeout: 300}
+fortinet:
+  commands:
+    - get system status
+    - get hardware status
+    - get system ha status
+    - get system performance status
+    - get system interface physical
+    - show system interface
+    - get router info routing-table all
+    - get system arp
+    - {command: show full-configuration, timeout: 600}
+checkpoint_gaia:
+  commands:
+    - show version all
+    - show asset all
+    - show interfaces all
+    - show route
+    - show cluster state
+    - show ntp servers
+    - show dns primary
+    - {command: show configuration, timeout: 300}
+opengear_linux:      # console servers; a Linux shell, no netmiko driver of its own
+  driver: linux
+  commands:
+    - cat /etc/version
+    - hostname
+    - ifconfig -a
+    - route -n
+    - config -g config.system
+    - config -g config.ports
+    - pmshell -l
+infoblox_nios:       # the restricted NIOS shell
+  driver: generic
+  commands:
+    - show version
+    - show network
+    - show status
+    - show hardware_status
+    - show ntp
+    - show dns
+    - show ha
+    - show interface
+    - show route
+    - show license
+bluecoat_sgos:       # ProxySG CLI; enable is needed for the configuration
+  driver: generic
+  enable: true
+  commands:
+    - show version
+    - show interface all
+    - show ip-route-table
+    - show licenses
+    - show clock
+    - show forwarding
+    - show proxy-services
+    - {command: show configuration, timeout: 300}

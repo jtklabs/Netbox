@@ -18,11 +18,61 @@ Operations:
 | Stage image only | Check flash; download a missing image and verify its checksum; no install/reload | Yes |
 | Install upgrade | Saves the running configuration, full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
 
-The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
+A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way; see [BIG-IP upgrades](UPGRADES.md#big-ip-upgrades). The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
 Select only the virtual chassis **master** for a stack. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
 
 **Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. The `write memory` that an install job runs at the start of its prechecks is the one device write that precedes that check. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
+
+## Redundancy groups, dependencies and holds
+
+Two switches in an HSRP pair, the A and B closets on one floor, or the F5
+units behind one load balancer must not be upgraded at the same time, and a
+core should not go until the closets it serves are done. **Discovery →
+Software → Redundancy Groups** and **Upgrade Dependencies** hold that
+knowledge, and the queue enforces it:
+
+- A **group** is a set of devices of which at most **members upgrading at
+  once** (default 1) may hold a claimed, running or recovery-required job,
+  counted across every batch and poller; 0 lets every member go together,
+  which is the right setting for an office's access switches. A device can be
+  in several groups; every one of them must have capacity.
+- A group can **wait for** other groups: in a batch, its members are not
+  claimed until every member of those groups has completed, and across
+  batches the two groups never upgrade at the same time. "Office core waits
+  for office access" is one relationship, however many switches are in each.
+- A device-level **dependency** does the same for one pair of devices;
+  discovery creates these from cables. Chains work transitively, and a cycle
+  is refused at scheduling.
+- The schedule preview shows the resulting **waves** so the order is visible
+  before anything is created; the wave is also shown on each job.
+- Groups and dependencies are **discovered** where NetBox already knows:
+  FHRP groups (HSRP and VRRP, written by `snmp-inventory`) become groups, and
+  cables between devices of different role tiers become dependencies, using
+  the `upgrade_tier_roles` plugin setting (`core`, `distribution`, `access` by
+  default, top down). The scanner refreshes them at the end of each sweep,
+  and **Refresh discovered groups** on the group list does the same on
+  demand. Anything created by hand is never changed by a refresh; a
+  discovered relationship that disappears is marked stale, not deleted.
+  Load-balancer pools and anything else discovery cannot see are entered by
+  hand.
+
+When a job ends `failed` or `recovery_required`, the pending jobs of its
+partners, of the devices that wait for it, and, with `hold_site_on_failure`
+(on by default), of every other device at the same site in that batch move to
+**held**, with the reason on the job. A device left in `recovery_required`
+also holds new jobs for its partners and dependents in later batches until a
+person records recovery, because that device is still fenced. A plain failure
+in prechecks does not reach other batches. A held job is released from its
+page (or all held jobs in the batch at once) or through the API, always with
+a reason that goes into the changelog; it then returns to the schedule and
+the normal gates still apply. A pending job can also be held by hand. Held
+jobs expire with their start window like pending ones.
+
+Manual `configure.py upgrade` runs against NetBox inventory refuse a target
+set that contains more members of a group than its limit unless
+`--ignore-groups` is given; they do not wait for dependencies, so use the
+queue for anything that needs ordering.
 
 ## Permissions
 

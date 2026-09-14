@@ -8,10 +8,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from dcim.api.serializers import DeviceSerializer
+from dcim.models import Device
+from netbox.api.fields import SerializedPKRelatedField
+
+from .. import upgrade_groups
 from .. import upgrade_queue as queue
-from ..models import DiscoveryPoller, UpgradeJob
+from ..models import DiscoveryPoller, UpgradeDependency, UpgradeGroup, UpgradeJob
 from ..upgrade_choices import UpgradeOperationChoices
-from ..upgrade_filtersets import UpgradeJobFilterSet
+from ..upgrade_filtersets import UpgradeDependencyFilterSet, UpgradeGroupFilterSet, UpgradeJobFilterSet
 
 
 class UpgradeJobSerializer(NetBoxModelSerializer):
@@ -26,6 +31,7 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
                   'profile', 'operation', 'scheduled_at', 'start_before', 'status', 'stage', 'message',
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
                   'completed_at', 'last_seen_at', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
+                  'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
                   'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
         read_only_fields = fields
@@ -142,3 +148,89 @@ class UpgradeCancelView(QueueView):
     def execute(self, request, data, pk):
         job = queue.cancel(request.user, pk, **data)
         return Response({'id': job.pk, 'status': job.status})
+
+
+class UpgradeGroupSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:upgradegroup-detail')
+    members = SerializedPKRelatedField(queryset=Device.objects.all(), serializer=DeviceSerializer, nested=True,
+                                       required=False, many=True)
+    depends_on = serializers.PrimaryKeyRelatedField(queryset=UpgradeGroup.objects.all(), many=True, required=False)
+
+    def validate_depends_on(self, value):
+        if self.instance is not None and self.instance in value:
+            raise serializers.ValidationError('A group cannot wait for itself.')
+        return value
+
+    class Meta:
+        model = UpgradeGroup
+        fields = ('id', 'url', 'display', 'name', 'max_concurrent', 'source', 'key', 'stale', 'members', 'depends_on',
+                  'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated')
+        brief_fields = ('id', 'url', 'display', 'name', 'max_concurrent')
+        read_only_fields = ('source', 'key', 'stale')
+
+
+class UpgradeGroupViewSet(NetBoxModelViewSet):
+    queryset = UpgradeGroup.objects.prefetch_related('members', 'tags')
+    serializer_class = UpgradeGroupSerializer
+    filterset_class = UpgradeGroupFilterSet
+
+
+class UpgradeDependencySerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:upgradedependency-detail')
+    upstream = DeviceSerializer(nested=True)
+    downstream = DeviceSerializer(nested=True)
+
+    class Meta:
+        model = UpgradeDependency
+        fields = ('id', 'url', 'display', 'upstream', 'downstream', 'source', 'key', 'stale',
+                  'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated')
+        brief_fields = ('id', 'url', 'display', 'upstream', 'downstream')
+        read_only_fields = ('source', 'key', 'stale')
+
+
+class UpgradeDependencyViewSet(NetBoxModelViewSet):
+    queryset = UpgradeDependency.objects.select_related('upstream', 'downstream').prefetch_related('tags')
+    serializer_class = UpgradeDependencySerializer
+    filterset_class = UpgradeDependencyFilterSet
+
+
+class ReasonSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=1000)
+
+
+class UpgradeHoldView(QueueView):
+    permission = 'change_upgradejob'
+    serializer_class = ReasonSerializer
+
+    def execute(self, request, data, pk):
+        job = queue.hold(request.user, pk, data['reason'])
+        return Response({'id': job.pk, 'status': job.status, 'held_reason': job.held_reason})
+
+
+class UpgradeReleaseView(QueueView):
+    permission = 'change_upgradejob'
+    serializer_class = ReasonSerializer
+
+    def execute(self, request, data, pk):
+        job = queue.release(request.user, pk, data['reason'])
+        return Response({'id': job.pk, 'status': job.status})
+
+
+class ReleaseBatchSerializer(ReasonSerializer):
+    batch_id = serializers.UUIDField()
+
+
+class UpgradeReleaseBatchView(QueueView):
+    permission = 'change_upgradejob'
+    serializer_class = ReleaseBatchSerializer
+
+    def execute(self, request, data):
+        return Response({'released': queue.release_batch(request.user, data['batch_id'], data['reason'])})
+
+
+class UpgradeRefreshGroupsView(QueueView):
+    permission = 'change_upgradegroup'
+    serializer_class = serializers.Serializer
+
+    def execute(self, request, data):
+        return Response(upgrade_groups.refresh_discovered())
