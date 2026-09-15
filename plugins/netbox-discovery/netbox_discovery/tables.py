@@ -4,6 +4,7 @@ from netbox.tables import NetBoxTable, columns
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
@@ -11,6 +12,7 @@ from netbox_discovery.models import (
 __all__ = (
     'DiscoveryIssueTable',
     'DiscoveryPollerTable',
+    'DiscoveryRuleTable',
     'HardwareReplacementTable',
     'OnboardingRequestTable',
 )
@@ -120,3 +122,37 @@ class DiscoveryIssueTable(NetBoxTable):
             'detected_at', 'status', 'kind', 'address', 'reported_name',
             'serial', 'device',
         )
+
+
+class DiscoveryRuleTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+    enabled = columns.BooleanColumn()
+    # The rule as a sentence is what somebody scanning the list wants; the
+    # parts are there for anyone sorting or filtering on one of them.
+    sentence = tables.Column(accessor='sentence', orderable=False, verbose_name='Rule')
+    # Shown by label, sorted by value: without an explicit order_by a column
+    # whose accessor is a method would try to order the queryset by it.
+    match_field = tables.Column(
+        accessor='get_match_field_display', order_by='match_field',
+        verbose_name='When this field',
+    )
+    match_operator = tables.Column(
+        accessor='get_match_operator_display', order_by='match_operator',
+        verbose_name='Comparison',
+    )
+    match_value = tables.Column(verbose_name='This value')
+    set_field = tables.Column(
+        accessor='get_set_field_display', order_by='set_field', verbose_name='Sets',
+    )
+    set_value = tables.Column(verbose_name='To')
+    only_if_blank = columns.BooleanColumn(verbose_name='Only when empty')
+    tags = columns.TagColumn(url_name='plugins:netbox_discovery:discoveryrule_list')
+
+    class Meta(NetBoxTable.Meta):
+        model = DiscoveryRule
+        fields = (
+            'pk', 'id', 'name', 'enabled', 'weight', 'sentence', 'match_field',
+            'match_operator', 'match_value', 'set_field', 'set_value',
+            'only_if_blank', 'description', 'tags', 'created', 'last_updated',
+        )
+        default_columns = ('name', 'enabled', 'weight', 'sentence', 'description')

@@ -32,6 +32,12 @@ Applying is done by the poller, not by NetBox. All the idempotent create logic
 — device types, stacks into virtual chassis, module bays, interfaces, addresses
 — lives in the scanner already, and reimplementing it here would be a second
 source of truth that could drift from the first.
+
+Discovery rules follow the same split. A rule ("when the name contains fw- and
+the model is empty, set the model to FPR-2120") is stored and edited here, and
+handed to every poller at the start of its run; the poller applies it to each
+scan before reporting, and the request page shows which values a rule
+supplied. Nothing here evaluates a rule.
 """
 
 from netbox.plugins import PluginConfig

@@ -1053,13 +1053,7 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
     # GET; the walks run afterwards, and only for values still empty, so a
     # device that answered the scalars never pays for the walks.
     wanted = [oid for oid in everything if not oid.endswith(".*")]
-    found = {}
-    if wanted:
-        try:
-            found = session.get(host, wanted)
-        except SnmpError as exc:
-            log.debug("%s: vendor scalars unavailable (%s)", host, exc)
-            found = {}
+    found = _get_scalars(session, host, wanted) if wanted else {}
     walked: dict[str, VarBind | None] = {}
 
     def _first_row(oid):
@@ -1138,6 +1132,49 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
         if value:
             facts.vendor_part_number = value
             break
+
+
+def _get_scalars(session: CredentialSession, host: str,
+                 oids: list[str]) -> dict[str, VarBind]:
+    """One batched GET for the vendor scalars; one GET per OID if that fails.
+
+    A profile covers a product family, so the batch usually names something
+    this particular product does not serve: the Fortinet profile asks a
+    FortiAnalyzer for the FortiGate version scalar alongside its own. Most
+    agents answer that one varbind with noSuchObject and the rest normally.
+    Some fail the whole request instead -- an authorizationError for an OID
+    outside the SNMPv3 view, or an SNMPv1-style noSuchName -- and the batch
+    then comes back with nothing, taking the version and serial this device
+    does publish down with it. So when a batch of several OIDs yields nothing,
+    each is asked for on its own. That costs a round trip per OID, only on
+    that path, and keeps whatever the device was willing to say.
+
+    A timeout is not retried. The device has stopped answering, and asking
+    four more times would only multiply the wait.
+    """
+    try:
+        found = session.get(host, oids)
+    except SnmpTimeoutError as exc:
+        log.debug("%s: vendor scalars unavailable (%s)", host, exc)
+        return {}
+    except SnmpError as exc:
+        log.debug("%s: batched vendor scalar GET failed (%s); asking one at a time",
+                  host, exc)
+        found = {}
+    if found or len(oids) < 2:
+        return found
+
+    log.debug("%s: batched vendor scalar GET answered nothing; asking one at a time", host)
+    found = {}
+    for oid in oids:
+        try:
+            found.update(session.get(host, [oid]))
+        except SnmpTimeoutError as exc:
+            log.debug("%s: %s timed out (%s); not asking for the rest", host, oid, exc)
+            break
+        except SnmpError as exc:
+            log.debug("%s: %s unavailable (%s)", host, oid, exc)
+    return found
 
 
 # --- index decoding ---------------------------------------------------------

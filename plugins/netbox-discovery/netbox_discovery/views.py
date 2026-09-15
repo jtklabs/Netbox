@@ -18,6 +18,7 @@ from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
@@ -48,6 +49,11 @@ __all__ = (
     'DiscoveryIssueEditView',
     'DiscoveryIssueDeleteView',
     'DiscoveryIssueBulkDeleteView',
+    'DiscoveryRuleListView',
+    'DiscoveryRuleView',
+    'DiscoveryRuleEditView',
+    'DiscoveryRuleDeleteView',
+    'DiscoveryRuleBulkDeleteView',
 )
 
 
@@ -71,7 +77,20 @@ class OnboardingRequestView(ObjectView):
     )
 
     def get_extra_context(self, request, instance):
+        # The rules that touched this scan, by the name the poller recorded,
+        # so each filled-in value can link to the rule that supplied it. A
+        # rule renamed or deleted since still shows under the recorded name.
+        applied = instance.rules_applied
+        rules = {
+            rule.name: rule for rule in DiscoveryRule.objects.filter(
+                name__in={entry.get('rule', '') for entry in applied}
+            )
+        } if applied else {}
         return {
+            'rules_applied': [
+                {'entry': entry, 'rule': rules.get(entry.get('rule', ''))}
+                for entry in applied
+            ],
             'review_form': forms.OnboardingReviewForm(initial={
                 'override_name': instance.override_name,
                 'override_model': instance.override_model,
@@ -433,3 +452,44 @@ class DiscoveryIssueBulkDeleteView(BulkDeleteView):
     queryset = DiscoveryIssue.objects.select_related('device')
     filterset = filtersets.DiscoveryIssueFilterSet
     table = tables.DiscoveryIssueTable
+
+
+@register_model_view(DiscoveryRule, name='list')
+class DiscoveryRuleListView(ObjectListView):
+    queryset = DiscoveryRule.objects.all()
+    table = tables.DiscoveryRuleTable
+    filterset = filtersets.DiscoveryRuleFilterSet
+    filterset_form = forms.DiscoveryRuleFilterForm
+
+
+@register_model_view(DiscoveryRule)
+class DiscoveryRuleView(ObjectView):
+    queryset = DiscoveryRule.objects.all()
+
+    def get_extra_context(self, request, instance):
+        return {
+            # The scans this rule has filled something in on, found by the
+            # rule name the poller recorded. This is the only place a rule's
+            # effect can be seen from NetBox, since nothing here evaluates
+            # one: a rule that never appears here has never matched.
+            'requests': OnboardingRequest.objects.filter(
+                discovered__contains={'rules_applied': [{'rule': instance.name}]}
+            ).select_related('site', 'device').order_by('-scanned_at')[:25],
+        }
+
+
+@register_model_view(DiscoveryRule, 'edit')
+class DiscoveryRuleEditView(ObjectEditView):
+    queryset = DiscoveryRule.objects.all()
+    form = forms.DiscoveryRuleForm
+
+
+@register_model_view(DiscoveryRule, 'delete')
+class DiscoveryRuleDeleteView(ObjectDeleteView):
+    queryset = DiscoveryRule.objects.all()
+
+
+class DiscoveryRuleBulkDeleteView(BulkDeleteView):
+    queryset = DiscoveryRule.objects.all()
+    filterset = filtersets.DiscoveryRuleFilterSet
+    table = tables.DiscoveryRuleTable

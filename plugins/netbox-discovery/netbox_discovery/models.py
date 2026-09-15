@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 
 from django.conf import settings
@@ -12,12 +13,16 @@ from netbox_discovery.choices import (
     IssueStatusChoices,
     OnboardingStatusChoices,
     ReplacementKindChoices,
+    RuleMatchFieldChoices,
+    RuleOperatorChoices,
+    RuleSetFieldChoices,
 )
 from netbox_discovery.utils import plugin_setting
 
 __all__ = (
     'DiscoveryIssue',
     'DiscoveryPoller',
+    'DiscoveryRule',
     'HardwareReplacement',
     'OnboardingRequest',
     'UpgradeJob',
@@ -471,6 +476,16 @@ class OnboardingRequest(PrimaryModel):
     def access_point_count(self):
         return len(self.discovered.get('access_points', [])) if self.discovered else 0
 
+    @property
+    def rules_applied(self):
+        """Values a discovery rule supplied rather than the device.
+
+        Each entry names the rule, the device (a stack member has its own),
+        the field, the value written and what the device had said, so the
+        page can show which facts are the device's own.
+        """
+        return (self.discovered.get('rules_applied') or []) if self.discovered else []
+
 
 class HardwareReplacement(PrimaryModel):
     """A serial number that changed under a name we already knew.
@@ -632,6 +647,117 @@ class DiscoveryIssue(PrimaryModel):
     @property
     def is_open(self):
         return self.status == IssueStatusChoices.STATUS_OPEN
+
+
+class DiscoveryRule(PrimaryModel):
+    """Fill in a fact the device does not report, for every device of one kind.
+
+    The scanner records what a device says about itself and nothing else. When
+    a platform publishes no model — a Firepower 2120, say — the request stops
+    at review and somebody types the model in. By the third identical firewall
+    the typing is the problem, and a rule says it once: when the name contains
+    "fw-" and the model is empty, the model is FPR-2120.
+
+    Rules are applied by the pollers, not here. A poller reads the enabled
+    rules at the start of each run and applies them to every scan before it is
+    reported or written, so one rule serves onboarding scans and the sweep
+    alike, and the review page shows the result with the rule named against
+    it. Nothing in NetBox evaluates a rule, so there is one implementation to
+    keep correct rather than two that can drift — the same reason the apply
+    itself lives in the scanner.
+
+    By default a rule fills a field only when the device left it empty. What
+    the device reports wins, exactly as a reviewer's model override does. A
+    rule can be set to replace instead; the value it replaced is recorded with
+    the scan so the substitution is visible rather than silent.
+    """
+
+    name = models.CharField(max_length=100, unique=True)
+    enabled = models.BooleanField(
+        default=True, help_text='Pollers apply only enabled rules',
+    )
+    weight = models.PositiveSmallIntegerField(
+        default=100,
+        help_text='Rules apply in ascending weight. Where two would set the same '
+                  'field the lighter one wins, and a later rule can match on '
+                  'what an earlier one set.',
+    )
+    match_field = models.CharField(
+        max_length=30, choices=RuleMatchFieldChoices,
+        default=RuleMatchFieldChoices.FIELD_NAME, verbose_name='When this field',
+    )
+    match_operator = models.CharField(
+        max_length=20, choices=RuleOperatorChoices,
+        default=RuleOperatorChoices.OP_CONTAINS, verbose_name='Comparison',
+    )
+    match_value = models.CharField(
+        max_length=200, verbose_name='This value',
+        help_text='Matching is case-insensitive',
+    )
+    set_field = models.CharField(
+        max_length=30, choices=RuleSetFieldChoices,
+        default=RuleSetFieldChoices.FIELD_MODEL, verbose_name='Set this field',
+    )
+    set_value = models.CharField(
+        max_length=200, verbose_name='To this value',
+        help_text='Exactly as it should appear in NetBox, e.g. FPR-2120',
+    )
+    only_if_blank = models.BooleanField(
+        default=True, verbose_name='Only when empty',
+        help_text='Fill the field only when the device did not report one. Turn '
+                  'off to replace what the device says; the replaced value is '
+                  'still recorded on the scan.',
+    )
+
+    clone_fields = ('enabled', 'weight', 'match_field', 'match_operator',
+                    'set_field', 'only_if_blank')
+
+    class Meta:
+        ordering = ('weight', 'name')
+        verbose_name = 'discovery rule'
+        verbose_name_plural = 'discovery rules'
+
+    def __str__(self):
+        return self.name
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:discoveryrule', args=[self.pk])
+
+    def clean(self):
+        super().clean()
+        # Refused here rather than on the poller, which would only be able to
+        # skip the rule and log about it on a box nobody is watching.
+        if not (self.match_value or '').strip():
+            raise ValidationError({'match_value': 'Enter the value to match.'})
+        if not (self.set_value or '').strip():
+            raise ValidationError({'set_value': 'Enter the value to set.'})
+        if self.match_operator == RuleOperatorChoices.OP_REGEX:
+            try:
+                re.compile(self.match_value)
+            except re.error as exc:
+                raise ValidationError({
+                    'match_value': 'Not a valid regular expression: %s.' % exc,
+                })
+
+    @staticmethod
+    def _lower_first(label):
+        return label[:1].lower() + label[1:] if label else label
+
+    @property
+    def sentence(self):
+        """The rule in words, for the list, the detail page and the API."""
+        subject = self._lower_first(self.get_match_field_display())
+        target = self._lower_first(self.get_set_field_display())
+        text = 'When the %s %s “%s”' % (
+            subject, self.get_match_operator_display(), self.match_value,
+        )
+        if self.only_if_blank:
+            return '%s and the %s is empty, set the %s to “%s”.' % (
+                text, target, target, self.set_value,
+            )
+        return '%s, set the %s to “%s”, replacing whatever the device reports.' % (
+            text, target, self.set_value,
+        )
 
 
 # Imported here so Django discovers these models with the rest of the plugin.

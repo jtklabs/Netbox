@@ -5,6 +5,7 @@ from netbox_discovery import views
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
@@ -77,6 +78,18 @@ urlpatterns = [
          name='discoveryissue_delete'),
     path('issues/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='discoveryissue_changelog', kwargs={'model': DiscoveryIssue}),
+
+    path('rules/', views.DiscoveryRuleListView.as_view(), name='discoveryrule_list'),
+    path('rules/add/', views.DiscoveryRuleEditView.as_view(), name='discoveryrule_add'),
+    path('rules/delete/', views.DiscoveryRuleBulkDeleteView.as_view(),
+         name='discoveryrule_bulk_delete'),
+    path('rules/<int:pk>/', views.DiscoveryRuleView.as_view(), name='discoveryrule'),
+    path('rules/<int:pk>/edit/', views.DiscoveryRuleEditView.as_view(),
+         name='discoveryrule_edit'),
+    path('rules/<int:pk>/delete/', views.DiscoveryRuleDeleteView.as_view(),
+         name='discoveryrule_delete'),
+    path('rules/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='discoveryrule_changelog', kwargs={'model': DiscoveryRule}),
 ]
 
 from . import command_views, upgrade_views

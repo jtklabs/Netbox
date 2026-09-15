@@ -9,12 +9,14 @@ from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
 
 __all__ = (
     'DiscoveryPollerSerializer',
+    'DiscoveryRuleSerializer',
     'OnboardingRequestSerializer',
     'PollerCheckInSerializer',
     'ScanResultSerializer',
@@ -135,6 +137,11 @@ class ScanResultSerializer(serializers.Serializer):
     )
     devices = DiscoveredDeviceSerializer(many=True, required=False, default=list)
     access_points = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list
+    )
+    # Which of the reported values a discovery rule supplied rather than the
+    # device: {rule, device, field, value, previous}. Older pollers send none.
+    rules_applied = serializers.ListField(
         child=serializers.DictField(), required=False, default=list
     )
 
@@ -280,3 +287,27 @@ class DiscoveryIssueSerializer(NetBoxModelSerializer):
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )
         brief_fields = ('url', 'id', 'display', 'kind', 'status', 'address')
+
+
+class DiscoveryRuleSerializer(NetBoxModelSerializer):
+    """Read by every poller at the start of a run (`?enabled=true`).
+
+    The poller accepts each choice either as its bare value or as NetBox's
+    {value, label} rendering, so a NetBox that changes its mind about which
+    it sends breaks nothing. `sentence` is the rule in words, read-only.
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name='plugins-api:netbox_discovery-api:discoveryrule-detail'
+    )
+    sentence = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = DiscoveryRule
+        fields = (
+            'url', 'id', 'display', 'name', 'enabled', 'weight',
+            'match_field', 'match_operator', 'match_value',
+            'set_field', 'set_value', 'only_if_blank', 'sentence',
+            'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
+        )
+        brief_fields = ('url', 'id', 'display', 'name', 'enabled')

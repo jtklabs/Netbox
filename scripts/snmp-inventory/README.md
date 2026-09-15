@@ -117,6 +117,18 @@ Every vendor OID was resolved from the vendor's published MIB rather than
 recalled; see [docs/OID-SOURCES.md](docs/OID-SOURCES.md) for the provenance and
 [docs/resolve_oid.py](docs/resolve_oid.py) to re-derive them.
 
+FortiManager and FortiAnalyzer report their version at `fmSysVersion`
+(`1.3.6.1.4.1.12356.103.2.1.7.0`) rather than the FortiGate scalar, and their
+`sysDescr` carries no version at all, so that OID is the only source. The
+Fortinet profile asks for both scalars in one GET. An agent that fails the
+whole request over the one it does not serve — an `authorizationError` for an
+OID outside its SNMPv3 view, say — is asked again one OID at a time, so the
+version and serial it does publish still arrive. If a FortiAnalyzer shows no
+version in NetBox, `--probe` it: the IDENTIFICATION section lists each vendor
+OID asked and what came back, which separates a poller still on a build that
+did not know the OID (the version shown against the poller in NetBox is 1.1.0
+or later once it does) from a device that answered nothing.
+
 ### Where the software version goes
 
 NetBox 4.6 has no per-device software version field, so the reading needs a
@@ -403,6 +415,11 @@ than not asking.
 
 Set `review_policy` to `always` in the plugin config to go back to reviewing
 every device.
+
+A model, manufacturer or platform a device never reports can also be supplied
+by a **discovery rule**, so the same gap is not reviewed on every device of
+that kind — see [Filling in what a device does not
+report](#filling-in-what-a-device-does-not-report).
 
 ### Devices SNMP cannot reach
 
@@ -1020,6 +1037,55 @@ model sitting in a field this scanner is not yet reading — a one-line fix, and
 better than typing it by hand forever. Firepower is the case where the dump
 genuinely comes up empty.
 
+## Filling in what a device does not report
+
+The case above is one device. When the same gap turns up on every box of one
+kind — every Firepower publishes no model — typing it at each review is the
+wrong trade, and a **discovery rule** says it once. Rules live in NetBox under
+**Discovery → Rules**, and each one reads as a sentence:
+
+> When the *device name* contains `fw-` and the *model* is empty, set the
+> *model* to `FPR-2120`.
+
+A rule has one condition and one assignment:
+
+| Part | Choices |
+|---|---|
+| When this field | device name, model, manufacturer, platform, serial, software version, `sysDescr`, scanned address |
+| Comparison | contains, starts with, ends with, is exactly, matches a regular expression — all case-insensitive |
+| Sets | model, manufacturer, platform, software version |
+| Only when empty | On by default: what the device reports wins, exactly as a reviewer's override does. Off replaces the device's value, and the replaced value is recorded on the scan |
+| Weight | Rules apply lightest first, and a later rule can match on what an earlier one set — manufacturer from the name, then platform from the manufacturer |
+
+**Pollers apply the rules; NetBox does not.** Every run starts by reading the
+enabled rules (`GET /api/plugins/discovery/rules/?enabled=true`), and each
+scan — onboarding job or sweep — has them applied before it is reported or
+written. So the review page shows exactly what will be created, with a
+**Filled in by rules** table naming the rule behind each supplied value, and
+the same rule serves the devices a sweep finds. The rule's own page lists the
+onboarding scans it has filled something in on, which is also how to tell
+that a rule matches nothing.
+
+Because nothing in NetBox evaluates a rule, adding one does not change a
+request already sitting in review: use **Scan again** on it and the poller
+applies the rule on the fresh walk. The name, serial and interfaces are never
+touched by a rule — the name has its own override, and a serial is the one
+thing a rule must not invent.
+
+The poller token needs `view` on discovery rules. Without it the poller logs a
+warning at the start of every run and applies none; a NetBox without the
+plugin, or with one older than the poller, is simply a NetBox with no rules.
+
+Over the API:
+
+```bash
+curl -sX POST "$NB/plugins/discovery/rules/" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Firepower by name", "match_field": "name",
+       "match_operator": "contains", "match_value": "fw-",
+       "set_field": "model", "set_value": "FPR-2120"}'
+```
+
 ## Notes and gotchas
 
 Full detail in [docs/API-NOTES.md](docs/API-NOTES.md). The ones most likely to
@@ -1053,6 +1119,8 @@ snmpinv/
   selection.py               which addresses this poller owns
   netbox.py                  REST client: lookup-or-create, dry-run
   sync.py                    idempotent writes
+  rules.py                   discovery rules from NetBox: fill in what a
+                             device does not report
   cables.py                  adjacencies -> tagged Cable objects, safely
   config.py                  config and credential files
 tests/
