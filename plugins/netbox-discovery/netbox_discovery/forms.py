@@ -3,6 +3,7 @@ from ipam.models import VRF
 from tenancy.models import Tenant, TenantGroup
 from django import forms
 from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm, NetBoxModelImportForm
+from utilities.forms import BOOLEAN_WITH_BLANK_CHOICES
 from utilities.forms.fields import (
     CSVModelChoiceField,
     DynamicModelChoiceField,
@@ -10,8 +11,18 @@ from utilities.forms.fields import (
 )
 from utilities.forms.rendering import FieldSet
 
-from netbox_discovery.choices import OnboardingStatusChoices
-from netbox_discovery.models import DiscoveryIssue, DiscoveryPoller, OnboardingRequest
+from netbox_discovery.choices import (
+    OnboardingStatusChoices,
+    RuleMatchFieldChoices,
+    RuleOperatorChoices,
+    RuleSetFieldChoices,
+)
+from netbox_discovery.models import (
+    DiscoveryIssue,
+    DiscoveryPoller,
+    DiscoveryRule,
+    OnboardingRequest,
+)
 from netbox_discovery.resolution import resolve
 
 __all__ = (
@@ -23,6 +34,8 @@ __all__ = (
     'DiscoveryPollerForm',
     'DiscoveryPollerFilterForm',
     'DiscoveryIssueForm',
+    'DiscoveryRuleForm',
+    'DiscoveryRuleFilterForm',
 )
 
 
@@ -277,3 +290,49 @@ class DiscoveryIssueForm(NetBoxModelForm):
             'status': 'Resolved once the duplicate is sorted out; Ignored if it '
                       'is expected and should stop being raised',
         }
+
+
+class DiscoveryRuleForm(NetBoxModelForm):
+    """One condition and one assignment, read top to bottom as a sentence.
+
+    Deliberately not a general expression builder. A second condition is
+    almost always "and the field is empty", which is the checkbox; anything
+    more particular is a regular expression on the name or the sysDescr.
+    """
+
+    fieldsets = (
+        FieldSet('name', 'enabled', 'weight', 'description', name='Rule'),
+        FieldSet('match_field', 'match_operator', 'match_value', name='When'),
+        FieldSet('set_field', 'set_value', 'only_if_blank', name='Then'),
+        FieldSet('tags', name='Tags'),
+    )
+
+    class Meta:
+        model = DiscoveryRule
+        fields = (
+            'name', 'enabled', 'weight', 'match_field', 'match_operator',
+            'match_value', 'set_field', 'set_value', 'only_if_blank',
+            'description', 'comments', 'tags',
+        )
+        help_texts = {
+            'name': 'Shown against every value this rule fills in, so make it '
+                    'say what the rule is for',
+        }
+
+
+class DiscoveryRuleFilterForm(NetBoxModelFilterSetForm):
+    model = DiscoveryRule
+
+    enabled = forms.NullBooleanField(
+        required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES),
+    )
+    match_field = forms.MultipleChoiceField(
+        choices=RuleMatchFieldChoices, required=False, label='When this field',
+    )
+    match_operator = forms.MultipleChoiceField(
+        choices=RuleOperatorChoices, required=False, label='Comparison',
+    )
+    set_field = forms.MultipleChoiceField(
+        choices=RuleSetFieldChoices, required=False, label='Sets this field',
+    )
+    tag = TagFilterField(model)

@@ -105,6 +105,9 @@ class ScanResult:
     fhrp_groups: list[FhrpRecord] = field(default_factory=list)
     credential_name: str = ""
     facts: DeviceFacts | None = None
+    # Values supplied by discovery rules rather than the device (rules.py),
+    # kept so a review can tell the two apart. Empty until rules are applied.
+    rules_applied: list = field(default_factory=list)
 
     @property
     def is_stack(self) -> bool:

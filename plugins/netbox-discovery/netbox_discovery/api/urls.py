@@ -3,6 +3,7 @@ from netbox.api.routers import NetBoxRouter
 from netbox_discovery.api.views import (
     DiscoveryIssueViewSet,
     DiscoveryPollerViewSet,
+    DiscoveryRuleViewSet,
     HardwareReplacementViewSet,
     OnboardingRequestViewSet,
 )
@@ -12,6 +13,7 @@ router.register('pollers', DiscoveryPollerViewSet)
 router.register('onboarding-requests', OnboardingRequestViewSet)
 router.register('hardware-replacements', HardwareReplacementViewSet)
 router.register('issues', DiscoveryIssueViewSet)
+router.register('rules', DiscoveryRuleViewSet)
 urlpatterns = router.urls
 
 from django.urls import path

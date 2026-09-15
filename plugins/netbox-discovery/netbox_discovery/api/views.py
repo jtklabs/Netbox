@@ -25,6 +25,7 @@ from netbox_discovery.api.serializers import (
     ApplyResultSerializer,
     ApproveSerializer,
     DiscoveryPollerSerializer,
+    DiscoveryRuleSerializer,
     JobSerializer,
     DiscoveryIssueSerializer,
     HardwareReplacementSerializer,
@@ -40,6 +41,7 @@ from netbox_discovery.utils import plugin_setting
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
@@ -326,6 +328,7 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
                 'credential': result['credential'],
                 'devices': result['devices'],
                 'access_points': result['access_points'],
+                'rules_applied': result['rules_applied'],
             }
             needs_review, reason = review.evaluate(entry, entry.discovered)
             if plugin_setting('review_policy') == 'always':
@@ -406,3 +409,11 @@ class DiscoveryIssueViewSet(NetBoxModelViewSet):
     queryset = DiscoveryIssue.objects.select_related('device', 'poller').prefetch_related('tags')
     serializer_class = DiscoveryIssueSerializer
     filterset_class = filtersets.DiscoveryIssueFilterSet
+
+
+class DiscoveryRuleViewSet(NetBoxModelViewSet):
+    """What a device does not report, said once. Pollers read these."""
+
+    queryset = DiscoveryRule.objects.prefetch_related('tags')
+    serializer_class = DiscoveryRuleSerializer
+    filterset_class = filtersets.DiscoveryRuleFilterSet

@@ -21,6 +21,10 @@ hours old by the time somebody gets to it, and the device is right there to
 ask. If the hardware has changed underneath the approval — a different serial
 or model — the request goes back to review instead of applying, because the
 person approved a specific box and this is no longer that box.
+
+Discovery rules (rules.py) run on both: the scan reports what the rules filled
+in, so the review sees exactly what will be created, and the apply re-reads
+the device and fills it in again the same way.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import threading
+from typing import Sequence
 
 from .collect import Collector
 from .model import (
@@ -38,6 +43,7 @@ from .model import (
     build_scan_result,
 )
 from .netbox import NetBox, NetBoxError
+from .rules import Rule, apply_rules, summarise
 from .snmp import SnmpAuthError, SnmpError, SnmpTimeoutError
 from .sync import Syncer
 
@@ -93,7 +99,8 @@ def check_in(netbox: NetBox, poller_name: str, version: str = "",
 
 
 def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
-             jobs: list[dict], dry_run: bool = False, workers: int = 8) -> dict:
+             jobs: list[dict], dry_run: bool = False, workers: int = 8,
+             rules: Sequence[Rule] = ()) -> dict:
     """Do each job and report its outcome back. Returns a count per outcome.
 
     Jobs run concurrently. A check-in can hand back a batch — a bulk CSV import
@@ -118,9 +125,9 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
         try:
             if action == "scan":
                 return _do_scan(netbox, collector, syncer, request_id,
-                                job.get("address", ""), dry_run)
+                                job.get("address", ""), dry_run, rules)
             if action == "apply":
-                return _do_apply(netbox, collector, syncer, job, dry_run)
+                return _do_apply(netbox, collector, syncer, job, dry_run, rules)
             log.warning("request %s: unknown job action %r", request_id, action)
             return "skipped"
         except NetBoxError as exc:
@@ -141,7 +148,7 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
 
 
 def _do_scan(netbox: NetBox, collector: Collector, syncer: Syncer, request_id: int,
-             address: str, dry_run: bool) -> str:
+             address: str, dry_run: bool, rules: Sequence[Rule] = ()) -> str:
     """Walk a device and report what is there, writing nothing."""
     log.info("onboarding %s: scanning", address)
     try:
@@ -168,6 +175,7 @@ def _do_scan(netbox: NetBox, collector: Collector, syncer: Syncer, request_id: i
                              "The device answered but reported no chassis, so there "
                              "is nothing to create.")
         return "no-chassis"
+    _fill_from_rules(result, rules, address)
 
     payload = scan_payload(result)
     if dry_run:
@@ -204,7 +212,7 @@ def _report_scan_failure(netbox: NetBox, request_id: int, address: str,
 
 
 def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
-              job: dict, dry_run: bool) -> str:
+              job: dict, dry_run: bool, rules: Sequence[Rule] = ()) -> str:
     """Create the device an operator approved, after re-reading it."""
     address = job.get("address", "")
     request_id = job.get("id")
@@ -248,6 +256,11 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
         if changed:
             _report_apply_failure(netbox, request_id, dry_run, changed)
             return "changed"
+        # Only now, after the box has been judged on what it reports itself:
+        # the same rules the scan was reported under, so what was reviewed is
+        # what gets created. The stored preview taken above already carries
+        # their work and is not re-judged -- the person approved that reading.
+        _fill_from_rules(result, rules, address)
 
     _apply_overrides(result, job)
 
@@ -344,12 +357,27 @@ def _hardware_changed(netbox: NetBox, request_id: int, result: ScanResult) -> st
     except NetBoxError:
         # Cannot check; better to apply what is actually there than to stall.
         return ""
-    previewed = (request.get("discovered") or {}).get("devices") or []
+    discovered = request.get("discovered") or {}
+    previewed = discovered.get("devices") or []
     if not previewed:
         return ""
 
+    # Compare what the device itself said both times. A model a rule supplied
+    # at scan time is in the preview with the device's own answer (usually
+    # nothing) kept under rules_applied; that answer is what the re-read is
+    # judged against here, before the rules run again. Without this every
+    # rule-filled model would read as a hardware change, and so would a rule
+    # added between review and apply -- neither is a different box.
+    device_said = {
+        (entry.get("device"), entry.get("field")): (entry.get("previous") or "")
+        for entry in discovered.get("rules_applied") or []
+    }
+
     def key(entry):
-        return ((entry.get("serial") or "").strip(), (entry.get("model") or "").strip())
+        model = entry.get("model") or ""
+        if (entry.get("name"), "model") in device_said:
+            model = device_said[(entry.get("name"), "model")]
+        return ((entry.get("serial") or "").strip(), model.strip())
 
     before = sorted(key(d) for d in previewed)
     after = sorted((d.serial.strip(), d.model.strip()) for d in result.devices)
@@ -364,6 +392,13 @@ def _hardware_changed(netbox: NetBox, request_id: int, result: ScanResult) -> st
 
 def _pairs(items) -> str:
     return ", ".join("%s/%s" % (model or "?", serial or "?") for serial, model in items)
+
+
+def _fill_from_rules(result: ScanResult, rules: Sequence[Rule], address: str) -> None:
+    """Let the discovery rules fill in what the device left blank, and say so."""
+    applied = apply_rules(result, rules)
+    if applied:
+        log.info("onboarding %s: rules filled in %s", address, summarise(applied))
 
 
 def _apply_overrides(result: ScanResult, job: dict) -> None:
@@ -464,6 +499,9 @@ def scan_payload(result: ScanResult) -> dict:
              "software_version": ap.software_version, "description": ap.description}
             for ap in result.access_points
         ],
+        # Which of the values above a rule supplied rather than the device,
+        # so the review page can show the two apart.
+        "rules_applied": [entry.as_dict() for entry in result.rules_applied],
     }
 
 

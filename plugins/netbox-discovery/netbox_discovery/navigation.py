@@ -43,10 +43,25 @@ issues = PluginMenuItem(
     permissions=['netbox_discovery.view_discoveryissue'],
 )
 
+# What a device does not report, said once instead of typed at every review.
+rules = PluginMenuItem(
+    link='plugins:netbox_discovery:discoveryrule_list',
+    link_text='Rules',
+    permissions=['netbox_discovery.view_discoveryrule'],
+    buttons=(
+        PluginMenuButton(
+            link='plugins:netbox_discovery:discoveryrule_add',
+            title='Add a rule',
+            icon_class='mdi mdi-plus-thick',
+            permissions=['netbox_discovery.add_discoveryrule'],
+        ),
+    ),
+)
+
 menu = PluginMenu(
     label='Discovery',
     groups=(
-        ('Onboarding', (onboarding, pollers)),
+        ('Onboarding', (onboarding, pollers, rules)),
         ('Changes', (replacements, issues)),
         ('Software', (
             PluginMenuItem(

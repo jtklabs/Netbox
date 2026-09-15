@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from snmpinv import config as config_module
 from snmpinv import onboarding
 from snmpinv import probe as probe_module
+from snmpinv import rules as rules_module
 from snmpinv import __version__
 from snmpinv.bulkstate import BulkState
 from snmpinv.collect import Collector, DeviceFacts
@@ -105,8 +106,13 @@ def main(argv=None) -> int:
     )
     syncer = Syncer(netbox, config.sync)
 
+    # Rules kept in the Discovery plugin that fill in what a device does not
+    # report. Read once per run so every scan in it is judged the same way;
+    # --collect-only promises not to touch NetBox, so it reads none.
+    rules = [] if args.collect_only else rules_module.load_rules(netbox)
+
     if args.onboard:
-        return run_onboarding(netbox, config, collector, syncer, args)
+        return run_onboarding(netbox, config, collector, syncer, args, rules)
 
     try:
         targets = build_target_list(netbox, config, args)
@@ -126,7 +132,8 @@ def main(argv=None) -> int:
     started = time.time()
     scanned = failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.snmp.workers) as pool:
-        futures = {pool.submit(scan_one, collector, target): target for target in targets}
+        futures = {pool.submit(scan_one, collector, target, rules): target
+                   for target in targets}
         for future in concurrent.futures.as_completed(futures):
             target = futures[future]
             try:
@@ -235,7 +242,7 @@ def run_probe(args) -> int:
 
 
 def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
-                   args) -> int:
+                   args, rules=()) -> int:
     """Check in with the Discovery plugin and work whatever it hands back.
 
     Run this on a short timer — a couple of minutes — because a person is
@@ -295,7 +302,7 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
         log.info("check-in: %d job(s)", len(jobs))
         for name, n in onboarding.run_jobs(
             netbox, collector, syncer, jobs,
-            dry_run=args.dry_run, workers=config.snmp.workers,
+            dry_run=args.dry_run, workers=config.snmp.workers, rules=rules,
         ).items():
             counts[name] = counts.get(name, 0) + n
         total += len(jobs)
@@ -406,9 +413,11 @@ def _site_from_prefix(netbox: NetBox, address: str) -> int | None:
     return best_site
 
 
-def scan_one(collector: Collector, target: Target) -> ScanResult:
+def scan_one(collector: Collector, target: Target, rules=()) -> ScanResult:
     facts: DeviceFacts = collector.collect(target.address)
-    return build_scan_result(facts)
+    result = build_scan_result(facts)
+    rules_module.apply_rules(result, rules)
+    return result
 
 
 def describe(result: ScanResult) -> None:
@@ -434,6 +443,8 @@ def describe(result: ScanResult) -> None:
         bits.append(f"{modules} modules")
     if result.access_points:
         bits.append(f"{len(result.access_points)} APs")
+    if result.rules_applied:
+        bits.append("rules: " + rules_module.summarise(result.rules_applied))
     log.info(" | ".join(bits))
 
 

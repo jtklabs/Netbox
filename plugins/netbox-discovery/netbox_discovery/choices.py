@@ -86,3 +86,73 @@ class IssueStatusChoices(ChoiceSet):
         (STATUS_RESOLVED, 'Resolved', 'green'),
         (STATUS_IGNORED, 'Ignored', 'gray'),
     ]
+
+
+class RuleMatchFieldChoices(ChoiceSet):
+    """What a discovery rule may look at on a scanned device."""
+
+    key = 'DiscoveryRule.match_field'
+
+    FIELD_NAME = 'name'
+    FIELD_MODEL = 'model'
+    FIELD_MANUFACTURER = 'manufacturer'
+    FIELD_PLATFORM = 'platform'
+    FIELD_SERIAL = 'serial'
+    FIELD_SOFTWARE_VERSION = 'software_version'
+    FIELD_SYS_DESCR = 'sys_descr'
+    FIELD_ADDRESS = 'address'
+
+    CHOICES = [
+        (FIELD_NAME, 'Device name'),
+        (FIELD_MODEL, 'Model'),
+        (FIELD_MANUFACTURER, 'Manufacturer'),
+        (FIELD_PLATFORM, 'Platform'),
+        (FIELD_SERIAL, 'Serial'),
+        (FIELD_SOFTWARE_VERSION, 'Software version'),
+        (FIELD_SYS_DESCR, 'System description (sysDescr)'),
+        (FIELD_ADDRESS, 'Scanned address'),
+    ]
+
+
+class RuleOperatorChoices(ChoiceSet):
+    """How the matched field is compared. Every comparison is case-insensitive."""
+
+    key = 'DiscoveryRule.match_operator'
+
+    OP_CONTAINS = 'contains'
+    OP_STARTS_WITH = 'starts_with'
+    OP_ENDS_WITH = 'ends_with'
+    OP_EQUALS = 'equals'
+    OP_REGEX = 'regex'
+
+    CHOICES = [
+        (OP_CONTAINS, 'contains'),
+        (OP_STARTS_WITH, 'starts with'),
+        (OP_ENDS_WITH, 'ends with'),
+        (OP_EQUALS, 'is exactly'),
+        (OP_REGEX, 'matches the regular expression'),
+    ]
+
+
+class RuleSetFieldChoices(ChoiceSet):
+    """What a discovery rule may fill in.
+
+    The facts that decide what gets created, and nothing else. The name is
+    never blank (it falls back to the address) and has an override of its own;
+    the serial is the one thing a rule must never invent, because serials are
+    what support contracts and quotes are matched on.
+    """
+
+    key = 'DiscoveryRule.set_field'
+
+    FIELD_MODEL = 'model'
+    FIELD_MANUFACTURER = 'manufacturer'
+    FIELD_PLATFORM = 'platform'
+    FIELD_SOFTWARE_VERSION = 'software_version'
+
+    CHOICES = [
+        (FIELD_MODEL, 'Model'),
+        (FIELD_MANUFACTURER, 'Manufacturer'),
+        (FIELD_PLATFORM, 'Platform'),
+        (FIELD_SOFTWARE_VERSION, 'Software version'),
+    ]

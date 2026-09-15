@@ -1,0 +1,72 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Rule</h5>
+        <div class="card-body">
+          <p class="fs-5">{{ object.sentence }}</p>
+          <table class="table table-hover attr-table">
+            <tr><th>Enabled</th><td>{% checkmark object.enabled %}</td></tr>
+            <tr><th>Weight</th><td>{{ object.weight }}</td></tr>
+            <tr><th>When this field</th><td>{{ object.get_match_field_display }}</td></tr>
+            <tr><th>Comparison</th><td>{{ object.get_match_operator_display }}</td></tr>
+            <tr><th>This value</th><td><code>{{ object.match_value }}</code></td></tr>
+            <tr><th>Sets</th><td>{{ object.get_set_field_display }}</td></tr>
+            <tr><th>To</th><td><code>{{ object.set_value }}</code></td></tr>
+            <tr><th>Only when empty</th><td>{% checkmark object.only_if_blank %}</td></tr>
+            <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+          </table>
+          <p class="text-muted small mb-0">
+            Pollers read the enabled rules at the start of every run and apply
+            them, lightest weight first, to each scan before it is reported or
+            written — onboarding scans and the sweep alike. Matching is
+            case-insensitive. Nothing in NetBox evaluates a rule, so a rule
+            added now takes effect on the next scan, not on requests already
+            awaiting review: use <em>Scan again</em> on those.
+          </p>
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Scans this rule filled something in on</h5>
+        <div class="card-body">
+          {% if requests %}
+            <table class="table table-sm">
+              <thead><tr><th>Request</th><th>Status</th><th>Site</th><th>Device</th><th>Scanned</th></tr></thead>
+              <tbody>
+                {% for entry in requests %}
+                  <tr>
+                    <td>{{ entry|linkify }}</td>
+                    <td>{% badge entry.get_status_display bg_color=entry.get_status_color %}</td>
+                    <td>{{ entry.target_site|linkify|placeholder }}</td>
+                    <td>{{ entry.device|linkify|placeholder }}</td>
+                    <td>{{ entry.scanned_at|placeholder }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <p class="text-muted small mb-0">
+              The most recent 25. Each request's page lists the values this
+              rule supplied.
+            </p>
+          {% else %}
+            <p class="text-muted mb-0">
+              No onboarding scan has matched this rule yet. Sweep rescans of
+              existing devices apply it too, but are not listed here.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}

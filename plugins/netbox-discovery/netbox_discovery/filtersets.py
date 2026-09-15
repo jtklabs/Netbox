@@ -6,6 +6,7 @@ from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
     DiscoveryIssue,
     DiscoveryPoller,
+    DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
 )
@@ -13,6 +14,7 @@ from netbox_discovery.models import (
 __all__ = (
     'DiscoveryIssueFilterSet',
     'DiscoveryPollerFilterSet',
+    'DiscoveryRuleFilterSet',
     'HardwareReplacementFilterSet',
     'OnboardingRequestFilterSet',
 )
@@ -102,4 +104,23 @@ class DiscoveryIssueFilterSet(NetBoxModelFilterSet):
             | Q(serial__icontains=value)
             | Q(reported_name__icontains=value)
             | Q(detail__icontains=value)
+        )
+
+
+class DiscoveryRuleFilterSet(NetBoxModelFilterSet):
+    """`?enabled=true` is what a poller asks for at the start of every run."""
+
+    class Meta:
+        model = DiscoveryRule
+        fields = ('id', 'name', 'enabled', 'weight', 'match_field',
+                  'match_operator', 'set_field', 'only_if_blank')
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(name__icontains=value)
+            | Q(match_value__icontains=value)
+            | Q(set_value__icontains=value)
+            | Q(description__icontains=value)
         )
