@@ -22,8 +22,9 @@ standards-file examples.
 - [Utility commands](#utility-commands): [NTP check](#check-ntp),
   [discovery](#discover), [rollback](#rollback), [selftest](#selftest),
   [collect](README.md#collect-show-commands-into-netbox).
-- [IOS XE upgrades](UPGRADES.md): approved profiles, NetBox targeting, install
-  mode/conversion, parallel execution, pre/post validation and progress webhooks.
+- [Upgrades](UPGRADES.md) for Catalyst IOS XE, Arista EOS and BIG-IP: approved
+  profiles, NetBox targeting, install mode/conversion, parallel execution,
+  pre/post validation and progress webhooks.
 - [Shared flags](#shared-flags): [inventory](#inventory-and-device-selection),
   [NetBox](#netbox-inventory-and-interface-tags), [authentication](#device-authentication),
   [AWS](#aws-secrets-manager), [F5 HTTPS](#f5-https),

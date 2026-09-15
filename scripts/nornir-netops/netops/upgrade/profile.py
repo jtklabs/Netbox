@@ -1,8 +1,9 @@
 """An explicit, locally validated upgrade path; no implicit version selection.
 
-Two families share one profile shape: Catalyst 9000 IOS XE images and BIG-IP
-`.iso` images. The image filename decides the family, and each family applies
-its own rules for models, releases and image sources.
+Three families share one profile shape: Catalyst 9000 IOS XE images, Arista
+EOS `.swi` images and BIG-IP `.iso` images. The image filename decides the
+family, and each family applies its own rules for models, releases and image
+sources.
 """
 
 import re
@@ -28,8 +29,23 @@ def f5_version(value):
     return tuple(parts + [0] * (4 - len(parts)))
 
 
+def eos_version(value):
+    """EOS releases: 4.32.1F, 4.30.5M, 4.28.10.1M. Numbers first, then the train letter."""
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?([A-Z]{0,3})", str(value))
+    if not match:
+        raise ValueError(f"invalid EOS release: {value!r}")
+    return tuple(int(x or 0) for x in match.groups()[:4]) + (match[5],)
+
+
 F5_IMAGE = re.compile(r"^(?:Hotfix-)?BIGIP-(\d+(?:\.\d+){2,3})-(\d+\.\d+\.\d+)(?:[.-][A-Za-z0-9.-]+)?\.iso$")
 F5_MODEL = re.compile(r"^(?:BIG-IP .+|[A-Z][A-Z0-9]{2,5})$")
+# EOS-4.32.1F.swi, EOS64-4.32.1F.swi and the 2GB/INT variants Arista publishes.
+EOS_IMAGE = re.compile(r"^EOS(?:64)?(?:-2GB)?(?:-INT)?-(\d+\.\d+\.\d+(?:\.\d+)?[A-Z]{0,3})\.swi$")
+EOS_MODEL = re.compile(r"^(?:(?:DCS|CCS)-[A-Z0-9][A-Z0-9-]*|vEOS(?:-lab)?)$")
+# Reserve floors: IOS XE expands packages on flash and BIG-IP unpacks the ISO;
+# an EOS .swi is mounted in place, so only headroom for logs and cores is needed.
+FREE_SPACE_FLOOR = {"eos": 100_000_000}
+DEFAULT_FREE_SPACE_FLOOR = 1_500_000_000
 
 
 @dataclass(frozen=True)
@@ -51,12 +67,19 @@ class Profile:
 
     @property
     def family(self):
-        if str(self.image).lower().endswith(".iso"):
+        image = str(self.image).lower()
+        if image.endswith(".iso"):
             return "f5"
+        if image.endswith(".swi"):
+            return "eos"
         return "C9350" if self.models and str(self.models[0]).startswith("C9350-") else "C9300"
 
     def release(self, value):
-        return f5_version(value) if self.family == "f5" else version(value)
+        if self.family == "f5":
+            return f5_version(value)
+        if self.family == "eos":
+            return eos_version(value)
+        return version(value)
 
     @classmethod
     def load(cls, path):
@@ -84,15 +107,52 @@ class Profile:
             raise ValueError("image must be the image filename")
         if not isinstance(result.md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result.md5):
             raise ValueError("md5 must be the vendor-published 32-digit image checksum")
-        if type(result.minimum_free_bytes) is not int or result.minimum_free_bytes < 1_500_000_000:
-            raise ValueError("minimum_free_bytes must reserve at least 1500000000 bytes for expansion")
+        floor = FREE_SPACE_FLOOR.get(result.family, DEFAULT_FREE_SPACE_FLOOR)
+        if type(result.minimum_free_bytes) is not int or result.minimum_free_bytes < floor:
+            raise ValueError(f"minimum_free_bytes must reserve at least {floor} bytes for expansion")
         for key in ("bundle_conversion_validated", "allow_active", "ucs_backup"):
             if type(getattr(result, key)) is not bool:
                 raise ValueError(f"{key} must be a boolean")
         for key in ("image_source", "volume", "license_check_date"):
             if not isinstance(getattr(result, key), str):
                 raise ValueError(f"{key} must be a string")
-        return cls._validate_f5(result) if result.family == "f5" else cls._validate_ios_xe(result)
+        if result.family == "f5":
+            return cls._validate_f5(result)
+        if result.family == "eos":
+            return cls._validate_eos(result)
+        return cls._validate_ios_xe(result)
+
+    @staticmethod
+    def _validate_url_source(result, schemes, message):
+        parsed = urlsplit(result.image_source)
+        if (parsed.scheme not in schemes or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or not re.fullmatch(r"[A-Za-z0-9:/_.%~-]+", result.image_source)):
+            raise ValueError(message)
+        if Path(parsed.path).name != result.image:
+            raise ValueError("image_source basename must match image")
+
+    @classmethod
+    def _validate_eos(cls, result):
+        if result.volume or result.allow_active or result.license_check_date:
+            raise ValueError("volume, allow_active and license_check_date apply to BIG-IP profiles only")
+        if result.bundle_conversion_validated:
+            raise ValueError("bundle_conversion_validated applies to IOS XE profiles only")
+        if not all(isinstance(m, str) and EOS_MODEL.match(m) for m in result.models):
+            raise ValueError("EOS models must be exact Arista model names such as DCS-7050SX3-48YC8 or CCS-720XP-48Y6")
+        match = EOS_IMAGE.match(result.image)
+        if not match:
+            raise ValueError("EOS image must be an EOS-<release>.swi or EOS64-<release>.swi filename")
+        target = eos_version(result.target_version)
+        if eos_version(match[1]) != target:
+            raise ValueError("image filename release must match target_version")
+        for start in result.starting_versions:
+            if eos_version(start) >= target:
+                raise ValueError("EOS starting versions must be older than the target")
+        if result.image_source:
+            cls._validate_url_source(result, {"https", "http", "tftp"},
+                                     "image_source must be an HTTP(S)/TFTP URL without credentials or query")
+        return result
 
     @classmethod
     def _validate_ios_xe(cls, result):
@@ -122,13 +182,8 @@ class Profile:
         if not image_release or version(image_release[1]) != target:
             raise ValueError("image filename release must match target_version")
         if result.image_source:
-            parsed = urlsplit(result.image_source)
-            if (parsed.scheme not in {"https", "http", "tftp"} or not parsed.hostname
-                    or parsed.username or parsed.password or parsed.query or parsed.fragment
-                    or not re.fullmatch(r"[A-Za-z0-9:/_.%~-]+", result.image_source)):
-                raise ValueError("image_source must be an HTTP(S)/TFTP URL without credentials or query")
-            if Path(parsed.path).name != result.image:
-                raise ValueError("image_source basename must match image")
+            cls._validate_url_source(result, {"https", "http", "tftp"},
+                                     "image_source must be an HTTP(S)/TFTP URL without credentials or query")
         return result
 
     @classmethod

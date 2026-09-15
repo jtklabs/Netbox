@@ -98,6 +98,9 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
 
 
 class Device:
+    # Evidence that a reload dialogue did what it said before the session dropped.
+    reload_success = re.compile(r"SUCCESS|Install will reload|Reloading", re.I)
+
     def __init__(self, task, options, emit):
         self.task = task
         self.options = options
@@ -131,6 +134,18 @@ class Device:
             raise ValueError(f"device reported failure for {command}")
         return output
 
+    def answer(self, tail, reload):
+        """The reply to a recognized prompt at the end of the dialogue, or None."""
+        if reload and re.search(r"(?:Do you want to proceed|proceed with reload|reload of the system).*?\[y/n\]\s*[:?]?\s*$", tail, re.I | re.S):
+            return "y\n"
+        if reload and re.search(r"Please confirm you have changed boot config to flash:packages\.conf\s*\[y/n\]\s*$", tail, re.I):
+            # The workflow verifies both running and saved boot settings
+            # before entering this dialogue (also used for conversion).
+            return "y\n"
+        if not reload and re.search(r"Destination filename\s*\[[^\]\r\n]*\]\?\s*$", tail, re.I):
+            return "\n"
+        return None
+
     def interactive(self, command, timeout, reload=False):
         """Read a bounded channel dialogue. Only answer recognized prompts.
 
@@ -150,21 +165,14 @@ class Device:
                 if INSTALL_FAILURE.search(transcript):
                     raise ValueError("device reported install/copy failure")
                 tail = transcript[answered:]
-                if reload and re.search(r"(?:Do you want to proceed|proceed with reload|reload of the system).*?\[y/n\]\s*[:?]?\s*$", tail, re.I | re.S):
-                    conn.write_channel("y\n")
+                reply = self.answer(tail, reload)
+                if reply is not None:
+                    conn.write_channel(reply)
                     answered = len(transcript)
-                elif reload and re.search(r"Please confirm you have changed boot config to flash:packages\.conf\s*\[y/n\]\s*$", tail, re.I):
-                    # The workflow verifies both running and saved boot settings
-                    # before entering this dialogue (also used for conversion).
-                    conn.write_channel("y\n")
-                    answered = len(transcript)
-                elif not reload and re.search(r"Destination filename\s*\[[^\]\r\n]*\]\?\s*$", tail, re.I):
-                    conn.write_channel("\n")
-                    answered = len(transcript)
-                elif re.search(r"(?:\[y/n\]|\[confirm\]|[Pp]assword:|[Uu]sername:)\s*[:?]?\s*$", tail):
+                elif re.search(r"(?:\[y/n\]|\[confirm\]|\[yes/no[^\]]*\]|[Pp]assword:|[Uu]sername:)\s*[:?]?\s*$", tail):
                     raise ValueError("unrecognized interactive prompt; manual inspection required")
                 if re.search(r"(?:^|\n)" + re.escape(prompt) + r"\s*$", transcript):
-                    if reload and not re.search(r"SUCCESS|Install will reload|Reloading", transcript, re.I):
+                    if reload and not self.reload_success.search(transcript):
                         raise ValueError("install returned to prompt without success evidence")
                     return transcript
                 if not conn.is_alive():
@@ -382,6 +390,9 @@ def upgrade_device(task, profile, options, reporter):
     if profile.family == "f5":
         from . import f5_workflow
         return f5_workflow.upgrade_device(task, profile, options, reporter)
+    if profile.family == "eos":
+        from . import eos_workflow
+        return eos_workflow.upgrade_device(task, profile, options, reporter)
     changed = False
     plan = {}
     stage_only = getattr(options, "stage_only", False)

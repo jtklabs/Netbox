@@ -96,7 +96,8 @@ def run(args, style):
             print(style.dim("run the members separately, schedule them through NetBox, or pass --ignore-groups"), file=sys.stderr)
             return 3
     reporter = Reporter(archive.current(), settings)
-    print(f"{'APPLY' if args.apply else 'DRY RUN'} {'STAGE ONLY' if args.stage_only else 'UPGRADE'}: {profile.name} ({'BIG-IP' if profile.family == 'f5' else profile.family}); "
+    family = {"f5": "BIG-IP", "eos": "Arista EOS"}.get(profile.family, profile.family)
+    print(f"{'APPLY' if args.apply else 'DRY RUN'} {'STAGE ONLY' if args.stage_only else 'UPGRADE'}: {profile.name} ({family}); "
           f"{len(targets.inventory.hosts)} device(s), {args.workers} at a time")
     print(f"credentials: {credentials.describe()}")
     if not settings:
