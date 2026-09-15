@@ -146,9 +146,13 @@ class Heartbeat:
 
 
 def platform_for(profile):
-    """Nornir platform for a job: a BIG-IP profile is recognized by its .iso image."""
-    image = str((profile or {}).get('image', '')) if isinstance(profile, dict) else ''
-    return 'f5_tmsh' if image.lower().endswith('.iso') else 'cisco_ios'
+    """Nornir platform for a job: the image filename names the family (.iso BIG-IP, .swi EOS)."""
+    image = str((profile or {}).get('image', '')).lower() if isinstance(profile, dict) else ''
+    if image.endswith('.iso'):
+        return 'f5_tmsh'
+    if image.endswith('.swi'):
+        return 'arista_eos'
+    return 'cisco_ios'
 
 
 def validate_assignment(job, apply):

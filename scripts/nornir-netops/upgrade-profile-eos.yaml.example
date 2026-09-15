@@ -1,0 +1,22 @@
+# EXAMPLE ONLY: these releases/models are illustrative, not a validated path.
+# Arista EOS example. Fill in your exact models and team-validated release path.
+# Review the target's release notes for supported upgrade paths and lab results
+# for that path, including MLAG pairs.
+name: leaf-upgrade
+models:
+  - DCS-7050SX3-48YC8          # exactly as `show version` prints after "Arista"
+starting_versions:
+  - "4.30.5M"
+target_version: "4.32.1F"
+# EOS-<release>.swi or EOS64-<release>.swi; the release must match target_version.
+image: EOS-4.32.1F.swi
+# Replace with the MD5 published by Arista for this exact image.
+# The placeholder intentionally fails profile validation.
+md5: REPLACE_WITH_ARISTA_PUBLISHED_MD5
+# Free bytes kept on flash beyond the image (the .swi is booted in place, not
+# expanded). At least 100000000; a missing image additionally needs its size.
+minimum_free_bytes: 200000000
+# Optional: switch-reachable HTTP(S)/TFTP URL, without credentials/query params.
+# If omitted, the image must already be on flash.
+# Use upgrade --stage-only --apply to copy/verify ahead of the upgrade window.
+# image_source: http://images.example.com/EOS-4.32.1F.swi

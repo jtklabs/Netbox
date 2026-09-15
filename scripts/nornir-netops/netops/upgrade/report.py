@@ -24,6 +24,9 @@ NOT_COMPARED = {
     "show interfaces counters errors": "counters, see Health", "show aaa servers": "counters",
     "show radius statistics": "counters", "show access-session details": "session identifiers",
     "show ipv6 neighbors": "ages",
+    # Arista EOS diagnostics.
+    "show clock": "clock", "show processes top once": "counters, see Health", "show ntp status": "see Health",
+    "show reload cause": "changes with every reload, see Findings",
 }
 MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
 UNIT = r"(?:years?|weeks?|days?|hours?|minutes?|mins?|seconds?|secs?)"
@@ -111,8 +114,12 @@ def config_section(before, after):
         lines += ["Boot settings excluded; they are listed below.", "", "```diff", *diff[:400], *(["... truncated; the archive holds both configurations"] if len(diff) > 400 else []), "```"]
     else:
         lines.append("No differences (boot settings excluded).")
-    boot = lambda text: ", ".join(re.findall(r"(?m)^boot system (.+)$", text)) or "none"
-    lines += ["", f"Boot settings: before `{boot(before.get('config', ''))}`; after `{boot(after.get('config', ''))}`."]
+    def boot(snapshot):
+        # EOS keeps its boot image in flash:boot-config rather than the configuration.
+        if "boot" in snapshot:
+            return snapshot["boot"].get("image") or "none"
+        return ", ".join(re.findall(r"(?m)^boot system (.+)$", snapshot.get("config", ""))) or "none"
+    lines += ["", f"Boot settings: before `{boot(before)}`; after `{boot(after)}`."]
     if after.get("config") and after.get("startup_config"):
         lines.append("Startup-config after upgrade: " + ("identical to running-config." if after["config"] == after["startup_config"] else "differs from running-config."))
     return lines + [""]
@@ -144,7 +151,9 @@ def health_section(before, after):
 def diagnostics_section(before, after):
     lines = ["## Diagnostics (line-level, order ignored; times, dates, uptimes and readings masked)", ""]
     skipped = []
-    for command in checks.DIAGNOSTICS:
+    # A collector that is not the IOS XE one names its own diagnostics.
+    commands = before.get("diagnostic_commands") or after.get("diagnostic_commands") or checks.DIAGNOSTICS
+    for command in commands:
         if command in NOT_COMPARED:
             skipped.append(f"{command} ({NOT_COMPARED[command]})")
             continue

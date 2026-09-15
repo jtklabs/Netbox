@@ -1,12 +1,15 @@
-# Catalyst IOS XE upgrades
+# Software upgrades: Catalyst IOS XE, Arista EOS and BIG-IP
 
 `configure.py upgrade` uses this directory's shared `.env`, AWS Secrets Manager
 login resolution, NetBox inventory/filtering, threaded Nornir runner and private
 JSON archives. It is read-only unless `--apply` is present. NetBox is the default
 inventory for this command, even if standards deployment defaults to CSV.
-Explicit `--csv` and `--ip` still work for lab runs.
+Explicit `--csv` and `--ip` still work for lab runs. The profile's image
+filename selects the driver: a `.bin` package is Catalyst IOS XE (this section),
+an `EOS-<release>.swi` is [Arista EOS](#arista-eos-upgrades) over SSH and a
+`BIGIP-<version>.iso` is [BIG-IP](#big-ip-upgrades) over iControl REST.
 
-The driver supports **Cisco C9350 IOS XE** profiles and the existing C9300-family
+The IOS XE driver supports **Cisco C9350 IOS XE** profiles and the existing C9300-family
 profiles through the IOS XE install workflow. C9350 uses `cisco9k_iosxe` images
 (or explicitly selected `cisco9k_iosxe_npe` images); C9300 uses `cat9k_iosxe`.
 Wrong-family images and profiles mixing these two families are rejected.
@@ -272,7 +275,9 @@ All devices emit `queued` before workers start. Active stages include
 `connecting`, `saving_config`, `precheck`, `precheck_complete`,
 `bundle_mode_flagged`, `unsaved_changes`,
 `image_verification`, `ready`, `staging`, `configuring_boot`, `installing`,
-`reconnecting`, `converging`, `postcheck` and `validating`.
+`reconnecting`, `converging`, `postcheck` and `validating`; BIG-IP units also
+emit `backing_up` (UCS archive) and `failing_over`. EOS switches use the IOS XE
+stages; `configuring_boot` is the boot-config change and `installing` the reload.
 Terminal stages are `dry_run_complete`, `already_current`, `blocked`, `staged`, `staging_failed`,
 `completed`, `completed_with_warnings`, `validation_failed`, `failed` and
 `recovery_required`. `summary` is optional and contains counts/version/gate
@@ -355,7 +360,8 @@ dry-run immutability, image checks, install dialogue, failure handling,
 post-check deltas and progress delivery. Run:
 
 ```bash
-python -m pytest tests/test_upgrade.py tests/test_webhook.py -q
+python -m pytest tests/test_upgrade.py tests/test_upgrade_eos.py tests/test_upgrade_f5.py \
+  tests/test_upgrade_scheduler.py tests/test_webhook.py -q
 ```
 
 Before applying in production, test your exact PID and release path in a lab,
@@ -379,6 +385,72 @@ for install states and conversion details. The C9350 tests use synthetic
 transcripts with its PIDs and image names; they are not a live C9350 lab
 qualification. A profile records your team's tested path; the script does not
 infer approval from release ordering or a shared IOS XE command alone.
+
+## Arista EOS upgrades
+
+The same command, profile shape, NetBox scheduling, progress events, archive
+and comparison report drive Arista switches over SSH with netmiko's
+`arista_eos` driver; eAPI is not used. A profile is an EOS profile when its
+`image` is an `EOS-<release>.swi` or `EOS64-<release>.swi` file. Devices need
+the `arista-eos` platform in NetBox (or a blank platform) and the same `NET_*`
+credentials with enable access. See `upgrade-profile-eos.yaml.example`.
+
+```yaml
+name: leaf-upgrade
+models:
+  - DCS-7050SX3-48YC8          # exactly as `show version` prints after "Arista"
+starting_versions:
+  - "4.30.5M"
+target_version: "4.32.1F"
+image: EOS-4.32.1F.swi
+md5: REPLACE_WITH_ARISTA_PUBLISHED_MD5
+minimum_free_bytes: 200000000        # headroom on flash beyond the .swi; at least 100000000
+image_source: http://images.example.com/EOS-4.32.1F.swi   # optional; switch-reachable HTTP(S)/TFTP
+```
+
+Order of operations under `--apply`: `write memory`; baseline; the image
+verified on flash, or copied with `copy <image_source> flash:<image>`, and its
+`verify /md5` checked against the profile (an existing file with a different
+checksum is never overwritten); the `ready` gate; `boot system flash:<image>`
+confirmed through `show boot-config`; a fresh check that the running and
+startup configurations are still identical; `reload now`; reconnect; then the
+same convergence loop and comparison report. `--stage-only` copies and
+verifies the image only. A dry run reads everything and writes nothing. EOS
+boots one image file, so there is no install mode, bundle conversion or stack;
+`bundle_conversion_validated`, `volume`, `allow_active` and
+`license_check_date` are rejected in an EOS profile. The reload dialogue
+answers only `Proceed with reload? [confirm]`; a save prompt or any other
+question stops the workflow with `recovery_required` for inspection.
+
+Prechecks block on: a model outside `models`, a release outside
+`starting_versions`, MLAG in any state other than `Active` or `Disabled`, an
+active MLAG whose peer link is not up and negotiated or whose peer
+configuration is inconsistent, and a unit already running the target whose
+boot-config points at a different image. An MLAG peer is a separate device:
+upgrade one member, let MLAG return to `Active`, then schedule the other. NetBox
+redundancy groups refuse a target set that contains both members.
+
+The baseline compares interface status, IP interfaces, the MAC table, VLANs,
+port channels, spanning-tree port roles/states and root identities, MLAG
+status, port counts and per-MLAG interface state, VRRP groups, LLDP neighbors,
+VRFs, IPv4 routes and ARP per VRF, and the BGP (every VRF, IPv4 and IPv6),
+OSPF, OSPFv3 and IS-IS neighbors detected from the configuration, all as
+unordered sets of stable fields. The running configuration is compared with
+its metadata comments removed. Health takes CPU busy share from `show
+processes top once` (100 minus idle; EOS has no one-minute counter), free
+memory from `show version`, NTP peers, environment alarms and interface error
+counters. Post-checks additionally require the target release, `show
+boot-config` pointing at the target image and a saved configuration, and warn
+when `show reload cause` is not the requested user reload. IPv6 routes, IPv6
+neighbors, trunks and the reload cause are retained as raw diagnostics only;
+PoE is not collected. A `router` block other than bgp, ospf, ospfv3, isis or
+the non-neighbor blocks EOS uses (general, multicast, bfd, pim, igmp, msdp and
+similar) blocks the upgrade until a comparator exists.
+
+This flow has been exercised against synthetic SSH transcripts only. Validate
+your exact model, release path and MLAG design in a lab before scheduling
+production switches; Arista's release notes for the target list the supported
+upgrade paths.
 
 ## BIG-IP upgrades
 
@@ -418,7 +490,9 @@ downloaded and checksum-verified (set `NETOPS_F5_UCS_PASSPHRASE` to encrypt
 it; UCS files contain private keys); then install to the boot volume, reboot
 to it, reconnect, the same convergence loop and the comparison report.
 `--stage-only` uploads and verifies the image only. A dry run reads
-everything and writes nothing.
+everything and writes nothing. An `image_source` URL is downloaded to the
+worker's image cache first (`--image-cache` or `NETOPS_IMAGE_CACHE`, default
+`<project>/.images`) and checksum-verified there before upload.
 
 Prechecks block on: an unapproved platform, a release outside
 `starting_versions`, an install already in progress on a volume, a device

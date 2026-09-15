@@ -459,7 +459,7 @@ def compare(before, after):
 # Row identities that are safe to name in a progress message. Endpoint MAC and
 # IP addresses and configuration text stay in the archive.
 IDENTITY_KEYS = ("port", "interface", "local_interface", "destination_port", "name", "neighbor_name", "neighbor",
-                 "system_id", "network", "group", "server", "vlan_id")
+                 "system_id", "network", "group", "server", "vlan_id", "mlag", "instance")
 
 
 def _identity(row):

@@ -452,7 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .upgrade.cli import add_arguments as upgrade_arguments
     upgrade = subs.add_parser("upgrade", parents=[_discover_arguments()],
-                              help="audit or install an approved Catalyst IOS XE image",
+                              help="audit or install an approved Catalyst IOS XE, Arista EOS or BIG-IP image",
                               formatter_class=HelpFormatter)
     upgrade_arguments(upgrade)
     poll_upgrades = subs.add_parser("upgrade-poll", parents=[_discover_arguments()],

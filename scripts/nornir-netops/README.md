@@ -48,7 +48,7 @@ re-run with --apply to push the commands above
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
 | [`collect`](#collect-show-commands-into-netbox) | Run each platform's show commands read-only and file the outputs on the NetBox device page | every platform in `commands.yaml` |
-| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `f5_tmsh` |
+| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, EOS boot-image reload or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `arista_eos`, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
 What each of them should converge on comes from
