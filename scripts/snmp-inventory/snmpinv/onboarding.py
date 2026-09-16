@@ -36,6 +36,7 @@ from typing import Sequence
 
 from .collect import Collector
 from .model import (
+    ContextRecord,
     DeviceRecord,
     InterfaceRecord,
     ModuleRecord,
@@ -439,12 +440,20 @@ def _find_created_device(netbox: NetBox, result: ScanResult, site_id: int) -> di
     primary = result.primary
     if primary is None:
         return None
-    if primary.serial:
-        found = netbox.first("/dcim/devices/", {"serial": primary.serial})
+    if primary.context is not None and primary.context.is_vdc:
+        # The VDC lives on the chassis; that is the device the request produced.
+        if primary.context.chassis_serial:
+            return netbox.first("/dcim/devices/", {"serial": primary.context.chassis_serial})
+        return None
+    # Name at the site first: it is unique there, where a serial may now sit
+    # on more than one record and would point a duplicate's request at the
+    # original.
+    if primary.name:
+        found = netbox.first("/dcim/devices/", {"name": primary.name, "site_id": site_id})
         if found:
             return found
-    if primary.name:
-        return netbox.first("/dcim/devices/", {"name": primary.name, "site_id": site_id})
+    if primary.serial:
+        return netbox.first("/dcim/devices/", {"serial": primary.serial})
     return None
 
 
@@ -474,6 +483,9 @@ def scan_payload(result: ScanResult) -> dict:
                 "software_version": device.software_version,
                 "is_master": bool(device.vc_is_master) or device is result.primary,
                 "vc_position": device.vc_position,
+                # A Nexus VDC or a vCMP guest, and the chassis it belongs to;
+                # None for a box of its own. The review page says which.
+                "context": device.context.as_dict() if device.context else None,
                 "interfaces": [
                     {
                         "name": i.name,
@@ -524,6 +536,7 @@ def scan_result_from_payload(payload: dict, host: str = "") -> ScanResult:
             software_version=entry.get("software_version", ""),
             vc_position=entry.get("vc_position"),
             vc_is_master=bool(entry.get("is_master")),
+            context=ContextRecord.from_dict(entry.get("context")),
             interfaces=[
                 InterfaceRecord(
                     name=i.get("name", ""),
@@ -576,6 +589,8 @@ def _describe(result: ScanResult) -> str:
         bits.append("%s %s" % (primary.manufacturer, primary.model))
     if primary.serial:
         bits.append("serial %s" % primary.serial)
+    if primary.context is not None:
+        bits.append(primary.context.detail)
     if result.is_stack:
         bits.append("stack of %d" % len(result.devices))
     return " | ".join(bits)

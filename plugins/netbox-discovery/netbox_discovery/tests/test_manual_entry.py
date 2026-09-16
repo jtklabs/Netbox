@@ -140,3 +140,44 @@ class ManualEntryTest(TestCase):
                                    model='NEW-MODEL')
         self.assertEqual(self.entry.discovered, FINDINGS)
         self.assertEqual(self.entry.status, C.STATUS_FAILED)
+
+
+class ManualEntryIsProtectedTest(TestCase):
+    """A device created from a hand-entered request is tagged so the scanner
+    never changes what was typed."""
+
+    @classmethod
+    def setUpTestData(cls):
+        region = Region.objects.create(name='Tagged US', slug='tagged-us')
+        cls.site = Site.objects.create(name='Tagged Site', slug='tagged-site', region=region)
+        cls.site.tags.add(Tag.objects.create(name='poller-tagged', slug='poller-tagged'))
+        Prefix.objects.create(prefix='198.51.100.0/24', scope=cls.site)
+        cls.user = get_user_model().objects.create_superuser('tagged', password='x')
+        from dcim.models import DeviceRole, DeviceType
+        manufacturer = Manufacturer.objects.create(name='Tagged vendor', slug='tagged-vendor')
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model='T-1', slug='t-1')
+        role = DeviceRole.objects.create(name='Tagged', slug='tagged')
+        from dcim.models import Device
+        cls.device = Device.objects.create(name='typed-01', device_type=device_type,
+                                           role=role, site=cls.site)
+
+    def applied(self, manually_entered):
+        entry = OnboardingRequest(address='198.51.100.20')
+        entry.save()
+        entry.manually_entered = manually_entered
+        entry.status = C.STATUS_APPROVED
+        entry.save()
+        self.client.force_login(self.user)
+        response = self.client.post(
+            reverse('plugins-api:netbox_discovery-api:onboardingrequest-applied',
+                    kwargs={'pk': entry.pk}),
+            {'ok': True, 'device': self.device.pk}, content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200, response.content[:500])
+        return {t.slug for t in self.device.tags.all()}
+
+    def test_a_hand_entered_device_is_tagged_when_applied(self):
+        self.assertIn('discovery-manual', self.applied(manually_entered=True))
+
+    def test_a_scanned_device_is_not(self):
+        self.assertNotIn('discovery-manual', self.applied(manually_entered=False))

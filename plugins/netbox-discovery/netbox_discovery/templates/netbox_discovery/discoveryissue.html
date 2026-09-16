@@ -35,10 +35,12 @@
             <tr><th>Existing record</th><td>{{ object.device|linkify|placeholder }}</td></tr>
           </table>
           <p class="text-muted small mb-0">
-            Nothing in DCIM was changed. The scanner will keep refusing this
-            device until the two serials are sorted out — mark the issue
-            <em>Ignored</em> if the duplicate is expected and should stop being
-            raised.
+            Nothing in DCIM was changed when this was raised. Duplicate serials
+            are allowed now: the scanner no longer refuses or raises them, and
+            writes a device that agrees with an existing record on neither
+            name nor address as a separate device with the same serial. Issues
+            already on this list are history; mark them <em>Resolved</em> or
+            <em>Ignored</em> as you see fit.
           </p>
         </div>
       </div>

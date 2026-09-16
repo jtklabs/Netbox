@@ -433,6 +433,13 @@ Hand-entered requests are flagged `manually_entered` and labelled as such
 wherever they are shown. A typed serial and an observed one are not equally
 trustworthy and should never look alike.
 
+The device such a request creates is tagged **`discovery-manual`**, and the
+scanner honours the tag for good: a later scan that resolves to that device
+never changes its serial, model, site or tenant and never retires it as a
+swap. Blanks are filled in, and interfaces, addresses and the software
+version still land. Somebody typed that identity because the box could not
+be scanned; a scan does not get to overrule them.
+
 Also available over the API:
 
 ```bash
@@ -754,30 +761,38 @@ onboarding; they are independent and can overlap safely.
 
 ### When a serial is already on another device
 
-Devices are matched by serial first, which is what makes a renamed or
-re-addressed box resolve to the record it already has. It is also what would
-let a duplicated or mistyped serial pull a scan onto the *wrong* record and
-overwrite it — silently, since nothing about that looks like an error.
+Duplicate serials are **allowed**. A Nexus VDC and its chassis, a vCMP guest
+and its host, a vendor reusing a number, a serial typed on two records — all
+of these exist, and refusing to write until somebody sorted them out (which
+is what this did before) meant the devices never landed at all. Nothing is
+raised as an issue for a duplicate serial any more.
 
-So the scan is refused instead. Nothing in DCIM is touched, and the collision
-is raised as a **Discovery Issue** with both sides of it: the address scanned,
-the name it reported, the serial, and the record it collided with.
+What is refused instead is the **guess**. A scan claims an existing record
+only when the evidence says it is the same box:
 
-Telling a genuine conflict from a normal change comes down to what else agrees:
+| The scan has… | It is the record that… |
+|---|---|
+| a serial | carries that serial **and** agrees on the name or the address. A rename keeps the address, a re-address keeps the name |
+| no serial | has the polled address on one of its interfaces, else has the same name **at the site being scanned** |
 
-| Serial matches, and… | Read as | Action |
-|---|---|---|
-| same name | re-addressed box | sync normally |
-| same address | renamed box | sync normally |
-| neither matches | two devices, one serial | **refused and raised** |
+Anything else is a different box and gets a record of its own, beside the
+existing one, with the log saying so. Two things this rules out that used to
+happen: a serial on two records claiming whichever came first, and a device
+with no serial claiming a record of the same name at *another* site — branch
+sites reuse hostnames, and that match overwrote the other site's switch and
+moved it. The one thing given up is a box renamed and re-addressed in the
+same change window, which now gets a second record rather than an update;
+delete the old one.
 
-One open issue per address and serial — the sweep runs four times a day and
-would otherwise file the same complaint until somebody dealt with it. Mark an
-issue *Ignored* if the duplicate is expected and should stop being raised.
+A device created from a request that was **entered by hand** is tagged
+`discovery-manual`, and a later scan that resolves to it keeps what was
+typed: serial, model, site and tenant are never changed and nothing is
+retired. Blanks are still filled in, and interfaces, addresses and the
+software version still land, because those are observations rather than
+identity.
 
-Onboarding applies the same rule earlier: a scan whose serial is already in
-NetBox stops for review rather than creating a second device for hardware that
-already exists.
+Onboarding still stops for review when a scanned serial is already on another
+device — a person should see it — and approving creates the second device.
 
 ### When a serial changes
 
@@ -806,6 +821,44 @@ in when reconciling contracts. NetBox's changelog holds the old value too, but
 only as a diff on one object at one moment.
 
 Set `retain_replaced_hardware = false` to go back to overwriting in place.
+
+### One chassis, several management addresses
+
+Two platforms answer on more than one address for one box, and every address
+reports the chassis serial as its own. Taken at face value that is two devices
+with one serial, which the rule above refuses — so neither ever landed, or the
+first one scanned took the record and the rest were refused against it.
+
+| Scan | Written as | Why |
+|---|---|---|
+| **Nexus VDC** (non-default) | a NetBox **virtual device context** on the chassis device | A VDC is a slice of the chassis: its own hostname, address and allocated ports. The ports are written to the chassis and allocated to the context; the polled address becomes the context's primary IP, never the chassis's. NX-OS is upgraded per chassis, so the software version and the modules stay on the chassis, written from its own scan |
+| **F5 vCMP guest** | a **device of its own**, with no serial, linked to the host | A guest is a whole BIG-IP: its own TMOS version, its own upgrade schedule, its own config. Everything that matters about it is per device. The host's serial is deliberately not written to the guest — a serial is what contracts are matched on — and the link is an object custom field, `vcmp_host`, that the scanner creates on first use |
+
+How each is recognised, from what the device itself says:
+
+- A Nexus serves `ciscoVdcTable` (CISCO-VDC-MIB). A non-default VDC runs its
+  own SNMP agent and is expected to list only itself; should an agent list
+  every VDC, the hostname decides — with combined hostnames a non-default VDC
+  is `<default>-<vdc>`. The default VDC (id 1) is the chassis record.
+  `--probe` shows the table and which row the scanner took the agent to be.
+- A vCMP guest reports platform ID `Z101` at `sysPlatformInfoName`, where the
+  host reports its own (`C113` for a BIG-IP 4000).
+
+Order matters for VDCs: **the chassis must be in NetBox first.** A VDC is
+never created as a device of its own; if the chassis is missing the scan logs
+why and writes nothing, and onboarding holds the request saying to onboard
+the default VDC. A guest needs no order — it is created either way, and the
+host link is made on whichever sweep first finds both.
+
+Records made before this was understood are handled rather than fought. A
+chassis whose record was created from a non-default VDC keeps being treated
+as the chassis (the log says so, and says to point its primary IP at the
+default VDC's address to have the VDC become a context). A guest created
+with the host's serial has that serial moved off it and the link made.
+
+Neither the onboarding review nor the sweep reads a VDC's or a guest's
+running config or software as the chassis's: a guest reports its own version
+like any device, and a VDC reports none.
 
 ### What it writes
 

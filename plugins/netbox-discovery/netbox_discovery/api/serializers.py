@@ -118,6 +118,9 @@ class DiscoveredDeviceSerializer(serializers.Serializer):
     vc_position = serializers.IntegerField(required=False, allow_null=True, default=None)
     interfaces = serializers.ListField(child=serializers.DictField(), required=False, default=list)
     modules = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    # A Nexus VDC or a vCMP guest: {kind, chassis_serial, name, identifier,
+    # detail}. None for a box of its own, and absent from older pollers.
+    context = serializers.DictField(required=False, allow_null=True, default=None)
 
 
 class ScanResultSerializer(serializers.Serializer):

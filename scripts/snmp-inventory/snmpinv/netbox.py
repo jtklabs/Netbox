@@ -348,28 +348,29 @@ class NetBox:
         )
 
     def ensure_custom_field(self, name: str, object_types: Iterable[str], field_type: str = "text",
-                            label: str = "", description: str = "") -> dict | None:
+                            label: str = "", description: str = "", **extra) -> dict | None:
         """Create a custom field if the instance does not already have one.
 
         NetBox has no per-device software version field of its own, so the
         version we collect needs somewhere to live. Creating it here means a
         fresh poller against a fresh NetBox works with no manual setup.
+
+        `extra` goes into the create payload as is -- an object-typed field
+        needs `related_object_type` naming what it points at.
         """
         existing = self.first("/extras/custom-fields/", {"name": name})
         if existing is not None:
             return existing
-        return self.create(
-            "/extras/custom-fields/",
-            {
-                "name": name,
-                "label": label or name.replace("_", " ").title(),
-                "type": field_type,
-                "object_types": list(object_types),
-                "description": description,
-                "required": False,
-            },
-            label=f"custom field {name}",
-        )
+        payload = {
+            "name": name,
+            "label": label or name.replace("_", " ").title(),
+            "type": field_type,
+            "object_types": list(object_types),
+            "description": description,
+            "required": False,
+        }
+        payload.update(extra)
+        return self.create("/extras/custom-fields/", payload, label=f"custom field {name}")
 
     def summary(self) -> str:
         if not self.created and not self.updated and not self.deleted:

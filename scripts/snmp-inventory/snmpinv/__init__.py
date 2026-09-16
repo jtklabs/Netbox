@@ -21,4 +21,4 @@ running to benefit from -- it is how "is that poller on the new build yet?" is
 answered without logging in to it.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

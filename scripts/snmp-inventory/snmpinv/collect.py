@@ -61,6 +61,15 @@ class Entity:
 
 
 @dataclass
+class VdcRow:
+    """One ciscoVdcTable row: a virtual device context on a Nexus."""
+
+    vdc_id: int
+    name: str = ""
+    state: int = 0
+
+
+@dataclass
 class Interface:
     """One interface, merged from ifTable and ifXTable."""
 
@@ -211,6 +220,10 @@ class DeviceFacts:
     access_points: list[AccessPoint] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
     fhrp_groups: list[FhrpGroup] = field(default_factory=list)
+    # CISCO-VDC-MIB rows, NX-OS only. Which row is the agent that answered
+    # decides whether this scan is the chassis or one of its virtual device
+    # contexts -- see model.py.
+    vdcs: list[VdcRow] = field(default_factory=list)
 
     software_version: str = ""
     vendor_serial: str = ""
@@ -359,6 +372,11 @@ class Collector:
         # trip, so it is gated on the vendor rather than attempted blindly.
         if profile is not None and profile.name == "cisco":
             facts.stack_members = _walk_stack_members(session, host)
+            # Nexus virtual device contexts, gated tighter still: only NX-OS
+            # serves the table, and an IOS box would pay a round trip for
+            # nothing.
+            if "nx-os" in facts.sys_descr.lower():
+                facts.vdcs = _walk_vdcs(session, host)
 
         if self.collect_neighbors:
             # LLDP is IEEE-standard and tried on everything: a device without
@@ -1000,6 +1018,29 @@ def _lldp_capability_names(data: bytes) -> frozenset:
     return frozenset(names)
 
 
+def _walk_vdcs(session: CredentialSession, host: str) -> list[VdcRow]:
+    """CISCO-VDC-MIB ciscoVdcTable, indexed by VDC id.
+
+    Returns whatever rows this agent serves. A VDC runs its own SNMP agent, so
+    a non-default VDC is expected to list itself alone while the default VDC
+    lists every VDC on the chassis; model.py works out which row answered.
+    """
+    try:
+        binds = session.walk(host, vendors.CISCO_VDC_ENTRY)
+    except SnmpError as exc:
+        log.debug("%s: CISCO-VDC-MIB unavailable (%s)", host, exc)
+        return []
+    names = collect_column(binds, vendors.CISCO_VDC_NAME)
+    states = collect_column(binds, vendors.CISCO_VDC_STATE)
+    rows = []
+    for key in sorted(set(names) | set(states), key=_int_key):
+        if not key.isdigit():
+            continue
+        rows.append(VdcRow(vdc_id=int(key), name=_text(names.get(key)),
+                           state=_int(states.get(key), 0)))
+    return rows
+
+
 def _walk_access_points(session: CredentialSession, host: str) -> list[AccessPoint]:
     """Aruba controllers know every AP they terminate; ask them for the list.
 
@@ -1044,7 +1085,7 @@ def _apply_vendor_scalars(session: CredentialSession, host: str, facts: DeviceFa
     """Fetch the vendor's version/serial/model scalars in one GET."""
     everything = (list(profile.version_oids) + list(profile.build_oids)
                   + list(profile.serial_oids) + list(profile.model_oids)
-                  + list(profile.part_number_oids))
+                  + list(profile.part_number_oids) + list(profile.extra_scalar_oids))
     if not everything:
         return
     # An entry ending in ".*" names a table COLUMN to walk rather than a

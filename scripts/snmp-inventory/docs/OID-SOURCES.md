@@ -160,6 +160,29 @@ Only states 1–8 count as physically present. `provisioned(9)` means the member
 is configured but the hardware is absent, and creating a NetBox device for it
 would be inventing a switch that is not in the rack.
 
+## CISCO-VDC-MIB (Nexus virtual device contexts)
+
+Resolved 2026-09-16 with `resolve_oid.py` from the MIB text (`CISCO-VDC-MIB.my`,
+LAST-UPDATED 201611030000Z, module identity `ciscoVdcMIB`), with CISCO-SMI
+and CISCO-TC beside it. The MIB is not in the librenms mirror; the copy used
+came from a public MIB collection on GitHub and its module identity, revision
+history and object descriptions were read before trusting it.
+
+| Object | OID | Notes |
+|---|---|---|
+| `ciscoVdcMIB` | 1.3.6.1.4.1.9.9.774 | |
+| `ciscoVdcTable` | 1.3.6.1.4.1.9.9.774.1.1 | "an entry for each VDC instance created in the system" |
+| `ciscoVdcEntry` | 1.3.6.1.4.1.9.9.774.1.1.1 | INDEX { ciscoVdcId }, so the id is the row instance |
+| `ciscoVdcName` | 1.3.6.1.4.1.9.9.774.1.1.1.2 | "uniquely identifies the VDC instance in the system" |
+| `ciscoVdcState` | 1.3.6.1.4.1.9.9.774.1.1.1.3 | active(1) suspended(2) nonconfigured(3) configured(4) failed(5) |
+| `ciscoVdcCombinedHostnameEnabled` | 1.3.6.1.4.1.9.9.774.1.2.2 | when on, non-default VDC hostnames are `<default VDC name>-<nondefault VDC name>` — the basis of the hostname fallback in model.py |
+
+The MIB says nothing about which rows a non-default VDC's own agent serves.
+Cisco documents one SNMP instance per VDC, so a non-default VDC is expected
+to list only itself; the scanner also copes with an agent that lists every
+VDC (hostname match, then the default VDC). Confirm against a partitioned
+Nexus with `--probe --save-walk` when one is available.
+
 ## Vendor scalars
 
 | Vendor | Object | OID | MIB |
@@ -173,6 +196,8 @@ would be inventing a switch that is not in the rack.
 | F5 | `sysProductVersion` | 1.3.6.1.4.1.3375.2.1.4.2.0 | F5-BIGIP-SYSTEM-MIB |
 | F5 | `sysGeneralChassisSerialNum` | 1.3.6.1.4.1.3375.2.1.3.3.3.0 | F5-BIGIP-SYSTEM-MIB |
 | F5 | `sysPlatformInfoMarketingName` | 1.3.6.1.4.1.3375.2.1.3.5.2.0 | F5-BIGIP-SYSTEM-MIB |
+| F5 | `sysPlatformInfoName` | 1.3.6.1.4.1.3375.2.1.3.5.1.0 | F5-BIGIP-SYSTEM-MIB, "The platform name": the platform ID, `C113` for a BIG-IP 4000 and `Z101` for a vCMP guest, which is how a guest is told from the chassis whose serial it reports. Resolved 2026-09-16 from the librenms copy of the MIB |
+| F5 | `sysVcmpTable` | 1.3.6.1.4.1.3375.2.1.13.1.2 | F5-BIGIP-SYSTEM-MIB, host side: `sysVcmpVcmpName` .1, `sysVcmpHostname` .2 ("The host name of the VCMP guest"), `sysVcmpState` .4, `sysVcmpMgmtAddr` .7, `sysVcmpVcmpId` .12. Resolved 2026-09-16; documented for a future host-side inventory of guests, not read yet |
 | Check Point | `svnVersion` | 1.3.6.1.4.1.2620.1.6.4.1.0 | CHECKPOINT-MIB |
 | Check Point | `svnServicePack` | 1.3.6.1.4.1.2620.1.6.999.0 | CHECKPOINT-MIB |
 | Check Point | `svnApplianceSerialNumber` | 1.3.6.1.4.1.2620.1.6.16.3.0 | CHECKPOINT-MIB |
