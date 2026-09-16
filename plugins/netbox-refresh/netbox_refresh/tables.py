@@ -98,6 +98,71 @@ class RegionCostTable(tables.Table):
         orderable = False
 
 
+class UnconfiguredModelTable(tables.Table):
+    """Hardware models with no lifecycle: plain dict rows from the view."""
+
+    model = tables.Column(linkify=lambda record: record['url'], verbose_name='Hardware model')
+    manufacturer = tables.Column(linkify=True)
+    part_number = tables.Column()
+    kind = tables.Column(verbose_name='Kind')
+    installed = tables.Column(verbose_name='Installed')
+    lifecycle = columns.TemplateColumn(
+        template_code='<span class="text-muted">None configured</span>',
+        verbose_name='Lifecycle', orderable=False,
+    )
+    actions = columns.TemplateColumn(
+        template_code='{% if perms.netbox_refresh.add_modellifecycle %}'
+                      '<a href="{{ record.add_url }}" class="btn btn-sm btn-primary">'
+                      '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Add lifecycle</a>'
+                      '{% endif %}',
+        verbose_name='', orderable=False,
+    )
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'Every hardware model in NetBox has a lifecycle.'
+        orderable = False
+
+
+class SiteCostTable(tables.Table):
+    """Report rows are plain dicts assembled by the view, not model instances."""
+
+    site = tables.Column(linkify=lambda record: record['site_url'])
+    region = tables.Column(linkify=lambda record: record['region_url'])
+    models = tables.Column(verbose_name='Models')
+    units = tables.Column(verbose_name='Units')
+    total = tables.Column(verbose_name='Replacement cost')
+    unpriced = tables.Column(verbose_name='Unpriced units')
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'Nothing to price in the selected window.'
+        orderable = False
+
+
+class SiteRefreshTable(tables.Table):
+    """One row per site and model: what each site has to replace.
+
+    Report rows are plain dicts assembled by the view, not model instances.
+    """
+
+    site = tables.Column(linkify=lambda record: record['site_url'])
+    region = tables.Column(linkify=lambda record: record['region_url'])
+    model = tables.Column(linkify=lambda record: record['url'], verbose_name='Hardware model')
+    manufacturer = tables.Column()
+    part_number = tables.Column()
+    milestone_date = tables.DateColumn(verbose_name='Milestone')
+    installed = tables.Column(verbose_name='Units')
+    replacement = tables.Column(linkify=lambda record: record['replacement_url'])
+    unit_cost = tables.Column(verbose_name='Unit cost here')
+    extended_cost = tables.Column()
+
+    class Meta:
+        attrs = {'class': 'table table-hover object-list'}
+        empty_text = 'No hardware at any site reaches this milestone in the selected window.'
+        orderable = False
+
+
 class RefreshReportTable(tables.Table):
     """Report rows are plain dicts assembled by the view, not model instances."""
 
