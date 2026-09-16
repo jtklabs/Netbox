@@ -362,22 +362,23 @@ def _hardware_changed(netbox: NetBox, request_id: int, result: ScanResult) -> st
     if not previewed:
         return ""
 
-    # Compare what the device itself said both times. A model a rule supplied
-    # at scan time is in the preview with the device's own answer (usually
-    # nothing) kept under rules_applied; that answer is what the re-read is
-    # judged against here, before the rules run again. Without this every
-    # rule-filled model would read as a hardware change, and so would a rule
-    # added between review and apply -- neither is a different box.
+    # Compare what the device itself said both times. A model or serial a
+    # rule supplied at scan time is in the preview with the device's own
+    # answer (usually nothing) kept under rules_applied; that answer is what
+    # the re-read is judged against here, before the rules run again. Without
+    # this every rule-filled value would read as a hardware change, and so
+    # would a rule added between review and apply -- neither is a different
+    # box.
     device_said = {
         (entry.get("device"), entry.get("field")): (entry.get("previous") or "")
         for entry in discovered.get("rules_applied") or []
     }
 
+    def reported(entry, field):
+        return device_said.get((entry.get("name"), field), entry.get(field) or "").strip()
+
     def key(entry):
-        model = entry.get("model") or ""
-        if (entry.get("name"), "model") in device_said:
-            model = device_said[(entry.get("name"), "model")]
-        return ((entry.get("serial") or "").strip(), model.strip())
+        return (reported(entry, "serial"), reported(entry, "model"))
 
     before = sorted(key(d) for d in previewed)
     after = sorted((d.serial.strip(), d.model.strip()) for d in result.devices)

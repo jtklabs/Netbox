@@ -738,6 +738,29 @@ class DiscoveryRule(PrimaryModel):
                 raise ValidationError({
                     'match_value': 'Not a valid regular expression: %s.' % exc,
                 })
+        if self.set_field == RuleSetFieldChoices.FIELD_SERIAL:
+            # A serial belongs to one box. Anything looser than an exact
+            # match on the name or address stamps the same serial on every
+            # device the rule matches, and the sync refuses the second as a
+            # duplicate — after the first has already been written wrong.
+            pinned = (
+                self.match_field in (RuleMatchFieldChoices.FIELD_NAME,
+                                     RuleMatchFieldChoices.FIELD_ADDRESS)
+                and self.match_operator == RuleOperatorChoices.OP_EQUALS
+            )
+            if not pinned:
+                raise ValidationError({
+                    'set_field': 'A serial belongs to one device, so a rule that '
+                                 'sets it must match the device name or scanned '
+                                 'address with "is exactly".',
+                })
+            # A changed serial is how a hardware swap is detected; a rule
+            # replacing one would retire a device record on every sweep.
+            if not self.only_if_blank:
+                raise ValidationError({
+                    'only_if_blank': 'A rule may fill in a serial the device does '
+                                     'not report, never replace one it does.',
+                })
 
     @staticmethod
     def _lower_first(label):

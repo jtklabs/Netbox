@@ -1053,7 +1053,7 @@ A rule has one condition and one assignment:
 |---|---|
 | When this field | device name, model, manufacturer, platform, serial, software version, `sysDescr`, scanned address |
 | Comparison | contains, starts with, ends with, is exactly, matches a regular expression — all case-insensitive |
-| Sets | model, manufacturer, platform, software version |
+| Sets | model, manufacturer, platform, software version, serial |
 | Only when empty | On by default: what the device reports wins, exactly as a reviewer's override does. Off replaces the device's value, and the replaced value is recorded on the scan |
 | Weight | Rules apply lightest first, and a later rule can match on what an earlier one set — manufacturer from the name, then platform from the manufacturer |
 
@@ -1068,9 +1068,19 @@ that a rule matches nothing.
 
 Because nothing in NetBox evaluates a rule, adding one does not change a
 request already sitting in review: use **Scan again** on it and the poller
-applies the rule on the fresh walk. The name, serial and interfaces are never
-touched by a rule — the name has its own override, and a serial is the one
-thing a rule must not invent.
+applies the rule on the fresh walk. The name and interfaces are never touched
+by a rule; the name has its own override.
+
+**A serial rule is one rule per box.** A serial belongs to exactly one
+device, and serials are what support contracts and quotes are matched on, so
+a rule that sets one must match the device **name or address** with **is
+exactly**, and may only fill in a serial the device does not report — never
+replace one, because a changed serial is how the scanner detects a hardware
+swap and a rule must not be able to fake one. NetBox refuses anything looser
+on save, and the poller refuses it again if handed one. This is for the VM
+appliance or the box with a blank ENTITY-MIB whose serial you know from the
+invoice: *when the device name is exactly `faz-01` and the serial is empty,
+set the serial to `FAZ-VMTM12345678`.*
 
 The poller token needs `view` on discovery rules. Without it the poller logs a
 warning at the start of every run and applies none; a NetBox without the
