@@ -1,0 +1,25 @@
+<!-- @dsCard group="Brand" viewport="700x150" name="Focus & interaction states" subtitle="3px ring, always visible on keyboard focus" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../styles.css">
+<style>html,body{margin:0}body{background:var(--surface-card);padding:16px;font-size:var(--text-base)}.r{display:flex;gap:0;align-items:stretch}.sw{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:6px;min-width:0}.sw b{font-size:10px;font-weight:600;letter-spacing:.04em;display:block}.sw span{font-family:var(--font-mono);font-size:9px;opacity:.8;display:block}.tok{font-family:var(--font-mono);font-size:10px;color:var(--text-muted)}.lb{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600}</style>
+</head>
+<body>
+<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+<div><div class="lb" style="margin-bottom:6px">Rest / hover / active</div><div style="display:flex;gap:8px">
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--navy-700);color:#fff;font-size:var(--text-base);font-weight:500">Rest</span>
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--navy-600);color:#fff;font-size:var(--text-base);font-weight:500">Hover</span>
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--navy-800);color:#fff;font-size:var(--text-base);font-weight:500">Active</span>
+</div><div class="tok" style="margin-top:7px">hover = one step darker · active = two steps</div></div>
+<div><div class="lb" style="margin-bottom:6px">Focus ring</div><div style="display:flex;gap:14px">
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--surface-card);border:1px solid var(--border-focus);box-shadow:var(--focus-ring);font-size:var(--text-base)">Input</span>
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--crimson-500);color:#fff;box-shadow:var(--focus-ring-danger);font-size:var(--text-base);font-weight:500">Delete</span>
+</div><div class="tok" style="margin-top:7px">--focus-ring · --focus-ring-danger</div></div>
+<div><div class="lb" style="margin-bottom:6px">Disabled</div>
+<span style="height:34px;display:inline-flex;align-items:center;padding:0 12px;border-radius:4px;background:var(--action-disabled-bg);color:var(--action-disabled-fg);font-size:var(--text-base);font-weight:500">Submit</span>
+<div class="tok" style="margin-top:7px">no opacity tricks</div></div>
+</div>
+</body>
+</html>

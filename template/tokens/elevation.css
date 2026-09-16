@@ -1,0 +1,14 @@
+/* Elevation. Flat by default — shadows mark things that float, not things that matter. */
+:root{
+  --shadow-none:none;
+  --shadow-xs:0 1px 1px rgba(22,40,60,.05);
+  --shadow-sm:0 1px 2px rgba(22,40,60,.08);
+  --shadow-md:0 2px 6px rgba(22,40,60,.10);
+  --shadow-lg:0 8px 24px rgba(22,40,60,.14);
+  --shadow-dialog:0 18px 48px rgba(12,24,38,.26);
+  --shadow-dropdown:0 6px 16px rgba(22,40,60,.16);
+  --shadow-inset-row:inset 0 -1px 0 var(--border-subtle);
+  --shadow-sticky-header:0 1px 0 var(--border-default);
+  --shadow-card:var(--shadow-none);   /* flat fallback; the glass layer re-points this */
+  --shadow-nav-active:none;
+}

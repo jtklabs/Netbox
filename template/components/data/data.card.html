@@ -1,0 +1,80 @@
+<!-- @dsCard group="Components" viewport="700x560" name="Data display" subtitle="DataTable, DonutChart, StatusPill, MetricTile, ProgressMeter, EmptyState" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-card);padding:16px}.lbl{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600;margin-bottom:6px}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.cols{display:flex;gap:24px;align-items:flex-start}.grp{display:flex;flex-direction:column;gap:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { DataTable, DonutChart, StatusPill, MetricTile, ProgressMeter, EmptyState, Card, Button } = window.PortalDesignSystem_986bf0;
+const posture=[
+  {label:'Compliant',value:3461,tone:'success'},
+  {label:'Non-compliant',value:512,tone:'danger'},
+  {label:'Unknown',value:209,tone:'unknown'},
+];
+const rows=[
+  {id:'CKT-40182',carrier:'Lumen',site:'CHI-01',bw:'1 Gbps',status:'active'},
+  {id:'CKT-40219',carrier:'Zayo',site:'DAL-03',bw:'500 Mbps',status:'due soon'},
+  {id:'CKT-40244',carrier:'AT&T',site:'ATL-02',bw:'10 Gbps',status:'overdue'},
+  {id:'CKT-40301',carrier:'Cogent',site:'DEN-01',bw:'250 Mbps',status:'decommissioned'},
+];
+const columns=[
+  {key:'id',header:'Circuit ID',mono:true,width:130},
+  {key:'carrier',header:'Carrier'},
+  {key:'site',header:'Site',mono:true,width:90},
+  {key:'bw',header:'Bandwidth',align:'right',mono:true,width:110},
+  {key:'status',header:'Compliance',width:150,render:r=><StatusPill status={r.status}/>},
+];
+function Demo(){
+  const [sel,setSel]=React.useState(['CKT-40219']);
+  return (
+    <div className="grp">
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12}}>
+        <MetricTile label="Assets managed" value="4,182" icon="server" delta="+38 this month" deltaTone="positive" deltaDirection="up"/>
+        <MetricTile label="Overdue reports" value="6" icon="shield-alert" delta="+2 vs last week" deltaTone="negative" deltaDirection="up"/>
+        <MetricTile label="Open tasks" value="12" icon="clipboard-list" footnote="3 due today"/>
+        <MetricTile label="Config drift" value="2.4" unit="%" icon="git-compare" delta="-0.6 pts" deltaTone="positive" deltaDirection="down"/>
+      </div>
+      <div className="cols">
+        <div style={{width:200,flex:'0 0 auto'}}>
+          <div className="lbl">Donut chart</div>
+          <DonutChart size={168} thickness={22} segments={posture} centerHint="of 4,182"/>
+        </div>
+        <div style={{display:'flex',gap:16,flex:'0 0 auto'}}>
+          <DonutChart size={104} thickness={14} legend={false} caption="Midwest" segments={[{label:'Compliant',value:1042,tone:'success'},{label:'Non-compliant',value:118,tone:'danger'},{label:'Unknown',value:44,tone:'unknown'}]}/>
+          <DonutChart size={104} thickness={14} legend={false} caption="West" segments={[{label:'Compliant',value:637,tone:'success'},{label:'Non-compliant',value:101,tone:'danger'},{label:'Unknown',value:46,tone:'unknown'}]}/>
+        </div>
+      </div>
+      <div className="cols">
+        <div style={{flex:1,minWidth:0}}>
+          <div className="lbl">Status pills</div>
+          <div className="row">
+            <StatusPill status="active"/><StatusPill status="in review"/><StatusPill status="due soon"/><StatusPill status="overdue"/><StatusPill status="draft"/><StatusPill status="non-compliant"/>
+          </div>
+        </div>
+        <div style={{width:200}}>
+          <div className="lbl">Progress</div>
+          <ProgressMeter label="Evidence collected" value={18} max={24} valueText="18 of 24"/>
+        </div>
+      </div>
+      <Card title="Circuit inventory" subtitle="1,284 records" padding="none" actions={<Button size="sm" iconLeft="download">Export</Button>}>
+        <DataTable columns={columns} rows={rows} selectable selected={sel} onSelectedChange={setSel} sortKey="id" sortDir="asc" onSort={()=>{}} onRowClick={()=>{}}/>
+      </Card>
+      <div style={{border:'1px solid var(--border-default)',borderRadius:'var(--radius-card)',background:'var(--surface-card)'}}>
+        <EmptyState compact icon="cable" title="No circuits match these filters" description="Clear a filter or widen the date range." action={<Button size="sm">Clear filters</Button>}/>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

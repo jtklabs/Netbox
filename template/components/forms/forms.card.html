@@ -1,0 +1,81 @@
+<!-- @dsCard group="Components" viewport="700x420" name="Forms" subtitle="FormField, Input, Textarea, Select, Checkbox, Radio, Switch, FileUpload" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-card);padding:16px}.lbl{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600;margin-bottom:6px}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.cols{display:flex;gap:24px;align-items:flex-start}.grp{display:flex;flex-direction:column;gap:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { FormField, Input, Textarea, Select, Checkbox, Radio, Switch, FileUpload } = window.PortalDesignSystem_986bf0;
+function Demo(){
+  const [on,setOn]=React.useState(true);
+  const [pick,setPick]=React.useState('site');
+  return (
+    <div className="grp">
+      <div className="cols">
+        <FormField label="Circuit ID" htmlFor="ckt" required hint="Carrier-assigned identifier." maxWidth={240}>
+          <Input id="ckt" mono defaultValue="CKT-40182"/>
+        </FormField>
+        <FormField label="Bandwidth" htmlFor="bw" maxWidth={180}>
+          <Input id="bw" mono defaultValue="1000" suffix="Mbps"/>
+        </FormField>
+        <FormField label="Region" htmlFor="rg" maxWidth={180}>
+          <Select id="rg" placeholder="All regions" options={["Midwest","Northeast","South","West"]}/>
+        </FormField>
+      </div>
+      <div className="cols">
+        <FormField label="Management IP" htmlFor="ip" error="Enter a valid IPv4 address." maxWidth={240}>
+          <Input id="ip" mono invalid defaultValue="10.42.8"/>
+        </FormField>
+        <FormField label="Search" htmlFor="sr" maxWidth={240}>
+          <Input id="sr" size="sm" iconLeft="search" placeholder="Search inventory"/>
+        </FormField>
+        <FormField label="Carrier" htmlFor="cr" maxWidth={180}>
+          <Input id="cr" disabled defaultValue="Lumen"/>
+        </FormField>
+      </div>
+      <FormField label="Remediation notes" htmlFor="nt" hint="Include ticket references." maxWidth={520}>
+        <Textarea id="nt" rows={3} defaultValue="Replaced SFP on Gi0/1; monitoring for 48h."/>
+      </FormField>
+      <div className="cols">
+        <div>
+          <div className="lbl">Checkbox</div>
+          <div className="grp" style={{gap:8}}>
+            <Checkbox checked label="Include decommissioned assets"/>
+            <Checkbox indeterminate label="Select all (partial)"/>
+            <Checkbox disabled label="Locked by policy"/>
+          </div>
+        </div>
+        <div>
+          <div className="lbl">Radio</div>
+          <div className="grp" style={{gap:8}}>
+            <Radio name="scope" value="site" checked={pick==='site'} onChange={()=>setPick('site')} label="Single site" description="One facility and its circuits."/>
+            <Radio name="scope" value="region" checked={pick==='region'} onChange={()=>setPick('region')} label="Whole region"/>
+          </div>
+        </div>
+        <div>
+          <div className="lbl">Switch</div>
+          <div className="grp" style={{gap:8}}>
+            <Switch checked={on} onChange={()=>setOn(!on)} label="Weekly digest" description="Sent Mondays 07:00."/>
+            <Switch checked={false} onChange={()=>{}} label="Beta topology view"/>
+          </div>
+        </div>
+      </div>
+      <FormField label="Supporting evidence" hint="Attach the exported access review." maxWidth={520}>
+        <FileUpload files={[{name:'q3-access-review.xlsx',size:'1.2 MB'}]} onRemove={()=>{}}/>
+      </FormField>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

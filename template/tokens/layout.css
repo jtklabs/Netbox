@@ -1,0 +1,23 @@
+/* Layout — the portal chrome is fixed; only the content column scrolls. */
+:root{
+  --nav-width:236px;
+  --nav-width-collapsed:56px;
+  --header-height:56px;
+  --subheader-height:44px;
+  --content-max:1440px;   /* prose and form columns only — table screens run full width */
+  --page-gutter:24px;
+  --page-gutter-tight:16px;
+  --control-height-sm:28px;
+  --control-height:34px;
+  --control-height-lg:40px;
+  --row-height:40px;
+  --row-height-compact:34px;
+  --field-max:560px;
+  --z-base:0; /* @kind other */
+  --z-sticky:10; /* @kind other */
+  --z-dropdown:100; /* @kind other */
+  --z-scrim:900; /* @kind other */
+  --z-dialog:1000; /* @kind other */
+  --z-toast:1100; /* @kind other */
+  --z-tooltip:1200; /* @kind other */
+}

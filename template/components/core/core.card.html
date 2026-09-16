@@ -1,0 +1,86 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Core" subtitle="Button, IconButton, Badge, Tag, Card, Icon" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-card);padding:16px}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.lbl{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600;margin-bottom:6px}.grp{display:flex;flex-direction:column;gap:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Button, IconButton, Badge, Tag, Card, Icon } = window.PortalDesignSystem_986bf0;
+function Demo(){
+  return (
+    <div className="grp">
+      <div>
+        <div className="lbl">Button variants</div>
+        <div className="row">
+          <Button variant="primary" iconLeft="plus">Add asset</Button>
+          <Button>Cancel</Button>
+          <Button variant="ghost" iconLeft="download">Export CSV</Button>
+          <Button variant="danger" iconLeft="trash-2">Delete</Button>
+          <Button variant="link">View history</Button>
+          <Button variant="primary" loading>Saving</Button>
+          <Button disabled>Disabled</Button>
+        </div>
+      </div>
+      <div className="row" style={{gap:24,alignItems:'flex-start'}}>
+        <div>
+          <div className="lbl">Sizes</div>
+          <div className="row">
+            <Button size="sm">Small</Button><Button size="md">Medium</Button><Button size="lg">Large</Button>
+          </div>
+        </div>
+        <div>
+          <div className="lbl">Icon buttons</div>
+          <div className="row">
+            <IconButton icon="refresh-cw" label="Refresh"/>
+            <IconButton icon="list" label="List view" selected/>
+            <IconButton icon="settings" label="Settings" variant="secondary"/>
+            <IconButton icon="trash-2" label="Delete" variant="danger"/>
+          </div>
+        </div>
+        <div>
+          <div className="lbl">Icons</div>
+          <div className="row" style={{color:'var(--text-muted)'}}>
+            <Icon name="server" size={18}/><Icon name="shield-check" size={18}/><Icon name="clipboard-list" size={18}/><Icon name="map-pin" size={18}/><Icon name="external-link" size={18}/>
+          </div>
+        </div>
+      </div>
+      <div className="row" style={{gap:24,alignItems:'flex-start'}}>
+        <div>
+          <div className="lbl">Badges</div>
+          <div className="row">
+            <Badge tone="neutral">Tier 3</Badge><Badge tone="brand">Managed</Badge><Badge tone="info">In review</Badge>
+            <Badge tone="success">Passed</Badge><Badge tone="warning">Due soon</Badge><Badge tone="danger">4 overdue</Badge><Badge tone="neutral" solid>12</Badge>
+          </div>
+        </div>
+        <div>
+          <div className="lbl">Tags</div>
+          <div className="row">
+            <Tag icon="map-pin" onRemove={()=>{}}>Region: Midwest</Tag><Tag onRemove={()=>{}}>Status: Active</Tag><Tag>SNMP v3</Tag>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div className="lbl">Card</div>
+        <Card title="Circuit CKT-40182" subtitle="Updated 12 Sep 2026" actions={<Button size="sm" iconLeft="pencil">Edit</Button>} style={{maxWidth:420}}>
+          <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'6px 16px',fontSize:'var(--text-sm)'}}>
+            <span style={{color:'var(--text-muted)'}}>Carrier</span><span data-mono>Lumen</span>
+            <span style={{color:'var(--text-muted)'}}>Bandwidth</span><span data-mono>1 Gbps</span>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

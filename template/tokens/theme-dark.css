@@ -1,0 +1,78 @@
+/* Dark theme. Scope: [data-theme="dark"] on <html>. Only aliases are re-pointed —
+   the ramps do not change, so components need no dark-specific code. */
+[data-theme="dark"]{
+  --text-strong:#F2F5F8;
+  --text-body:#DCE3EB;
+  --text-muted:#98A4B3;
+  --text-subtle:#77828F;
+  --text-inverse:#0C1826;
+  --text-on-nav:#AEBCCC;
+  --text-on-nav-active:#FFFFFF;
+  --text-heading:#F2F5F8;
+  --text-link:#8FB3D9;
+  --text-link-hover:#E08A8F;
+  --text-danger:#F09399;
+  --text-success:#7BC9A0;
+  --text-warning:#E5BE73;
+
+  --success-ink:#7BC9A0;--success-tint:#12291E;--success-edge:#2C5540;
+  --warning-ink:#E5BE73;--warning-tint:#2B2213;--warning-edge:#5A4A22;
+  --danger-ink:#F09399;--danger-tint:#2E1517;--danger-edge:#5E2B2F;
+  --info-ink:#8FC3E8;--info-tint:#112532;--info-edge:#24506B;
+  --neutral-ink:#AEBCCC;--neutral-tint:#1B2530;--neutral-edge:#333F4C;
+
+  --surface-page:#0E1621;
+  --surface-card:#16202C;
+  --surface-raised:#1E2C3C;
+  --surface-input:#0E1621;
+  --surface-tooltip:#0A121C;
+  --surface-sunken:#121B25;
+  --surface-header:#16202C;
+  --surface-nav:#0A121C;
+  --surface-brand-panel:#0A121C;
+  --surface-nav-hover:rgba(255,255,255,.06);
+  --surface-nav-active:rgba(255,255,255,.10);
+  --surface-nav-section:#0A121C;
+  --surface-hover:#1C2734;
+  --surface-selected:#1A2B3E;
+  --surface-disabled:#1A232E;
+  --surface-scrim:rgba(4,9,15,.68);
+
+  --border-subtle:#222E3B;
+  --border-default:#2C3A49;
+  --border-strong:#3B4B5C;
+  --border-input:#3B4B5C;
+  --border-focus:#6C89AC;
+  --border-danger:#CC4A51;
+  --border-nav:rgba(255,255,255,.08);
+
+  --action-primary-bg:#2A4868;
+  --action-primary-bg-hover:#33557A;
+  --action-primary-bg-active:#1E3651;
+  --action-primary-fg:#FFFFFF;
+  --action-secondary-bg:#1C2734;
+  --action-secondary-bg-hover:#22303F;
+  --action-secondary-bg-active:#2A3A4B;
+  --action-secondary-fg:#DCE3EB;
+  --action-ghost-bg-hover:#1C2734;
+  --action-ghost-fg:#9FBDDC;
+  --action-danger-bg:#A01E25;
+  --action-danger-bg-hover:#B4232B;
+  --action-danger-bg-active:#8C1A21;
+  --action-danger-fg:#FFFFFF;
+  --action-disabled-bg:#1C2734;
+  --action-disabled-fg:#5C6773;
+
+  --focus-ring:0 0 0 3px rgba(108,137,172,.40);
+  --focus-ring-danger:0 0 0 3px rgba(204,74,81,.35);
+
+  --shadow-xs:0 1px 1px rgba(0,0,0,.35);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.40);
+  --shadow-md:0 2px 6px rgba(0,0,0,.45);
+  --shadow-lg:0 8px 24px rgba(0,0,0,.55);
+  --shadow-dialog:0 18px 48px rgba(0,0,0,.65);
+  --shadow-dropdown:0 6px 16px rgba(0,0,0,.55);
+
+  --chart-1:#6C89AC;--chart-2:#CC4A51;--chart-3:#5D9EAE;
+  --chart-4:#E5BE73;--chart-5:#A8BCD3;--chart-6:#77828F;
+}

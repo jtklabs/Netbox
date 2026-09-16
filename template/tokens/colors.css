@@ -1,0 +1,92 @@
+/* Colors — base ramps first, semantic aliases second.
+   Always consume the semantic aliases in components; ramps are for building new aliases. */
+:root{
+  /* Navy — primary brand ramp. Sidebar, primary actions, headings. */
+  --navy-50:#EEF3F8;--navy-100:#D7E1EC;--navy-200:#A8BCD3;--navy-300:#6C89AC;--navy-400:#3E6089;
+  --navy-500:#2A4868;--navy-600:#1E3651;--navy-700:#16283C;--navy-800:#11202F;--navy-900:#0C1826;
+
+  /* Crimson — accent ramp. Destructive actions, overdue/critical states, active nav marker. */
+  --crimson-50:#FCEFF0;--crimson-100:#F7DDDE;--crimson-200:#EFB9BC;--crimson-300:#E08A8F;
+  --crimson-400:#CC4A51;--crimson-500:#B4232B;--crimson-600:#A01E25;--crimson-700:#8C1A21;
+
+  /* Neutral — cool-tinted gray ramp. Text, borders, surfaces, table rules. */
+  --gray-0:#FFFFFF;--gray-25:#F7F8FA;--gray-50:#F1F3F6;--gray-100:#E6E9EE;--gray-200:#D5DAE1;
+  --gray-300:#B9C1CB;--gray-400:#8D97A4;--gray-500:#6B7685;--gray-550:#5D6776;--gray-600:#4F5967;--gray-700:#39414D;
+  --gray-800:#252C36;--gray-900:#161B22;
+
+  /* Status ramps — three stops each: ink, tint, edge. */
+  --success-ink:#1B6E45;--success-tint:#E4F3EA;--success-edge:#A9D8BD;
+  --warning-ink:#8A5A00;--warning-tint:#FDF3DC;--warning-edge:#EBCE8C;
+  --danger-ink:#A01E25;--danger-tint:#FCEFF0;--danger-edge:#EFB9BC;
+  --info-ink:#1B5E8C;--info-tint:#E5F0F8;--info-edge:#A9CBE4;
+  --neutral-ink:#4F5967;--neutral-tint:#F1F3F6;--neutral-edge:#D5DAE1;
+
+  /* Text */
+  --text-strong:var(--gray-900);
+  --text-body:var(--gray-800);
+  --text-muted:var(--gray-500);
+  --text-subtle:var(--gray-400);
+  --text-inverse:var(--gray-0);
+  --text-on-nav:#C7D3E1;
+  --text-on-nav-active:var(--gray-0);
+  --text-heading:var(--navy-700);
+  --text-link:var(--navy-600);
+  --text-link-hover:var(--crimson-600);
+  --text-danger:var(--danger-ink);
+  --text-success:var(--success-ink);
+  --text-warning:var(--warning-ink);
+
+  /* Surfaces */
+  --surface-page:var(--gray-50);
+  --surface-card:var(--gray-0);
+  --surface-raised:var(--gray-0);
+  --surface-input:var(--gray-0);
+  --surface-tooltip:var(--navy-800);
+  --surface-sunken:var(--gray-25);
+  --surface-header:var(--gray-0);
+  --surface-nav:var(--navy-700);
+  --surface-brand-panel:var(--navy-700);
+  --surface-nav-hover:rgba(255,255,255,.07);
+  --surface-nav-active:rgba(255,255,255,.12);
+  --surface-nav-section:var(--navy-800);
+  --surface-hover:var(--gray-25);
+  --surface-selected:var(--navy-50);
+  --surface-disabled:var(--gray-50);
+  --surface-scrim:rgba(12,24,38,.55);
+
+  /* Borders */
+  --border-subtle:var(--gray-100);
+  --border-default:var(--gray-200);
+  --border-strong:var(--gray-300);
+  --border-input:var(--gray-300);
+  --border-focus:var(--navy-500);
+  --border-danger:var(--crimson-500);
+  --border-nav:rgba(255,255,255,.10);
+
+  /* Actions */
+  --action-primary-bg:var(--navy-700);
+  --action-primary-bg-hover:var(--navy-600);
+  --action-primary-bg-active:var(--navy-800);
+  --action-primary-fg:var(--gray-0);
+  --action-secondary-bg:var(--gray-0);
+  --action-secondary-bg-hover:var(--gray-50);
+  --action-secondary-bg-active:var(--gray-100);
+  --action-secondary-fg:var(--gray-800);
+  --action-ghost-bg-hover:var(--gray-50);
+  --action-ghost-fg:var(--navy-600);
+  --action-danger-bg:var(--crimson-500);
+  --action-danger-bg-hover:var(--crimson-600);
+  --action-danger-bg-active:var(--crimson-700);
+  --action-danger-fg:var(--gray-0);
+  --action-disabled-bg:var(--gray-100);
+  --action-disabled-fg:var(--gray-400);
+
+  /* Focus */
+  --focus-ring:0 0 0 3px rgba(42,72,104,.32);
+  --focus-ring-danger:0 0 0 3px rgba(180,35,43,.28);
+  --focus-ring-inverse:0 0 0 3px rgba(255,255,255,.35);
+
+  /* Data visualization — ordered categorical sequence */
+  --chart-1:var(--navy-500);--chart-2:var(--crimson-500);--chart-3:#3E7C8C;
+  --chart-4:#8A5A00;--chart-5:var(--navy-300);--chart-6:var(--gray-400);
+}

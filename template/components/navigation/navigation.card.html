@@ -1,0 +1,54 @@
+<!-- @dsCard group="Components" viewport="700x380" name="Navigation" subtitle="SidebarNav, Breadcrumbs, Tabs, Pagination" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-card);padding:16px}.lbl{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600;margin-bottom:6px}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.cols{display:flex;gap:24px;align-items:flex-start}.grp{display:flex;flex-direction:column;gap:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { SidebarNav, Breadcrumbs, Tabs, Pagination } = window.PortalDesignSystem_986bf0;
+const sections=[
+  {id:'ops',label:'Operations',items:[{id:'dash',label:'Dashboard',icon:'layout-dashboard'},{id:'tasks',label:'Tasks',icon:'clipboard-list',count:12}]},
+  {id:'inv',label:'Inventory',items:[{id:'ckt',label:'Circuits',icon:'cable'},{id:'dev',label:'Devices',icon:'server'},{id:'sites',label:'Sites',icon:'building-2'}]},
+  {id:'cmp',label:'Compliance',items:[{id:'rep',label:'Reports',icon:'shield-check',count:3,countTone:'danger'}]},
+  {id:'ext',label:'Tools',items:[{id:'graf',label:'Grafana',icon:'activity',external:true}]},
+];
+function Demo(){
+  const [tab,setTab]=React.useState('overview');
+  const [page,setPage]=React.useState(2);
+  return (
+    <div className="cols" style={{gap:20}}>
+      <div style={{height:340,border:'1px solid var(--border-default)',borderRadius:'var(--radius-card)',overflow:'hidden',flex:'0 0 auto'}}>
+        <SidebarNav brand="Nova" sections={sections} activeId="ckt" onNavigate={()=>{}}/>
+      </div>
+      <div className="grp" style={{flex:1,minWidth:0}}>
+        <div>
+          <div className="lbl">Breadcrumbs</div>
+          <Breadcrumbs items={[{id:'inv',label:'Inventory'},{id:'ckt',label:'Circuits'},{label:'CKT-40182'}]}/>
+        </div>
+        <div>
+          <div className="lbl">Tabs</div>
+          <Tabs activeId={tab} onChange={setTab} tabs={[{id:'overview',label:'Overview'},{id:'config',label:'Configuration'},{id:'compliance',label:'Compliance',count:3},{id:'history',label:'History'},{id:'archive',label:'Archive',disabled:true}]}/>
+        </div>
+        <div>
+          <div className="lbl">Pagination</div>
+          <div style={{border:'1px solid var(--border-default)',borderRadius:'var(--radius-card)',background:'var(--surface-card)'}}>
+            <Pagination page={page} pageSize={25} total={1284} onPageChange={setPage} onPageSizeChange={()=>{}}/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>
