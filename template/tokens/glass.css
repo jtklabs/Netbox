@@ -1,0 +1,100 @@
+/* Glass layer — light frost.
+   Loaded after colors.css so it re-points the SURFACE and BORDER aliases to translucent
+   values. Nothing else changes: text, status inks and action fills stay fully opaque, so
+   contrast is unaffected. Components pick glass up through the same aliases they already
+   consumed — only the eight surfaces that literally float also apply --glass-film.
+
+   Intensity is set once here. --glass-blur 18px / tints ~.72 is the tuned middle setting;
+   drop the blur to 10px and raise the tints toward .9 for a flatter portal, or push blur to
+   28px and tints toward .55 for a heavier look. Do not exceed 32px — it costs frame time on
+   large tables and reads as smeared rather than frosted. */
+:root{
+  --glass-blur:18px;
+  --glass-blur-subtle:10px;
+  --glass-blur-strong:26px;
+  --glass-saturate:150%;
+  --glass-film:blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  --glass-film-subtle:blur(var(--glass-blur-subtle)) saturate(130%);
+  --glass-film-strong:blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+
+  /* Translucent films. Raised > card > chrome: the higher a thing floats, the more opaque
+     it gets, because dialogs and menus must stay readable over arbitrary content. */
+  --glass-raised:rgba(255,255,255,.88);
+  --glass-card:rgba(255,255,255,.72);
+  --glass-chrome:rgba(255,255,255,.56);
+  --glass-sunken:rgba(255,255,255,.38);
+  --glass-input:rgba(255,255,255,.78);
+  --glass-hover:rgba(255,255,255,.62);
+
+  /* Edges. On frost the light rim reads as the border; the ink rule is the fallback for
+     anything sitting on an opaque surface. */
+  --glass-edge:rgba(255,255,255,.80);
+  --glass-edge-strong:rgba(255,255,255,.94);
+  --glass-rule:rgba(22,40,60,.09);
+  --glass-rule-strong:rgba(22,40,60,.14);
+  --glass-highlight:inset 0 1px 0 rgba(255,255,255,.62); /* @kind shadow */
+
+  /* The lit field behind every panel. Navy and crimson only — the brand pair. */
+  --glass-ambient:
+    radial-gradient(820px 560px at 8% -10%, rgba(108,137,172,.42), transparent 62%),
+    radial-gradient(700px 500px at 96% 6%, rgba(204,74,81,.20), transparent 60%),
+    radial-gradient(760px 620px at 62% 106%, rgba(108,137,172,.24), transparent 62%); /* @kind color */
+  --glass-ambient-base:#EAEEF4;
+
+  /* Re-pointed surface aliases */
+  --surface-page:var(--glass-ambient-base);
+  --surface-card:var(--glass-card);
+  --surface-raised:var(--glass-raised);
+  --surface-sunken:var(--glass-sunken);
+  --surface-header:var(--glass-chrome);
+  --surface-nav:var(--glass-chrome);
+  --surface-brand-panel:linear-gradient(165deg,var(--navy-500),var(--navy-800) 72%); /* @kind color */
+  --surface-nav-hover:rgba(255,255,255,.70);
+  --surface-nav-active:#FFFFFF;
+  --surface-nav-section:transparent;
+  --surface-hover:var(--glass-hover);
+  --surface-selected:rgba(168,188,211,.34);
+  --surface-disabled:rgba(22,40,60,.05);
+  --surface-scrim:rgba(12,24,38,.42);
+  --surface-input:var(--glass-input);
+  --surface-tooltip:rgba(17,32,47,.88);
+
+  /* Nav sits on frost now, not on navy — nav text becomes ink. */
+  --text-on-nav:var(--gray-700);
+  --text-on-nav-active:var(--navy-700);
+
+  /* Secondary inks go one stop darker on frost. The flat build set them against pure white;
+     a .72 film over the lit field composites to about #F2F4F8, which costs roughly half a
+     contrast point — enough to drop #6B7685 under 4.5:1. */
+  --text-muted:var(--gray-600);
+  --text-subtle:var(--gray-550);
+
+  --border-subtle:var(--glass-rule);
+  --border-default:var(--glass-rule-strong);
+  --border-input:rgba(22,40,60,.16);
+  --border-nav:rgba(22,40,60,.08);
+
+  --action-secondary-bg:rgba(255,255,255,.80);
+  --action-secondary-bg-hover:rgba(255,255,255,.94);
+  --action-secondary-bg-active:#FFFFFF;
+  --action-ghost-bg-hover:rgba(255,255,255,.62);
+
+  /* Glass elevation: a light rim on top, a soft spread below. */
+  --shadow-card:0 1px 2px rgba(22,40,60,.06), 0 20px 44px -26px rgba(22,40,60,.30);
+  --shadow-dialog:var(--glass-highlight), 0 32px 72px -28px rgba(12,24,38,.46);
+  --shadow-dropdown:var(--glass-highlight), 0 12px 32px -14px rgba(22,40,60,.34);
+  --shadow-nav-active:0 1px 2px rgba(22,40,60,.08), 0 6px 14px -8px rgba(22,40,60,.24);
+}
+
+/* The ambient field. The base color goes on <html> so it propagates to the page canvas;
+   the blooms go on a fixed pseudo-element above it. Panels then blur a stable image rather
+   than whatever scrolled past. The base color rides on <html> (set in base.css from
+   --surface-page); it must NOT sit on <body>, because a body background propagates to the
+   page canvas, which paints below negative z-index and would bury the blooms. */
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:var(--glass-ambient)}
+
+/* Browsers without backdrop-filter get opaque surfaces instead of muddy ones. */
+@supports not (backdrop-filter:blur(1px)){
+  :root{--glass-raised:#FFFFFF;--glass-card:#FFFFFF;--glass-chrome:#F7F8FA;--glass-sunken:#F1F3F6;--glass-input:#FFFFFF;--glass-hover:#F1F3F6}
+}
+

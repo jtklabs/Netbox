@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<!-- @template name="Portal screen" description="Nova portal chrome on light frost: collapsible rail, frosted top bar, page header and a sortable, filterable records table — start any internal screen here." -->
+<helmet>
+<script src="./ds-base.js"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<style>html,body{height:100%;margin:0}body{overflow:hidden}</style>
+</helmet>
+<div style="display:flex;height:100vh;font-family:var(--font-sans);font-size:14px;color:var(--text-body)">
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.SidebarNav" brand="Nova" sections="{{ navSections }}" active-id="circuits" footer="{{ navFooter }}" hint-size="236px,100%"></x-import>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;position:relative;z-index:0">
+<header style="height:56px;flex:0 0 auto;display:flex;align-items:center;gap:16px;padding:0 24px;background:var(--surface-header);backdrop-filter:var(--glass-film-strong);-webkit-backdrop-filter:var(--glass-film-strong);border-bottom:1px solid var(--glass-edge)">
+<div style="width:300px;max-width:40%;height:30px;display:flex;align-items:center;gap:8px;padding:0 10px;background:var(--surface-input);backdrop-filter:var(--glass-film-subtle);-webkit-backdrop-filter:var(--glass-film-subtle);border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-subtle)">Search assets, reports, tasks</div>
+<div style="flex:1"></div>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.Button" size="sm" variant="ghost" icon-left="circle-help" hint-size="90px,28px">Help</x-import>
+</header>
+<div style="flex:1;min-height:0;overflow-y:auto">
+<div style="width:100%;padding:24px;display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
+<div style="flex:1;min-width:0">
+<h1 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-0.012em;color:var(--text-heading)">Circuits &amp; WAN links</h1>
+<p style="margin:4px 0 0;font-size:13px;color:var(--text-muted)">34 records · synced 15 minutes ago</p>
+</div>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.Button" icon-left="download" hint-size="120px,34px">Export CSV</x-import>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.Button" variant="primary" icon-left="plus" hint-size="120px,34px">Add asset</x-import>
+</div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.MetricTile" label="Compliant" value="1,112" hint-size="100%,88px"></x-import>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.MetricTile" label="Due soon" value="128" tone="warning" hint-size="100%,88px"></x-import>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.MetricTile" label="Overdue" value="44" tone="danger" hint-size="100%,88px"></x-import>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.MetricTile" label="Avg. uptime" value="99.94%" hint-size="100%,88px"></x-import>
+</div>
+<section style="background:var(--surface-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film);border:1px solid var(--glass-edge);border-radius:8px;box-shadow:var(--shadow-card)">
+<header style="display:flex;align-items:center;gap:12px;min-height:44px;padding:12px 16px;border-bottom:1px solid var(--border-subtle)">
+<h3 style="margin:0;flex:1;font-size:14px;font-weight:600;color:var(--text-heading)">Records</h3>
+</header>
+<x-import component-from-global-scope="PortalDesignSystem_986bf0.DataTable" columns="{{ columns }}" rows="{{ rows }}" search="{{ true }}" filterable="{{ filterable }}" paginated="{{ true }}" page-size="{{ pageSize }}" default-sort-key="id" sticky-header="{{ true }}" compact="{{ compact }}" hint-size="100%,320px"></x-import>
+</section>
+</div>
+</div>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:860},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;default&quot;:&quot;light&quot;,&quot;tsType&quot;:&quot;\&quot;light\&quot; | \&quot;dark\&quot;&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;glassBlur&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:18,&quot;min&quot;:0,&quot;max&quot;:32,&quot;step&quot;:2,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;compact&quot;,&quot;default&quot;],&quot;default&quot;:&quot;compact&quot;,&quot;tsType&quot;:&quot;\&quot;compact\&quot; | \&quot;default\&quot;&quot;,&quot;section&quot;:&quot;Table&quot;},&quot;pageSize&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[25,50,100],&quot;default&quot;:25,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Table&quot;},&quot;filterable&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Table&quot;}}">
+class Component extends DCLogic {
+  componentDidMount() { this.sync(); }
+  componentDidUpdate() { this.sync(); }
+
+  /* Theme and glass intensity are document-level, so they are set on <html> rather than
+     passed down. Intensity moves one token; every frosted surface follows. */
+  sync() {
+    const root = document.documentElement;
+    root.setAttribute("data-theme", this.props.theme === "dark" ? "dark" : "light");
+    const blur = this.props.glassBlur;
+    if (blur != null) {
+      root.style.setProperty("--glass-blur", blur + "px");
+      root.style.setProperty("--glass-blur-subtle", Math.round(blur * 0.55) + "px");
+      root.style.setProperty("--glass-blur-strong", Math.round(blur * 1.45) + "px");
+    }
+    if (window.lucide) window.lucide.createIcons();
+  }
+
+  navSections() {
+    return [
+      { id: "ops", label: "Operations", items: [
+        { id: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
+        { id: "tasks", label: "My tasks", icon: "check-square", count: 7 },
+        { id: "sites", label: "Sites & facilities", icon: "building-2" },
+      ] },
+      { id: "inventory", label: "Inventory", items: [
+        { id: "circuits", label: "Circuits & WAN", icon: "cable" },
+        { id: "routers", label: "Routers & switches", icon: "router" },
+        /* Third level: Inventory → Global → Cisco. A group opens itself when the active
+           route is under it. */
+        { id: "global", label: "Global", icon: "globe", items: [
+          { id: "vendor-cisco", label: "Cisco" },
+          { id: "vendor-juniper", label: "Juniper" },
+          { id: "vendor-arista", label: "Arista" },
+        ] },
+      ] },
+      { id: "compliance", label: "Compliance", items: [
+        { id: "reports", label: "Reports", icon: "clipboard-check", count: 3, countTone: "danger" },
+        { id: "standards", label: "Config standards", icon: "shield-check" },
+      ] },
+    ];
+  }
+
+  renderVals() {
+    const NS = window.PortalDesignSystem_986bf0 || {};
+    const pill = (status) => (NS.StatusPill ? React.createElement(NS.StatusPill, { status }) : status);
+    return {
+      navSections: this.navSections(),
+      /* A function, so the footer can shed its label when the rail is 56px wide. */
+      navFooter: ({ collapsed }) =>
+        React.createElement(
+          "span",
+          { style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0 } },
+          React.createElement(
+            "span",
+            { style: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, flex: "0 0 auto", borderRadius: 999, background: "var(--navy-700)", color: "#fff", fontSize: "var(--text-2xs)", fontWeight: 600 } },
+            "DO"
+          ),
+          collapsed
+            ? null
+            : React.createElement("span", { style: { fontSize: "var(--text-xs)", color: "var(--text-body)", whiteSpace: "nowrap" } }, "D. Okafor")
+        ),
+      filterable: this.props.filterable !== false,
+      compact: this.props.density !== "default",
+      pageSize: this.props.pageSize || 25,
+      columns: [
+        { key: "id", header: "Circuit ID", mono: true, width: 130 },
+        { key: "carrier", header: "Carrier", filter: "select" },
+        { key: "site", header: "Site", mono: true, filter: "select", width: 100 },
+        { key: "bandwidth", header: "Bandwidth", align: "right", mono: true, width: 130,
+          sortAccessor: (r) => r.mbps, render: (r) => r.mbps.toLocaleString() + " Mbps" },
+        { key: "audited", header: "Last audit", mono: true, width: 120 },
+        { key: "status", header: "Compliance", filter: "select", width: 150, render: (r) => pill(r.status) },
+      ],
+      rows: this.rows(),
+    };
+  }
+
+  /* 34 records so the page footer has something to page through. Replace this with your
+     own rows — the table needs nothing but `id` plus the column keys. */
+  rows() {
+    const carriers = ["Lumen", "Zayo", "AT&T", "Cogent", "Verizon", "Comcast"];
+    const sites = ["CHI-01", "DAL-03", "ATL-02", "SEA-01", "DEN-02", "NYC-04", "BOS-01", "PHX-01"];
+    const speeds = [250, 500, 1000, 2000, 10000];
+    const states = ["compliant", "compliant", "compliant", "due soon", "overdue", "exception"];
+    const out = [];
+    for (let i = 0; i < 34; i++) {
+      const month = ((i * 5) % 12) + 1;
+      out.push({
+        id: "CKT-" + (40182 + i * 37),
+        carrier: carriers[i % carriers.length],
+        site: sites[i % sites.length],
+        mbps: speeds[i % speeds.length],
+        audited: (month > 9 ? 2025 : 2026) + "-" + String(month).padStart(2, "0") + "-" + String(((i * 7) % 27) + 1).padStart(2, "0"),
+        status: states[i % states.length],
+      });
+    }
+    return out;
+  }
+}
+
+</script>
+</body>
+</html>

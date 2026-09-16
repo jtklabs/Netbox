@@ -1,0 +1,69 @@
+/* Glass layer — dark. Loaded after theme-dark.css so it re-points that theme's surface
+   aliases to translucent films. Same rule as light: only surfaces and edges change; inks,
+   status colors and action fills come from theme-dark.css untouched.
+
+   Dark frost needs MORE opacity than light frost, not less — a dark translucent panel over a
+   lit field loses contrast fast. Card sits at .68 here versus .72 in light, but the field
+   behind it is far darker, so effective text contrast lands in the same place. */
+[data-theme="dark"]{
+  --glass-raised:rgba(30,44,60,.88);
+  --glass-card:rgba(26,38,52,.68);
+  --glass-chrome:rgba(18,28,40,.62);
+  --glass-sunken:rgba(10,18,28,.42);
+  --glass-input:rgba(10,18,28,.60);
+  --glass-hover:rgba(255,255,255,.07);
+
+  --glass-edge:rgba(255,255,255,.12);
+  --glass-edge-strong:rgba(255,255,255,.20);
+  --glass-rule:rgba(255,255,255,.08);
+  --glass-rule-strong:rgba(255,255,255,.13);
+  --glass-highlight:inset 0 1px 0 rgba(255,255,255,.12); /* @kind shadow */
+
+  --glass-ambient:
+    radial-gradient(880px 600px at 10% -12%, rgba(42,72,104,.62), transparent 64%),
+    radial-gradient(720px 520px at 96% 4%, rgba(140,26,33,.34), transparent 60%),
+    radial-gradient(820px 680px at 66% 108%, rgba(30,54,81,.50), transparent 64%); /* @kind color */
+  --glass-ambient-base:#0A1119;
+
+  --surface-page:var(--glass-ambient-base);
+  --surface-card:var(--glass-card);
+  --surface-raised:var(--glass-raised);
+  --surface-sunken:var(--glass-sunken);
+  --surface-header:var(--glass-chrome);
+  --surface-nav:var(--glass-chrome);
+  --surface-brand-panel:linear-gradient(165deg,#1B3550,#070D15 72%); /* @kind color */
+  --surface-nav-hover:rgba(255,255,255,.07);
+  --surface-nav-active:rgba(255,255,255,.14);
+  --surface-nav-section:transparent;
+  --surface-hover:var(--glass-hover);
+  --surface-selected:rgba(62,96,137,.28);
+  --surface-disabled:rgba(255,255,255,.05);
+  --surface-scrim:rgba(4,9,15,.58);
+  --surface-input:var(--glass-input);
+
+  --text-on-nav:rgba(231,237,245,.82);
+  --text-on-nav-active:#FFFFFF;
+
+  /* Same correction in the other direction: dark frost is lighter than the flat dark card,
+     so the subtle ink has to come up to clear 4.5:1. */
+  --text-subtle:#8A95A3;
+
+  --border-subtle:var(--glass-rule);
+  --border-default:var(--glass-rule-strong);
+  --border-input:rgba(255,255,255,.16);
+  --border-nav:rgba(255,255,255,.09);
+
+  --action-secondary-bg:rgba(255,255,255,.08);
+  --action-secondary-bg-hover:rgba(255,255,255,.14);
+  --action-secondary-bg-active:rgba(255,255,255,.20);
+  --action-ghost-bg-hover:rgba(255,255,255,.08);
+
+  --shadow-card:var(--glass-highlight), 0 24px 48px -28px rgba(0,0,0,.70);
+  --shadow-dialog:var(--glass-highlight), 0 36px 80px -30px rgba(0,0,0,.80);
+  --shadow-dropdown:var(--glass-highlight), 0 14px 34px -14px rgba(0,0,0,.70);
+  --shadow-nav-active:inset 0 1px 0 rgba(255,255,255,.16);
+}
+
+@supports not (backdrop-filter:blur(1px)){
+  [data-theme="dark"]{--glass-raised:#1E2C3C;--glass-card:#16202C;--glass-chrome:#121C28;--glass-sunken:#0E1621;--glass-input:#0E1621;--glass-hover:#1C2734}
+}

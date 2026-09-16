@@ -1,0 +1,12 @@
+/* Motion. Short, linear-feeling, no bounce. Nothing animates longer than 240ms. */
+:root{
+  --duration-instant:80ms; /* @kind other */
+  --duration-fast:120ms; /* @kind other */
+  --duration-base:160ms; /* @kind other */
+  --duration-slow:240ms; /* @kind other */
+  --ease-standard:cubic-bezier(.2,0,.2,1); /* @kind other */
+  --ease-out:cubic-bezier(0,0,.2,1); /* @kind other */
+  --ease-in:cubic-bezier(.4,0,1,1); /* @kind other */
+  --transition-control:background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),box-shadow var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard); /* @kind other */
+  --transition-surface:background-color var(--duration-fast) var(--ease-standard); /* @kind other */
+}

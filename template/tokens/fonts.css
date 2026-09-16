@@ -1,0 +1,5 @@
+/* Webfonts. No font binaries were provided with the source material, so both
+   families are loaded from Google Fonts. Public Sans and IBM Plex Mono are both
+   open-licensed, so they can be self-hosted: drop the .woff2 files in
+   assets/fonts/ and replace this @import with local @font-face rules. */
+@import url("https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap");

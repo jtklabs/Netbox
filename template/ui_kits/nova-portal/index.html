@@ -1,0 +1,199 @@
+<!-- @dsCard group="Nova portal" viewport="1440x900" name="Portal (click-through)" subtitle="Sign in, then browse inventory, compliance, tasks, forms and linked tools" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nova — network operations portal</title>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="data.js"></script>
+<style>html,body,#root{height:100%;margin:0}body{overflow:hidden}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="AppShell.jsx"></script>
+<script type="text/babel" src="DashboardScreen.jsx"></script>
+<script type="text/babel" src="InventoryListScreen.jsx"></script>
+<script type="text/babel" src="InventoryDetailScreen.jsx"></script>
+<script type="text/babel" src="ComplianceReportScreen.jsx"></script>
+<script type="text/babel" src="ComplianceFormScreen.jsx"></script>
+<script type="text/babel" src="TaskScreens.jsx"></script>
+<script type="text/babel" src="MultiStepFormScreen.jsx"></script>
+<script type="text/babel" src="ToolLauncherScreen.jsx"></script>
+<script type="text/babel" src="AuthAndSettingsScreens.jsx"></script>
+<script type="text/babel">
+const { Button, IconButton } = window.PortalDesignSystem_986bf0;
+
+const INVENTORY_TITLES = {
+  circuits: ["Circuits & WAN links", "1,284 records · synced from NetBox 15 minutes ago"],
+  devices: ["Routers & switches", "2,461 records · synced from NetBox 15 minutes ago"],
+  "vendor-cisco": ["Cisco estate", "1,902 devices across 64 sites · synced from NetBox 15 minutes ago"],
+  "vendor-juniper": ["Juniper estate", "412 devices across 28 sites · synced from NetBox 15 minutes ago"],
+  "vendor-arista": ["Arista estate", "147 devices across 9 sites · synced from NetBox 15 minutes ago"],
+  firewalls: ["Firewalls", "23 records · synced from NetBox 15 minutes ago"],
+  wireless: ["Wireless APs", "318 records · synced from NetBox 15 minutes ago"],
+  sites: ["Sites & facilities", "64 records"],
+  addressing: ["IP blocks & VLANs", "412 records"],
+  carriers: ["Carriers & contracts", "18 records"],
+  licenses: ["Licenses", "96 records"],
+};
+
+function Portal() {
+  const [signedIn, setSignedIn] = React.useState(false);
+  const [screen, setScreen] = React.useState("dashboard");
+  const [theme, setTheme] = React.useState("light");
+  const [record, setRecord] = React.useState(null);
+  const [report, setReport] = React.useState(null);
+  const [task, setTask] = React.useState(null);
+  const [detailTab, setDetailTab] = React.useState("overview");
+
+  React.useEffect(() => { document.documentElement.setAttribute("data-theme", theme); }, [theme]);
+  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+
+  const go = (id) => {
+    if (id.indexOf("t-") === 0) { setScreen("tool-launcher"); return; }
+    setRecord(null); setReport(null); setTask(null); setDetailTab("overview");
+    setScreen(id);
+  };
+
+  if (!signedIn) return <LoginScreen onSignIn={() => setSignedIn(true)} />;
+
+  const shell = (props, children) =>
+    <AppShell activeId={props.activeId || screen} onNavigate={go} theme={theme} onToggleTheme={toggleTheme} {...props}>{children}</AppShell>;
+
+  if (record) {
+    return shell(
+      {
+        activeId: "circuits",
+        breadcrumbs: [{ id: "dashboard", label: "Nova" }, { id: "circuits", label: "Circuits & WAN" }, { label: record.id }],
+        title: record.id,
+        subtitle: record.carrier + " · " + record.site + " · " + record.bandwidth,
+        actions: <React.Fragment><Button iconLeft="external-link">Open in NetBox</Button><Button iconLeft="clipboard-list">New task</Button><Button variant="primary" iconLeft="shield-check">Re-check compliance</Button></React.Fragment>,
+        tabs: [{ id: "overview", label: "Overview" }, { id: "compliance", label: "Compliance", count: 5 }, { id: "history", label: "Change history" }],
+        activeTab: detailTab,
+        onTabChange: setDetailTab,
+      },
+      <InventoryDetailScreen record={record} tab={detailTab} />
+    );
+  }
+
+  if (report) {
+    return shell(
+      {
+        activeId: "reports",
+        breadcrumbs: [{ id: "dashboard", label: "Nova" }, { id: "reports", label: "Compliance reports" }, { label: report.id }],
+        title: report.name,
+        subtitle: report.id + " · " + report.framework + " · owner " + report.owner,
+        actions: <React.Fragment><Button iconLeft="printer">Print pack</Button><Button variant="primary" iconLeft="upload">Add evidence</Button></React.Fragment>,
+      },
+      <ComplianceReportScreen report={report} onNavigate={go} onOpenReport={setReport} />
+    );
+  }
+
+  if (task) {
+    return shell(
+      {
+        activeId: "tasks",
+        breadcrumbs: [{ id: "dashboard", label: "Nova" }, { id: "tasks", label: "Task assignments" }, { label: task.id }],
+        title: task.id,
+        subtitle: "Compliance evidence · " + task.related,
+      },
+      <TaskDetailScreen task={task} onNavigate={go} />
+    );
+  }
+
+  if (INVENTORY_TITLES[screen]) {
+    const [title, subtitle] = INVENTORY_TITLES[screen];
+    return shell(
+      {
+        title: title,
+        subtitle: subtitle,
+        actions: <React.Fragment><Button iconLeft="sliders-horizontal">Saved views</Button><Button variant="primary" iconLeft="plus" onClick={() => go("intake")}>Add asset</Button></React.Fragment>,
+      },
+      <InventoryListScreen onOpenRecord={setRecord} />
+    );
+  }
+
+  if (screen === "reports" || screen === "standards") {
+    return shell(
+      {
+        activeId: screen,
+        title: screen === "standards" ? "Configuration standards" : "Compliance reports",
+        subtitle: screen === "standards" ? "Baselines evaluated nightly against every managed device" : "Register of every reporting obligation and its evidence",
+        actions: <Button variant="primary" iconLeft="file-plus-2" onClick={() => go("submit")}>New submission</Button>,
+      },
+      <ComplianceReportScreen onNavigate={go} onOpenReport={setReport} />
+    );
+  }
+
+  if (screen === "submit") {
+    return shell(
+      {
+        breadcrumbs: [{ id: "dashboard", label: "Nova" }, { id: "reports", label: "Compliance reports" }, { label: "New submission" }],
+        title: "Submit a compliance report",
+        subtitle: "Evidence is locked once the reviewer accepts the submission",
+      },
+      <ComplianceFormScreen onNavigate={go} />
+    );
+  }
+
+  if (screen === "tasks") {
+    return shell(
+      {
+        title: "Task assignments",
+        subtitle: "12 open · 3 overdue across the network team",
+      },
+      <TaskListScreen onOpenTask={setTask} />
+    );
+  }
+
+  if (screen === "intake") {
+    return shell(
+      {
+        breadcrumbs: [{ id: "dashboard", label: "Nova" }, { id: "devices", label: "Inventory" }, { label: "New asset" }],
+        title: "New asset intake",
+        subtitle: "Five steps. Progress is saved as a draft after each step.",
+      },
+      <MultiStepFormScreen onNavigate={go} />
+    );
+  }
+
+  if (screen === "tool-launcher") {
+    return shell(
+      {
+        activeId: "tool-launcher",
+        title: "Linked tools",
+        subtitle: "Everything else the network team uses, reachable with your portal session",
+      },
+      <ToolLauncherScreen />
+    );
+  }
+
+  if (screen === "settings") {
+    return shell(
+      {
+        title: "Settings",
+        subtitle: "Your preferences, notifications and the roles that govern access",
+      },
+      <SettingsScreen theme={theme} onToggleTheme={toggleTheme} />
+    );
+  }
+
+  return shell(
+    {
+      title: "Good morning, Deji",
+      subtitle: "Monday 15 September 2026 · 3 reports need attention",
+      actions: <React.Fragment><Button iconLeft="download">Export summary</Button><Button variant="primary" iconLeft="file-plus-2" onClick={() => go("submit")}>Submit a report</Button></React.Fragment>,
+    },
+    <DashboardScreen onNavigate={go} />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Portal />);
+</script>
+</body>
+</html>

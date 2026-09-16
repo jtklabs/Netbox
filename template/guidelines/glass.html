@@ -1,0 +1,66 @@
+<!-- @dsCard group="Brand" viewport="760x420" name="Glass" subtitle="Light frost: what floats, how far, and where it stops" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../styles.css">
+<style>
+html,body{margin:0;height:100%}
+body{padding:18px;font-size:var(--text-base);overflow:hidden}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;height:100%}
+.panel{padding:14px;border-radius:var(--radius-card);border:1px solid var(--glass-edge);box-shadow:var(--shadow-card);min-width:0;display:flex;flex-direction:column;gap:10px}
+.lb{font-size:var(--text-2xs);letter-spacing:var(--tracking-caps);text-transform:uppercase;color:var(--text-subtle);font-weight:600}
+.tok{font-family:var(--font-mono);font-size:10px;color:var(--text-muted)}
+.stack{display:flex;flex-direction:column;gap:7px}
+.film{height:38px;border-radius:var(--radius-md);border:1px solid var(--glass-edge);display:flex;align-items:center;padding:0 10px;gap:8px;font-size:var(--text-xs);color:var(--text-body)}
+.rule{display:flex;align-items:center;gap:8px;font-size:var(--text-xs);color:var(--text-body)}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.yes{background:var(--success-ink)}
+.no{background:var(--crimson-500)}
+</style>
+</head>
+<body>
+<div class="grid">
+<div class="panel" style="background:var(--surface-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)">
+<div class="lb">The three films</div>
+<div class="stack">
+<div class="film" style="background:var(--glass-raised);backdrop-filter:var(--glass-film-strong);-webkit-backdrop-filter:var(--glass-film-strong)"><span style="flex:1">Raised — dialogs, menus, toasts</span><span class="tok">.88</span></div>
+<div class="film" style="background:var(--glass-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)"><span style="flex:1">Card — panels, tiles, tables</span><span class="tok">.72</span></div>
+<div class="film" style="background:var(--glass-chrome);backdrop-filter:var(--glass-film-strong);-webkit-backdrop-filter:var(--glass-film-strong)"><span style="flex:1">Chrome — rail, top bar</span><span class="tok">.56</span></div>
+</div>
+<p style="margin:0;font-size:var(--text-xs);color:var(--text-muted);text-wrap:pretty">The higher a surface floats, the more opaque it gets. A dialog has to stay readable over content it did not choose.</p>
+</div>
+
+<div class="panel" style="background:var(--surface-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)">
+<div class="lb">Intensity</div>
+<div class="stack">
+<div class="film" style="background:var(--glass-card);backdrop-filter:var(--glass-film-subtle);-webkit-backdrop-filter:var(--glass-film-subtle)"><span style="flex:1">Subtle — inputs, table headers</span><span class="tok">10px</span></div>
+<div class="film" style="background:var(--glass-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)"><span style="flex:1">Standard — everything else</span><span class="tok">18px</span></div>
+<div class="film" style="background:var(--glass-card);backdrop-filter:var(--glass-film-strong);-webkit-backdrop-filter:var(--glass-film-strong)"><span style="flex:1">Strong — chrome, dialogs</span><span class="tok">26px</span></div>
+</div>
+<p style="margin:0;font-size:var(--text-xs);color:var(--text-muted);text-wrap:pretty">Set once in <span class="tok">tokens/glass.css</span>. Past 32px the blur reads as smeared and costs frame time on long tables.</p>
+</div>
+
+<div class="panel" style="background:var(--surface-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)">
+<div class="lb">Where glass stops</div>
+<div class="stack">
+<div class="rule"><span class="dot yes"></span><span>Surfaces, edges, rules, hovers</span></div>
+<div class="rule"><span class="dot no"></span><span>Body text and headings — always full opacity</span></div>
+<div class="rule"><span class="dot no"></span><span>Status pills and badges — solid tints, or the state stops reading</span></div>
+<div class="rule"><span class="dot no"></span><span>Primary and danger buttons — solid navy, solid crimson</span></div>
+<div class="rule"><span class="dot no"></span><span>Anything carrying a number someone will act on</span></div>
+</div>
+<p style="margin:0;font-size:var(--text-xs);color:var(--text-muted);text-wrap:pretty">Translucency is for the container. Never for the content.</p>
+</div>
+
+<div class="panel" style="background:var(--surface-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film)">
+<div class="lb">The lit field</div>
+<div style="flex:1;min-height:60px;border-radius:var(--radius-md);border:1px solid var(--glass-edge);background:var(--glass-ambient-base);position:relative;overflow:hidden">
+<div style="position:absolute;inset:0;background:var(--glass-ambient)"></div>
+<div style="position:absolute;left:14px;right:14px;top:16px;bottom:16px;border-radius:var(--radius-md);background:var(--glass-card);backdrop-filter:var(--glass-film);-webkit-backdrop-filter:var(--glass-film);border:1px solid var(--glass-edge);box-shadow:var(--shadow-card)"></div>
+</div>
+<p style="margin:0;font-size:var(--text-xs);color:var(--text-muted);text-wrap:pretty">Navy and crimson blooms on <span class="tok">#EAEEF4</span>, fixed to the viewport so panels blur a stable image rather than whatever scrolled past. There is nothing to blur without it.</p>
+</div>
+</div>
+</body>
+</html>

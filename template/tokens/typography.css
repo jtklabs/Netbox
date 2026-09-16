@@ -1,0 +1,40 @@
+/* Typography. UI base is 14px — this is a dense data portal, not a marketing site. */
+:root{
+  --font-sans:"Public Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+
+  /* Scale */
+  --text-2xs:11px;--text-xs:12px;--text-sm:13px;--text-base:14px;--text-md:16px;
+  --text-lg:18px;--text-xl:20px;--text-2xl:24px;--text-3xl:30px;--text-4xl:36px;
+
+  /* Line heights */
+  --leading-tight:1.2;--leading-snug:1.35;--leading-normal:1.5;--leading-relaxed:1.65;
+
+  /* Weights */
+  --weight-regular:400;--weight-medium:500;--weight-semibold:600;--weight-bold:700;
+
+  /* Tracking */
+  --tracking-tight:-0.012em;--tracking-normal:0;--tracking-wide:0.02em;--tracking-caps:0.06em;
+
+  /* Semantic roles */
+  --type-page-title-size:var(--text-2xl);
+  --type-page-title-weight:var(--weight-semibold);
+  --type-page-title-tracking:var(--tracking-tight);
+  --type-section-size:var(--text-md);
+  --type-section-weight:var(--weight-semibold);
+  --type-card-title-size:var(--text-base);
+  --type-card-title-weight:var(--weight-semibold);
+  --type-body-size:var(--text-base);
+  --type-body-leading:var(--leading-normal);
+  --type-label-size:var(--text-sm);
+  --type-label-weight:var(--weight-medium);
+  --type-hint-size:var(--text-xs);
+  --type-table-header-size:var(--text-xs);
+  --type-table-header-weight:var(--weight-semibold);
+  --type-table-header-tracking:var(--tracking-caps);
+  --type-eyebrow-size:var(--text-2xs);
+  --type-eyebrow-tracking:var(--tracking-caps);
+  --type-data-size:var(--text-sm);
+  --type-metric-size:var(--text-3xl);
+  --type-metric-weight:var(--weight-semibold);
+}

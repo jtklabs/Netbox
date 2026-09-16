@@ -1,0 +1,17 @@
+/* Spacing — 4px base grid. Use --space-* everywhere; never raw px. */
+:root{
+  --space-0:0;--space-05:2px;--space-1:4px;--space-15:6px;--space-2:8px;--space-3:12px;
+  --space-4:16px;--space-5:20px;--space-6:24px;--space-8:32px;--space-10:40px;
+  --space-12:48px;--space-16:64px;
+
+  /* Component-level rhythm */
+  --pad-control-x:12px;      /* buttons, inputs */
+  --pad-control-y:7px;
+  --pad-cell-x:12px;         /* table cells */
+  --pad-cell-y:9px;
+  --pad-card:16px;
+  --pad-card-lg:20px;
+  --gap-inline:8px;          /* between sibling controls */
+  --gap-field:16px;          /* between form fields */
+  --gap-section:24px;        /* between page sections */
+}
