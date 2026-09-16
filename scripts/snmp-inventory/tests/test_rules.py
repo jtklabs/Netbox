@@ -141,6 +141,55 @@ class TestWhatCanBeSet:
         apply_rules(result, [rule(set_field=field, set_value="X")])
         assert getattr(result.primary, field) == "X"
 
+    def test_a_serial_the_device_does_not_report(self):
+        """A VM appliance or a box with a blank ENTITY-MIB. One rule per box,
+        pinned to it by name."""
+        result = result_for(serial="")
+        applied = apply_rules(result, [rule(
+            name="fw-dal-01 serial", match_operator="equals", match_value="fw-dal-01",
+            set_field="serial", set_value="FAZ-VMTM12345678",
+        )])
+        assert result.primary.serial == "FAZ-VMTM12345678"
+        assert applied[0].field == "serial"
+
+    def test_a_serial_the_device_reports_is_never_replaced(self):
+        result = result_for()
+        apply_rules(result, [rule(match_operator="equals", match_value="fw-dal-01",
+                                  set_field="serial", set_value="OTHER")])
+        assert result.primary.serial == "JAD12345678"
+
+
+class TestSerialRulesArePinnedToOneBox:
+    """The plugin refuses these on save; the poller refuses them again so an
+    older NetBox cannot hand it a rule that stamps one serial on a fleet."""
+
+    def serial_rule(self, **overrides):
+        values = dict(match_field="name", match_operator="equals", match_value="fw-dal-01",
+                      set_field="serial", set_value="JAD12345678")
+        values.update(overrides)
+        return rule(**values)
+
+    @pytest.mark.parametrize("match_field", ["name", "address"])
+    def test_exact_name_or_address_is_allowed(self, match_field):
+        assert rules_module.validate_rule(self.serial_rule(match_field=match_field)) == ""
+
+    @pytest.mark.parametrize("broken", [
+        {"match_operator": "contains"},
+        {"match_operator": "starts_with"},
+        {"match_operator": "regex", "match_value": "^fw-dal-01$"},
+        {"match_field": "sys_descr"},
+        {"match_field": "manufacturer"},
+    ])
+    def test_anything_looser_is_refused(self, broken):
+        assert "match the device name or address exactly" in \
+            rules_module.validate_rule(self.serial_rule(**broken))
+
+    def test_replacing_a_reported_serial_is_refused(self):
+        """A changed serial is how a hardware swap is detected; a rule must
+        not be able to fake one."""
+        assert "never replace one" in \
+            rules_module.validate_rule(self.serial_rule(only_if_blank=False))
+
 
 class TestOrderAndChaining:
     def test_rules_are_applied_in_the_order_given(self):
@@ -241,7 +290,8 @@ class TestReadingRulesFromThePlugin:
     @pytest.mark.parametrize("broken", [
         {"match_field": "colour"},
         {"match_operator": "sounds_like"},
-        {"set_field": "serial"},          # never invented by a rule
+        {"set_field": "name"},            # has an override of its own
+        {"set_field": "interfaces"},
         {"match_value": ""},
         {"set_value": "  "},
         {"match_operator": "regex", "match_value": "("},
@@ -329,6 +379,18 @@ class TestApplyingAfterReview:
             self.APPLIED,
         )
         assert "changed since this was reviewed" in _hardware_changed(reviewed, 1, result_for())
+
+    def test_a_serial_a_rule_supplied_is_not_a_hardware_change_either(self):
+        reviewed = self.Reviewed(
+            [{"name": "fw-dal-01", "serial": "FAZ-VMTM12345678", "model": "FPR-2120"}],
+            [{"rule": "fw-dal-01 serial", "device": "fw-dal-01", "field": "serial",
+              "value": "FAZ-VMTM12345678", "previous": ""}],
+        )
+        # The re-read, before rules: the device still reports no serial.
+        assert _hardware_changed(reviewed, 1, result_for(model="FPR-2120", serial="")) == ""
+        # But a box that now reports a serial of its own, and a different
+        # one, is a different box.
+        assert _hardware_changed(reviewed, 1, result_for(model="FPR-2120", serial="REAL1"))
 
     def test_a_model_the_device_reported_is_compared_as_before(self):
         reviewed = self.Reviewed(

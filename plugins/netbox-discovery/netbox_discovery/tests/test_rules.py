@@ -57,6 +57,39 @@ class DiscoveryRuleModelTest(TestCase):
             firepower_rule(match_value='   ').full_clean()
         self.assertIn('match_value', caught.exception.message_dict)
 
+    def serial_rule(self, **overrides):
+        values = dict(name='faz-01 serial', match_field='name', match_operator='equals',
+                      match_value='faz-01', set_field='serial',
+                      set_value='FAZ-VMTM12345678')
+        values.update(overrides)
+        return DiscoveryRule(**values)
+
+    def test_a_serial_rule_pinned_to_one_box_by_name_is_accepted(self):
+        self.serial_rule().full_clean()
+        self.serial_rule(match_field='address', match_value='198.51.100.10').full_clean()
+        self.assertIn('set the serial to', self.serial_rule().sentence)
+
+    def test_a_serial_rule_that_could_match_several_boxes_is_refused(self):
+        """Serials are what support contracts and quotes are matched on; one
+        serial on a fleet of devices is a mess the sync would only half
+        refuse, after the first was written."""
+        for broken in (
+            {'match_operator': 'contains'},
+            {'match_operator': 'regex', 'match_value': '^faz-01$'},
+            {'match_field': 'sys_descr'},
+            {'match_field': 'manufacturer'},
+        ):
+            with self.subTest(broken=broken):
+                with self.assertRaises(ValidationError) as caught:
+                    self.serial_rule(**broken).full_clean()
+                self.assertIn('set_field', caught.exception.message_dict)
+
+    def test_a_serial_rule_may_never_replace_a_reported_serial(self):
+        """A changed serial is how a hardware swap is detected."""
+        with self.assertRaises(ValidationError) as caught:
+            self.serial_rule(only_if_blank=False).full_clean()
+        self.assertIn('only_if_blank', caught.exception.message_dict)
+
     def test_rules_order_by_weight_then_name(self):
         """The order the poller applies them in."""
         firepower_rule(name='zeta', weight=100).save()
@@ -171,6 +204,15 @@ class DiscoveryRuleAPITest(APITestCase):
         }, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertTrue(DiscoveryRule.objects.get(name='Palo Alto by sysDescr').only_if_blank)
+
+    def test_a_loose_serial_rule_is_refused_over_the_api_too(self):
+        response = self.client.post(self.url, {
+            'name': 'serials everywhere', 'match_field': 'name',
+            'match_operator': 'contains', 'match_value': 'fw-',
+            'set_field': 'serial', 'set_value': 'ONE-SERIAL',
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('set_field', response.data)
 
     def test_a_bad_regex_is_refused_over_the_api_too(self):
         response = self.client.post(self.url, {

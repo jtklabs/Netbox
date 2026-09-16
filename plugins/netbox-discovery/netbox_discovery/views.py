@@ -1,3 +1,4 @@
+from dcim.models import Device
 from django.contrib import messages
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
@@ -86,7 +87,17 @@ class OnboardingRequestView(ObjectView):
                 name__in={entry.get('rule', '') for entry in applied}
             )
         } if applied else {}
+        # The chassis a VDC or vCMP guest belongs to, by the serial the scan
+        # reported for it — None when it is not in NetBox, which for a VDC is
+        # the reason the request is waiting.
+        context = instance.discovered_context
+        chassis = None
+        if context and (context.get('chassis_serial') or '').strip():
+            chassis = Device.objects.filter(
+                serial__iexact=context['chassis_serial'].strip()
+            ).first()
         return {
+            'context_chassis': chassis,
             'rules_applied': [
                 {'entry': entry, 'rule': rules.get(entry.get('rule', ''))}
                 for entry in applied

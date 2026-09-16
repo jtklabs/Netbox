@@ -20,6 +20,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from dcim.models import Device
+from extras.models import Tag
 from netbox_discovery import actions, filtersets, review
 from netbox_discovery.api.serializers import (
     ApplyResultSerializer,
@@ -47,6 +48,13 @@ from netbox_discovery.models import (
 )
 
 logger = logging.getLogger('netbox_discovery.api')
+
+# Put on a device whose request was entered by hand. The scanner reads it
+# and never changes such a device's identity -- serial, model, site -- on a
+# later scan: somebody typed those because the box could not be scanned, and
+# a scan that resolves to the record fills blanks and adds interfaces only.
+MANUAL_TAG_SLUG = 'discovery-manual'
+MANUAL_TAG_NAME = 'Entered by hand'
 
 
 class DiscoveryPollerViewSet(NetBoxModelViewSet):
@@ -375,6 +383,11 @@ class OnboardingRequestViewSet(NetBoxModelViewSet):
             entry.status = OnboardingStatusChoices.STATUS_APPLIED
             entry.applied_at = timezone.now()
             entry.error = ''
+            if entry.manually_entered:
+                tag, _created = Tag.objects.get_or_create(
+                    slug=MANUAL_TAG_SLUG, defaults={'name': MANUAL_TAG_NAME},
+                )
+                device.tags.add(tag)
         else:
             # Back to review rather than failed: the operator already approved
             # this one, so the useful next step is to look at why it would not

@@ -158,6 +158,27 @@ family. Custom fields are created through `/extras/custom-fields/` with
 
 `custom_fields` merges on PATCH — sending one key leaves the others alone.
 
+### Virtual device contexts
+
+`/dcim/virtual-device-contexts/` takes `device`, `name`, `identifier`
+(0–32767, optional), `status`, `tenant`, `primary_ip4`/`primary_ip6` and the
+usual description/comments/tags. The primary address must be assigned to an
+interface of the parent device, exactly as for a device. Filters `device_id`
+and `name` are what the scanner looks a context up by.
+
+An interface's allocation to contexts is its `vdcs` field, a list of context
+ids, read back as brief objects. PATCHing `vdcs` **replaces** the list, so
+the scanner reads the current allocation and appends — a port can sit in
+more than one context (mgmt0 is in all of them).
+
+### Object custom fields need `related_object_type`
+
+Creating a custom field of `type: object` without `related_object_type`
+(`"dcim.device"`, say) is a 400. `NetBox.ensure_custom_field` passes extra
+keys through for exactly this. The field's value is written as the target's
+id and read back as a nested object, so compare `["id"]` before deciding it
+changed.
+
 ## Cables
 
 Verified against the live 4.6.7 before the cable sync was written, the same

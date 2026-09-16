@@ -100,9 +100,31 @@ SOFTWARE_VERSION_CUSTOM_FIELD = {
 # depending on how the estate is run.
 RETIRED_DEVICE_STATUS = "inventory"
 RETIRED_TAG = "replaced"
+# Put on a device by the Discovery plugin when its request was entered by
+# hand. Somebody typed that model and serial because the box could not be
+# scanned, and a later scan that resolves to the record must not overwrite
+# what they typed: it may add interfaces and addresses, never change identity.
+MANUAL_TAG = "discovery-manual"
+
+DEVICES_ENDPOINT = "/dcim/devices/"
+# A Nexus VDC is written as a NetBox virtual device context on its chassis.
+VDC_ENDPOINT = "/dcim/virtual-device-contexts/"
+
+# A vCMP guest is a device of its own, linked to the chassis it runs on
+# through an object custom field the scanner creates on first use, the way
+# it creates the software version field. An object field rather than free
+# text so the link is clickable and survives the host being renamed.
+VCMP_HOST_FIELD = "vcmp_host"
+VCMP_HOST_CUSTOM_FIELD = {
+    "name": VCMP_HOST_FIELD,
+    "label": "vCMP host",
+    "type": "object",
+    "object_types": ["dcim.device"],
+    "related_object_type": "dcim.device",
+    "description": "The BIG-IP chassis this vCMP guest runs on, set by the SNMP scanner",
+}
 
 REPLACEMENT_ENDPOINT = "/plugins/discovery/hardware-replacements/"
-ISSUE_ENDPOINT = "/plugins/discovery/issues/"
 
 
 @dataclass
@@ -140,15 +162,20 @@ class SyncOptions:
     sync_fhrp_groups: bool = True
 
 
+def _primary_address(device: dict) -> str:
+    primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+    return (primary.get("address") or "").split("/")[0] if isinstance(primary, dict) else ""
+
+
 class Syncer:
     def __init__(self, netbox: NetBox, options: SyncOptions | None = None):
         self.netbox = netbox
         self.options = options or SyncOptions()
         self.cables = CableSyncer(netbox, self.options.cable_neighbor_classes)
         self._custom_field_ready = False
+        self._vcmp_field_ready = False
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
-        self._issues_ok: bool | None = None
         # Chassis swaps are detected before the replacement device exists, so
         # the audit row waits here until it has something to point at.
         self._pending_replacements: list[dict] = []
@@ -178,6 +205,15 @@ class Syncer:
         if self.options.manage_software_version and not self._lifecycle_available():
             self._ensure_software_version_field()
 
+        # A Nexus VDC is not a device: it is a slice of a chassis that must
+        # already be in NetBox, and is written onto that record. A vCMP guest
+        # is a device and goes through the ordinary path below, linked to its
+        # host afterwards.
+        primary = result.primary
+        if (primary is not None and primary.context is not None and primary.context.is_vdc
+                and self._sync_vdc(result, primary, scanned_address, tenant_id)):
+            return
+
         virtual_chassis = None
         if result.is_stack:
             virtual_chassis = self.netbox.ensure(
@@ -193,6 +229,8 @@ class Syncer:
                                          scanned_address=scanned_address)
             if device is not None:
                 created.append((record, device))
+                if record.context is not None and record.context.is_vcmp_guest:
+                    self._link_vcmp_host(device, record)
 
         # The master is one of the devices we just created, so it can only be
         # set once they exist.
@@ -297,15 +335,8 @@ class Syncer:
         )
         platform = self._ensure_platform(record.platform, manufacturer)
 
-        existing = self._find_device(record, site_id)
-
-        conflict = self._serial_belongs_to_another_device(existing, record, scanned_address)
-        if conflict:
-            # Refusing is the whole point. Matching on serial is what makes a
-            # re-IP'd box resolve to its existing record, and it is also what
-            # would let this scan write straight over a different device.
-            self._raise_issue(existing, record, scanned_address, conflict)
-            return None
+        existing = self._find_device(record, site_id, scanned_address)
+        manual = existing is not None and self._is_manual(existing)
 
         desired: dict = {}
         if record.serial:
@@ -327,6 +358,14 @@ class Syncer:
                 and not self._lifecycle_available()):
             desired["custom_fields"] = {SOFTWARE_VERSION_FIELD: record.software_version}
 
+        if existing is not None and manual:
+            # Entered by hand: the typed identity stands. Only what the record
+            # lacks is filled in, and nothing is retired or moved.
+            for key in ("serial", "device_type", "site", "tenant"):
+                if key in desired and existing.get(key) not in (None, "", {}):
+                    desired.pop(key)
+            log.debug("%s: entered by hand; identity left as typed", record.name)
+            return self._patch_device(existing, desired, record)
         if existing is not None:
             replaced = self._handle_serial_change(existing, record, site_id)
             if replaced is not None:
@@ -364,88 +403,16 @@ class Syncer:
         self._flush_pending_replacements(record, created)
         return created
 
-    def _serial_belongs_to_another_device(self, existing: dict | None,
-                                          record: DeviceRecord,
-                                          scanned_address: str) -> str:
-        """Is this serial already held against a *different* box?
-
-        Serial matching is deliberate and mostly right: it is what makes a
-        device that was renamed, re-addressed or moved resolve to the record it
-        already has. The dangerous case is when two devices carry one serial —
-        a mistyped entry, a vendor reusing one, or two records that were always
-        the same box. Then the match is wrong and syncing would overwrite a
-        record belonging to something else, silently.
-
-        Telling the two apart comes down to what else agrees. A rename keeps
-        the address; a re-address keeps the name. When *neither* matches, there
-        is no evidence these are the same device beyond a serial that is by
-        assumption suspect, so it is refused.
-        """
-        if existing is None or not record.serial:
-            return ""
-        stored_serial = (existing.get("serial") or "").strip()
-        if stored_serial.lower() != record.serial.strip().lower():
-            # Matched by name, not serial — that is the replacement path.
-            return ""
-
-        stored_name = (existing.get("name") or "").strip().lower()
+    @staticmethod
+    def _is_this_device(device: dict, record: DeviceRecord, scanned_address: str) -> bool:
+        """Does a record that shares this scan's serial agree with it on name
+        or address? A rename keeps the address; a re-address keeps the name."""
+        stored_name = (device.get("name") or "").strip().lower()
         reported_name = record.name.strip().lower()
         if stored_name and reported_name and stored_name == reported_name:
-            return ""
-
-        primary = (existing.get("primary_ip4") or existing.get("primary_ip") or {})
-        primary_address = (primary.get("address") or "").split("/")[0]
-        if scanned_address and primary_address and scanned_address == primary_address:
-            # Same address, different name: the box was renamed. Fine.
-            return ""
-
-        return (
-            "Serial %s is already on %s%s, which reports a different name and a "
-            "different address. Either two devices have been given one serial, or "
-            "one of them is wrong. Nothing was changed."
-            % (
-                record.serial,
-                existing.get("name") or "device %s" % existing.get("id"),
-                " (%s)" % primary_address if primary_address else "",
-            )
-        )
-
-    def _raise_issue(self, existing: dict | None, record: DeviceRecord,
-                     scanned_address: str, detail: str) -> None:
-        """Record something a person has to settle, where they will see it."""
-        log.error("%s: %s", scanned_address or record.name, detail)
-        if not self._issues_available():
-            return
-        payload = {
-            "kind": "duplicate-serial",
-            "status": "open",
-            "address": scanned_address or "",
-            "serial": record.serial,
-            "reported_name": record.name,
-            "detail": detail,
-            "detected_at": datetime.now(timezone.utc).isoformat(),
-        }
-        if existing is not None and existing.get("id", 0) > 0:
-            payload["device"] = existing["id"]
-        try:
-            self.netbox.create(ISSUE_ENDPOINT, payload, label="discovery issue")
-        except NetBoxError as exc:
-            # A duplicate open issue is the expected collision — the sweep runs
-            # four times a day and this one is already on the list.
-            if "unique" in str(exc).lower() or "already exists" in str(exc).lower():
-                log.debug("issue already open for %s", scanned_address)
-            else:
-                log.error("could not record the issue: %s", exc)
-
-    def _issues_available(self) -> bool:
-        if self._issues_ok is None:
-            self._issues_ok = self.netbox.endpoint_available(ISSUE_ENDPOINT)
-            if not self._issues_ok:
-                log.warning(
-                    "the Discovery plugin is not installed, so this could only be "
-                    "logged, not raised where anyone will see it"
-                )
-        return self._issues_ok
+            return True
+        primary_address = _primary_address(device)
+        return bool(scanned_address and primary_address and scanned_address == primary_address)
 
     def _handle_serial_change(self, existing: dict, record: DeviceRecord,
                               site_id: int) -> dict | None:
@@ -586,25 +553,236 @@ class Syncer:
                 remaining.append(pending)
         self._pending_replacements = remaining
 
-    def _find_device(self, record: DeviceRecord, site_id: int) -> dict | None:
-        """Find an existing device: serial first, then name.
+    def _find_device(self, record: DeviceRecord, site_id: int,
+                     scanned_address: str = "") -> dict | None:
+        """The record this scan belongs to, or None to create one.
 
-        Serial is the stronger key — it survives a rename, and for a stack it is
-        the only thing that reliably distinguishes member 2 from member 3. Name
-        is the fallback for gear that reports no serial.
+        The rule that matters more than any match: a scan never lands on a
+        record that might be a different box. The old rules did exactly that
+        twice over -- a serial alone claimed the first record carrying it,
+        and a name alone claimed a record at any site -- so a serial typed on
+        two devices, or two branch switches both called core-sw-01 with no
+        serial, quietly overwrote each other. Duplicate serials are allowed
+        now (a VDC, a guest, a vendor reusing one) and are never refused or
+        reported; what is refused is the guess.
+
+        With a serial: the records carrying it, and among them the one that
+        agrees on name or address. A rename keeps the address, a re-address
+        keeps the name; a record agreeing on neither is a different box.
+
+        Then, with or without a serial: the device with the polled address on
+        one of its interfaces -- an address belongs to one box -- else the
+        name at the site being scanned. This is how a record made without a
+        serial (entered by hand, imported from a sheet) gets its serial when
+        the box first reports one, and how a swapped chassis is noticed: the
+        name matches and the serial does not, which _handle_serial_change
+        reads as a replacement. Never the name elsewhere: names repeat across
+        sites, and matching one moved devices between sites.
+
+        None means a new record, beside whatever carries the serial.
         """
         if record.serial:
-            found = self.netbox.first("/dcim/devices/", {"serial": record.serial})
-            if found is not None:
-                return found
+            candidates = self._devices_with_serial(record.serial)
+            for device in candidates:
+                if self._is_this_device(device, record, scanned_address):
+                    return device
+            if candidates:
+                log.warning(
+                    "%s: serial %s is already on %s, which agrees on neither name nor "
+                    "address; %r is treated as a separate device with the same serial",
+                    scanned_address or record.name, record.serial,
+                    ", ".join(d.get("name") or "device %s" % d.get("id") for d in candidates),
+                    record.name,
+                )
+        by_address = self._device_at_address(scanned_address)
+        if by_address is not None:
+            return by_address
         if record.name:
-            found = self.netbox.first("/dcim/devices/", {"name": record.name, "site_id": site_id})
-            if found is not None:
-                return found
-            # A device may have been created at the wrong site by an earlier
-            # tool; match on name alone rather than making a duplicate.
-            return self.netbox.first("/dcim/devices/", {"name": record.name})
+            return self.netbox.first(DEVICES_ENDPOINT, {"name": record.name, "site_id": site_id})
         return None
+
+    def _device_at_address(self, address: str) -> dict | None:
+        """The device carrying `address` on one of its interfaces, if any."""
+        if not address:
+            return None
+        for ip in self.netbox.all("/ipam/ip-addresses/", {"address": address}):
+            if ip.get("assigned_object_type") != "dcim.interface" or not ip.get("assigned_object_id"):
+                continue
+            assigned = ip.get("assigned_object") or {}
+            device_id = (assigned.get("device") or {}).get("id") if isinstance(assigned, dict) else None
+            if device_id is None:
+                interface = self.netbox.first("/dcim/interfaces/", {"id": ip["assigned_object_id"]})
+                device = (interface or {}).get("device") or {}
+                device_id = device.get("id") if isinstance(device, dict) else device
+            if device_id:
+                try:
+                    return self.netbox.get(f"{DEVICES_ENDPOINT}{device_id}/")
+                except NetBoxError:
+                    return None
+        return None
+
+    @staticmethod
+    def _is_manual(device: dict) -> bool:
+        return MANUAL_TAG in {t.get("slug") for t in device.get("tags") or [] if isinstance(t, dict)}
+
+    def _devices_with_serial(self, serial: str) -> list[dict]:
+        return self.netbox.all(DEVICES_ENDPOINT, {"serial": serial})
+
+    # --- partitions of a chassis: Nexus VDCs and vCMP guests ----------------
+
+    def _sync_vdc(self, result: ScanResult, record: DeviceRecord,
+                  scanned_address: str, tenant_id: int | None) -> bool:
+        """Write a Nexus VDC as a virtual device context on its chassis.
+
+        The chassis is found by the serial the VDC reports, which is the
+        chassis's own. Its interfaces are the chassis's ports, so they are
+        written to the chassis and allocated to the context; the VDC's
+        management address becomes the context's primary IP, never the
+        chassis's. Modules and the software version are the chassis's and are
+        written from its own scan.
+
+        Returns False to have the caller carry on as for an ordinary device.
+        That happens when the record this serial resolves to *is* this VDC --
+        a chassis first recorded from a non-default VDC, before VDCs were
+        understood -- since demoting it to a context of itself would be wrong.
+        """
+        context = record.context
+        candidates = self._devices_with_serial(record.serial) if record.serial else []
+        if any(self._is_this_device(d, record, scanned_address) for d in candidates):
+            log.warning(
+                "%s: NetBox device %r carries this chassis serial and answers as VDC %r, "
+                "so it was recorded from a VDC rather than from the default VDC. Treating "
+                "it as the chassis. Point its primary IP at the default VDC's address to "
+                "have this VDC written as a virtual device context instead.",
+                scanned_address or record.name, record.name, context.name,
+            )
+            return False
+        if not candidates:
+            log.warning(
+                "%s: %s -- that chassis is not in NetBox, and a VDC is not created as a "
+                "device of its own. Scan the chassis (its default VDC) first. Nothing written.",
+                scanned_address or record.name, context.detail,
+            )
+            return True
+        chassis = candidates[0]
+        if len(candidates) > 1:
+            log.warning("%s: serial %s is on %d devices; using %s as the chassis",
+                        scanned_address or record.name, record.serial, len(candidates),
+                        chassis.get("name"))
+
+        vdc = self._ensure_vdc(chassis, record, tenant_id)
+        if vdc is None:
+            return True
+        if self.options.sync_interfaces:
+            self._sync_interfaces(chassis, record, scanned_address, tenant_id, vdc=vdc)
+        created = [(record, chassis)]
+        if self.options.sync_cables and self.options.sync_interfaces:
+            self.cables.sync_result(result, created)
+        if self.options.sync_fhrp_groups and self.options.sync_interfaces and result.fhrp_groups:
+            self._sync_fhrp_groups(result, created)
+        return True
+
+    def _ensure_vdc(self, chassis: dict, record: DeviceRecord,
+                    tenant_id: int | None) -> dict | None:
+        context = record.context
+        name = context.name or record.name
+        description = "Hostname %s" % record.name
+        payload = {"device": chassis["id"], "name": name, "status": "active",
+                   "description": description}
+        if context.identifier is not None:
+            payload["identifier"] = context.identifier
+        if tenant_id:
+            payload["tenant"] = tenant_id
+        vdc = self.netbox.ensure(
+            VDC_ENDPOINT, {"device_id": chassis["id"], "name": name}, payload,
+            label=f"virtual device context {name} on {chassis.get('name')}",
+        )
+        if vdc is None or vdc.get("id", 0) < 0:
+            return vdc
+        return self.netbox.ensure_fields(
+            VDC_ENDPOINT, vdc,
+            {"identifier": context.identifier, "description": description},
+            label=f"virtual device context {name}",
+        )
+
+    def _ensure_interface_vdc(self, interface: dict, vdc: dict) -> None:
+        """Allocate a chassis port to the VDC that reported it.
+
+        A port can sit in more than one VDC -- mgmt0 is in all of them -- so
+        this adds to the allocation rather than replacing it.
+        """
+        if interface.get("id", 0) < 0 or vdc.get("id", 0) < 0:
+            return
+        current = [v.get("id") if isinstance(v, dict) else v
+                   for v in (interface.get("vdcs") or [])]
+        if vdc["id"] in current:
+            return
+        updated = self.netbox.update(
+            "/dcim/interfaces/", interface["id"], {"vdcs": current + [vdc["id"]]},
+            label=f"interface {interface.get('name')} in VDC {vdc.get('name')}",
+        )
+        if updated:
+            interface.update(updated)
+
+    def _link_vcmp_host(self, device: dict, record: DeviceRecord) -> None:
+        """Point a vCMP guest at the chassis it runs on.
+
+        The host is found by the chassis serial the guest reported, which is
+        deliberately not written to the guest. A guest recorded before guests
+        were understood may carry that serial; it is moved off, or the host's
+        own scan would collide with the guest on every sweep. A host not yet
+        in NetBox is not an error: the link is made on a later sweep.
+        """
+        context = record.context
+        if device.get("id", 0) < 0:
+            log.info("[dry-run] would link %s to its vCMP host (chassis serial %s)",
+                     record.name, context.chassis_serial or "?")
+            return
+        serial = (device.get("serial") or "").strip()
+        if serial and context.chassis_serial and serial.lower() == context.chassis_serial.lower():
+            log.warning("%s: carried its vCMP host's chassis serial %s; moving it off the guest",
+                        record.name, serial)
+            updated = self.netbox.update(DEVICES_ENDPOINT, device["id"], {"serial": ""},
+                                         label=f"device {record.name} serial")
+            if updated:
+                device.update(updated)
+        host = self._vcmp_host_for(context.chassis_serial, exclude_id=device["id"])
+        if host is None:
+            log.info("%s: vCMP host with chassis serial %s is not in NetBox yet; "
+                     "the link is made on a later sweep", record.name,
+                     context.chassis_serial or "?")
+            return
+        self._ensure_vcmp_host_field()
+        current = (device.get("custom_fields") or {}).get(VCMP_HOST_FIELD)
+        current_id = current.get("id") if isinstance(current, dict) else current
+        if current_id == host["id"]:
+            return
+        self.netbox.update(
+            DEVICES_ENDPOINT, device["id"], {"custom_fields": {VCMP_HOST_FIELD: host["id"]}},
+            label=f"device {record.name} vCMP host {host.get('name')}",
+        )
+
+    def _vcmp_host_for(self, chassis_serial: str, exclude_id: int) -> dict | None:
+        if not chassis_serial:
+            return None
+        candidates = [d for d in self._devices_with_serial(chassis_serial)
+                      if d.get("id") != exclude_id]
+        # Prefer a record that is not itself a guest: one still carrying the
+        # host's serial from before guests were understood would link a guest
+        # to a guest.
+        hosts = [d for d in candidates
+                 if not (d.get("custom_fields") or {}).get(VCMP_HOST_FIELD)]
+        return (hosts or candidates)[0] if candidates else None
+
+    def _ensure_vcmp_host_field(self) -> None:
+        if self._vcmp_field_ready:
+            return
+        spec = dict(VCMP_HOST_CUSTOM_FIELD)
+        self.netbox.ensure_custom_field(
+            spec.pop("name"), spec.pop("object_types"), field_type=spec.pop("type"),
+            label=spec.pop("label"), description=spec.pop("description"), **spec,
+        )
+        self._vcmp_field_ready = True
 
     def _patch_device(self, existing: dict, desired: dict, record: DeviceRecord) -> dict:
         # custom_fields merges rather than replaces, so send only our key and
@@ -926,7 +1104,15 @@ class Syncer:
     )
 
     def _sync_interfaces(self, device: dict | None, record: DeviceRecord,
-                         scanned_address: str, tenant_id: int | None = None) -> None:
+                         scanned_address: str, tenant_id: int | None = None,
+                         vdc: dict | None = None) -> None:
+        """Write a record's interfaces onto `device`.
+
+        `vdc` is set when the record is a Nexus VDC and `device` its chassis:
+        the ports are the chassis's and are allocated to the context, and the
+        polled address becomes the context's primary IP rather than the
+        chassis's.
+        """
         if device is None or not record.interfaces:
             return
 
@@ -939,13 +1125,15 @@ class Syncer:
             netbox_interface = self._ensure_interface(device, interface, existing_by_name)
             if netbox_interface is None:
                 continue
+            if vdc is not None:
+                self._ensure_interface_vdc(netbox_interface, vdc)
             if interface.mac_address:
                 self._ensure_mac(netbox_interface, interface.mac_address)
             if self.options.sync_ips:
                 for cidr in interface.ip_addresses:
                     try:
                         self._ensure_ip(device, netbox_interface, cidr, scanned_address,
-                                        tenant_id)
+                                        tenant_id, vdc=vdc)
                     except NetBoxError as exc:
                         # One address NetBox will not take must not cost the
                         # rest of the device. This used to abort the whole
@@ -958,10 +1146,10 @@ class Syncer:
                         )
 
         if self.options.set_primary_ip and scanned_address:
-            self._ensure_primary_ip(device, scanned_address, tenant_id)
+            self._ensure_primary_ip(device, scanned_address, tenant_id, vdc=vdc)
 
     def _ensure_primary_ip(self, device: dict, scanned_address: str,
-                           tenant_id: int | None = None) -> None:
+                           tenant_id: int | None = None, vdc: dict | None = None) -> None:
         """Make the address we polled the primary IP. Always.
 
         The rule is flat: the primary IP is the address the device was
@@ -988,19 +1176,23 @@ class Syncer:
         about real hardware, where a virtual interface labelled as holding the
         polled address is at worst an extra row that says exactly what it is.
         """
-        if device.get("id", 0) < 0:
+        # For a VDC the address belongs to the context, not to the chassis
+        # whose interfaces carry it.
+        owner, owner_path = (vdc, VDC_ENDPOINT) if vdc is not None else (device, DEVICES_ENDPOINT)
+        if device.get("id", 0) < 0 or owner.get("id", 0) < 0:
             # A dry-run placeholder. Negative ids exist only in this process,
             # so reading one back is a guaranteed 404 — and there is nothing
             # to write either. Say what would happen and stop.
             log.info("would set %s as the primary IP of %s",
-                     scanned_address, device.get("name"))
+                     scanned_address, owner.get("name"))
             return
 
         # Refetched because the interface loop may have set it a moment ago,
         # and the dict we were handed predates that.
-        fresh = self.netbox.get(f"/dcim/devices/{device['id']}/")
-        if (fresh.get("primary_ip4") or {}).get("id"):
+        fresh_owner = self.netbox.get(f"{owner_path}{owner['id']}/")
+        if (fresh_owner.get("primary_ip4") or {}).get("id"):
             return          # step 1: the device reported it
+        fresh = fresh_owner if vdc is None else self.netbox.get(f"{DEVICES_ENDPOINT}{device['id']}/")
 
         interfaces = self.netbox.all("/dcim/interfaces/", {"device_id": device["id"]})
 
@@ -1018,7 +1210,7 @@ class Syncer:
         mine = next((c for c in candidates
                      if c.get("assigned_object_id") in by_id), None)
         if mine is not None:
-            self._set_primary_ip(fresh, mine)
+            self._set_primary_ip(fresh_owner, mine, owner_path)
             return
 
         chosen = next(
@@ -1046,7 +1238,7 @@ class Syncer:
         # device.
         cidr = candidates[0]["address"] if candidates else f"{scanned_address}/32"
         try:
-            self._ensure_ip(fresh, chosen, cidr, scanned_address, tenant_id)
+            self._ensure_ip(fresh, chosen, cidr, scanned_address, tenant_id, vdc=vdc)
         except NetBoxError as exc:
             log.warning("could not record %s on %s: %s",
                         scanned_address, chosen.get("name"), exc)
@@ -1147,7 +1339,8 @@ class Syncer:
             )
 
     def _ensure_ip(self, device: dict, interface: dict | None, cidr: str,
-                   scanned_address: str, tenant_id: int | None = None) -> None:
+                   scanned_address: str, tenant_id: int | None = None,
+                   vdc: dict | None = None) -> None:
         if interface is None:
             return
         existing = self.netbox.first(
@@ -1191,22 +1384,31 @@ class Syncer:
 
         if (self.options.set_primary_ip and existing is not None and scanned_address
                 and cidr.split("/")[0] == scanned_address):
-            self._set_primary_ip(device, existing)
+            if vdc is not None:
+                self._set_primary_ip(vdc, existing, VDC_ENDPOINT)
+            else:
+                self._set_primary_ip(device, existing)
 
-    def _set_primary_ip(self, device: dict, ip: dict) -> None:
-        """Make the address we actually polled the device's primary IP."""
-        if (device.get("primary_ip4") or {}).get("id") == ip["id"]:
+    def _set_primary_ip(self, owner: dict, ip: dict, path: str = DEVICES_ENDPOINT) -> None:
+        """Make the address we actually polled the primary IP of `owner` --
+        a device, or a virtual device context on one."""
+        if (owner.get("primary_ip4") or {}).get("id") == ip["id"]:
             return
         if ":" in ip.get("address", ""):
             return
+        if owner.get("id", 0) < 0:
+            return
         try:
-            self.netbox.update(
-                "/dcim/devices/", device["id"], {"primary_ip4": ip["id"]},
-                label=f"device {device.get('name')} primary IP",
+            updated = self.netbox.update(
+                path, owner["id"], {"primary_ip4": ip["id"]},
+                label=f"{owner.get('name')} primary IP",
             )
+            # Remembered on the dict in hand, so the interface loop and the
+            # fallback that follows it do not both write it.
+            owner["primary_ip4"] = (updated or {}).get("primary_ip4") or {"id": ip["id"]}
         except NetBoxError as exc:
             # Not fatal: the inventory is still correct without a primary IP.
-            log.warning("could not set primary IP on %s: %s", device.get("name"), exc)
+            log.warning("could not set primary IP on %s: %s", owner.get("name"), exc)
 
     # --- access points ------------------------------------------------------
 

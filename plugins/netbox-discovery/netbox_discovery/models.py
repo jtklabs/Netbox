@@ -461,6 +461,16 @@ class OnboardingRequest(PrimaryModel):
         return self.primary_discovered.get('platform', '')
 
     @property
+    def discovered_context(self):
+        """What partition of a chassis this scan is, if it is one.
+
+        A Nexus VDC or a vCMP guest, as the poller reported it: kind,
+        chassis_serial, name, identifier and a one-line detail. None for a
+        box of its own.
+        """
+        return self.primary_discovered.get('context') or None
+
+    @property
     def is_stack(self):
         return len(self.discovered_devices) > 1
 
@@ -572,7 +582,14 @@ class DiscoveryIssue(PrimaryModel):
     a re-IP'd or renamed box resolve to its existing record, and it is also
     what lets one device's data be written straight over another's when a
     serial is duplicated or mistyped. That overwrite is silent and destroys the
-    record it lands on, so it is refused and raised here instead.
+    record it lands on, so it used to be refused and raised here.
+
+    Duplicate serials are allowed now (a Nexus VDC and its chassis, a vCMP
+    guest and its host, a vendor reusing a number), and the scanner writes a
+    scan that agrees with an existing record on neither name nor address as a
+    separate device instead of refusing it. Nothing raises this kind any more;
+    the model stays for the issues already filed and for whatever a scan may
+    next be unable to decide.
     """
 
     kind = models.CharField(
@@ -737,6 +754,29 @@ class DiscoveryRule(PrimaryModel):
             except re.error as exc:
                 raise ValidationError({
                     'match_value': 'Not a valid regular expression: %s.' % exc,
+                })
+        if self.set_field == RuleSetFieldChoices.FIELD_SERIAL:
+            # A serial belongs to one box. Anything looser than an exact
+            # match on the name or address stamps the same serial on every
+            # device the rule matches, and the sync refuses the second as a
+            # duplicate — after the first has already been written wrong.
+            pinned = (
+                self.match_field in (RuleMatchFieldChoices.FIELD_NAME,
+                                     RuleMatchFieldChoices.FIELD_ADDRESS)
+                and self.match_operator == RuleOperatorChoices.OP_EQUALS
+            )
+            if not pinned:
+                raise ValidationError({
+                    'set_field': 'A serial belongs to one device, so a rule that '
+                                 'sets it must match the device name or scanned '
+                                 'address with "is exactly".',
+                })
+            # A changed serial is how a hardware swap is detected; a rule
+            # replacing one would retire a device record on every sweep.
+            if not self.only_if_blank:
+                raise ValidationError({
+                    'only_if_blank': 'A rule may fill in a serial the device does '
+                                     'not report, never replace one it does.',
                 })
 
     @staticmethod

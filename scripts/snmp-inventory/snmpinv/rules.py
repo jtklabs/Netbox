@@ -44,11 +44,18 @@ RULES_ENDPOINT = "/plugins/discovery/rules/"
 # family on most platforms, and the scanned address.
 MATCH_FIELDS = ("name", "model", "manufacturer", "platform", "serial",
                 "software_version", "sys_descr", "address")
-# What a rule may set. Deliberately the facts that decide what gets created.
-# The name is never blank (it falls back to the address) and has an override
-# of its own, and the serial is the one thing a rule must never invent.
-SET_FIELDS = ("model", "manufacturer", "platform", "software_version")
+# What a rule may set: the facts that decide what gets created, and the
+# serial. The name is never blank (it falls back to the address) and has an
+# override of its own.
+SET_FIELDS = ("model", "manufacturer", "platform", "software_version", "serial")
 OPERATORS = ("contains", "starts_with", "ends_with", "equals", "regex")
+# A serial belongs to one box, so a rule that supplies one must pin one box:
+# the device name or its address, matched exactly. Anything looser stamps the
+# same serial on every device it matches, and the sync then refuses the
+# second as a duplicate. And it may only fill a serial the device does not
+# report, never replace one: a changed serial is how a hardware swap is
+# detected, and a rule must not fake one.
+SERIAL_MATCH_FIELDS = ("name", "address")
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,12 @@ def validate_rule(rule: Rule) -> str:
             re.compile(rule.match_value)
         except re.error as exc:
             return "bad regular expression: %s" % exc
+    if rule.set_field == "serial":
+        if rule.match_field not in SERIAL_MATCH_FIELDS or rule.match_operator != "equals":
+            return ("a serial belongs to one device, so a rule setting one must "
+                    "match the device name or address exactly")
+        if not rule.only_if_blank:
+            return "a rule may fill in a serial the device does not report, never replace one"
     return ""
 
 

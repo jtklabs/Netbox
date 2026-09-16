@@ -137,10 +137,11 @@ class RuleOperatorChoices(ChoiceSet):
 class RuleSetFieldChoices(ChoiceSet):
     """What a discovery rule may fill in.
 
-    The facts that decide what gets created, and nothing else. The name is
-    never blank (it falls back to the address) and has an override of its own;
-    the serial is the one thing a rule must never invent, because serials are
-    what support contracts and quotes are matched on.
+    The facts that decide what gets created, and the serial. The name is never
+    blank (it falls back to the address) and has an override of its own. A
+    serial belongs to one box — serials are what support contracts and quotes
+    are matched on — so the model insists a serial rule match the device name
+    or address exactly, and only fill in a serial the device does not report.
     """
 
     key = 'DiscoveryRule.set_field'
@@ -149,10 +150,12 @@ class RuleSetFieldChoices(ChoiceSet):
     FIELD_MANUFACTURER = 'manufacturer'
     FIELD_PLATFORM = 'platform'
     FIELD_SOFTWARE_VERSION = 'software_version'
+    FIELD_SERIAL = 'serial'
 
     CHOICES = [
         (FIELD_MODEL, 'Model'),
         (FIELD_MANUFACTURER, 'Manufacturer'),
         (FIELD_PLATFORM, 'Platform'),
         (FIELD_SOFTWARE_VERSION, 'Software version'),
+        (FIELD_SERIAL, 'Serial'),
     ]

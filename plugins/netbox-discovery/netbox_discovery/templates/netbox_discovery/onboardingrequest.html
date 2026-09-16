@@ -105,6 +105,27 @@
               <tr><th>Manufacturer</th><td>{{ object.discovered_manufacturer|placeholder }}</td></tr>
               <tr><th>Model</th><td><strong>{{ object.discovered_model|placeholder }}</strong></td></tr>
               <tr><th>Serial</th><td><code>{{ object.discovered_serial|placeholder }}</code></td></tr>
+              {% with partition=object.discovered_context %}
+                {% if partition %}
+                  <tr><th>Partition of</th>
+                    <td>
+                      {{ partition.detail }}<br>
+                      {% if context_chassis %}
+                        <span class="text-muted small">in NetBox as</span> {{ context_chassis|linkify }}
+                        {% if partition.kind == 'vdc' %}
+                          <span class="text-muted small">— applying creates a virtual device context on it</span>
+                        {% else %}
+                          <span class="text-muted small">— applying creates this guest as its own device, linked to that host</span>
+                        {% endif %}
+                      {% elif partition.kind == 'vdc' %}
+                        <span class="text-warning"><i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+                          that chassis is not in NetBox; onboard its default VDC first</span>
+                      {% else %}
+                        <span class="text-muted small">host not in NetBox yet; the link is made when it is</span>
+                      {% endif %}
+                    </td></tr>
+                {% endif %}
+              {% endwith %}
               <tr><th>Platform</th><td>{{ object.discovered_platform|placeholder }}</td></tr>
               <tr><th>Software</th><td>{{ object.discovered_version|placeholder }}</td></tr>
               <tr><th>Interfaces</th><td>{{ object.interface_count }}</td></tr>

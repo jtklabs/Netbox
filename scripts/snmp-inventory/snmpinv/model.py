@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import mibs, vendors
-from .collect import DeviceFacts, Entity, Interface
+from .collect import DeviceFacts, Entity, Interface, VdcRow
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,70 @@ class InterfaceRecord:
 
 
 @dataclass
+class ContextRecord:
+    """A scan that is a partition of a chassis rather than a chassis of its own.
+
+    Two platforms answer on more than one management address for one box, and
+    each address reports the chassis serial as its own. Taken at face value
+    that is two devices with one serial, which the sync rightly refuses; this
+    says what the scan actually is so it can be written as that instead.
+
+      vdc         A Nexus virtual device context: a slice of the chassis with
+                  its own hostname, address and allocated ports. NetBox has a
+                  model for exactly this, hung off the chassis device, and the
+                  chassis keeps the serial, the modules and the software
+                  version -- NX-OS is upgraded per chassis, not per VDC.
+
+      vcmp-guest  An F5 vCMP guest: a whole BIG-IP in its own right, with its
+                  own TMOS version, its own upgrade schedule and its own
+                  configuration, that happens to run on shared hardware and
+                  report the host's chassis serial. It becomes a device of
+                  its own, linked to the host and carrying no serial, because
+                  everything that matters about it -- versions, upgrades,
+                  compliance -- is per device, and a serial is what contracts
+                  are matched on.
+    """
+
+    kind: str
+    # The serial the scan reported, which is the chassis's; how the chassis
+    # is found in NetBox.
+    chassis_serial: str = ""
+    # The context's own name (ciscoVdcName) and id, where the platform has them.
+    name: str = ""
+    identifier: int | None = None
+    # One line for logs and the review page.
+    detail: str = ""
+
+    KIND_VDC = "vdc"
+    KIND_VCMP_GUEST = "vcmp-guest"
+
+    @property
+    def is_vdc(self) -> bool:
+        return self.kind == self.KIND_VDC
+
+    @property
+    def is_vcmp_guest(self) -> bool:
+        return self.kind == self.KIND_VCMP_GUEST
+
+    def as_dict(self) -> dict:
+        return {"kind": self.kind, "chassis_serial": self.chassis_serial,
+                "name": self.name, "identifier": self.identifier, "detail": self.detail}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "ContextRecord | None":
+        if not data or not data.get("kind"):
+            return None
+        identifier = data.get("identifier")
+        return cls(
+            kind=str(data["kind"]),
+            chassis_serial=str(data.get("chassis_serial") or ""),
+            name=str(data.get("name") or ""),
+            identifier=int(identifier) if identifier not in (None, "") else None,
+            detail=str(data.get("detail") or ""),
+        )
+
+
+@dataclass
 class DeviceRecord:
     """One NetBox Device — a standalone box, or one member of a stack."""
 
@@ -78,6 +142,9 @@ class DeviceRecord:
     # Set for APs learned from a controller; they are created as devices but
     # are never scanned directly and have no interfaces of their own.
     is_access_point: bool = False
+    # Set when this scan is a partition of a chassis -- a Nexus VDC or a vCMP
+    # guest -- and says how the sync should write it. None for a real box.
+    context: ContextRecord | None = None
 
 
 @dataclass
@@ -379,7 +446,7 @@ def _build_single_device(facts: DeviceFacts, name: str, manufacturer: str,
                          platform: str) -> DeviceRecord:
     chassis = facts.chassis_entities()
     entity = chassis[0] if chassis else None
-    return DeviceRecord(
+    record = DeviceRecord(
         name=name,
         serial=_serial_for(facts, entity),
         model=_model_for(facts, entity),
@@ -388,6 +455,74 @@ def _build_single_device(facts: DeviceFacts, name: str, manufacturer: str,
         platform=platform,
         software_version=facts.software_version,
     )
+    record.context = _context_for(facts, record)
+    if record.context is not None and record.context.is_vcmp_guest:
+        # The serial a guest reports is the host's. Written to the guest it
+        # would collide with the host on every sweep; kept on the context it
+        # links the two instead.
+        record.serial = ""
+    return record
+
+
+# --- partitions of a chassis ------------------------------------------------
+
+
+def _context_for(facts: DeviceFacts, record: DeviceRecord) -> ContextRecord | None:
+    """Is this scan a Nexus VDC or a vCMP guest rather than a chassis?"""
+    profile = facts.profile
+    if profile is None:
+        return None
+    if profile.name == "cisco" and facts.vdcs:
+        row = _own_vdc(facts)
+        if row is None or row.vdc_id == vendors.CISCO_DEFAULT_VDC_ID:
+            return None
+        return ContextRecord(
+            kind=ContextRecord.KIND_VDC, chassis_serial=record.serial,
+            name=row.name or record.name, identifier=row.vdc_id,
+            detail="VDC %d %r of the chassis with serial %s"
+                   % (row.vdc_id, row.name or record.name, record.serial or "?"),
+        )
+    if profile.name == "f5":
+        platform_id = (facts.vendor_scalars.get(vendors.F5_PLATFORM_ID) or "").strip()
+        if platform_id.upper() == vendors.F5_VCMP_GUEST_PLATFORM_ID:
+            return ContextRecord(
+                kind=ContextRecord.KIND_VCMP_GUEST, chassis_serial=record.serial,
+                name=record.name,
+                detail="vCMP guest (platform %s) on the host with chassis serial %s"
+                       % (platform_id, record.serial or "?"),
+            )
+    return None
+
+
+def _own_vdc(facts: DeviceFacts) -> VdcRow | None:
+    """Which ciscoVdcTable row is the agent that answered.
+
+    A VDC runs its own SNMP agent, so the table it serves is expected to hold
+    only its own row, and one row is that row. Should an agent list every VDC
+    on the chassis, the hostname settles it: with combined hostnames a
+    non-default VDC is called <default>-<vdc>, and either way a hostname that
+    is, or ends in, a VDC's name belongs to that VDC. Failing both, a row for
+    the default VDC means the default VDC is what answered. None means the
+    table could not be read that way, and the scan is treated as a chassis.
+    """
+    rows = facts.vdcs
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    host = (facts.sys_name or "").split(".")[0].strip().lower()
+    named = [row for row in rows if row.name.strip()]
+    for row in named:
+        if host == row.name.strip().lower():
+            return row
+    # The longest name first, so "dmz-b" is not mistaken for "b".
+    for row in sorted(named, key=lambda r: -len(r.name)):
+        if host.endswith("-" + row.name.strip().lower()):
+            return row
+    for row in rows:
+        if row.vdc_id == vendors.CISCO_DEFAULT_VDC_ID:
+            return row
+    return None
 
 
 # --- interfaces -------------------------------------------------------------

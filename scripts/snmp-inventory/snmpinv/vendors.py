@@ -71,6 +71,30 @@ FORCE10_UNIT_MODEL = f"{FORCE10_UNIT_ENTRY}.7.*"
 FORCE10_UNIT_VERSION = f"{FORCE10_UNIT_ENTRY}.10.*"
 FORCE10_UNIT_SERIAL = f"{FORCE10_UNIT_ENTRY}.12.*"
 
+# CISCO-VDC-MIB (ciscoVdcMIB, 1.3.6.1.4.1.9.9.774), resolved from the MIB text
+# 2026-09-16 with docs/resolve_oid.py; see OID-SOURCES.md. ciscoVdcTable is
+# INDEXed by ciscoVdcId, so the id is the row instance and only the name and
+# state are columns. A Nexus runs one SNMP agent per virtual device context,
+# each answering on its own address with the chassis serial, so without this
+# table two VDCs look like two devices sharing one serial. Walked on NX-OS
+# only; nothing else serves it.
+CISCO_VDC_ENTRY = "1.3.6.1.4.1.9.9.774.1.1.1"
+CISCO_VDC_NAME = f"{CISCO_VDC_ENTRY}.2"
+CISCO_VDC_STATE = f"{CISCO_VDC_ENTRY}.3"
+CISCO_VDC_STATE_NAMES = {1: "active", 2: "suspended", 3: "nonconfigured",
+                         4: "configured", 5: "failed"}
+# The VDC every Nexus has, partitioned or not: the one that owns the chassis
+# and the unallocated ports. Its scan is the chassis record.
+CISCO_DEFAULT_VDC_ID = 1
+
+# F5-BIGIP-SYSTEM-MIB sysPlatformInfoName (1.3.6.1.4.1.3375.2.1.3.5.1): the
+# platform ID, "C113" for a BIG-IP 4000, as distinct from the marketing name
+# the profile reads for the model. A vCMP guest reports Z101 here while
+# reporting its host's chassis serial as its own, and this is what tells the
+# two apart. Resolved from the MIB 2026-09-16; see OID-SOURCES.md.
+F5_PLATFORM_ID = "1.3.6.1.4.1.3375.2.1.3.5.1.0"
+F5_VCMP_GUEST_PLATFORM_ID = "Z101"
+
 
 @dataclass(frozen=True)
 class VendorProfile:
@@ -113,6 +137,10 @@ class VendorProfile:
     model_patterns: tuple[str, ...] = ()
     # Extra subtrees to walk for this vendor (e.g. the Aruba AP table).
     extra_walks: tuple[str, ...] = ()
+    # Read in the same batched GET as the scalars above and kept only in
+    # facts.vendor_scalars, for the modelling layer to consult -- the F5
+    # platform ID that says whether a BIG-IP is a vCMP guest, for instance.
+    extra_scalar_oids: tuple[str, ...] = ()
     # ENTITY-MIB is authoritative where it is populated. Appliances that leave
     # it empty set this so the sync layer knows a missing chassis row is normal
     # and should fall back to the scalar OIDs rather than warn.
@@ -238,6 +266,9 @@ PROFILES: dict[int, VendorProfile] = {
         build_oids=("1.3.6.1.4.1.3375.2.1.4.3.0",),
         serial_oids=("1.3.6.1.4.1.3375.2.1.3.3.3.0",),     # sysGeneralChassisSerialNum
         model_oids=("1.3.6.1.4.1.3375.2.1.3.5.2.0",),      # sysPlatformInfoMarketingName
+        # The platform ID, to tell a vCMP guest (Z101) from the chassis whose
+        # serial it reports -- see model.py.
+        extra_scalar_oids=(F5_PLATFORM_ID,),
         entity_mib_sparse=True,
     ),
     2620: VendorProfile(

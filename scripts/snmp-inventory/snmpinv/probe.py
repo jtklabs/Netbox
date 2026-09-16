@@ -108,6 +108,12 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
         _row(w, "Model (vendor OID)", facts.vendor_model)
     if facts.vendor_serial:
         _row(w, "Serial (vendor OID)", facts.vendor_serial)
+    platform_id = (facts.vendor_scalars.get(vendors.F5_PLATFORM_ID) or "").strip()
+    if platform_id:
+        guest = platform_id.upper() == vendors.F5_VCMP_GUEST_PLATFORM_ID
+        _row(w, "Platform ID", platform_id + (" (vCMP guest)" if guest else ""))
+    if primary is not None and primary.context is not None:
+        _row(w, "Partition", primary.context.detail)
 
     # Shown whenever something is missing, because "no version" has two very
     # different causes and the report should say which: either no profile
@@ -129,7 +135,8 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
         w(f"\n  Nothing reported for: {', '.join(missing)}. What was asked:\n")
         for oid, value in facts.vendor_scalars.items():
             kind = ("version" if oid in (profile.version_oids or ()) else
-                    "serial" if oid in (profile.serial_oids or ()) else "model")
+                    "serial" if oid in (profile.serial_oids or ()) else
+                    "model" if oid in (profile.model_oids or ()) else "other")
             shown = "(no such object on this device)" if value is None else (
                 repr(value) if value else "(empty string)")
             w(f"    {kind:<8} {oid:<34} {shown}\n")
@@ -186,6 +193,18 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
               f"{mibs.CSW_ROLE_NAMES.get(member.role, member.role):<10} "
               f"{mibs.CSW_STATE_NAMES.get(member.state, member.state):<14} "
               f"{member.mac_address or '—':<20} {member.entity_index}\n")
+
+    if facts.vdcs:
+        _section(w, f"VIRTUAL DEVICE CONTEXTS — CISCO-VDC-MIB ({len(facts.vdcs)})")
+        w(f"  {'id':>4}  {'name':<24} state\n")
+        for row in facts.vdcs:
+            w(f"  {row.vdc_id:>4}  {(row.name or '—')[:24]:<24} "
+              f"{vendors.CISCO_VDC_STATE_NAMES.get(row.state, row.state)}\n")
+        if primary is not None and primary.context is not None and primary.context.is_vdc:
+            w(f"  This agent answered as VDC {primary.context.identifier}: a partition of\n")
+            w(f"  the chassis, written as a virtual device context on it.\n")
+        else:
+            w("  This agent answered as the default VDC, which is the chassis record.\n")
 
     modules = facts.module_entities()
     _section(w, f"MODULES ({len(modules)})")
@@ -268,6 +287,17 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
     if not result.devices:
         w("  nothing — no chassis was identified, so no device would be created.\n")
     for device in result.devices:
+        context = device.context
+        if context is not None and context.is_vdc:
+            w(f"  context  virtual device context {context.name!r} (id {context.identifier}) "
+              f"on the chassis with serial {context.chassis_serial or '?'}\n")
+            w(f"           the chassis must already be in NetBox; its ports below are\n")
+            w(f"           written to the chassis and allocated to the context, and the\n")
+            w(f"           polled address becomes the context's primary IP\n")
+            if device.interfaces:
+                w(f"           {len(device.interfaces)} interfaces, "
+                  f"{sum(len(i.ip_addresses) for i in device.interfaces)} addresses\n")
+            continue
         bits = [device.name]
         if device.model:
             bits.append(f"{device.manufacturer} {device.model}")
@@ -279,6 +309,9 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
             bits.append(f"member {device.vc_position}"
                         + (" (master)" if device.vc_is_master else ""))
         w(f"  device   {' | '.join(bits)}\n")
+        if context is not None and context.is_vcmp_guest:
+            w(f"           vCMP guest: linked to the host with chassis serial "
+              f"{context.chassis_serial or '?'}; that serial is not written to the guest\n")
         if device.interfaces:
             w(f"           {len(device.interfaces)} interfaces, "
               f"{sum(len(i.ip_addresses) for i in device.interfaces)} addresses\n")
@@ -359,6 +392,9 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
             "software_version": facts.software_version,
             "vendor_model_oid": facts.vendor_model,
             "vendor_serial_oid": facts.vendor_serial,
+            "platform_id": facts.vendor_scalars.get(vendors.F5_PLATFORM_ID),
+            "context": (result.primary.context.as_dict()
+                        if result.primary and result.primary.context else None),
         },
         "entities": [
             {
@@ -378,6 +414,11 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
                 "mac": m.mac_address, "entity_index": m.entity_index,
             }
             for m in facts.stack_members
+        ],
+        "vdcs": [
+            {"id": row.vdc_id, "name": row.name,
+             "state": vendors.CISCO_VDC_STATE_NAMES.get(row.state, row.state)}
+            for row in facts.vdcs
         ],
         "interfaces": [
             {
