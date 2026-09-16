@@ -330,6 +330,16 @@ class RefreshReportForm(forms.Form):
         queryset=Site.objects.all(), required=False,
         help_text='Only count installed units at these sites',
     )
+    BREAKDOWN_CHOICES = (
+        ('model', 'By hardware model'),
+        ('site', 'By site'),
+    )
+    breakdown = forms.ChoiceField(
+        choices=BREAKDOWN_CHOICES, initial='model', required=False,
+        label='Break down',
+        help_text='By site lists every model due at each site, with each site '
+                  'priced at its own rate',
+    )
 
 
 # --------------------------------------------------------------------------- #

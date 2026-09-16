@@ -1,11 +1,15 @@
+import csv
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from dcim.models import Device, DeviceType, Module, ModuleType, Region, Site
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.db.models import Count, Q
+from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.views import View
 from netbox.views.generic import (
     BulkDeleteView,
@@ -53,7 +57,68 @@ class ModelLifecycleListView(ObjectListView):
     template_name = 'netbox_refresh/modellifecycle_list.html'
 
     def get_extra_context(self, request):
-        return {'cisco_configured': _cisco_configured()}
+        return {
+            'cisco_configured': _cisco_configured(),
+            # The other half of the picture: hardware in NetBox that no
+            # lifecycle has been written for. A list of what is configured
+            # cannot show what is missing, and the missing ones are where the
+            # unplanned refreshes come from.
+            'unconfigured_table': tables.UnconfiguredModelTable(
+                _unconfigured_models(request.GET)
+            ),
+        }
+
+
+def _unconfigured_models(params):
+    """Every device and module type without a lifecycle, as table rows.
+
+    Narrowed by the same search box and manufacturer filter as the list
+    above it, so the two halves of the page answer the same question.
+    Installed counts are annotated in the query rather than looked up per
+    row.
+    """
+    covered = {
+        model: set(
+            ModelLifecycle.objects.filter(assigned_object_type__model=model)
+            .values_list('assigned_object_id', flat=True)
+        )
+        for model in ('devicetype', 'moduletype')
+    }
+    search = (params.get('q') or '').strip()
+    manufacturers = [m for m in params.getlist('manufacturer_id') if m]
+
+    rows = []
+    for model, queryset, kind in (
+        ('devicetype', DeviceType.objects.all(), 'Device type'),
+        ('moduletype', ModuleType.objects.all(), 'Module type'),
+    ):
+        queryset = queryset.exclude(pk__in=covered[model]).select_related('manufacturer')
+        queryset = queryset.annotate(installed=Count('instances'))
+        if search:
+            queryset = queryset.filter(
+                Q(model__icontains=search) | Q(part_number__icontains=search)
+                | Q(manufacturer__name__icontains=search)
+            )
+        if manufacturers:
+            queryset = queryset.filter(manufacturer_id__in=manufacturers)
+        for obj in queryset.order_by('manufacturer__name', 'model'):
+            rows.append({
+                'model': str(obj),
+                'url': obj.get_absolute_url(),
+                'manufacturer': obj.manufacturer,
+                'part_number': obj.part_number or '—',
+                'kind': kind,
+                'installed': obj.installed,
+                'add_url': '%s?%s=%d' % (
+                    reverse('plugins:netbox_refresh:modellifecycle_add'),
+                    'device_type' if model == 'devicetype' else 'module_type', obj.pk,
+                ),
+            })
+    # Hardware that is actually installed first: an uncatalogued model with
+    # no units is a gap on paper, one with forty units is a gap in the plan.
+    rows.sort(key=lambda r: (-r['installed'], r['manufacturer'].name if r['manufacturer'] else '',
+                             r['model']))
+    return rows
 
 
 @register_model_view(ModelLifecycle)
@@ -357,6 +422,40 @@ def _money(per_currency):
     )
 
 
+def _cell(value):
+    """A CSV cell: dates as ISO, money as a plain number, dashes as empty."""
+    if value is None or value == '—':
+        return ''
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return '%.2f' % value
+    return str(value)
+
+
+def _site_rows(site_agg):
+    """The per-site cost breakdown: what each site has to replace, in money."""
+    sites = Site.objects.select_related('region').in_bulk(
+        [site_id for site_id in site_agg if site_id is not None]
+    )
+    rows = []
+    for site_id, agg in site_agg.items():
+        site = sites.get(site_id)
+        region = site.region if site else None
+        rows.append({
+            'site': site.name if site else '(no site)',
+            'site_url': site.get_absolute_url() if site else None,
+            'region': region.name if region else '—',
+            'region_url': region.get_absolute_url() if region else None,
+            'models': agg['models'],
+            'units': agg['units'],
+            'total': _money(agg['totals']),
+            'unpriced': agg['unpriced'] or '',
+        })
+    rows.sort(key=lambda r: (r['site_url'] is None, r['site']))
+    return rows
+
+
 def _region_rows(region_agg):
     """The per-region cost breakdown, labelled with each region's tree path."""
     all_regions = Region.objects.in_bulk()
@@ -395,6 +494,11 @@ class RefreshReportView(PermissionRequiredMixin, View):
     queries, so the report stays cheap as the estate grows — and priced per
     site, because ReplacementPrice lets the same model cost different money
     in different places.
+
+    Two breakdowns of the same numbers. By model answers "what is going end
+    of life and what will it cost"; by site answers "what does each site have
+    to replace", which is the list a site's refresh is planned from. Either
+    can be taken away as CSV (`?export=csv`), the same rows the page shows.
     """
 
     permission_required = 'netbox_refresh.view_modellifecycle'
@@ -405,6 +509,29 @@ class RefreshReportView(PermissionRequiredMixin, View):
         form.is_valid()
         data = form.cleaned_data if form.is_bound else {}
 
+        report = self._build(data)
+        breakdown = data.get('breakdown') or 'model'
+        if request.GET.get('export') == 'csv':
+            return self._csv(report, breakdown)
+
+        return render(request, self.template_name, {
+            'form': form,
+            'breakdown': breakdown,
+            'table': tables.RefreshReportTable(report['rows']),
+            'site_table': tables.SiteRefreshTable(report['site_rows']),
+            'region_table': tables.RegionCostTable(_region_rows(report['region_agg'])),
+            'site_cost_table': tables.SiteCostTable(_site_rows(report['site_agg'])),
+            'row_count': len(report['rows']),
+            'site_count': len(report['site_agg']),
+            'total_units': report['total_units'],
+            'totals': dict(report['totals']),
+            'missing_cost': report['models_with_gaps'],
+            'unpriced_units': report['unpriced_units'],
+            'date_label': report['date_label'],
+            'export_query': request.GET.urlencode(),
+        })
+
+    def _build(self, data):
         date_field = data.get('date_field') or EFFECTIVE_EOL_ALIAS
         after = data.get('after')
         before = data.get('before')
@@ -459,10 +586,12 @@ class RefreshReportView(PermissionRequiredMixin, View):
             for per_site in list(device_site_counts.values()) + list(module_site_counts.values())
             for site_id in per_site
         }
-        site_cache = Site.objects.in_bulk(involved_site_ids)
+        # With regions, which the by-site rows name on every line.
+        site_cache = Site.objects.select_related('region').in_bulk(involved_site_ids)
         resolver = PriceResolver([r.pk for r in records])
 
         rows = []
+        site_rows = []
         totals = defaultdict(lambda: 0)
         total_units = 0
         models_with_gaps = 0
@@ -470,6 +599,9 @@ class RefreshReportView(PermissionRequiredMixin, View):
         # region_id (None = siteless bucket) -> aggregation for the breakdown
         region_agg = defaultdict(lambda: {'units': 0, 'unpriced': 0,
                                           'totals': defaultdict(lambda: 0)})
+        # site_id (None = siteless bucket) -> the same, plus how many models
+        site_agg = defaultdict(lambda: {'units': 0, 'unpriced': 0, 'models': 0,
+                                        'totals': defaultdict(lambda: 0)})
         for record in records:
             model_name = record.assigned_object_type.model
             obj = type_cache.get(model_name, {}).get(record.assigned_object_id)
@@ -483,6 +615,8 @@ class RefreshReportView(PermissionRequiredMixin, View):
             if sites and not installed:
                 continue  # nothing of this model at the selected sites
 
+            replacement = record.replacement
+            milestone_date = getattr(record, date_field)
             extended = defaultdict(lambda: 0)    # currency -> amount, this model
             model_unpriced = 0
             for site_id, count in per_site.items():
@@ -490,14 +624,40 @@ class RefreshReportView(PermissionRequiredMixin, View):
                 hit = resolver.resolve(record, site)
                 bucket = region_agg[site.region_id if site else None]
                 bucket['units'] += count
+                per_site_bucket = site_agg[site_id if site else None]
+                per_site_bucket['units'] += count
+                per_site_bucket['models'] += 1
+                amount = hit.cost * count if hit is not None else None
                 if hit is None:
                     model_unpriced += count
                     bucket['unpriced'] += count
-                    continue
-                amount = hit.cost * count
-                extended[hit.currency] += amount
-                totals[hit.currency] += amount
-                bucket['totals'][hit.currency] += amount
+                    per_site_bucket['unpriced'] += count
+                else:
+                    extended[hit.currency] += amount
+                    totals[hit.currency] += amount
+                    bucket['totals'][hit.currency] += amount
+                    per_site_bucket['totals'][hit.currency] += amount
+                # One row per site and model: the site's own refresh list,
+                # priced at the site's own rate.
+                site_rows.append({
+                    'site': site.name if site else '(no site)',
+                    'site_url': site.get_absolute_url() if site else None,
+                    'region': site.region.name if site and site.region else '—',
+                    'region_url': site.region.get_absolute_url() if site and site.region else None,
+                    'model': str(obj),
+                    'url': record.get_absolute_url(),
+                    'manufacturer': obj.manufacturer,
+                    'part_number': obj.part_number or '—',
+                    'milestone_date': milestone_date,
+                    'installed': count,
+                    'replacement': replacement or '—',
+                    'replacement_url': replacement.get_absolute_url() if replacement else None,
+                    'unit_cost': '{:,.2f} {}'.format(hit.cost, hit.currency) if hit else '—',
+                    'unit_cost_amount': hit.cost if hit else None,
+                    'currency': hit.currency if hit else '',
+                    'extended_cost': '{:,.2f} {}'.format(amount, hit.currency) if hit else '—',
+                    'extended_cost_amount': amount,
+                })
             if model_unpriced:
                 models_with_gaps += 1
                 unpriced_units += model_unpriced
@@ -512,13 +672,12 @@ class RefreshReportView(PermissionRequiredMixin, View):
                 unit_cost = '%d regional price%s' % (regional, 's' if regional != 1 else '') \
                     if regional else '—'
 
-            replacement = record.replacement
             rows.append({
                 'model': str(obj),
                 'url': record.get_absolute_url(),
                 'manufacturer': obj.manufacturer,
                 'part_number': obj.part_number or '—',
-                'milestone_date': getattr(record, date_field),
+                'milestone_date': milestone_date,
                 'installed': installed,
                 'replacement': replacement or '—',
                 'replacement_url': replacement.get_absolute_url() if replacement else None,
@@ -527,19 +686,56 @@ class RefreshReportView(PermissionRequiredMixin, View):
             })
 
         rows.sort(key=lambda r: (r['milestone_date'] is None, r['milestone_date']))
-        table = tables.RefreshReportTable(rows)
+        # Site by site, each site's list soonest first; the siteless bucket last.
+        site_rows.sort(key=lambda r: (r['site_url'] is None, r['site'],
+                                      r['milestone_date'] is None, r['milestone_date'],
+                                      r['model']))
 
-        return render(request, self.template_name, {
-            'form': form,
-            'table': table,
-            'region_table': tables.RegionCostTable(_region_rows(region_agg)),
-            'row_count': len(rows),
+        return {
+            'rows': rows,
+            'site_rows': site_rows,
+            'region_agg': region_agg,
+            'site_agg': site_agg,
+            'totals': totals,
             'total_units': total_units,
-            'totals': dict(totals),
-            'missing_cost': models_with_gaps,
+            'models_with_gaps': models_with_gaps,
             'unpriced_units': unpriced_units,
             'date_label': dict(forms.RefreshReportForm.DATE_FIELD_CHOICES).get(date_field),
-        })
+        }
+
+    # Column order and headings for the two exports. Money is split into an
+    # amount and a currency where a row has exactly one price -- the by-site
+    # rows -- so a spreadsheet can sum it; a by-model row can span several
+    # currencies and keeps the page's "12,000.00 USD + 9,500.00 EUR" text.
+    MODEL_COLUMNS = (
+        ('model', 'Hardware model'), ('manufacturer', 'Manufacturer'),
+        ('part_number', 'Part number'), ('milestone_date', 'Milestone date'),
+        ('installed', 'Installed'), ('replacement', 'Replacement'),
+        ('unit_cost', 'Unit cost'), ('extended_cost', 'Extended cost'),
+    )
+    SITE_COLUMNS = (
+        ('site', 'Site'), ('region', 'Region'), ('model', 'Hardware model'),
+        ('manufacturer', 'Manufacturer'), ('part_number', 'Part number'),
+        ('milestone_date', 'Milestone date'), ('installed', 'Units'),
+        ('replacement', 'Replacement'), ('unit_cost_amount', 'Unit cost'),
+        ('currency', 'Currency'), ('extended_cost_amount', 'Extended cost'),
+    )
+
+    def _csv(self, report, breakdown):
+        """The rows the page shows, as a file. Nothing is summarised: the
+        totals are a spreadsheet's job once it has the rows."""
+        columns = self.SITE_COLUMNS if breakdown == 'site' else self.MODEL_COLUMNS
+        rows = report['site_rows'] if breakdown == 'site' else report['rows']
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            'attachment; filename="refresh-report-by-%s-%s.csv"'
+            % (breakdown, date.today().isoformat())
+        )
+        writer = csv.writer(response)
+        writer.writerow(['Milestone'] + [heading for _key, heading in columns])
+        for row in rows:
+            writer.writerow([report['date_label']] + [_cell(row.get(key)) for key, _ in columns])
+        return response
 
 
 # --------------------------------------------------------------------------- #
