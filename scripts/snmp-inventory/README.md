@@ -772,7 +772,7 @@ only when the evidence says it is the same box:
 
 | The scan has… | It is the record that… |
 |---|---|
-| a serial | carries that serial **and** agrees on the name or the address. A rename keeps the address, a re-address keeps the name |
+| a serial | carries that serial **and** agrees on the name or the address. A rename keeps the address, a re-address keeps the name. The name may be one an earlier hostname rule gave the device, and for a stack member, sitting in the stack's own virtual chassis under that serial settles it |
 | no serial | has the polled address on one of its interfaces, else has the same name **at the site being scanned** |
 
 Anything else is a different box and gets a record of its own, beside the
@@ -1090,6 +1090,56 @@ model sitting in a field this scanner is not yet reading — a one-line fix, and
 better than typing it by hand forever. Firepower is the case where the dump
 genuinely comes up empty.
 
+## Hostnames with dots, and which part is the domain
+
+A device calls itself `test.google.com`; NetBox should call it `test`. The
+scanner used to get there by keeping everything before the first dot, which is
+wrong wherever the hostname itself has dots in it: `sw1.floor2.google.com` and
+`sw1.floor3.google.com` both became `sw1`, and the second could never be
+created beside the first.
+
+So the domains are listed instead, in NetBox under **Discovery → Stripped
+Domains** (one per entry, or pasted in through Import). With `google.com` on
+the list:
+
+| The device reports | NetBox calls it |
+|---|---|
+| `test.google.com` | `test` |
+| `sw1.floor2.google.com` | `sw1.floor2` |
+| `sw1.floor2` | `sw1.floor2` |
+| `testgoogle.com` | `testgoogle.com` — only at a dot |
+| `sw1.other.net` | `sw1.other.net` — not on the list |
+
+The dot that joins the domain to the hostname is inferred and comes off with
+it; type the entry with or without it. A domain is removed only from the end,
+the longest listed match wins, and matching ignores case. Stack members and
+the virtual chassis are named from the same result, and a CDP/LLDP neighbor
+is looked up under the name its own scan would have given it.
+
+**The first domain is a switch as well as an entry.** While the list is empty
+— or the plugin is absent — hostnames are cut at the first dot exactly as
+before. Once one domain is enabled, dots are kept, so a hostname under a
+domain that is *not* listed keeps that domain. List every domain the fleet
+uses and look at a `--dry-run` first. Two things make a missed domain cheap:
+
+- **An existing device is never given a longer name.** Listing `google.com`
+  does not turn the `sw9` already in NetBox into `sw9.other.net`; it is
+  recognised by its serial and its old name and left as it is. The same goes
+  for a stack: it stays one virtual chassis with its members, under the names
+  it has.
+- **A domain listed late is taken off.** A device *created* as
+  `sw9.other.net` while `other.net` was missing is renamed `sw9` on the first
+  sweep after it is listed. Only names the scanner derived from the hostname
+  are touched; a name somebody typed is never changed, and neither is a
+  hand-entered device.
+
+Pollers read the list at the start of every run
+(`GET /api/plugins/discovery/stripped-domains/?enabled=true`), so the poller
+token needs `view` on stripped domains; without it the poller warns and falls
+back to the first-dot rule for that run. `--probe` reads no NetBox and so has
+no list: pass `--strip-domain google.com` (repeatable) to see the name a sweep
+would give.
+
 ## Filling in what a device does not report
 
 The case above is one device. When the same gap turns up on every box of one
@@ -1184,6 +1234,8 @@ snmpinv/
   sync.py                    idempotent writes
   rules.py                   discovery rules from NetBox: fill in what a
                              device does not report
+  naming.py                  hostname -> device name: which domains come off,
+                             from the plugin's stripped-domain list
   cables.py                  adjacencies -> tagged Cable objects, safely
   config.py                  config and credential files
 tests/

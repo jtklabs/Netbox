@@ -22,6 +22,7 @@ from netbox_discovery.models import (
     DiscoveryPoller,
     DiscoveryRule,
     OnboardingRequest,
+    StrippedDomain,
 )
 from netbox_discovery.resolution import resolve
 
@@ -36,6 +37,9 @@ __all__ = (
     'DiscoveryIssueForm',
     'DiscoveryRuleForm',
     'DiscoveryRuleFilterForm',
+    'StrippedDomainForm',
+    'StrippedDomainFilterForm',
+    'StrippedDomainImportForm',
 )
 
 
@@ -336,3 +340,31 @@ class DiscoveryRuleFilterForm(NetBoxModelFilterSetForm):
         choices=RuleSetFieldChoices, required=False, label='Sets this field',
     )
     tag = TagFilterField(model)
+
+
+class StrippedDomainForm(NetBoxModelForm):
+    fieldsets = (
+        FieldSet('domain', 'enabled', 'description', name='Domain to strip'),
+        FieldSet('tags', name='Tags'),
+    )
+
+    class Meta:
+        model = StrippedDomain
+        fields = ('domain', 'enabled', 'description', 'comments', 'tags')
+
+
+class StrippedDomainFilterForm(NetBoxModelFilterSetForm):
+    model = StrippedDomain
+
+    enabled = forms.NullBooleanField(
+        required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES),
+    )
+    tag = TagFilterField(model)
+
+
+class StrippedDomainImportForm(NetBoxModelImportForm):
+    """A fleet's domains in one paste: one per line under a `domain` heading."""
+
+    class Meta:
+        model = StrippedDomain
+        fields = ('domain', 'enabled', 'description')

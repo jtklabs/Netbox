@@ -38,6 +38,11 @@ the model is empty, set the model to FPR-2120") is stored and edited here, and
 handed to every poller at the start of its run; the poller applies it to each
 scan before reporting, and the request page shows which values a rule
 supplied. Nothing here evaluates a rule.
+
+So does the list of stripped domains: which part of a reported hostname is
+the domain ("google.com" turns test.google.com into test, and leaves the dots
+in sw1.floor2 alone) is kept here and applied by the pollers when they name
+what they scan.
 """
 
 from netbox.plugins import PluginConfig

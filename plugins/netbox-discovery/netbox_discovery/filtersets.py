@@ -9,9 +9,11 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 __all__ = (
+    'StrippedDomainFilterSet',
     'DiscoveryIssueFilterSet',
     'DiscoveryPollerFilterSet',
     'DiscoveryRuleFilterSet',
@@ -123,4 +125,19 @@ class DiscoveryRuleFilterSet(NetBoxModelFilterSet):
             | Q(match_value__icontains=value)
             | Q(set_value__icontains=value)
             | Q(description__icontains=value)
+        )
+
+
+class StrippedDomainFilterSet(NetBoxModelFilterSet):
+    """`?enabled=true` is what a poller asks for at the start of every run."""
+
+    class Meta:
+        model = StrippedDomain
+        fields = ('id', 'domain', 'enabled')
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(domain__icontains=value) | Q(description__icontains=value)
         )

@@ -23,6 +23,7 @@ __all__ = (
     'DiscoveryIssue',
     'DiscoveryPoller',
     'DiscoveryRule',
+    'StrippedDomain',
     'HardwareReplacement',
     'OnboardingRequest',
     'UpgradeJob',
@@ -798,6 +799,85 @@ class DiscoveryRule(PrimaryModel):
         return '%s, set the %s to “%s”, replacing whatever the device reports.' % (
             text, target, self.set_value,
         )
+
+
+class StrippedDomain(PrimaryModel):
+    """A domain to take off the hostnames devices report.
+
+    A device calls itself `test.google.com`; NetBox should call it `test`.
+    The scanner used to get there by keeping everything before the first dot,
+    which is wrong wherever the hostname itself has dots in it:
+    `sw1.floor2.google.com` and `sw1.floor3.google.com` both became `sw1`,
+    and the second could never be created beside the first. So the domains
+    are said out loud instead. With `google.com` on this list:
+
+        test.google.com          ->  test
+        sw1.floor2.google.com    ->  sw1.floor2
+        sw1.other.net            ->  sw1.other.net    (not on the list)
+
+    The dot that joins the domain to the hostname is inferred and comes off
+    with it. A domain is only removed from the end of a name and only at a
+    label boundary, so `testgoogle.com` is untouched, and the longest listed
+    match wins.
+
+    Pollers read the enabled entries at the start of every run; nothing in
+    NetBox renames anything. While the list is EMPTY the first-dot rule still
+    applies, so listing a first domain is a switch as well as an entry: from
+    then on dots are kept, and a hostname under a domain that is not listed
+    keeps that domain. Existing devices are never given a longer name, and a
+    domain listed late is taken off the devices that were created with it on.
+    """
+
+    domain = models.CharField(
+        max_length=253, unique=True,
+        help_text='Removed from the end of reported hostnames, with the dot that '
+                  'joins it: google.com turns test.google.com into test',
+    )
+    enabled = models.BooleanField(
+        default=True, help_text='Pollers strip only enabled domains',
+    )
+
+    clone_fields = ('enabled',)
+
+    class Meta:
+        ordering = ('domain',)
+        verbose_name = 'stripped domain'
+        verbose_name_plural = 'stripped domains'
+
+    def __str__(self):
+        return self.domain
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:strippeddomain', args=[self.pk])
+
+    @staticmethod
+    def normalise(value):
+        """As the pollers compare it: lowercase, no surrounding dots or space."""
+        return (value or '').strip().strip('.').strip().lower()
+
+    def clean(self):
+        self.domain = self.normalise(self.domain)
+        super().clean()
+        if not self.domain:
+            raise ValidationError({'domain': 'Enter the domain to strip, e.g. google.com.'})
+        if any(ch.isspace() for ch in self.domain) or '..' in self.domain:
+            raise ValidationError({
+                'domain': 'A domain is labels joined by single dots, with no spaces.',
+            })
+        clash = StrippedDomain.objects.filter(domain=self.domain).exclude(pk=self.pk)
+        if clash.exists():
+            raise ValidationError({'domain': '%s is already on the list.' % self.domain})
+
+    def save(self, *args, **kwargs):
+        # Here as well as in clean(): the REST API validates a throwaway
+        # instance and saves the raw values, so ".Google.com." would otherwise
+        # be stored as typed when it arrives that way.
+        self.domain = self.normalise(self.domain)
+        super().save(*args, **kwargs)
+
+    def example(self):
+        """What this entry does, for the list and the detail page."""
+        return 'switch.%s → switch' % self.domain
 
 
 # Imported here so Django discovers these models with the rest of the plugin.

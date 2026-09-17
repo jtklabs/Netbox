@@ -5,6 +5,7 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 
@@ -51,3 +52,13 @@ class DiscoveryRuleIndex(SearchIndex):
         ('description', 500),
     )
     display_attrs = ('enabled', 'set_field', 'set_value')
+
+
+@register_search
+class StrippedDomainIndex(SearchIndex):
+    model = StrippedDomain
+    fields = (
+        ('domain', 100),
+        ('description', 500),
+    )
+    display_attrs = ('enabled',)

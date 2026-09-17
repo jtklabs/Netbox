@@ -6,6 +6,7 @@ from netbox_discovery.api.views import (
     DiscoveryRuleViewSet,
     HardwareReplacementViewSet,
     OnboardingRequestViewSet,
+    StrippedDomainViewSet,
 )
 
 router = NetBoxRouter()
@@ -14,6 +15,7 @@ router.register('onboarding-requests', OnboardingRequestViewSet)
 router.register('hardware-replacements', HardwareReplacementViewSet)
 router.register('issues', DiscoveryIssueViewSet)
 router.register('rules', DiscoveryRuleViewSet)
+router.register('stripped-domains', StrippedDomainViewSet)
 urlpatterns = router.urls
 
 from django.urls import path

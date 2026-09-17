@@ -32,7 +32,7 @@ _NAME_WIDTH = 26
 
 
 def probe(collector: Collector, address: str, as_json: bool = False,
-          save_walk: str = "", out=sys.stdout) -> int:
+          save_walk: str = "", out=sys.stdout, strip_domains=()) -> int:
     """Scan `address` and print what came back. Returns a process exit code."""
     try:
         facts = collector.collect(address)
@@ -51,7 +51,9 @@ def probe(collector: Collector, address: str, as_json: bool = False,
         print(f"{address}: {exc}", file=sys.stderr)
         return 1
 
-    result = build_scan_result(facts)
+    # A probe reads no NetBox, so it has no stripped-domain list of its own;
+    # --strip-domain supplies one so the name shown is the name a sweep gives.
+    result = build_scan_result(facts, strip_domains=strip_domains)
 
     if save_walk:
         _save_walk(collector, facts, address, save_walk)

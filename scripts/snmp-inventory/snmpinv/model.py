@@ -23,8 +23,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Sequence
 
-from . import mibs, vendors
+from . import mibs, naming, vendors
 from .collect import DeviceFacts, Entity, Interface, VdcRow
 
 log = logging.getLogger(__name__)
@@ -145,6 +146,10 @@ class DeviceRecord:
     # Set when this scan is a partition of a chassis -- a Nexus VDC or a vCMP
     # guest -- and says how the sync should write it. None for a real box.
     context: ContextRecord | None = None
+    # Names another naming rule would have given this device (naming.py). A
+    # NetBox record under one of these is this device, named before the rule
+    # changed; the sync recognises it and brings the name up to date.
+    former_names: tuple = ()
 
 
 @dataclass
@@ -175,6 +180,9 @@ class ScanResult:
     # Values supplied by discovery rules rather than the device (rules.py),
     # kept so a review can tell the two apart. Empty until rules are applied.
     rules_applied: list = field(default_factory=list)
+    # What the virtual chassis would have been called under another naming
+    # rule; see DeviceRecord.former_names.
+    former_chassis_names: tuple = ()
 
     @property
     def is_stack(self) -> bool:
@@ -189,8 +197,13 @@ class ScanResult:
         return self.devices[0] if self.devices else None
 
 
-def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True) -> ScanResult:
-    """Model one device's facts into NetBox-shaped records."""
+def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True,
+                      strip_domains: Sequence[str] = ()) -> ScanResult:
+    """Model one device's facts into NetBox-shaped records.
+
+    `strip_domains` is the Discovery plugin's list of domains to take off
+    reported hostnames; empty means the first-label rule. See naming.py.
+    """
     result = ScanResult(
         host=facts.host,
         sys_name=facts.sys_name,
@@ -200,14 +213,19 @@ def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True) -> ScanR
 
     manufacturer = _manufacturer(facts)
     platform = vendors.platform_for(facts.profile, facts.sys_descr)
-    base_name = _device_name(facts)
+    base_name = _device_name(facts, strip_domains)
+    former = tuple(name for name in naming.derivations(facts.sys_name, strip_domains)
+                   if name.lower() != base_name.lower())
 
     members = _stack_members(facts)
     if len(members) > 1:
         result.virtual_chassis_name = base_name
-        result.devices = _build_stack_devices(facts, members, base_name, manufacturer, platform)
+        result.former_chassis_names = former
+        result.devices = _build_stack_devices(facts, members, base_name, manufacturer,
+                                              platform, former)
     else:
         result.devices = [_build_single_device(facts, base_name, manufacturer, platform)]
+        result.devices[0].former_names = former
 
     _attach_interfaces(facts, result)
     _attach_modules(facts, result, manufacturer)
@@ -229,18 +247,17 @@ def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True) -> ScanR
 # --- naming and identity ----------------------------------------------------
 
 
-def _device_name(facts: DeviceFacts) -> str:
-    """Use the device's own hostname, trimmed of any DNS suffix.
+def _device_name(facts: DeviceFacts, strip_domains: Sequence[str] = ()) -> str:
+    """Use the device's own hostname, trimmed of its DNS suffix.
 
     Falls back to the polled address so a device with no sysName still lands in
     NetBox under something an operator can recognise.
+
+    sysName is frequently an FQDN; NetBox device names are conventionally the
+    short name. Which part is the domain is what naming.py decides: the listed
+    domains when there is a list, everything after the first dot when not.
     """
-    name = (facts.sys_name or "").strip()
-    if not name:
-        return facts.host
-    # sysName is frequently an FQDN; NetBox device names are conventionally the
-    # short name, and the domain lives on the VirtualChassis or the site.
-    return name.split(".")[0]
+    return naming.device_name(facts.sys_name, strip_domains) or facts.host
 
 
 def _manufacturer(facts: DeviceFacts) -> str:
@@ -417,7 +434,8 @@ def _nth_chassis(facts: DeviceFacts, number: int) -> Entity | None:
 
 
 def _build_stack_devices(facts: DeviceFacts, members: list[_Member], base_name: str,
-                         manufacturer: str, platform: str) -> list[DeviceRecord]:
+                         manufacturer: str, platform: str,
+                         former: tuple = ()) -> list[DeviceRecord]:
     """One NetBox Device per stack member.
 
     Member names follow `<stack>-<n>` for everything but the master, which keeps
@@ -438,6 +456,9 @@ def _build_stack_devices(facts: DeviceFacts, members: list[_Member], base_name: 
             software_version=facts.software_version,
             vc_position=member.position,
             vc_is_master=member.is_master,
+            former_names=tuple(
+                old if member.is_master else f"{old}-{member.position}" for old in former
+            ),
         ))
     return devices
 
@@ -473,7 +494,7 @@ def _context_for(facts: DeviceFacts, record: DeviceRecord) -> ContextRecord | No
     if profile is None:
         return None
     if profile.name == "cisco" and facts.vdcs:
-        row = _own_vdc(facts)
+        row = _own_vdc(facts, record.name)
         if row is None or row.vdc_id == vendors.CISCO_DEFAULT_VDC_ID:
             return None
         return ContextRecord(
@@ -494,7 +515,7 @@ def _context_for(facts: DeviceFacts, record: DeviceRecord) -> ContextRecord | No
     return None
 
 
-def _own_vdc(facts: DeviceFacts) -> VdcRow | None:
+def _own_vdc(facts: DeviceFacts, name: str = "") -> VdcRow | None:
     """Which ciscoVdcTable row is the agent that answered.
 
     A VDC runs its own SNMP agent, so the table it serves is expected to hold
@@ -510,7 +531,9 @@ def _own_vdc(facts: DeviceFacts) -> VdcRow | None:
         return None
     if len(rows) == 1:
         return rows[0]
-    host = (facts.sys_name or "").split(".")[0].strip().lower()
+    # The hostname as the device is named, so a listed domain is off it and
+    # a dot that belongs to the hostname is not.
+    host = (name or naming.first_label(facts.sys_name)).strip().lower()
     named = [row for row in rows if row.name.strip()]
     for row in named:
         if host == row.name.strip().lower():

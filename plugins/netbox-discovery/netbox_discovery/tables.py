@@ -7,9 +7,11 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 __all__ = (
+    'StrippedDomainTable',
     'DiscoveryIssueTable',
     'DiscoveryPollerTable',
     'DiscoveryRuleTable',
@@ -156,3 +158,16 @@ class DiscoveryRuleTable(NetBoxTable):
             'only_if_blank', 'description', 'tags', 'created', 'last_updated',
         )
         default_columns = ('name', 'enabled', 'weight', 'sentence', 'description')
+
+
+class StrippedDomainTable(NetBoxTable):
+    domain = tables.Column(linkify=True)
+    enabled = columns.BooleanColumn()
+    example = tables.Column(accessor='example', orderable=False, verbose_name='Effect')
+    tags = columns.TagColumn(url_name='plugins:netbox_discovery:strippeddomain_list')
+
+    class Meta(NetBoxTable.Meta):
+        model = StrippedDomain
+        fields = ('pk', 'id', 'domain', 'enabled', 'example', 'description', 'tags',
+                  'created', 'last_updated')
+        default_columns = ('domain', 'enabled', 'example', 'description')

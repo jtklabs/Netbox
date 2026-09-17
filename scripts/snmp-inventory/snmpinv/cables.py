@@ -52,13 +52,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from . import naming
 from .model import ScanResult
 from .neighbors import (
     Adjacency,
     build_adjacencies,
     canonical_port,
     classify,
-    short_name,
 )
 from .netbox import NetBox, NetBoxError
 
@@ -109,9 +109,11 @@ class CableReport:
 class CableSyncer:
     """Write one scan's adjacencies as cables, under the rules above."""
 
-    def __init__(self, netbox: NetBox, cable_classes: tuple = DEFAULT_CABLE_CLASSES):
+    def __init__(self, netbox: NetBox, cable_classes: tuple = DEFAULT_CABLE_CLASSES,
+                 strip_domains: tuple = ()):
         self.netbox = netbox
         self.cable_classes = tuple(cable_classes)
+        self.strip_domains = tuple(strip_domains)
         self.report = CableReport()
         self._tag_ready = False
         self._husks_swept = False
@@ -226,17 +228,19 @@ class CableSyncer:
         Name matching is suffix-tolerant because whether a neighbor reports
         "sw1" or "sw1.corp.example.com" depends on its domain configuration:
         the reported name is tried verbatim (case-insensitively) first, then
-        its short form. Falling back to the chassis MAC or the CDP management
-        address covers gear whose sysName never made it into NetBox as the
-        device name.
+        as its own scan would have named it (naming.py) -- less a listed
+        domain, or cut at the first dot when no domains are listed. Falling
+        back to the chassis MAC or the CDP management address covers gear
+        whose sysName never made it into NetBox as the device name.
         """
         name = (adjacency.remote_name or "").strip()
         if name:
             candidates = [name]
-            if short_name(name) != name.lower():
+            short = naming.device_name(name, self.strip_domains)
+            if short and short.lower() != name.lower():
                 # Only when a suffix actually came off — the lookup below is
                 # already case-insensitive, so a suffixless name needs one try.
-                candidates.append(short_name(name))
+                candidates.append(short)
             for candidate in candidates:
                 matches = self.netbox.all("/dcim/devices/", {"name__ie": candidate})
                 if len(matches) == 1:
