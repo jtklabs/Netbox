@@ -129,3 +129,54 @@ class StrippedDomainAPITest(APITestCase):
     def test_a_duplicate_is_refused_over_the_api(self):
         response = self.client.post(self.url, {'domain': 'GOOGLE.com'}, format='json')
         self.assertEqual(response.status_code, 400)
+
+
+class ListNotAppliedTest(TestCase):
+    """A poller that cannot read the list cuts at the first dot, silently.
+    The request page is the only place anybody would notice."""
+
+    @classmethod
+    def setUpTestData(cls):
+        region = Region.objects.create(name='NA US', slug='na-us')
+        site = Site.objects.create(name='NA Site', slug='na-site', region=region)
+        site.tags.add(Tag.objects.create(name='poller-na', slug='poller-na'))
+        Prefix.objects.create(prefix='198.51.100.0/24', scope=site)
+        cls.user = get_user_model().objects.create_superuser('not-applied', password='x')
+        StrippedDomain.objects.create(domain='device.com')
+        StrippedDomain.objects.create(domain='off.example', enabled=False)
+
+    def request_named(self, name, sys_name, address='198.51.100.30'):
+        entry = OnboardingRequest(address=address)
+        entry.save()
+        entry.discovered = {'sys_name': sys_name,
+                            'devices': [{'name': name, 'is_master': True}]}
+        entry.save()
+        return entry
+
+    def test_the_case_from_the_report(self):
+        entry = self.request_named('test', 'test.example.device.com')
+        self.assertEqual(entry.stripped_domain_not_applied,
+                         {'named': 'test', 'expected': 'test.example', 'domain': 'device.com'})
+
+    def test_the_page_says_so_with_the_pollers_version(self):
+        entry = self.request_named('test', 'test.example.device.com')
+        entry.poller.version = '1.0.0'
+        entry.poller.save()
+        self.client.force_login(self.user)
+        response = self.client.get(entry.get_absolute_url())
+        self.assertContains(response, 'did not')
+        self.assertContains(response, '<strong>test.example</strong>', html=False)
+        self.assertContains(response, '1.0.0')
+
+    def test_a_correctly_named_device_raises_nothing(self):
+        for name, sys_name in (
+            ('test.example', 'test.example.device.com'),   # the list was applied
+            ('test', 'test.device.com'),                   # first label IS the stripped name
+            ('test', 'test.example.other.net'),            # domain not listed
+            ('test', 'test.example.off.example'),          # entry disabled
+            ('core-fw', 'test.example.device.com'),        # a name somebody chose
+            ('test', ''),                                  # nothing reported
+        ):
+            with self.subTest(name=name, sys_name=sys_name):
+                self.assertIsNone(
+                    self.request_named(name, sys_name).stripped_domain_not_applied)

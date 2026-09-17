@@ -465,6 +465,42 @@ class OnboardingRequest(PrimaryModel):
         return self.primary_discovered.get('platform', '')
 
     @property
+    def stripped_domain_not_applied(self):
+        """Did the poller name this device without the stripped-domain list?
+
+        A poller that cannot read the list falls back to cutting the hostname
+        at the first dot, and nothing else about the scan looks wrong: the
+        device simply arrives as `test` when `test.example` was meant. It
+        happens when the poller runs a build from before the list existed,
+        when its token cannot view stripped domains, or when the domain was
+        listed after the scan -- all invisible from here unless this says so.
+
+        Returns {'named', 'expected', 'domain'} when the reported name is the
+        first label of a hostname that an enabled domain would have left more
+        of, else None. A diagnosis only: the poller names devices, and the
+        one line of suffix arithmetic here decides nothing.
+        """
+        hostname = ((self.discovered or {}).get('sys_name') or '').strip().rstrip('.')
+        named = (self.primary_discovered.get('name') or '').strip()
+        if not hostname or not named or '.' in named:
+            return None
+        if named.lower() != hostname.split('.')[0].lower():
+            return None     # not a first-dot cut: a rule, an override, a typed name
+        lowered = hostname.lower()
+        domains = sorted(
+            StrippedDomain.objects.filter(enabled=True).values_list('domain', flat=True),
+            key=len, reverse=True,
+        )
+        for domain in domains:
+            suffix = '.' + domain
+            if lowered.endswith(suffix) and len(hostname) > len(suffix):
+                expected = hostname[:-len(suffix)]
+                if expected.lower() != named.lower():
+                    return {'named': named, 'expected': expected, 'domain': domain}
+                return None
+        return None
+
+    @property
     def discovered_context(self):
         """What partition of a chassis this scan is, if it is one.
 
