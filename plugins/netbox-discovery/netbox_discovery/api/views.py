@@ -124,7 +124,7 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                 OnboardingRequest.objects
                 .select_for_update(of=('self',), skip_locked=True)
                 .filter(poller=poller)
-                .select_related('site', 'override_site', 'role', 'tenant')
+                .select_related('site', 'override_site', 'role', 'tenant', 'vrf')
                 .order_by('created')
             )
             # The window must be wider than `limit` because _action_for
@@ -169,6 +169,13 @@ class DiscoveryPollerViewSet(NetBoxModelViewSet):
                     # at all when the space overlaps.
                     'tenant': entry.tenant_id,
                     'tenant_name': entry.tenant.name if entry.tenant else '',
+                    # Carried so the device's addresses are written into the
+                    # routing table that placed it. In overlapping space the
+                    # same address already exists in another table, and
+                    # without this the poller finds that one, declines to
+                    # steal it, and the device lands with no address at all.
+                    'vrf': entry.vrf_id,
+                    'vrf_name': entry.vrf.name if entry.vrf else '',
                 })
                 if len(jobs) >= limit:
                     break

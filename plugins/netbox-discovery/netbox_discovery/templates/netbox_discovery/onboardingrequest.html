@@ -31,7 +31,9 @@
           <table class="table table-hover attr-table">
             <tr><th>Containing prefix</th><td>{{ object.prefix|linkify|placeholder }}</td></tr>
             <tr><th>Tenant</th><td>{{ object.tenant|linkify|placeholder }}</td></tr>
-            {% if object.vrf %}<tr><th>VRF</th><td>{{ object.vrf|linkify }}</td></tr>{% endif %}
+            <tr><th>Routing table</th>
+              <td>{% if object.vrf %}VRF {{ object.vrf|linkify }}{% else %}Global
+                <span class="text-muted small">— no VRF was chosen</span>{% endif %}</td></tr>
             <tr><th>Site</th><td>{{ object.site|linkify|placeholder }}</td></tr>
             {% if object.override_site %}
               <tr><th>Site override</th><td>{{ object.override_site|linkify }}</td></tr>
@@ -63,11 +65,12 @@
             </p>
           {% endif %}
           <p class="text-muted small mb-0">
-            The address is placed by the most specific prefix containing it; that
-            prefix's site, or the nearest region above it, carries the
-            <code>poller-&lt;name&gt;</code> tag that decides who scans it. Where
-            address space overlaps between tenants, the tenant is part of that
-            key — without it the same address matches more than one prefix.
+            The address is placed by the most specific prefix containing it
+            <em>in its routing table</em> — the VRF chosen on the request, or
+            the global table when none was. That prefix's site, or the nearest
+            region above it, carries the <code>poller-&lt;name&gt;</code> tag
+            that decides who scans it. Where address space overlaps, the VRF is
+            what says which network is meant.
           </p>
         </div>
       </div>

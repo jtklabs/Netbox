@@ -179,6 +179,16 @@ keys through for exactly this. The field's value is written as the target's
 id and read back as a nested object, so compare `["id"]` before deciding it
 changed.
 
+### `?vrf_id=null` is the global table
+
+`/ipam/ip-addresses/` and `/ipam/prefixes/` take `vrf_id=<id>` for one VRF and
+the literal `vrf_id=null` for objects in no VRF. Leaving the filter off
+searches **every** table, which in overlapping address space returns another
+network's copy of the address. The scanner therefore sends one or the other on
+every address lookup, never neither. Pinned on the NetBox side by the
+Discovery plugin's `test_vrf_routing.py`, since the scanner's own tests run
+against a fake that would believe anything.
+
 ## Cables
 
 Verified against the live 4.6.7 before the cable sync was written, the same

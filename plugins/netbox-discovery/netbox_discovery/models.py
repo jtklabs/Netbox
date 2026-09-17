@@ -198,7 +198,10 @@ class OnboardingRequest(PrimaryModel):
     )
     vrf = models.ForeignKey(
         to='ipam.VRF', on_delete=models.PROTECT, blank=True, null=True,
-        related_name='+', help_text='Narrows the address to one routing table',
+        related_name='+', verbose_name='VRF',
+        help_text='The routing table the address is in. Only prefixes in this VRF '
+                  'place it; blank means only the global table does. The poller '
+                  'writes the device\'s addresses into the same VRF.',
     )
     manually_entered = models.BooleanField(
         default=False,
