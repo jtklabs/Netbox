@@ -168,10 +168,15 @@ def _primary_address(device: dict) -> str:
 
 
 class Syncer:
-    def __init__(self, netbox: NetBox, options: SyncOptions | None = None):
+    def __init__(self, netbox: NetBox, options: SyncOptions | None = None,
+                 strip_domains: tuple = ()):
         self.netbox = netbox
         self.options = options or SyncOptions()
-        self.cables = CableSyncer(netbox, self.options.cable_neighbor_classes)
+        # The same list the scan results were named under (naming.py), so a
+        # neighbor's reported hostname is looked up under the name its own
+        # scan would have given it.
+        self.cables = CableSyncer(netbox, self.options.cable_neighbor_classes,
+                                  strip_domains=strip_domains)
         self._custom_field_ready = False
         self._vcmp_field_ready = False
         self._use_lifecycle: bool | None = None
@@ -216,17 +221,17 @@ class Syncer:
 
         virtual_chassis = None
         if result.is_stack:
-            virtual_chassis = self.netbox.ensure(
-                "/dcim/virtual-chassis/",
-                {"name": result.virtual_chassis_name},
-                {"name": result.virtual_chassis_name},
-                label=f"virtual chassis {result.virtual_chassis_name}",
-            )
+            virtual_chassis = self._ensure_virtual_chassis(result, scanned_address)
 
         created: list[tuple[DeviceRecord, dict]] = []
         for record in result.devices:
+            # The polled address belongs to the device that answered -- the
+            # master, or the only box. Offered to another stack member it
+            # would "find" the master's record for that member, and the
+            # serial mismatch would then read as the master being swapped.
+            address = scanned_address if record is primary else ""
             device = self._ensure_device(record, site_id, virtual_chassis, tenant_id,
-                                         scanned_address=scanned_address)
+                                         scanned_address=address)
             if device is not None:
                 created.append((record, device))
                 if record.context is not None and record.context.is_vcmp_guest:
@@ -335,7 +340,7 @@ class Syncer:
         )
         platform = self._ensure_platform(record.platform, manufacturer)
 
-        existing = self._find_device(record, site_id, scanned_address)
+        existing = self._find_device(record, site_id, scanned_address, virtual_chassis)
         manual = existing is not None and self._is_manual(existing)
 
         desired: dict = {}
@@ -375,6 +380,7 @@ class Syncer:
             else:
                 self._log_model_correction(existing, device_type, record)
                 self._apply_site_move(existing, site_id, desired, record)
+                self._follow_naming_rule(existing, record, site_id, desired)
                 return self._patch_device(existing, desired, record)
 
         if device_type is None:
@@ -404,15 +410,93 @@ class Syncer:
         return created
 
     @staticmethod
-    def _is_this_device(device: dict, record: DeviceRecord, scanned_address: str) -> bool:
-        """Does a record that shares this scan's serial agree with it on name
-        or address? A rename keeps the address; a re-address keeps the name."""
+    def _is_this_device(device: dict, record: DeviceRecord, scanned_address: str,
+                        virtual_chassis: dict | None = None) -> bool:
+        """Does a record that shares this scan's serial agree with it on
+        anything else? A rename keeps the address; a re-address keeps the name.
+
+        The name may be one an earlier naming rule gave the device (the first
+        label, before its domain was listed to be stripped). And for a stack
+        member, sitting in the stack's own virtual chassis under the same
+        serial settles it whatever the member has been called.
+        """
         stored_name = (device.get("name") or "").strip().lower()
-        reported_name = record.name.strip().lower()
-        if stored_name and reported_name and stored_name == reported_name:
+        names = {record.name.strip().lower()} | {n.strip().lower() for n in record.former_names}
+        if stored_name and stored_name in names - {""}:
+            return True
+        if (virtual_chassis is not None and record.vc_position is not None
+                and virtual_chassis.get("id") is not None
+                and (device.get("virtual_chassis") or {}).get("id") == virtual_chassis["id"]):
             return True
         primary_address = _primary_address(device)
         return bool(scanned_address and primary_address and scanned_address == primary_address)
+
+    def _ensure_virtual_chassis(self, result: ScanResult, scanned_address: str) -> dict | None:
+        """The stack's virtual chassis: by name, else the one its master is in.
+
+        A stack whose name changed -- the naming rule changed, or somebody
+        renamed the switch -- would otherwise get a second virtual chassis,
+        and its master would be dragged out of the one it leads. The master's
+        own record says which chassis this is, and that chassis is used
+        whatever it is called.
+        """
+        path = "/dcim/virtual-chassis/"
+        name = result.virtual_chassis_name
+        found = self.netbox.first(path, {"name": name})
+        if found is not None:
+            return found
+        master = result.primary
+        if master is not None and master.serial:
+            for device in self._devices_with_serial(master.serial):
+                current = device.get("virtual_chassis") or {}
+                if not current.get("id") or not self._is_this_device(device, master, scanned_address):
+                    continue
+                try:
+                    chassis = self.netbox.get(f"{path}{current['id']}/")
+                except NetBoxError:
+                    break
+                formers = {n.lower() for n in result.former_chassis_names}
+                current_name = chassis.get("name") or ""
+                # Only to take a listed domain off, never to lengthen a name;
+                # see _follow_naming_rule.
+                if current_name.lower() in formers and len(name) < len(current_name):
+                    log.info("virtual chassis %r renamed %r to follow the hostname rule",
+                             chassis.get("name"), name)
+                    return self.netbox.ensure_fields(path, chassis, {"name": name},
+                                                     label=f"virtual chassis {name}")
+                return chassis
+        return self.netbox.create(path, {"name": name}, label=f"virtual chassis {name}")
+
+    def _follow_naming_rule(self, existing: dict, record: DeviceRecord, site_id: int,
+                            desired: dict) -> None:
+        """Take a newly listed domain off a record the scanner named with it on.
+
+        The case: a domain was missing from the stripped-domain list, a device
+        was created as "sw9.other.net", and the domain has been listed since.
+        Only a name the scanner itself derived from the hostname
+        (record.former_names) is touched; one somebody typed is none of those
+        and stays. And only ever to take something OFF: a record is never
+        given a longer name than it has, so listing a first domain cannot
+        turn every existing "sw1" under an unlisted domain into an FQDN.
+        Skipped when the new name is already taken at the site, since NetBox
+        would refuse the whole update over it.
+        """
+        current = (existing.get("name") or "").strip()
+        if not current or current.lower() == record.name.strip().lower():
+            return
+        if current.lower() not in {n.lower() for n in record.former_names}:
+            return
+        if len(record.name.strip()) >= len(current):
+            return
+        taken = [d for d in self.netbox.all(DEVICES_ENDPOINT,
+                                            {"name__ie": record.name, "site_id": site_id})
+                 if d.get("id") != existing.get("id")]
+        if taken:
+            log.warning("%s: would be renamed %r under the hostname rule, but that name is "
+                        "already taken at this site; left as it is", current, record.name)
+            return
+        log.info("%s: renamed %r to follow the hostname rule", current, record.name)
+        desired["name"] = record.name
 
     def _handle_serial_change(self, existing: dict, record: DeviceRecord,
                               site_id: int) -> dict | None:
@@ -554,7 +638,8 @@ class Syncer:
         self._pending_replacements = remaining
 
     def _find_device(self, record: DeviceRecord, site_id: int,
-                     scanned_address: str = "") -> dict | None:
+                     scanned_address: str = "",
+                     virtual_chassis: dict | None = None) -> dict | None:
         """The record this scan belongs to, or None to create one.
 
         The rule that matters more than any match: a scan never lands on a
@@ -584,7 +669,7 @@ class Syncer:
         if record.serial:
             candidates = self._devices_with_serial(record.serial)
             for device in candidates:
-                if self._is_this_device(device, record, scanned_address):
+                if self._is_this_device(device, record, scanned_address, virtual_chassis):
                     return device
             if candidates:
                 log.warning(

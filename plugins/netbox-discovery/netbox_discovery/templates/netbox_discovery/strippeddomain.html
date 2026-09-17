@@ -1,0 +1,79 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Domain to strip</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr><th>Domain</th><td><code>{{ object.domain }}</code></td></tr>
+            <tr><th>Enabled</th><td>{% checkmark object.enabled %}</td></tr>
+            <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+          </table>
+          <table class="table table-sm">
+            <thead><tr><th>The device reports</th><th>NetBox calls it</th></tr></thead>
+            <tbody>
+              <tr><td><code>test.{{ object.domain }}</code></td><td><code>test</code></td></tr>
+              <tr><td><code>sw1.floor2.{{ object.domain }}</code></td><td><code>sw1.floor2</code></td></tr>
+              <tr><td><code>test{{ object.domain }}</code></td>
+                <td><code>test{{ object.domain }}</code> <span class="text-muted small">not at a dot, so untouched</span></td></tr>
+            </tbody>
+          </table>
+          <p class="text-muted small mb-0">
+            The dot that joins the domain to the hostname is inferred and comes
+            off with it. Pollers read this list at the start of every run and
+            name what they scan accordingly; nothing in NetBox renames anything.
+            While the list is empty, hostnames are cut at the first dot as they
+            always were, so <strong>the first enabled domain is a switch as well
+            as an entry</strong>: from then on dots are kept, and a hostname
+            under a domain that is <em>not</em> listed keeps that domain. List
+            every domain the fleet uses. Existing devices are never given a
+            longer name, and a domain listed late is taken off the devices that
+            were created with it on.
+            {% if not others_enabled and object.enabled %}
+              <span class="text-warning">This is the only enabled domain.</span>
+            {% endif %}
+          </p>
+        </div>
+      </div>
+      {% include 'inc/panels/tags.html' %}
+      {% plugin_left_page object %}
+    </div>
+
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">Onboarding scans under this domain</h5>
+        <div class="card-body">
+          {% if requests %}
+            <table class="table table-sm">
+              <thead><tr><th>Request</th><th>Reported hostname</th><th>Named</th><th>Status</th></tr></thead>
+              <tbody>
+                {% for entry in requests %}
+                  <tr>
+                    <td>{{ entry|linkify }}</td>
+                    <td><code>{{ entry.discovered.sys_name }}</code></td>
+                    <td>{{ entry.discovered_name|placeholder }}</td>
+                    <td>{% badge entry.get_status_display bg_color=entry.get_status_color %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <p class="text-muted small mb-0">
+              The most recent 25. The name shown is the one the poller gave at
+              scan time, under the list as it stood then.
+            </p>
+          {% else %}
+            <p class="text-muted mb-0">
+              No onboarding scan has reported a hostname under this domain yet.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+      {% include 'inc/panels/comments.html' %}
+      {% plugin_right_page object %}
+    </div>
+  </div>
+{% endblock %}

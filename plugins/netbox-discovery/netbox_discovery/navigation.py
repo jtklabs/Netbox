@@ -58,10 +58,31 @@ rules = PluginMenuItem(
     ),
 )
 
+# Which part of a reported hostname is the domain, said out loud.
+stripped_domains = PluginMenuItem(
+    link='plugins:netbox_discovery:strippeddomain_list',
+    link_text='Stripped Domains',
+    permissions=['netbox_discovery.view_strippeddomain'],
+    buttons=(
+        PluginMenuButton(
+            link='plugins:netbox_discovery:strippeddomain_add',
+            title='Add a domain',
+            icon_class='mdi mdi-plus-thick',
+            permissions=['netbox_discovery.add_strippeddomain'],
+        ),
+        PluginMenuButton(
+            link='plugins:netbox_discovery:strippeddomain_bulk_import',
+            title='Import',
+            icon_class='mdi mdi-upload',
+            permissions=['netbox_discovery.add_strippeddomain'],
+        ),
+    ),
+)
+
 menu = PluginMenu(
     label='Discovery',
     groups=(
-        ('Onboarding', (onboarding, pollers, rules)),
+        ('Onboarding', (onboarding, pollers, rules, stripped_domains)),
         ('Changes', (replacements, issues)),
         ('Software', (
             PluginMenuItem(

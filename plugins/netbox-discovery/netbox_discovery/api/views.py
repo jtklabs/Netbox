@@ -35,6 +35,7 @@ from netbox_discovery.api.serializers import (
     PollerCheckInSerializer,
     RejectSerializer,
     ScanResultSerializer,
+    StrippedDomainSerializer,
 )
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.resolution import normalise_poller_name
@@ -45,6 +46,7 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 logger = logging.getLogger('netbox_discovery.api')
@@ -430,3 +432,11 @@ class DiscoveryRuleViewSet(NetBoxModelViewSet):
     queryset = DiscoveryRule.objects.prefetch_related('tags')
     serializer_class = DiscoveryRuleSerializer
     filterset_class = filtersets.DiscoveryRuleFilterSet
+
+
+class StrippedDomainViewSet(NetBoxModelViewSet):
+    """Domains to take off reported hostnames. Pollers read these."""
+
+    queryset = StrippedDomain.objects.prefetch_related('tags')
+    serializer_class = StrippedDomainSerializer
+    filterset_class = filtersets.StrippedDomainFilterSet

@@ -22,6 +22,7 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 from netbox_discovery.resolution import sites_for_poller
 
@@ -55,6 +56,12 @@ __all__ = (
     'DiscoveryRuleEditView',
     'DiscoveryRuleDeleteView',
     'DiscoveryRuleBulkDeleteView',
+    'StrippedDomainListView',
+    'StrippedDomainView',
+    'StrippedDomainEditView',
+    'StrippedDomainDeleteView',
+    'StrippedDomainBulkImportView',
+    'StrippedDomainBulkDeleteView',
 )
 
 
@@ -504,3 +511,49 @@ class DiscoveryRuleBulkDeleteView(BulkDeleteView):
     queryset = DiscoveryRule.objects.all()
     filterset = filtersets.DiscoveryRuleFilterSet
     table = tables.DiscoveryRuleTable
+
+
+@register_model_view(StrippedDomain, name='list')
+class StrippedDomainListView(ObjectListView):
+    queryset = StrippedDomain.objects.all()
+    table = tables.StrippedDomainTable
+    filterset = filtersets.StrippedDomainFilterSet
+    filterset_form = forms.StrippedDomainFilterForm
+
+
+@register_model_view(StrippedDomain)
+class StrippedDomainView(ObjectView):
+    queryset = StrippedDomain.objects.all()
+
+    def get_extra_context(self, request, instance):
+        return {
+            # Scans whose reported hostname sits under this domain -- what the
+            # entry touches, and the quickest check that it was typed right.
+            'requests': OnboardingRequest.objects.filter(
+                discovered__sys_name__iendswith='.' + instance.domain
+            ).select_related('site', 'device').order_by('-scanned_at')[:25],
+            'others_enabled': StrippedDomain.objects.filter(enabled=True).exclude(
+                pk=instance.pk).count(),
+        }
+
+
+@register_model_view(StrippedDomain, 'edit')
+class StrippedDomainEditView(ObjectEditView):
+    queryset = StrippedDomain.objects.all()
+    form = forms.StrippedDomainForm
+
+
+@register_model_view(StrippedDomain, 'delete')
+class StrippedDomainDeleteView(ObjectDeleteView):
+    queryset = StrippedDomain.objects.all()
+
+
+class StrippedDomainBulkImportView(BulkImportView):
+    queryset = StrippedDomain.objects.all()
+    model_form = forms.StrippedDomainImportForm
+
+
+class StrippedDomainBulkDeleteView(BulkDeleteView):
+    queryset = StrippedDomain.objects.all()
+    filterset = filtersets.StrippedDomainFilterSet
+    table = tables.StrippedDomainTable

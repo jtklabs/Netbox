@@ -43,6 +43,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from snmpinv import config as config_module
+from snmpinv import naming
 from snmpinv import onboarding
 from snmpinv import probe as probe_module
 from snmpinv import rules as rules_module
@@ -104,7 +105,11 @@ def main(argv=None) -> int:
         max_repetitions=config.snmp.max_repetitions,
         bulk_state=bulk_state,
     )
-    syncer = Syncer(netbox, config.sync)
+    # The domains to take off reported hostnames, kept in the Discovery
+    # plugin. Read once per run and before anything is named, so every device,
+    # stack member and cabled neighbor in the run is named by the same rule.
+    strip_domains = naming.load_stripped_domains(netbox)
+    syncer = Syncer(netbox, config.sync, strip_domains=strip_domains)
 
     # Rules kept in the Discovery plugin that fill in what a device does not
     # report. Read once per run so every scan in it is judged the same way;
@@ -112,7 +117,7 @@ def main(argv=None) -> int:
     rules = [] if args.collect_only else rules_module.load_rules(netbox)
 
     if args.onboard:
-        return run_onboarding(netbox, config, collector, syncer, args, rules)
+        return run_onboarding(netbox, config, collector, syncer, args, rules, strip_domains)
 
     try:
         targets = build_target_list(netbox, config, args)
@@ -132,7 +137,7 @@ def main(argv=None) -> int:
     started = time.time()
     scanned = failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.snmp.workers) as pool:
-        futures = {pool.submit(scan_one, collector, target, rules): target
+        futures = {pool.submit(scan_one, collector, target, rules, strip_domains): target
                    for target in targets}
         for future in concurrent.futures.as_completed(futures):
             target = futures[future]
@@ -234,7 +239,8 @@ def run_probe(args) -> int:
     worst = 0
     for address in args.probe:
         code = probe_module.probe(
-            collector, address, as_json=args.json, save_walk=args.save_walk
+            collector, address, as_json=args.json, save_walk=args.save_walk,
+            strip_domains=tuple(args.strip_domain),
         )
         worst = max(worst, code)
     bulk_state.save()
@@ -242,7 +248,7 @@ def run_probe(args) -> int:
 
 
 def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
-                   args, rules=()) -> int:
+                   args, rules=(), strip_domains=()) -> int:
     """Check in with the Discovery plugin and work whatever it hands back.
 
     Run this on a short timer — a couple of minutes — because a person is
@@ -303,6 +309,7 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
         for name, n in onboarding.run_jobs(
             netbox, collector, syncer, jobs,
             dry_run=args.dry_run, workers=config.snmp.workers, rules=rules,
+            strip_domains=strip_domains,
         ).items():
             counts[name] = counts.get(name, 0) + n
         total += len(jobs)
@@ -413,9 +420,9 @@ def _site_from_prefix(netbox: NetBox, address: str) -> int | None:
     return best_site
 
 
-def scan_one(collector: Collector, target: Target, rules=()) -> ScanResult:
+def scan_one(collector: Collector, target: Target, rules=(), strip_domains=()) -> ScanResult:
     facts: DeviceFacts = collector.collect(target.address)
-    result = build_scan_result(facts)
+    result = build_scan_result(facts, strip_domains=strip_domains)
     rules_module.apply_rules(result, rules)
     return result
 
@@ -495,6 +502,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "without touching NetBox (repeatable)")
     parser.add_argument("--json", action="store_true",
                         help="with --probe, emit the findings as JSON")
+    parser.add_argument("--strip-domain", action="append", default=[], metavar="DOMAIN",
+                        help="with --probe, name the device as a sweep would with this "
+                             "domain on the Discovery plugin's stripped-domain list "
+                             "(repeatable); a probe reads no NetBox, so it has no list")
     parser.add_argument("--save-walk", default="", metavar="FILE",
                         help="with --probe, also save the raw walk as a test fixture")
     parser.add_argument("--onboard", action="store_true",

@@ -256,6 +256,8 @@ class FakeNetBox:
             if field == "interface":
                 return str(item.get("assigned_object_id")) == str(value)
             return str(_id(item.get(field))) == str(value)
+        if key == "name__ie":
+            return str(item.get("name") or "").lower() == str(value).lower()
         current = item.get(key)
         if key == "address":
             return str(current or "").split("/")[0] == str(value).split("/")[0]

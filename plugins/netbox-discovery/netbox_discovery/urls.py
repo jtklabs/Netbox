@@ -8,6 +8,7 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 # Route names must match the lowercased model class name — NetBox's generic
@@ -90,6 +91,23 @@ urlpatterns = [
          name='discoveryrule_delete'),
     path('rules/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
          name='discoveryrule_changelog', kwargs={'model': DiscoveryRule}),
+
+    path('stripped-domains/', views.StrippedDomainListView.as_view(),
+         name='strippeddomain_list'),
+    path('stripped-domains/add/', views.StrippedDomainEditView.as_view(),
+         name='strippeddomain_add'),
+    path('stripped-domains/import/', views.StrippedDomainBulkImportView.as_view(),
+         name='strippeddomain_bulk_import'),
+    path('stripped-domains/delete/', views.StrippedDomainBulkDeleteView.as_view(),
+         name='strippeddomain_bulk_delete'),
+    path('stripped-domains/<int:pk>/', views.StrippedDomainView.as_view(),
+         name='strippeddomain'),
+    path('stripped-domains/<int:pk>/edit/', views.StrippedDomainEditView.as_view(),
+         name='strippeddomain_edit'),
+    path('stripped-domains/<int:pk>/delete/', views.StrippedDomainDeleteView.as_view(),
+         name='strippeddomain_delete'),
+    path('stripped-domains/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+         name='strippeddomain_changelog', kwargs={'model': StrippedDomain}),
 ]
 
 from . import command_views, upgrade_views

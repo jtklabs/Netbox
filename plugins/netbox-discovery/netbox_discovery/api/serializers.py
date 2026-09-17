@@ -12,9 +12,11 @@ from netbox_discovery.models import (
     DiscoveryRule,
     HardwareReplacement,
     OnboardingRequest,
+    StrippedDomain,
 )
 
 __all__ = (
+    'StrippedDomainSerializer',
     'DiscoveryPollerSerializer',
     'DiscoveryRuleSerializer',
     'OnboardingRequestSerializer',
@@ -314,3 +316,19 @@ class DiscoveryRuleSerializer(NetBoxModelSerializer):
             'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
         )
         brief_fields = ('url', 'id', 'display', 'name', 'enabled')
+
+
+class StrippedDomainSerializer(NetBoxModelSerializer):
+    """Read by every poller at the start of a run (`?enabled=true`)."""
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name='plugins-api:netbox_discovery-api:strippeddomain-detail'
+    )
+
+    class Meta:
+        model = StrippedDomain
+        fields = (
+            'url', 'id', 'display', 'domain', 'enabled',
+            'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated',
+        )
+        brief_fields = ('url', 'id', 'display', 'domain', 'enabled')

@@ -101,7 +101,7 @@ def check_in(netbox: NetBox, poller_name: str, version: str = "",
 
 def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
              jobs: list[dict], dry_run: bool = False, workers: int = 8,
-             rules: Sequence[Rule] = ()) -> dict:
+             rules: Sequence[Rule] = (), strip_domains: Sequence[str] = ()) -> dict:
     """Do each job and report its outcome back. Returns a count per outcome.
 
     Jobs run concurrently. A check-in can hand back a batch — a bulk CSV import
@@ -126,9 +126,10 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
         try:
             if action == "scan":
                 return _do_scan(netbox, collector, syncer, request_id,
-                                job.get("address", ""), dry_run, rules)
+                                job.get("address", ""), dry_run, rules, strip_domains)
             if action == "apply":
-                return _do_apply(netbox, collector, syncer, job, dry_run, rules)
+                return _do_apply(netbox, collector, syncer, job, dry_run, rules,
+                                 strip_domains)
             log.warning("request %s: unknown job action %r", request_id, action)
             return "skipped"
         except NetBoxError as exc:
@@ -149,7 +150,8 @@ def run_jobs(netbox: NetBox, collector: Collector, syncer: Syncer,
 
 
 def _do_scan(netbox: NetBox, collector: Collector, syncer: Syncer, request_id: int,
-             address: str, dry_run: bool, rules: Sequence[Rule] = ()) -> str:
+             address: str, dry_run: bool, rules: Sequence[Rule] = (),
+             strip_domains: Sequence[str] = ()) -> str:
     """Walk a device and report what is there, writing nothing."""
     log.info("onboarding %s: scanning", address)
     try:
@@ -170,7 +172,7 @@ def _do_scan(netbox: NetBox, collector: Collector, syncer: Syncer, request_id: i
         _report_scan_failure(netbox, request_id, address, dry_run, str(exc))
         return "failed"
 
-    result = build_scan_result(facts)
+    result = build_scan_result(facts, strip_domains=strip_domains)
     if not result.devices:
         _report_scan_failure(netbox, request_id, address, dry_run,
                              "The device answered but reported no chassis, so there "
@@ -213,7 +215,8 @@ def _report_scan_failure(netbox: NetBox, request_id: int, address: str,
 
 
 def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
-              job: dict, dry_run: bool, rules: Sequence[Rule] = ()) -> str:
+              job: dict, dry_run: bool, rules: Sequence[Rule] = (),
+              strip_domains: Sequence[str] = ()) -> str:
     """Create the device an operator approved, after re-reading it."""
     address = job.get("address", "")
     request_id = job.get("id")
@@ -228,7 +231,7 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
 
     from_preview = False
     try:
-        result = build_scan_result(collector.collect(address))
+        result = build_scan_result(collector.collect(address), strip_domains=strip_domains)
     except SnmpError as exc:
         # The device is not answering now, but somebody already reviewed a
         # reading of it. Applying what they approved beats making them start

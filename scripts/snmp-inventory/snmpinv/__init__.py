@@ -13,6 +13,7 @@ for the reasoning behind each layer:
     netbox.py     REST client with lookup-or-create and dry-run
     sync.py       idempotent writes
     rules.py      fills in what a device does not report, from rules in NetBox
+    naming.py     hostname -> device name: which domains come off, from NetBox
     config.py     poller config and SNMPv3 credential sets
 
 The version is reported to the Discovery plugin at every check-in and shown
@@ -21,4 +22,4 @@ running to benefit from -- it is how "is that poller on the new build yet?" is
 answered without logging in to it.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
