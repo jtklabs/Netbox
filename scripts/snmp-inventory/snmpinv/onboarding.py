@@ -274,7 +274,7 @@ def _do_apply(netbox: NetBox, collector: Collector, syncer: Syncer,
         return "applied"
 
     return _write_and_report(netbox, syncer, request_id, address, result, site_id,
-                             job.get("tenant"))
+                             job.get("tenant"), job.get("vrf"))
 
 
 def _apply_result(netbox: NetBox, syncer: Syncer, request: dict,
@@ -299,18 +299,25 @@ def _apply_result(netbox: NetBox, syncer: Syncer, request: dict,
         "override_model": request.get("override_model") or "",
     })
     tenant = (request.get("tenant") or {}).get("id")
+    # The routing table the request was placed in; None is the global table.
+    vrf = (request.get("vrf") or {}).get("id")
     return _write_and_report(netbox, syncer, request["id"], address, result,
-                             site_id, tenant)
+                             site_id, tenant, vrf)
 
 
 def _write_and_report(netbox: NetBox, syncer: Syncer, request_id: int, address: str,
-                      result: ScanResult, site_id: int, tenant_id) -> str:
-    """The write half of an apply, shared by both routes into it."""
+                      result: ScanResult, site_id: int, tenant_id, vrf_id=None) -> str:
+    """The write half of an apply, shared by both routes into it.
+
+    `vrf_id` is the routing table the request was placed in, so the device's
+    addresses go into that table and not the one next to it.
+    """
     # Serialised: creating the shared taxonomy (manufacturer, device type,
     # platform, role) races otherwise, and the syncer's batched state is not
     # thread safe.
     with _write_lock:
-        syncer.sync(result, site_id, scanned_address=address, tenant_id=tenant_id)
+        syncer.sync(result, site_id, scanned_address=address, tenant_id=tenant_id,
+                    vrf_id=vrf_id)
         syncer.flush_software_reports()
         device = _find_created_device(netbox, result, site_id)
 

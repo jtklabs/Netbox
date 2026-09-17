@@ -22,4 +22,4 @@ running to benefit from -- it is how "is that poller on the new build yet?" is
 answered without logging in to it.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"

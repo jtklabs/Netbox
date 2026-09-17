@@ -5,21 +5,31 @@ This is the inverse of what the scanner does on a sweep. The scanner asks
 the poller. Both walk the same chain, and they must agree — if they disagree, a
 device gets onboarded by a poller that will never scan it again, or by none.
 
-    address (+ tenant) -> most specific containing prefix
-                       -> that prefix's site
-                       -> site's poller-<name> tag, else nearest tagged ancestor region
+    address in a routing table -> most specific containing prefix
+                               -> that prefix's site
+                               -> site's poller-<name> tag, else nearest tagged ancestor region
 
-Tenant is part of the key, not decoration. Address space overlaps across
-companies we have bought: two prefixes of 10.10.1.0/24 can and do coexist in
-NetBox's global table — it does not enforce uniqueness there — and a containment
-lookup returns both. Choosing between them by mask length alone would be a coin
-toss that files an acquired company's switch under our site, or hands it to a
-poller with no route to it.
+The routing table is part of the key, not decoration. Address space overlaps
+across companies we have bought: 10.10.1.0/24 exists here and again at the
+company acquired last year, and an address in it means a different device
+depending on whose network is meant. NetBox holds duplicated space in VRFs —
+with ENFORCE_GLOBAL_UNIQUE on, the default, a second identical prefix cannot
+sit in the global table at all — so the VRF says which network:
 
-So the rule is: if the candidate prefixes span more than one tenant and the
-caller did not say which, refuse and list them. Guessing is the one thing that
-must not happen. Where a single tenant owns all the candidates, the most
-specific wins as usual and nobody has to type anything.
+    a VRF on the request   only the prefixes IN THAT VRF place the address
+    no VRF                 only the prefixes in the global table do
+
+Never a mixture. Looking across every table and picking by mask length would
+be a coin toss that files an acquired company's switch under our site, or
+hands it to a poller with no route to it; and the reverse mistake — an
+address that exists only inside a VRF quietly falling through to the default
+region's poller — sends a poller after whatever answers at that address in
+ITS network. So neither happens: an address not in the chosen table is
+refused, and the refusal names the VRFs that do hold it.
+
+A tenant narrows within the chosen table and is otherwise inherited, from the
+prefix or failing that from the prefix's VRF, so the created device is filed
+against the right company without anybody typing it.
 
 Region tags are inherited by walking *up* from the site, so a sub-region tagged
 for another poller correctly takes its sites back from a parent tagged for us.
@@ -32,6 +42,7 @@ import ipaddress
 from dataclasses import dataclass, field
 
 from dcim.models import Region, Site
+from django.db.models import Q
 from ipam.models import Prefix
 
 from netbox_discovery.utils import plugin_setting
@@ -51,6 +62,9 @@ class Resolution:
     # the poller. The scan can go ahead; the site is chosen at review.
     used_default_region: bool = False
     candidates: list = field(default_factory=list)
+    # Which form field would settle the problem — 'vrf' or 'tenant' — so the
+    # error lands beside the thing to change rather than on the address.
+    needs: str = ''
 
     @property
     def ok(self) -> bool:
@@ -81,15 +95,31 @@ def normalise_address(value: str) -> str:
 
 
 def candidate_prefixes(address: str, tenant=None, vrf=None) -> list[Prefix]:
-    """Every prefix that contains `address`, narrowed by tenant and VRF."""
+    """Every prefix containing `address` in one routing table.
+
+    `vrf` picks the table: that VRF's prefixes, or with None the global
+    table's — never both. `tenant` narrows within it, and counts a prefix
+    that carries no tenant of its own but sits in a VRF belonging to that
+    tenant, since the VRF already says whose space it is.
+    """
     queryset = Prefix.objects.filter(
         prefix__net_contains_or_equals=address
-    ).select_related('tenant', 'vrf', 'scope_type')
+    ).select_related('tenant', 'vrf', 'vrf__tenant', 'scope_type')
+    queryset = queryset.filter(vrf=vrf) if vrf is not None else queryset.filter(vrf__isnull=True)
     if tenant is not None:
-        queryset = queryset.filter(tenant=tenant)
-    if vrf is not None:
-        queryset = queryset.filter(vrf=vrf)
+        queryset = queryset.filter(
+            Q(tenant=tenant) | Q(tenant__isnull=True, vrf__tenant=tenant)
+        )
     return list(queryset)
+
+
+def prefixes_in_vrfs(address: str) -> list[Prefix]:
+    """Prefixes containing `address` in any VRF — for saying where an address
+    that is not in the global table does live."""
+    return list(
+        Prefix.objects.filter(prefix__net_contains_or_equals=address, vrf__isnull=False)
+        .select_related('tenant', 'vrf', 'vrf__tenant', 'scope_type')
+    )
 
 
 def most_specific(prefixes: list[Prefix]) -> list[Prefix]:
@@ -178,44 +208,64 @@ def resolve(address: str, tenant=None, vrf=None) -> Resolution:
 
     candidates = candidate_prefixes(host, tenant=tenant, vrf=vrf)
 
-    if not candidates:
-        return _fall_back(host, tenant, vrf)
-
-    # Overlapping space: the address sits in prefixes belonging to more than
-    # one owner, and nobody said which device is meant.
-    #
-    # Keyed on (tenant, VRF) rather than tenant alone, because VRF is what
-    # actually holds overlapping space in NetBox. With ENFORCE_GLOBAL_UNIQUE on
-    # — the default — two identical prefixes cannot both sit in the global
-    # table at all, whatever their tenants; Prefix.clean() refuses the second.
-    # Duplicated space therefore lives in separate VRFs, with tenant as the
-    # ownership label on top. Either narrows this, so both are accepted.
-    owners = {(p.tenant_id, p.vrf_id) for p in candidates}
-    if len(owners) > 1 and tenant is None and vrf is None:
+    if not candidates and vrf is not None:
+        # A VRF was named and holds nothing for this address. The default
+        # region's poller is no answer here: a VRF is how somebody says "the
+        # other network", and that poller sits in this one.
         return Resolution(
-            address=host, tenant=tenant, candidates=candidates,
+            address=host, tenant=tenant, needs='vrf',
             problem=(
-                'This address is inside %d prefixes with different owners, so '
-                'there is no way to tell which device it is. Choose a tenant or '
-                'a VRF. Candidates: %s'
-                % (len(owners), _describe(candidates))
+                'VRF %s has no prefix containing %s%s, so nothing says which site '
+                'or poller it belongs to. Create the prefix in that VRF and scope '
+                'it to a site.'
+                % (vrf, host, ' for tenant %s' % tenant if tenant is not None else '')
             ),
         )
 
+    if not candidates:
+        elsewhere = prefixes_in_vrfs(host)
+        if elsewhere:
+            # Not in the global table, but it does exist inside a VRF. Falling
+            # back to the default region would send that region's poller after
+            # whatever answers at this address in ITS network — a different
+            # device, or nothing. Name the VRFs instead.
+            return Resolution(
+                address=host, tenant=tenant, candidates=elsewhere, needs='vrf',
+                problem=(
+                    'No prefix in the global table contains %s, and no VRF was '
+                    'chosen. It is inside: %s. Choose the VRF if one of those is '
+                    'the network this device is in.' % (host, _describe(elsewhere))
+                ),
+            )
+        return _fall_back(host, tenant, vrf)
+
+    # Within one routing table the longest mask wins, whoever owns the
+    # aggregates above it: a tenantless 10.0.0.0/8 over a tenant's /24 is
+    # nesting, not ambiguity. What cannot be settled is a tie — the same
+    # prefix twice in one table, possible only where uniqueness is not
+    # enforced — and a tenant breaks it when the two differ in tenant.
     winners = most_specific(candidates)
     if len(winners) > 1:
+        by_tenant = len({p.tenant_id for p in winners}) > 1 and tenant is None
         return Resolution(
             address=host, tenant=tenant, candidates=winners,
+            needs='tenant' if by_tenant else '',
             problem=(
-                'This address is inside %d equally specific prefixes and nothing '
-                'distinguishes them, so a site cannot be chosen. Give them '
-                'different tenants or VRFs. Candidates: %s'
-                % (len(winners), _describe(winners))
+                'This address is inside %d equally specific prefixes in %s, so a '
+                'site cannot be chosen. %s Candidates: %s'
+                % (len(winners),
+                   'VRF %s' % vrf if vrf is not None else 'the global table',
+                   'Choose a tenant.' if by_tenant
+                   else 'Nothing distinguishes them; give them different tenants or VRFs.',
+                   _describe(winners))
             ),
         )
 
     prefix = winners[0]
-    resolved_tenant = tenant or prefix.tenant
+    # The prefix's own tenant, else its VRF's: a VRF made for an acquired
+    # company already says whose space it is, and a prefix added to it without
+    # the tenant filled in is the ordinary way that gets forgotten.
+    resolved_tenant = tenant or prefix.tenant or (prefix.vrf.tenant if prefix.vrf else None)
 
     site = site_for_prefix(prefix)
     if site is None:

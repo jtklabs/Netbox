@@ -48,6 +48,11 @@ class Target:
     device_id: int | None = None
     device_name: str = ""
     source: str = ""
+    # The routing table the address was found in: the VRF of the prefix or
+    # address that made it a target, None for the global table. The sync
+    # writes the device's addresses into the same table, which is what keeps
+    # overlapping address space from colliding.
+    vrf_id: int | None = None
 
     def __hash__(self) -> int:
         return hash(self.address)
@@ -189,21 +194,36 @@ def select_targets(netbox: NetBox, poller_name: str, scan_tag: str = "",
 
     targets: dict[str, Target] = {}
 
+    def offer(target: Target) -> None:
+        """One scan per address. A poller sits in one network, so an address
+        that is a target in two routing tables is still one device from where
+        it stands; scanning it twice would file the same box under both."""
+        kept = targets.setdefault(target.address, target)
+        if kept is not target and kept.vrf_id != target.vrf_id:
+            log.warning(
+                "%s is a target in two routing tables (VRF %s and VRF %s) at this "
+                "poller's sites; it can reach only one of them, and scans it as the "
+                "first. Overlapping space needs a poller, and sites, of its own.",
+                target.address, kept.vrf_id or "global", target.vrf_id or "global",
+            )
+
     for target in _targets_from_ipam(netbox, ownership, scan_tag):
-        targets.setdefault(target.address, target)
+        offer(target)
 
     if include_device_primaries:
         for target in _targets_from_devices(netbox, ownership):
-            targets.setdefault(target.address, target)
+            offer(target)
 
     for target in _targets_from_tagged_devices(netbox, our_tag):
         # A device tagged for us anywhere overrides whatever its site said, so
         # this one replaces rather than defers.
         targets[target.address] = target
 
-    excluded = _addresses_claimed_by_others(netbox, our_tag)
-    for address in excluded:
-        if address in targets:
+    # By address AND routing table. In overlapping space another poller's
+    # device at 10.10.1.5 in its VRF says nothing about our 10.10.1.5 in the
+    # global table, and excluding on the bare address would quietly drop ours.
+    for address, vrf_id in _addresses_claimed_by_others(netbox, our_tag):
+        if address in targets and targets[address].vrf_id == vrf_id:
             log.debug("skipping %s — claimed by another poller", address)
             targets.pop(address)
 
@@ -225,7 +245,13 @@ def _targets_from_ipam(netbox: NetBox, ownership: Ownership, scan_tag: str) -> l
         site_name = ownership.site_names.get(site_id, "")
         prefixes = netbox.all("/ipam/prefixes/", {"site_id": site_id})
         for prefix in prefixes:
-            params = {"parent": prefix["prefix"]}
+            # Addresses in the prefix's own routing table only. `parent` is a
+            # pure containment test, so without the VRF a global 10.10.1.0/24
+            # at our site would also pull in every 10.10.1.x held in some
+            # other company's VRF -- addresses this poller cannot reach, or
+            # worse, can, and would scan as somebody else's device.
+            vrf_id = (prefix.get("vrf") or {}).get("id")
+            params = {"parent": prefix["prefix"], "vrf_id": vrf_id if vrf_id else "null"}
             if scan_tag:
                 params["tag"] = scan_tag
             for ip in netbox.all("/ipam/ip-addresses/", params):
@@ -241,7 +267,29 @@ def _targets_from_ipam(netbox: NetBox, ownership: Ownership, scan_tag: str) -> l
                     device_id=device.get("id"),
                     device_name=device.get("name", ""),
                     source="ipam",
+                    vrf_id=vrf_id,
                 ))
+    return out
+
+
+def _primary_vrfs(netbox: NetBox, devices: list[dict]) -> dict[int, int | None]:
+    """The VRF of each device's primary address, keyed by device id.
+
+    A device's nested primary_ip4 carries the address and nothing about its
+    routing table, so the address objects are fetched -- in batches, by id,
+    rather than one request per device.
+    """
+    by_ip: dict[int, int] = {}
+    for device in devices:
+        primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+        if primary.get("id"):
+            by_ip[primary["id"]] = device["id"]
+    out: dict[int, int | None] = {}
+    ids = sorted(by_ip)
+    for start in range(0, len(ids), 100):
+        for ip in netbox.all("/ipam/ip-addresses/", {"id": ids[start:start + 100]}):
+            if ip.get("id") in by_ip:
+                out[by_ip[ip["id"]]] = (ip.get("vrf") or {}).get("id")
     return out
 
 
@@ -250,7 +298,9 @@ def _targets_from_devices(netbox: NetBox, ownership: Ownership) -> list[Target]:
     out: list[Target] = []
     for site_id in sorted(ownership.our_site_ids):
         site_name = ownership.site_names.get(site_id, "")
-        for device in netbox.all("/dcim/devices/", {"site_id": site_id, "has_primary_ip": "true"}):
+        devices = netbox.all("/dcim/devices/", {"site_id": site_id, "has_primary_ip": "true"})
+        vrfs = _primary_vrfs(netbox, devices)
+        for device in devices:
             if _poller_claim_excludes(device, ownership.our_tag):
                 continue
             address = _bare_address((device.get("primary_ip4") or device.get("primary_ip") or {}).get("address", ""))
@@ -263,6 +313,7 @@ def _targets_from_devices(netbox: NetBox, ownership: Ownership) -> list[Target]:
                 device_id=device["id"],
                 device_name=device.get("name", ""),
                 source="device-primary-ip",
+                vrf_id=vrfs.get(device["id"]),
             ))
     return out
 
@@ -274,7 +325,9 @@ def _targets_from_tagged_devices(netbox: NetBox, our_tag: str) -> list[Target]:
         # pollers are driven entirely by site and region tags.
         return []
     out: list[Target] = []
-    for device in netbox.all("/dcim/devices/", {"tag": our_tag}):
+    devices = netbox.all("/dcim/devices/", {"tag": our_tag})
+    vrfs = _primary_vrfs(netbox, devices)
+    for device in devices:
         address = _bare_address((device.get("primary_ip4") or device.get("primary_ip") or {}).get("address", ""))
         if not address:
             continue
@@ -286,12 +339,13 @@ def _targets_from_tagged_devices(netbox: NetBox, our_tag: str) -> list[Target]:
             device_id=device["id"],
             device_name=device.get("name", ""),
             source="device-tag",
+            vrf_id=vrfs.get(device["id"]),
         ))
     return out
 
 
-def _addresses_claimed_by_others(netbox: NetBox, our_tag: str) -> set[str]:
-    """Primary addresses of devices explicitly tagged for a different poller.
+def _addresses_claimed_by_others(netbox: NetBox, our_tag: str) -> set[tuple]:
+    """(address, VRF id) of devices explicitly tagged for a different poller.
 
     Every `poller-*` tag other than ours is enumerated from the tag list, so a
     poller added later is excluded correctly without this poller being
@@ -301,9 +355,11 @@ def _addresses_claimed_by_others(netbox: NetBox, our_tag: str) -> set[str]:
         tag["slug"] for tag in netbox.all("/extras/tags/")
         if tag.get("slug", "").startswith(POLLER_TAG_PREFIX) and tag["slug"] != our_tag
     ]
-    claimed: set[str] = set()
+    claimed: set[tuple] = set()
     for slug in other_tags:
-        for device in netbox.all("/dcim/devices/", {"tag": slug}):
+        devices = netbox.all("/dcim/devices/", {"tag": slug})
+        vrfs = _primary_vrfs(netbox, devices)
+        for device in devices:
             if our_tag in [t.get("slug") for t in device.get("tags", [])]:
                 # Tagged for both: resolved in our favour, same as _pick_owner.
                 continue
@@ -311,7 +367,7 @@ def _addresses_claimed_by_others(netbox: NetBox, our_tag: str) -> set[str]:
                 (device.get("primary_ip4") or device.get("primary_ip") or {}).get("address", "")
             )
             if address:
-                claimed.add(address)
+                claimed.add((address, vrfs.get(device["id"])))
     return claimed
 
 

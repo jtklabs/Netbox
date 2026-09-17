@@ -179,6 +179,8 @@ class Syncer:
                                   strip_domains=strip_domains)
         self._custom_field_ready = False
         self._vcmp_field_ready = False
+        # The routing table of the host being synced; see sync().
+        self._vrf_id: int | None = None
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
         # Chassis swaps are detected before the replacement device exists, so
@@ -192,14 +194,39 @@ class Syncer:
     # --- entry point --------------------------------------------------------
 
     def sync(self, result: ScanResult, site_id: int | None, scanned_address: str = "",
-             tenant_id: int | None = None) -> None:
+             tenant_id: int | None = None, vrf_id: int | None = None) -> None:
         """Write one scanned host — a single device or a whole stack.
 
         `tenant_id` files the result against the company that owns it. It
         matters most where address space overlaps between us and companies we
         have bought: the tenant is what made the address resolvable in the
         first place, and dropping it here would leave the device unattributed.
+
+        `vrf_id` is the routing table the host was found in — the VRF of the
+        prefix that placed it, or None for the global table. Every address
+        this host reports is looked up and created in that table and no
+        other. In overlapping space the same address exists twice, and a
+        lookup across all tables finds the other network's copy: the sync
+        would decline to steal it and the device would land with no address,
+        or worse, be matched to the other network's device by it.
         """
+        # Held for the length of this one sync rather than passed down a dozen
+        # signatures. Safe because a Syncer writes one host at a time -- every
+        # caller serialises syncs under a lock -- and cleared afterwards so a
+        # later host can never inherit it.
+        self._vrf_id = vrf_id
+        try:
+            self._sync(result, site_id, scanned_address, tenant_id)
+        finally:
+            self._vrf_id = None
+
+    def _in_vrf(self) -> dict:
+        """The filter that scopes an address lookup to this sync's routing
+        table. NetBox takes `vrf_id=null` for the global table."""
+        return {"vrf_id": self._vrf_id if self._vrf_id else "null"}
+
+    def _sync(self, result: ScanResult, site_id: int | None, scanned_address: str,
+              tenant_id: int | None) -> None:
         if not result.devices:
             log.warning("%s: nothing to sync (device reported no chassis)", result.host)
             return
@@ -690,7 +717,9 @@ class Syncer:
         """The device carrying `address` on one of its interfaces, if any."""
         if not address:
             return None
-        for ip in self.netbox.all("/ipam/ip-addresses/", {"address": address}):
+        # In this host's routing table only: the same address in another VRF
+        # is another network's device.
+        for ip in self.netbox.all("/ipam/ip-addresses/", {"address": address, **self._in_vrf()}):
             if ip.get("assigned_object_type") != "dcim.interface" or not ip.get("assigned_object_id"):
                 continue
             assigned = ip.get("assigned_object") or {}
@@ -1289,7 +1318,8 @@ class Syncer:
         # creating <addr>/32 beside an existing <addr>/24 is refused as a
         # duplicate -- and a lookup by CIDR would never have found the /24 to
         # know that.
-        candidates = self.netbox.all("/ipam/ip-addresses/", {"address": scanned_address})
+        candidates = self.netbox.all("/ipam/ip-addresses/",
+                                     {"address": scanned_address, **self._in_vrf()})
 
         by_id = {iface["id"] for iface in interfaces}
         mine = next((c for c in candidates
@@ -1432,11 +1462,23 @@ class Syncer:
             "/ipam/ip-addresses/",
             {"address": cidr, "interface_id": interface["id"]},
         )
+        if (existing is not None and self._vrf_id
+                and (existing.get("vrf") or {}).get("id") != self._vrf_id):
+            # Already on this interface but in another table -- written before
+            # the scanner knew which VRF the device lives in. Moved rather
+            # than duplicated. Only ever INTO a VRF: with no VRF to go on, an
+            # address somebody placed in one by hand is left where it is.
+            existing = self.netbox.update(
+                "/ipam/ip-addresses/", existing["id"], {"vrf": self._vrf_id},
+                label=f"ip {cidr} into its VRF",
+            ) or existing
         if existing is None:
             # The address may already exist unassigned — imported from the CSV
             # before the device was ever scanned. Adopt it rather than making a
-            # duplicate.
-            candidates = self.netbox.all("/ipam/ip-addresses/", {"address": cidr})
+            # duplicate. Looked for in this host's routing table only: the
+            # same address in another VRF belongs to another network.
+            candidates = self.netbox.all("/ipam/ip-addresses/",
+                                         {"address": cidr, **self._in_vrf()})
             unassigned = [c for c in candidates if not c.get("assigned_object_id")]
             if unassigned:
                 existing = self.netbox.update(
@@ -1461,6 +1503,8 @@ class Syncer:
                     "assigned_object_type": "dcim.interface",
                     "assigned_object_id": interface["id"],
                 }
+                if self._vrf_id:
+                    payload["vrf"] = self._vrf_id
                 if tenant_id:
                     payload["tenant"] = tenant_id
                 existing = self.netbox.create(

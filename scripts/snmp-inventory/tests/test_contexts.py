@@ -229,7 +229,7 @@ class TestAVcmpGuest:
 # --- what the sync does with them --------------------------------------------
 
 FK_FIELDS = ("device", "site", "role", "device_type", "platform", "manufacturer",
-             "tenant", "virtual_chassis", "primary_ip4")
+             "tenant", "virtual_chassis", "primary_ip4", "vrf")
 
 
 def _id(value):
@@ -251,10 +251,14 @@ class FakeNetBox:
     def _matches(self, item, key, value):
         if key in ("limit", "offset", "brief", "has_primary_ip"):
             return True
+        if key == "id" and isinstance(value, (list, tuple)):
+            return item.get("id") in value
         if key.endswith("_id"):
             field = key[:-3]
             if field == "interface":
                 return str(item.get("assigned_object_id")) == str(value)
+            if value == "null":            # NetBox's spelling of "is not set"
+                return _id(item.get(field)) is None
             return str(_id(item.get(field))) == str(value)
         if key == "name__ie":
             return str(item.get("name") or "").lower() == str(value).lower()

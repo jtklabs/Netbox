@@ -61,11 +61,15 @@ class OnboardingRequestForm(NetBoxModelForm):
     tenant = DynamicModelChoiceField(
         queryset=Tenant.objects.all(), required=False,
         query_params={'group_id': '$tenant_group'},
-        help_text='Only needed when the address exists in more than one tenant',
+        help_text='Optional. Inherited from the prefix, or from its VRF; set it '
+                  'only to narrow the choice of prefix',
     )
     vrf = DynamicModelChoiceField(
         queryset=VRF.objects.all(), required=False, label='VRF',
-        help_text='Only needed when the address exists in more than one VRF',
+        query_params={'tenant_id': '$tenant'},
+        help_text='Which network the address is in. With a VRF, only the prefixes '
+                  'in that VRF decide the site and the poller; left blank, only the '
+                  'global table does. Set it for overlapping address space',
     )
     override_site = DynamicModelChoiceField(
         queryset=Site.objects.all(), required=False, label='Site',
@@ -81,7 +85,7 @@ class OnboardingRequestForm(NetBoxModelForm):
         # Second, not first: most addresses resolve without any of this, and
         # asking for a tenant up front would make the common case feel harder
         # than it is. The form says which to set when it actually needs one.
-        FieldSet('tenant_group', 'tenant', 'vrf', name='Which network (if ambiguous)'),
+        FieldSet('vrf', 'tenant_group', 'tenant', name='Which network (blank is the global table)'),
         FieldSet('override_name', 'override_site', 'role', 'description',
                  name='Optional overrides'),
         FieldSet('tags', name='Tags'),
@@ -121,7 +125,9 @@ class OnboardingRequestForm(NetBoxModelForm):
         resolution = resolve(address, tenant=cleaned.get('tenant'),
                              vrf=cleaned.get('vrf'))
         if resolution.problem:
-            field = 'tenant' if resolution.candidates else 'address'
+            # Beside the thing to change: the VRF when the address lives in
+            # another routing table, the tenant when that would break a tie.
+            field = resolution.needs or ('tenant' if resolution.candidates else 'address')
             raise forms.ValidationError({field: resolution.problem})
         cleaned['address'] = resolution.address
         return cleaned
@@ -174,7 +180,12 @@ class OnboardingRequestImportForm(NetBoxModelImportForm):
 
     tenant = CSVModelChoiceField(
         queryset=Tenant.objects.all(), to_field_name='name', required=False,
-        help_text='Needed only when the address is ambiguous across tenants',
+        help_text='Optional; inherited from the prefix or its VRF',
+    )
+    vrf = CSVModelChoiceField(
+        queryset=VRF.objects.all(), to_field_name='name', required=False,
+        help_text='VRF name. Blank means the global table; set it for devices '
+                  'in overlapping address space',
     )
     override_site = CSVModelChoiceField(
         queryset=Site.objects.all(), to_field_name='name', required=False,

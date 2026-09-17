@@ -528,10 +528,11 @@ def us_region(netbox, lab):
 class TestOverlappingAddressSpace:
     """Duplicate space across acquired companies.
 
-    NetBox does not enforce prefix uniqueness in the global table, so the same
-    /24 can exist twice with different tenants and a containment lookup returns
-    both. Choosing by mask length alone would be a coin toss that files an
-    acquired company's switch under our site.
+    The same /24 exists once per company, each copy in that company's VRF. The
+    VRF on the request says which network is meant: with one, only that VRF's
+    prefixes place the address; without one, only the global table does. An
+    address that is not in the chosen table is refused, naming the VRFs that
+    do hold it, rather than guessed at or handed to the default region.
     """
 
     def test_the_global_table_refuses_a_duplicate(self, netbox, overlapping):
@@ -562,42 +563,48 @@ class TestOverlappingAddressSpace:
     def test_the_same_prefix_exists_twice_across_vrfs(self, netbox, overlapping):
         assert netbox.count("/ipam/prefixes/", {"prefix": "198.18.0.0/24"}) == 2
 
-    def test_ambiguous_address_is_refused_not_guessed(self, netbox, overlapping):
+    def test_without_a_vrf_an_address_held_only_in_vrfs_is_refused_not_guessed(
+            self, netbox, overlapping):
+        """No VRF means the global table, which does not hold it. The default
+        region must not catch it either: that poller would go after whatever
+        answers at the address in its own network."""
         with pytest.raises(NetBoxError) as exc:
             submit(netbox, "198.18.0.10")
         message = str(exc.value)
-        assert "different owners" in message
-        assert PREFIX + "Alpha" in message and PREFIX + "Beta" in message
+        assert "No prefix in the global table" in message
+        assert PREFIX + "ALPHA" in message and PREFIX + "BETA" in message
 
-    def test_tenant_resolves_it_to_the_right_site(self, netbox, overlapping):
+    def test_a_tenant_alone_does_not_reach_into_a_vrf(self, netbox, overlapping):
+        """The VRF picks the routing table; a tenant only narrows within it."""
+        with pytest.raises(NetBoxError) as exc:
+            netbox.create(REQUESTS, {"address": "198.18.0.11",
+                                     "tenant": overlapping["alpha"]["id"]})
+        assert "Choose the VRF" in str(exc.value)
+
+    def test_the_vrf_resolves_it_to_the_right_site(self, netbox, overlapping):
         entry = netbox.create(REQUESTS, {"address": "198.18.0.11",
-                                         "tenant": overlapping["alpha"]["id"]})
+                                         "vrf": overlapping["vrf_a"]["id"]})
         assert entry["status"] == "pending"
         assert entry["site"]["name"] == PREFIX + "Alpha HQ"
         assert entry["tenant"]["name"] == PREFIX + "Alpha"
 
-    def test_the_other_tenant_gets_the_other_site(self, netbox, overlapping):
+    def test_the_other_vrf_gets_the_other_site(self, netbox, overlapping):
         entry = netbox.create(REQUESTS, {"address": "198.18.0.12",
-                                         "tenant": overlapping["beta"]["id"]})
-        assert entry["site"]["name"] == PREFIX + "Beta HQ", (
-            "the same address under a different tenant must land at a different site"
-        )
-
-    def test_vrf_alone_also_disambiguates(self, netbox, overlapping):
-        """VRF is the mechanism NetBox actually provides for this, so it has to
-        work on its own — not everyone labels tenants."""
-        entry = netbox.create(REQUESTS, {"address": "198.18.0.14",
                                          "vrf": overlapping["vrf_b"]["id"]})
-        assert entry["site"]["name"] == PREFIX + "Beta HQ"
+        assert entry["site"]["name"] == PREFIX + "Beta HQ", (
+            "the same address in a different VRF must land at a different site"
+        )
         # And the tenant is inherited from the prefix, so ownership still lands.
         assert entry["tenant"]["name"] == PREFIX + "Beta"
 
-    def test_tenant_is_stamped_onto_the_created_device(self, netbox, overlapping):
-        """Ownership has to survive onboarding, not just route it."""
+    def test_tenant_and_vrf_are_stamped_onto_what_is_created(self, netbox, overlapping):
+        """Ownership and the routing table have to survive onboarding, not
+        just route it: the device's address goes into the request's VRF."""
         entry = netbox.create(REQUESTS, {"address": "198.18.0.13",
-                                         "tenant": overlapping["beta"]["id"]})
+                                         "vrf": overlapping["vrf_b"]["id"]})
         jobs = [j for j in onboarding.check_in(netbox, POLLER) if j["id"] == entry["id"]]
         assert jobs and jobs[0]["tenant"] == overlapping["beta"]["id"]
+        assert jobs[0]["vrf"] == overlapping["vrf_b"]["id"]
 
         # A clean scan applies itself, so there is no approve step here.
         syncer = Syncer(netbox, SyncOptions(device_role=SLUG + "network"))
@@ -607,6 +614,10 @@ class TestOverlappingAddressSpace:
         assert final["status"] == "applied"
         device = netbox.get("/dcim/devices/%s/" % final["device"]["id"])
         assert (device.get("tenant") or {}).get("name") == PREFIX + "Beta"
+        addresses = netbox.all("/ipam/ip-addresses/", {"device_id": device["id"]})
+        assert addresses, "the device should have its addresses"
+        assert {(a.get("vrf") or {}).get("id") for a in addresses} == {
+            overlapping["vrf_b"]["id"]}
 
 
 class TestDefaultRegionFallback:

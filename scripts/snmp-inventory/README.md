@@ -451,39 +451,61 @@ curl -sX POST "$NB/plugins/discovery/onboarding-requests/12/manual/" -H "$AUTH" 
 
 ### Overlapping address space
 
-Address space repeats across companies that have been acquired: two prefixes of
-`10.10.1.0/24` can and do coexist, because NetBox does not enforce uniqueness in
-the global table. A containment lookup returns both, so an address alone is not
-always a key.
+Address space repeats across companies that have been acquired: `10.10.1.0/24`
+exists here and again over there, and `10.10.1.5` is a different device
+depending on whose network is meant. NetBox holds the duplicate in a **VRF** —
+with `ENFORCE_GLOBAL_UNIQUE` on, the default, the same prefix cannot sit in the
+global table twice — so the VRF is what says which network:
 
-The onboarding form therefore takes an optional **tenant** (with a tenant-group
-picker to make the list usable) and an optional **VRF**. Neither is asked for up
-front in the normal case — most addresses resolve without them.
+| On the request | What places the address |
+|---|---|
+| a **VRF** | only the prefixes **in that VRF** decide the site and the poller |
+| no VRF | only the prefixes in the **global table** do |
 
-The rule is: **if the candidate prefixes span more than one tenant and nobody
-said which, the request is refused and the candidates are listed.** Guessing is
-the one thing that must not happen; picking wrong files an acquired company's
-switch under your site, or hands it to a poller with no route to it.
+Never a mixture. The acquired company's `10.10.1.0/24`, in its VRF, scoped to
+its site, tagged for the poller that sits in its network, is reached by
+choosing that VRF; the same address with no VRF is ours.
+
+An address that is not in the chosen table is **refused**, and the refusal
+names the VRFs that do hold it:
 
 ```
-This address is inside prefixes belonging to 2 different tenants, so there is
-no way to tell which device it is. Choose a tenant. Candidates:
-  10.10.1.0/24 (tenant Company A, VRF global, site Boston DC1);
-  10.10.1.0/24 (tenant Company B, VRF global, site CompanyB HQ)
+No prefix in the global table contains 10.77.0.5, and no VRF was chosen. It is
+inside: 10.77.0.0/24 (tenant Acquired Co, VRF ACQ, site Acquired HQ). Choose
+the VRF if one of those is the network this device is in.
 ```
 
-Where one tenant owns all the candidates, the most specific wins as usual and
-nobody types anything. The resolved tenant is inherited from the prefix and
-**stamped onto the created device and its IP**, so ownership carries through
-rather than being used for routing and then thrown away.
+It is deliberately not handed to the default region instead: that region's
+poller would go after whatever answers at the address in *its* network — a
+different device, or nothing. The default region still catches an address that
+is in no table at all. A VRF that was chosen but holds no prefix for the
+address is refused the same way.
 
-Note that a tenant *group* is not enough on its own: if two acquired companies
-sit in the same group and both use `10.10.1.0/24`, the group does not
-distinguish them. The group only filters the tenant list.
+The **tenant** is optional and only narrows within the chosen table. Otherwise
+it is inherited — from the prefix, or when the prefix has none, from the
+prefix's VRF — and **stamped onto the created device and its IP**, so
+ownership carries through. Within one table the longest mask simply wins,
+whoever owns the aggregates above it. The CSV import takes a `vrf` column, by
+name.
+
+The routing table carries through to the writes. The job handed to the poller
+names the VRF, and **every address the device reports is looked up and created
+in that VRF** (the global table when there is none). Without that, the sync
+finds the other network's copy of the address, declines to steal it, and the
+device lands with no address at all. The sweep does the same: a target takes
+the VRF of the prefix or address that made it one, a prefix yields only the
+addresses in its own table, and another poller's claim on `10.10.1.5` in its
+VRF does not knock ours out of the global table. An address written before the
+scanner knew its VRF is moved into it on the next scan. For a hand-run
+`--host` scan, `--vrf-id` names the table; omitted, it is the global one.
+
+One poller sits in one network, so overlapping space needs a poller, and
+sites, of its own — tag the acquired company's sites `poller-<name>` for the
+poller deployed there. If one poller's sites hold the same address in two
+tables it scans it once and says so.
 
 Pollers can carry a tenant too, but it is not how work is routed — that still
-follows from the prefix's site. It is a guard: a request for another tenant
-arriving at a poller almost certainly means a site is tagged for the wrong one.
+follows from the prefix's site.
 
 ### When no prefix matches
 

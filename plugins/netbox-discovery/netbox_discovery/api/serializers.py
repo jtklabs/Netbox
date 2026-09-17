@@ -250,6 +250,10 @@ class JobSerializer(serializers.Serializer):
     role = serializers.CharField(allow_blank=True)
     tenant = serializers.IntegerField(allow_null=True)
     tenant_name = serializers.CharField(allow_blank=True)
+    # None is the global table. Declared for the same reason override_model
+    # is: a Serializer emits only the fields it knows about.
+    vrf = serializers.IntegerField(allow_null=True)
+    vrf_name = serializers.CharField(allow_blank=True)
 
 
 class HardwareReplacementSerializer(NetBoxModelSerializer):

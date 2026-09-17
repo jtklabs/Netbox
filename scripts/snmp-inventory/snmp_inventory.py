@@ -165,7 +165,8 @@ def main(argv=None) -> int:
                 continue
             try:
                 with _write_lock:
-                    syncer.sync(result, target.site_id, scanned_address=target.address)
+                    syncer.sync(result, target.site_id, scanned_address=target.address,
+                                vrf_id=target.vrf_id)
             except NetBoxError as exc:
                 log.error("%s: writing to NetBox failed: %s", target.address, exc)
                 failed += 1
@@ -369,12 +370,13 @@ def build_target_list(netbox: NetBox, config, args) -> list[Target]:
             if site_id is None and device is not None:
                 site_id = (device.get("site") or {}).get("id")
             if site_id is None:
-                site_id = _site_from_prefix(netbox, host)
+                site_id = _site_from_prefix(netbox, host, args.vrf_id)
             targets.append(Target(
                 address=host,
                 site_id=site_id,
                 site_name=ownership.site_names.get(site_id, "") if site_id else "",
                 source="cli",
+                vrf_id=args.vrf_id,
             ))
         return targets
 
@@ -389,16 +391,21 @@ def build_target_list(netbox: NetBox, config, args) -> list[Target]:
     return targets
 
 
-def _site_from_prefix(netbox: NetBox, address: str) -> int | None:
+def _site_from_prefix(netbox: NetBox, address: str, vrf_id: int | None = None) -> int | None:
     """Find the site by looking up the most specific prefix containing the IP.
 
     `?contains=` returns every containing prefix, least specific first, so the
     longest mask has to be picked explicitly rather than taking the first row.
     A /16 scoped to a regional aggregate must not win over the /24 that is
     actually the device's site.
+
+    In one routing table only -- the VRF given, or the global table -- the
+    same rule the onboarding form applies: across every table, overlapping
+    space would let another company's prefix decide where our device lives.
     """
     try:
-        prefixes = netbox.all("/ipam/prefixes/", {"contains": address})
+        prefixes = netbox.all("/ipam/prefixes/",
+                              {"contains": address, "vrf_id": vrf_id if vrf_id else "null"})
     except NetBoxError:
         return None
     best_len = -1
@@ -495,6 +502,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="scan this address instead of asking NetBox (repeatable)")
     parser.add_argument("--site-id", type=int, default=None,
                         help="site to file --host results under, when it cannot be derived")
+    parser.add_argument("--vrf-id", type=int, default=None,
+                        help="with --host, the VRF the address is in: its prefixes decide "
+                             "the site, and the device's addresses are written into it. "
+                             "Omit for the global table")
     parser.add_argument("--list-targets", action="store_true",
                         help="print the selected targets and exit")
     parser.add_argument("--probe", action="append", default=[], metavar="ADDRESS",
