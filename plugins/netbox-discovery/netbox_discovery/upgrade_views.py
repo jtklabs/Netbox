@@ -20,7 +20,7 @@ from utilities.views import register_model_view
 
 from .models import UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
 from . import upgrade_groups
-from .upgrade_choices import UpgradeOperationChoices, UpgradeStatusChoices
+from .upgrade_choices import TERMINAL, UpgradeOperationChoices, UpgradeStatusChoices
 from .upgrade_filtersets import UpgradeDependencyFilterSet, UpgradeGroupFilterSet, UpgradeJobFilterSet
 from . import upgrade_queue as queue
 
@@ -105,7 +105,21 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
     raise_exception = True
 
     def get(self, request):
-        return render(request, 'netbox_discovery/upgrade_schedule.html', {'form': ScheduleForm()})
+        return render(request, 'netbox_discovery/upgrade_schedule.html', {'form': ScheduleForm(initial=self.initial(request))})
+
+    @staticmethod
+    def initial(request):
+        """A closed job's device, plan and profile, when the form is opened from one."""
+        import yaml
+        from django.utils import timezone
+        source = request.GET.get('from_job', '')
+        job = UpgradeJob.objects.restrict(request.user, 'view').filter(pk=int(source)).first() if source.isdigit() else None
+        if job is None:
+            return {}
+        scheduled_at, start_before = queue.requeue_window(job, timezone.now())
+        return {'devices': [job.device_id], 'poller': job.poller_id, 'operation': job.operation,
+                'scheduled_at': scheduled_at.isoformat(timespec='minutes'), 'start_before': start_before.isoformat(timespec='minutes'),
+                'profile': yaml.safe_dump(job.profile, sort_keys=False), 'description': job.description}
 
     def post(self, request):
         form, rows = ScheduleForm(request.POST), []
@@ -175,6 +189,7 @@ class UpgradeJobView(ObjectView):
         import json
         return {'profile_text': json.dumps(instance.profile, indent=2),
                 'summary_text': json.dumps(instance.summary, indent=2),
+                'requeueable': instance.status in TERMINAL,
                 'waits_for_devices': Device.objects.filter(pk__in=instance.waits_for),
                 'held_in_batch': UpgradeJob.objects.filter(batch_id=instance.batch_id, status='held').count()}
 
@@ -191,6 +206,21 @@ class UpgradeCancelView(PermissionRequiredMixin, View):
                          recovered=request.POST.get('recovered') == 'yes')
             messages.success(request, 'Job closed.')
         except queue.QueueError as exc:
+            messages.error(request, str(exc))
+        return redirect(entry.get_absolute_url())
+
+
+class UpgradeRequeueView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_discovery.add_upgradejob'
+    raise_exception = True
+
+    def post(self, request, pk):
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'view'), pk=pk)
+        try:
+            job = queue.requeue(request.user, pk)
+            messages.success(request, 'Re-queued as a new job, due now.')
+            return redirect(job.get_absolute_url())
+        except (queue.QueueError, ValidationError) as exc:
             messages.error(request, str(exc))
         return redirect(entry.get_absolute_url())
 

@@ -64,8 +64,10 @@ def group_conflicts(groups, hosts):
     conflicts = []
     for group in groups:
         members = [selected[m["id"]] for m in group.get("members", []) if m.get("id") in selected]
-        limit = int(group.get("max_concurrent") or 1)
-        if len(members) > limit:
+        # A missing limit is a pair; 0 lets every member go at once.
+        limit = group.get("max_concurrent")
+        limit = 1 if limit is None else int(limit)
+        if limit and len(members) > limit:
             conflicts.append(f"redundancy group {group.get('name')!r} allows {limit} member(s) at a time; "
                              f"selected: {', '.join(sorted(members))}")
     return conflicts

@@ -21,7 +21,7 @@ urlpatterns = router.urls
 from django.urls import path
 from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, UpgradeReportView, UpgradeCancelView,
                        UpgradeGroupViewSet, UpgradeDependencyViewSet, UpgradeHoldView, UpgradeReleaseView,
-                       UpgradeReleaseBatchView, UpgradeRefreshGroupsView)
+                       UpgradeReleaseBatchView, UpgradeRefreshGroupsView, UpgradeRequeueView)
 
 from .commands import CommandOutputViewSet
 
@@ -37,5 +37,6 @@ urlpatterns = [
     path('upgrade-jobs/<int:pk>/cancel/', UpgradeCancelView.as_view(), name='upgradejob-cancel'),
     path('upgrade-jobs/<int:pk>/hold/', UpgradeHoldView.as_view(), name='upgradejob-hold'),
     path('upgrade-jobs/<int:pk>/release/', UpgradeReleaseView.as_view(), name='upgradejob-release'),
+    path('upgrade-jobs/<int:pk>/requeue/', UpgradeRequeueView.as_view(), name='upgradejob-requeue'),
     path('upgrade-groups/refresh/', UpgradeRefreshGroupsView.as_view(), name='upgradegroup-refresh'),
 ] + router.urls

@@ -48,6 +48,13 @@
       </form>
       {% endif %}
     {% endif %}
+    {% if requeueable and perms.netbox_discovery.add_upgradejob %}
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_requeue' pk=object.pk %}" class="d-inline">{% csrf_token %}
+        <button class="btn btn-primary">Re-queue now</button>
+      </form>
+      <a class="btn btn-outline-primary" href="{% url 'plugins:netbox_discovery:upgradejob_add' %}?from_job={{ object.pk }}">Re-queue with changes</a>
+      <p class="text-muted mt-2">A re-queue is a new job for this device with the same profile and operation, due now and keeping this job's window length. It is validated like a fresh schedule: ownership, redundancy groups and permissions apply again.</p>
+    {% endif %}
   </div></div>
   <div class="card"><h5 class="card-header">Profile snapshot</h5><pre class="card-body">{{ profile_text }}</pre></div>
 </div><div class="col-lg-6">

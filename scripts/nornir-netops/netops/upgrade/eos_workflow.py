@@ -2,11 +2,11 @@
 
 Order of operations under --apply: write memory, baseline, image verified on
 flash or copied from image_source and MD5-checked on the switch, the ready
-gate, boot-config pointed at the image, `reload now`, reconnect, then the
-shared convergence loop and comparison report. EOS boots one .swi file: there
-is no install mode, package expansion or stack to coordinate. An MLAG peer is
-a separate device and is never reloaded in the same run by this driver; NetBox
-redundancy groups keep the two apart.
+gate, `install source flash:<image> now reload` (EOS writes boot-config and
+reloads itself), reconnect, then the shared convergence loop and comparison
+report. EOS boots one .swi file: there is no package expansion or stack to
+coordinate. An MLAG peer is a separate device and is never reloaded in the same
+run by this driver; NetBox redundancy groups keep the two apart.
 """
 
 import difflib
@@ -23,12 +23,18 @@ from .workflow import Device, comparison_report, converge, device_lock, settle
 HEALTHY_MLAG = {"Disabled", "Active"}
 
 
+def install_command(profile):
+    # The image is already on flash and MD5-checked, so install copies nothing:
+    # it points boot-config at the image and reloads. `now` skips the prompts.
+    return f"install source flash:{profile.image} now reload"
+
+
 class EosDevice(Device):
     reload_success = re.compile(r"going down for reboot|Broadcast message", re.I)
 
     def answer(self, tail, reload):
-        # `reload now` normally reloads without asking; answer the plain
-        # confirmation if it appears. A save prompt means the running
+        # `install ... now reload` normally reloads without asking; answer the
+        # plain confirmation if it appears. A save prompt means the running
         # configuration changed after it was verified saved: stop instead.
         if reload and re.search(r"Proceed with reload\?\s*\[confirm\]\s*$", tail, re.I):
             return "\n"
@@ -118,8 +124,11 @@ def verify_image(device, profile, snapshot, plan, apply):
     free = re.search(r"\((\d+) bytes free\)", listing)
     needed = profile.minimum_free_bytes + (0 if exists else (size or 0))
     plan["flash"] = {"1": {"free_bytes": int(free[1]) if free else None, "required_free_bytes": needed}}
-    if not free or int(free[1]) < needed:
-        raise ValueError("insufficient or unknown free flash space")
+    if not free:
+        raise ValueError("free flash space could not be read from dir flash:")
+    if int(free[1]) < needed:
+        raise ValueError(f"insufficient free flash space: {free[1]} bytes free, {needed} required "
+                         f"({profile.minimum_free_bytes} reserve{'' if exists else ' plus the image'})")
     if not exists:
         if not profile.image_source:
             raise ValueError("target image missing from flash and image_source is not configured")
@@ -143,7 +152,8 @@ def verify_image(device, profile, snapshot, plan, apply):
         plan["image_size_bytes"] = size
         free = re.search(r"\((\d+) bytes free\)", device.read("dir flash:"))
         if not free or int(free[1]) < profile.minimum_free_bytes:
-            raise ValueError("insufficient reserve space after transfer")
+            raise ValueError(f"insufficient reserve space after transfer: {free[1] if free else 'unknown'} bytes free, "
+                             f"{profile.minimum_free_bytes} required")
 
 
 def target_findings(snapshot, profile, before, saved=True):
@@ -189,7 +199,7 @@ def upgrade_device(task, profile, options, reporter):
             before = collect(device.read, lambda cmd: emit("precheck", cmd))
             plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved, allow_mismatch=allow_mismatch)
             plan["configuration_saved"] = configuration_saved
-            plan["commands"] = [] if stage_only else ["write memory", f"boot system flash:{profile.image}", "reload now"]
+            plan["commands"] = [] if stage_only else ["write memory", install_command(profile)]
             emit("precheck_complete", "Image staging checks captured" if stage_only else "Baseline and upgrade plan captured",
                  {"pre": before, "upgrade_plan": plan,
                   "progress_summary": {"counts": before["metrics"]["counts"], "target_version": profile.target_version,
@@ -234,29 +244,18 @@ def upgrade_device(task, profile, options, reporter):
                 emit("staged", "Image copied to flash and checksum verified", {"upgrade_plan": plan})
                 return Result(host=host, result=plan, changed=changed)
             # Refuse stale config/version authorizations immediately before the
-            # first boot-setting write.
-            if (eos_checks.normalized_config(device.read("show running-config")) != before["config"]
-                    or eos_checks.software(device.read("show version")) != before["software"]):
+            # install, which writes boot-config and reloads in one command.
+            running = eos_checks.normalized_config(device.read("show running-config"))
+            if running != before["config"] or eos_checks.software(device.read("show version")) != before["software"]:
                 raise ValueError("configuration or software changed since precheck; rerun required")
+            if not allow_mismatch and running != eos_checks.normalized_config(device.read("show startup-config")):
+                raise ValueError("running and startup configuration differ before install; install not started")
             changed = True
-            emit("configuring_boot", f"Pointing boot-config at {profile.image}")
-            output = device.connection.send_config_set([f"boot system flash:{profile.image}"], read_timeout=options.show_timeout,
-                                                        error_pattern=r"(?im)^\s*%\s*(?:Invalid|Error|Incomplete|Ambiguous|Authorization)")
-            checks.understood("boot configuration", output)
-            configured = eos_checks.boot(checks.understood("show boot-config", device.read("show boot-config")))
-            if configured["image"] != profile.image:
-                raise ValueError("boot-config does not show the target image; reload not started")
-            saved_state = {"config": eos_checks.normalized_config(device.read("show running-config")),
-                           "startup_config": eos_checks.normalized_config(device.read("show startup-config"))}
-            if saved_state["config"] != before["config"]:
-                raise ValueError("unexpected configuration change during boot preparation; reload not started")
-            if not allow_mismatch and saved_state["config"] != saved_state["startup_config"]:
-                raise ValueError("running and startup configuration differ before reload; reload not started")
-            emit("installing", f"Reloading into {profile.image}")
+            emit("installing", f"Installing {profile.image} and reloading")
             try:
-                device.interactive("reload now", options.install_timeout, reload=True)
+                device.interactive(install_command(profile), options.install_timeout, reload=True)
             except (TimeoutError, OSError, EOFError):
-                emit("reconnecting", "Reload dialogue interrupted; checking outcome without resending reload")
+                emit("reconnecting", "Install dialogue interrupted; checking outcome without resending install")
             device.wait_for_target(profile)
             settle(emit, options)
             return converge(emit, options, before, plan, reporter, host,

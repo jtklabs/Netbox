@@ -12,6 +12,9 @@ from netops.upgrade import checks, eos_checks, eos_workflow, report, scheduler, 
 from netops.upgrade.profile import Profile, eos_version
 
 MODEL = "DCS-7050SX3-48YC8"
+INSTALL = "install source flash:EOS-4.32.1F.swi now reload"
+# Single-supervisor output as Arista documents it for `install source`.
+INSTALL_OUTPUT = "Preparing new boot-config... done.\nCommitting changes on this supervisor... done.\nReloading this supervisor...\n"
 
 
 @pytest.fixture
@@ -297,6 +300,49 @@ def test_unrecognized_critical_output_fails_closed(raw_change, key):
     assert key in baseline(raw)["errors"]
 
 
+BRIEF = ("Port Channel Port-Channel10:\n  Active Ports: Ethernet4 Ethernet3\n"
+         "Port Channel Port-Channel999:\n  Active Ports: Ethernet47 Ethernet48\n")
+
+
+def test_port_channels_fall_back_to_brief_where_summary_is_not_a_command():
+    # A release without `show port-channel summary` rejects it; `brief` answers.
+    raw = transcript()
+    raw["show port-channel summary"] = "% Invalid input (at token 2: 'summary')"
+    raw["show port-channel brief"] = BRIEF
+    snapshot = baseline(raw)
+    assert snapshot["errors"] == {}
+    assert snapshot["tables"]["port_channels"] == [{"name": "Port-Channel10", "active_ports": ["Ethernet3", "Ethernet4"]},
+                                                    {"name": "Port-Channel999", "active_ports": ["Ethernet47", "Ethernet48"]}]
+    assert snapshot["raw"]["show port-channel brief"] == BRIEF
+    # Neither command answering is not "no port-channels".
+    del raw["show port-channel brief"]
+    assert "device rejected 'show port-channel brief'" in baseline(raw)["errors"]["port_channels"]
+    raw["show port-channel summary"] = raw["show port-channel brief"] = ""
+    assert "no port-channel reported but 2 configured" in baseline(raw)["errors"]["port_channels"]
+    raw["show port-channel brief"] = "Port Channel Port-Channel10:\n  Inactive Ports: Ethernet3\n"
+    assert "unrecognized line 'Inactive Ports: Ethernet3'" in baseline(raw)["errors"]["port_channels"]
+
+
+def test_no_port_channels_is_an_empty_table_only_when_none_is_configured():
+    raw = transcript()
+    raw["show port-channel summary"] = raw["show port-channel brief"] = ""
+    for command in ("show running-config", "show startup-config"):
+        raw[command] = re.sub(r"(?ms)^interface Port-Channel\d+\n(?:   .*\n)*!\n", "", raw[command])
+    snapshot = baseline(raw)
+    assert snapshot["tables"]["port_channels"] == [] and "port_channels" not in snapshot["errors"]
+
+
+def test_flash_space_errors_carry_the_numbers(profile, options, fake_device):
+    fake_device.raw = dict(fake_device.raw, **{"dir flash:": fake_device.raw["dir flash:"].replace("2500000000 bytes free", "150000000 bytes free")})
+    result, reporter = run_device(profile, options)
+    assert result.failed and reporter.emit.call_args.args[1] == "blocked"
+    assert "insufficient free flash space: 150000000 bytes free, 200000000 required (200000000 reserve)" in reporter.emit.call_args.args[2]
+    fake_device.instances.clear()
+    fake_device.raw = dict(fake_device.raw, **{"dir flash:": "Directory of flash:/\n\nsomething new\n"})
+    result, reporter = run_device(profile, options)
+    assert result.failed and "free flash space could not be read" in reporter.emit.call_args.args[2]
+
+
 def test_optional_tables_become_warnings_not_empty_tables():
     raw = transcript()
     del raw["show lldp neighbors"]
@@ -447,16 +493,8 @@ def fake_device(monkeypatch, profile):
             self.options, self.emit = options, emit
             self.raw = dict(self.raw)
             self.connection = Mock()
-            self.connection.send_config_set.side_effect = self.configure_boot
             self.mutations = []
             self.instances.append(self)
-
-        def configure_boot(self, commands, **kwargs):
-            assert commands == [f"boot system flash:{profile.image}"]
-            self.mutations.append(commands[0])
-            self.raw["show boot-config"] = boot_config(profile.image)
-            self.raw["show running-config"] = re.sub(r"(?m)^! boot system .*$", f"! boot system flash:/{profile.image}", self.raw["show running-config"])
-            return ""
 
         def connect(self):
             pass
@@ -514,17 +552,20 @@ def test_dry_run_never_mutates(profile, options, fake_device):
     device.connection.send_config_set.assert_not_called()
     assert reporter.emit.call_args.args[1] == "dry_run_complete"
     plan = reporter.emit.call_args.args[3]["upgrade_plan"]
-    assert plan["commands"] == ["write memory", f"boot system flash:{profile.image}", "reload now"]
+    assert plan["commands"] == ["write memory", INSTALL]
     assert plan["image_verification"] == "verified" and plan["boot_image"] == "EOS-4.30.5M.swi"
 
 
-def test_apply_reloads_into_the_target_and_validates(profile, options, fake_device):
+def test_apply_installs_the_target_and_validates(profile, options, fake_device):
     options.apply = True
     result, reporter = run_device(profile, options)
     assert not result.failed and result.changed
-    assert fake_device.instances[0].mutations == ["write memory", f"boot system flash:{profile.image}", "reload now"]
+    device = fake_device.instances[0]
+    assert device.mutations == ["write memory", INSTALL]
+    # Install mode owns boot-config: the driver never writes `boot system` itself.
+    device.connection.send_config_set.assert_not_called()
     stages = [call.args[1] for call in reporter.emit.call_args_list]
-    assert stages.index("configuring_boot") < stages.index("installing") < stages.index("validating")
+    assert "configuring_boot" not in stages and stages.index("ready") < stages.index("installing") < stages.index("validating")
     assert stages.count("validating") == 2 and stages[-1] == "completed"
     assert result.result["status"] == "completed" and result.result["findings"] == []
 
@@ -552,8 +593,7 @@ def test_missing_image_blocks_without_a_source_and_is_copied_with_one(profile, o
     fake_device.image_exists = False
     result, reporter = run_device(sourced, options)
     assert not result.failed
-    assert fake_device.instances[0].mutations == ["write memory", f"copy {sourced.image_source} flash:{profile.image}",
-                                                   f"boot system flash:{profile.image}", "reload now"]
+    assert fake_device.instances[0].mutations == ["write memory", f"copy {sourced.image_source} flash:{profile.image}", INSTALL]
 
 
 def test_stage_only_copies_and_verifies_without_boot_or_reload(profile, options, fake_device):
@@ -576,7 +616,7 @@ def test_bad_checksum_blocks_all_writes(profile, options, fake_device):
     assert reporter.emit.call_args.args[1] == "blocked"
 
 
-def test_reload_failure_after_boot_change_requires_recovery(profile, options, fake_device):
+def test_install_failure_requires_recovery(profile, options, fake_device):
     options.apply = True
     fake_device.fail_reload = True
     result, reporter = run_device(profile, options)
@@ -604,29 +644,34 @@ def test_webhook_failure_at_ready_gate_stops_before_boot_changes(profile, option
     assert fake_device.instances[0].mutations == ["write memory"]
 
 
-def test_reload_dialogue_answers_confirmation_and_accepts_the_dropped_session():
+def test_install_dialogue_answers_confirmation_and_accepts_the_dropped_session():
     device = eos_workflow.EosDevice(SimpleNamespace(), SimpleNamespace(show_timeout=60), Mock())
     conn = device.connection = Mock()
     conn.find_prompt.return_value = "leaf1#"
-    conn.read_channel.side_effect = ["Proceed with reload? [confirm]", "\nBroadcast message from root@leaf1\n\nThe system is going down for reboot NOW!\n", ""]
+    conn.read_channel.side_effect = [INSTALL_OUTPUT + "Proceed with reload? [confirm]",
+                                     "\nBroadcast message from root@leaf1\n\nThe system is going down for reboot NOW!\n", ""]
     conn.is_alive.side_effect = [True, False, False]
-    transcript_text = device.interactive("reload now", 5, reload=True)
-    assert [call.args[0] for call in conn.write_channel.call_args_list] == ["reload now\n", "\n"]
+    transcript_text = device.interactive(INSTALL, 5, reload=True)
+    assert [call.args[0] for call in conn.write_channel.call_args_list] == [INSTALL + "\n", "\n"]
     assert "going down for reboot" in transcript_text
 
 
-def test_reload_dialogue_refuses_a_save_prompt_and_a_silent_return_to_prompt():
+def test_install_dialogue_refuses_a_save_prompt_a_silent_return_to_prompt_and_a_device_error():
     device = eos_workflow.EosDevice(SimpleNamespace(), SimpleNamespace(show_timeout=60), Mock())
     conn = device.connection = Mock()
     conn.find_prompt.return_value = "leaf1#"
     conn.read_channel.return_value = "System configuration has been modified. Save? [yes/no/cancel/diff]:"
     conn.is_alive.return_value = True
     with pytest.raises(ValueError, match="unrecognized interactive prompt"):
-        device.interactive("reload now", 5, reload=True)
+        device.interactive(INSTALL, 5, reload=True)
     assert conn.write_channel.call_count == 1
-    conn.read_channel.return_value = "reload now\nleaf1#"
+    # boot-config written but the reload never started: not a success.
+    conn.read_channel.return_value = INSTALL + "\n" + INSTALL_OUTPUT.replace("Reloading this supervisor...\n", "") + "leaf1#"
     with pytest.raises(ValueError, match="without success evidence"):
-        device.interactive("reload now", 5, reload=True)
+        device.interactive(INSTALL, 5, reload=True)
+    conn.read_channel.return_value = INSTALL + "\n% Error: flash:/EOS-4.32.1F.swi is not a valid EOS image\nleaf1#"
+    with pytest.raises(ValueError, match="device rejected"):
+        device.interactive(INSTALL, 5, reload=True)
 
 
 def test_copy_dialogue_treats_device_errors_as_failure():

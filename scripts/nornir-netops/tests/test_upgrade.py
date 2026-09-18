@@ -1374,7 +1374,8 @@ def test_group_conflicts_only_flag_groups_over_their_limit():
     hosts = [SimpleNamespace(name=name, data={"netbox_id": pk}) for name, pk in (("sw3a", 1), ("sw3b", 2), ("core-a", 3))]
     groups = [{"name": "closet-3", "max_concurrent": 1, "members": [{"id": 1}, {"id": 2}]},
               {"name": "core-pair", "max_concurrent": 1, "members": [{"id": 3}, {"id": 4}]},
-              {"name": "ilb-pool", "max_concurrent": 2, "members": [{"id": 1}, {"id": 2}, {"id": 5}]}]
+              {"name": "ilb-pool", "max_concurrent": 2, "members": [{"id": 1}, {"id": 2}, {"id": 5}]},
+              {"name": "office-access", "max_concurrent": 0, "members": [{"id": 1}, {"id": 2}]}]
     assert group_conflicts(groups, hosts) == ["redundancy group 'closet-3' allows 1 member(s) at a time; selected: sw3a, sw3b"]
     assert group_conflicts([], hosts) == []
 

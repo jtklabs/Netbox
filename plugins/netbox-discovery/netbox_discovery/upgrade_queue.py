@@ -13,7 +13,7 @@ from django.utils import timezone
 from django.db.models import Q
 
 from .models import DiscoveryPoller, UpgradeGroup, UpgradeJob
-from .upgrade_choices import ACTIVE, TERMINAL
+from .upgrade_choices import ACTIVE, TERMINAL, WAITING
 from .upgrade_groups import GroupError, downstream_of, memberships, plan_waves
 from .utils import plugin_setting
 
@@ -145,6 +145,30 @@ def schedule(user, data):
             raise QueueError('A selected device is outside your apply permissions.')
         jobs.append(job)
     return jobs
+
+
+def requeue_window(job, now):
+    """Start now, keeping the closed job's window length (at least an hour)."""
+    return now, now + max(job.start_before - job.scheduled_at, timedelta(hours=1))
+
+
+@transaction.atomic
+def requeue(user, pk):
+    """A new job for a closed job's device, profile and operation, due now.
+
+    Nothing about the old outcome carries over: ownership, the profile,
+    permissions and the redundancy groups are validated again as a fresh
+    single-device schedule in its own batch.
+    """
+    job = UpgradeJob.objects.restrict(user, 'view').get(pk=pk)
+    if job.status not in TERMINAL:
+        raise QueueError('Only a closed job can be re-queued; cancel or recover this one first.')
+    if UpgradeJob.objects.filter(device_id=job.device_id, status__in=ACTIVE + WAITING).exists():
+        raise QueueError(f'{job.device_name} already has a queued or active job.')
+    scheduled_at, start_before = requeue_window(job, timezone.now())
+    return schedule(user, {'filters': {'id': [job.device_id]}, 'profile': job.profile, 'operation': job.operation,
+                           'scheduled_at': scheduled_at, 'start_before': start_before,
+                           'poller': job.poller.name, 'description': job.description})[0]
 
 
 def check_target(job):

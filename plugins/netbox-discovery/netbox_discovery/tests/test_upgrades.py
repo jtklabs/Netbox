@@ -206,6 +206,41 @@ class UpgradeQueueTest(UpgradeFixture, TestCase):
         permission.users.add(user)
         self.assertEqual(queue.claim(user, self.poller, 3, True), [])
 
+    def test_closed_job_can_be_requeued_as_a_fresh_schedule(self):
+        job = self.scheduled(description='first try')
+        with self.assertRaises(queue.QueueError):
+            queue.requeue(self.user, job.pk)  # still pending
+        UpgradeJob.objects.filter(pk=job.pk).update(status='failed', message='blocked')
+        again = queue.requeue(self.user, job.pk)
+        self.assertEqual((again.device_id, again.operation, again.profile, again.poller_id, again.description, again.status),
+                         (job.device_id, job.operation, job.profile, job.poller_id, 'first try', 'pending'))
+        self.assertNotEqual(again.batch_id, job.batch_id)
+        self.assertLessEqual(again.scheduled_at, timezone.now())
+        self.assertEqual(again.start_before - again.scheduled_at, job.start_before - job.scheduled_at)
+        with self.assertRaises(queue.QueueError):
+            queue.requeue(self.user, job.pk)  # the device already has a queued job
+        self.assertEqual([j.pk for j in self.take()], [again.pk])
+
+    def test_requeue_controls_and_endpoints(self):
+        from django.test import Client
+        client = Client()
+        client.force_login(self.user)
+        job = self.scheduled()
+        url = reverse('plugins:netbox_discovery:upgradejob_requeue', args=[job.pk])
+        self.assertNotContains(client.get(job.get_absolute_url()), url)
+        UpgradeJob.objects.filter(pk=job.pk).update(status='completed')
+        self.assertContains(client.get(job.get_absolute_url()), url)
+        self.assertContains(client.get(f'/plugins/discovery/upgrades/add/?from_job={job.pk}'), PROFILE['image'])
+        response = client.post(url)
+        again = UpgradeJob.objects.exclude(pk=job.pk).get()
+        self.assertRedirects(response, again.get_absolute_url())
+        api_url = f'/api/plugins/discovery/upgrade-jobs/{job.pk}/requeue/'
+        self.assertEqual(self.client.post(api_url, {}, format='json').status_code, 409)
+        queue.cancel(self.user, again.pk)
+        response = self.client.post(api_url, {}, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(UpgradeJob.objects.get(pk=response.data['id']).status, 'pending')
+
     def test_ui_list_detail_and_schedule_render_with_a_job(self):
         job = self.scheduled()
         from django.test import Client
