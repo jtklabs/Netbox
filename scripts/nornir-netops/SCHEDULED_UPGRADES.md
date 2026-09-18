@@ -74,6 +74,140 @@ set that contains more members of a group than its limit unless
 `--ignore-groups` is given; they do not wait for dependencies, so use the
 queue for anything that needs ordering.
 
+### Setting them up
+
+Start from what discovery already found, then add what it cannot see.
+
+1. **Let discovery make the first pass.** Run an `snmp-inventory` sweep, or
+   open **Discovery → Software → Redundancy Groups** and click **Refresh
+   discovered groups**. Every HSRP or VRRP group with two or more devices
+   appears as a group with a limit of 1 and the source *FHRP group*; every
+   cable between two tiers appears under **Upgrade Dependencies** with the
+   source *Cabled uplink*. No cabled dependencies usually means the role
+   slugs do not match `upgrade_tier_roles`; see [Plugin settings](#plugin-settings).
+2. **Add a group by hand** with **Redundancy Groups → Add** for anything that
+   is not a gateway pair:
+
+   | Field | What to enter |
+   | --- | --- |
+   | Name | Unique, and what operators will read on a job: `atl-f5-pair`, `atl-floor3-closets`. |
+   | Max concurrent | Shown as **Members upgrading at once** on the group page. `1` for a pair or any set that must go one at a time; a higher number for a pool that can lose that many members; `0` when every member may go together. |
+   | Members | The devices. For a stack, the virtual chassis **master**: that is the device a job is created for. |
+   | Waits for groups | Groups whose members must finish first. Leave empty for a plain pair. |
+   | Description | Why the group exists; shown on the group page. |
+
+3. **Order two sets of devices** by putting each set in a group and setting
+   **Waits for groups** on the one that goes last. A group used only for
+   ordering gets a limit of `0`, so it adds no one-at-a-time rule of its own.
+4. **Order two single devices** with **Upgrade Dependencies → Add**:
+   **Upstream** is the device that waits, **Downstream** the one that goes
+   first. A device cannot wait for itself, and a pair of devices can have
+   only one dependency in each direction.
+5. **Check the result before scheduling.** On **Upgrade Jobs → Add**, the
+   preview lists each device's groups and its **wave**. Wave 1 starts first;
+   a device lands in a later wave because a group was full or something it
+   waits for is in the batch. A cycle is reported here by device name and
+   nothing is created until it is fixed.
+
+Membership, waits-for and dependencies are copied onto each job when the
+batch is scheduled. Adding a device to a group afterwards does not change
+jobs that already exist; cancel and reschedule them. The limit is the
+exception: it is read from the group by name each time a job is about to
+start, so changing **Max concurrent** applies to pending jobs straight
+away. Do not rename or delete a group while it has pending jobs: a job whose
+group name no longer exists falls back to a limit of 1.
+
+### Worked examples
+
+**HSRP or VRRP pair.** Nothing to enter. After a sweep the pair is a group
+named for the protocol, group number and virtual address, for example
+`HSRP 10 10.20.30.1`, with a limit of 1. Schedule both switches in one
+batch: they land in waves 1 and 2, and the second starts only when the first
+has completed.
+
+**A and B closets on one floor, no gateway protocol between them.** Add a
+group `atl-floor3-closets`, limit `1`, members `atl-3a-sw01` and
+`atl-3b-sw01`.
+
+**F5 pair or any load-balancer pool.** Discovery cannot see these. Add a
+group `atl-f5-pair`, limit `1`, with both units. For a pool of four that can
+run on three, add one group with all four and limit `1`; use `2` only if the
+service is sized to run on two.
+
+**Office access switches, then the office core.** Add `atl-access`, limit
+`0`, with every access switch, and `atl-core`, limit `1`, with both cores and
+**Waits for groups** set to `atl-access`. One batch holding all of them
+upgrades every access switch in wave 1, the first core in wave 2 and the
+second core in wave 3. If the cables are in NetBox and the role slugs match
+the tiers, the cabled dependencies already give the same order and only the
+core pair's own group is needed.
+
+**One device behind another with no cable in NetBox**, such as a firewall
+that should follow the switch it hangs off: add a dependency with the
+firewall as **Upstream** and the switch as **Downstream**.
+
+### Discovered and manual entries
+
+The **Source** column says where an entry came from: *Manual*, *FHRP group
+(HSRP/VRRP)* or *Cabled uplink*. A refresh behaves as follows:
+
+- Manual groups and dependencies are never changed.
+- On a discovered group, the **members are reset** to what the FHRP group
+  shows on every refresh. The name, limit, waits-for groups and description
+  are kept, so raising the limit or adding a waits-for on a discovered group
+  is safe; editing its members is not. Put extra members in a manual group.
+- An FHRP group seen on fewer than two devices makes no group.
+- A cable makes a dependency only when both devices have a role listed in
+  `upgrade_tier_roles` and the two roles differ. The device whose role comes
+  first in the list is upstream and waits.
+- When a manual dependency already exists for the same two devices, the
+  cable does not add a second one and the manual one stays manual.
+- A discovered entry that NetBox no longer supports is marked **stale**, not
+  deleted. **Stale entries are still enforced** until a person deletes them;
+  sort either list by its **Stale** column, or add `?stale=true` to the list
+  URL, to review them. One that is seen again is un-marked.
+- A discovered entry deleted while the FHRP group or cable still exists in
+  NetBox **comes back** on the next refresh. To switch off a discovered
+  group's rule, set its limit to `0` instead. A cabled dependency follows the
+  cable and the two roles: correct whichever of those is wrong in NetBox.
+
+### Plugin settings
+
+Both settings belong to the discovery plugin and go in `PLUGINS_CONFIG` in
+`configuration/plugins.py`. The file has no `netbox_discovery` block until
+one of them is overridden:
+
+```python
+PLUGINS_CONFIG = {
+    # ... existing plugins ...
+    "netbox_discovery": {
+        # Device role slugs, top of the network first.
+        "upgrade_tier_roles": ["core", "distribution", "access"],
+        # Hold the rest of a site's batch when one device there fails.
+        "hold_site_on_failure": True,
+    },
+}
+```
+
+- `upgrade_tier_roles` holds device role **slugs**, not names, from the top
+  of the network down. The default is `core`, `distribution`, `access`. If
+  the roles are named differently, for example `core-switch`,
+  `distribution-switch` and `access-switch`, list those slugs or no cabled
+  dependency is ever created. A device whose role is not listed takes no
+  part, and an empty list turns cabled dependencies off. The change shows
+  after NetBox restarts and the next refresh runs; dependencies from the old
+  list that no longer apply are marked stale.
+- `hold_site_on_failure` (default `True`) holds the other pending jobs at
+  the same site in the same batch when a job ends `failed` or
+  `recovery_required`. `False` limits holds to the failed device's partners
+  and the devices that wait for it.
+
+NetBox reads its configuration at start-up, so restart its containers after
+changing either one. On the scanner side, `sync_fhrp_groups = false` under `[sync]` in the
+`snmp-inventory` configuration stops both the FHRP write and the refresh
+request at the end of a sweep; the **Refresh discovered groups** button still
+works.
+
 ## Permissions
 
 Use NetBox Object Permissions on the `netbox_discovery.UpgradeJob` object type:
@@ -81,6 +215,14 @@ Use NetBox Object Permissions on the `netbox_discovery.UpgradeJob` object type:
 - Operators: `view`, `add` to schedule audits; also `apply` to schedule staging/upgrades. `change` permits cancelling pending jobs and recording recovery. Apply is a separate permission so audit schedulers cannot authorize reloads.
 - Workers: `run` to claim jobs and report/heartbeat. They do not need add, apply, change, or delete permission on upgrade jobs. Give the token write capability; read-only tokens cannot claim work.
 - Operators need view access to the selected DCIM devices. Optional filters use NetBox's own device filterset. Add/apply/run/change object constraints are enforced, including for batch creation.
+
+Redundancy groups and dependencies have their own object types, `netbox_discovery.UpgradeGroup` and `netbox_discovery.UpgradeDependency`:
+
+- People who maintain them: `view`, `add`, `change` and `delete` on both. **Refresh discovered groups**, in the UI and through the API, needs `change` on `UpgradeGroup`, and it rewrites discovered dependencies as well.
+- Operators who only schedule: `view` on both, so the groups, waves and hold reasons they see link to something. Scheduling itself applies every group and dependency regardless of what the scheduler may view.
+- The `snmp-inventory` account: `view` and `change` on `UpgradeGroup` with a write-enabled token, for the refresh at the end of a sweep. The sweep succeeds either way: without `view` the scanner treats the endpoint as absent and skips the refresh with only a debug message, and without `change` it logs a warning that the refresh failed.
+- Accounts that run `configure.py upgrade` by hand against NetBox inventory: `view` on `UpgradeGroup`. Without it the group check is skipped with a warning rather than blocking the run.
+- Holding and releasing jobs is `change` on `UpgradeJob`, not a group permission.
 
 For each remote account, constrain its `run` permission to its assigned poller, for example `{"poller__name": "checkmk-us"}`. Poller names and claim tokens coordinate work; account permissions provide authorization. The existing SNMP permissions remain separate. Current records are readable through ordinary `view` permission; claim tokens are only returned by the claim endpoint.
 
@@ -154,5 +296,26 @@ All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the nor
 - `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state.
 - `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
 - `GET /` and `GET {id}/`: current queue and progress for a dashboard. These endpoints never expose claim tokens and reject ordinary PATCH/DELETE operations.
+
+- `POST {id}/hold/` and `POST {id}/release/`: `{"reason":"..."}`, required. Hold a pending job, or return a held one to the schedule. `POST release-batch/`: `{"batch_id":"<uuid>","reason":"..."}` releases every held job in the batch and returns the count. All three need `change` on upgrade jobs and a write-enabled token; a refusal from the queue is a `409` with the reason in `detail`.
+
+Redundancy groups and dependencies are ordinary NetBox REST resources under `/api/plugins/discovery/`, with the usual list, create, `PATCH`, `DELETE`, tags and changelog:
+
+- `upgrade-groups/`: `name`, `max_concurrent` (default 1; 0 for no limit), `members` (device ids), `depends_on` (ids of the groups this one waits for), `description`, `comments`, `tags`. Filters: `name`, `source` (`manual`, `fhrp`, `cable`), `stale`, `max_concurrent`, `member_id`, `depends_on_id`, `key` and `q`.
+- `upgrade-dependencies/`: `upstream` (the device that waits) and `downstream` (the device that goes first), as device ids, plus `description`, `comments`, `tags`. Filters: `upstream_id`, `downstream_id`, `source`, `stale`, `key` and `q`.
+- `source`, `key` and `stale` are read-only on both; anything created through the API is manual.
+- `POST upgrade-groups/refresh/` with an empty body runs the same refresh as the button and returns `{"groups", "dependencies", "stale_groups", "stale_dependencies"}`. It needs `change` on redundancy groups and a write-enabled token.
+
+```bash
+# An F5 pair that must go one at a time (members are NetBox device ids)
+curl -sS -X POST "$NETBOX_URL/api/plugins/discovery/upgrade-groups/" \
+  -H "Authorization: Token $NETBOX_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "atl-f5-pair", "max_concurrent": 1, "members": [412, 413]}'
+
+# Device 731 waits for device 655
+curl -sS -X POST "$NETBOX_URL/api/plugins/discovery/upgrade-dependencies/" \
+  -H "Authorization: Token $NETBOX_TOKEN" -H "Content-Type: application/json" \
+  -d '{"upstream": 731, "downstream": 655}'
+```
 
 Deployment requires plugin migrations through `0008_upgrade_poller_last_seen` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.
