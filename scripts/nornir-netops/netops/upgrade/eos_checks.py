@@ -179,7 +179,6 @@ TABLES = {
     "ip_interfaces": ("show ip interface brief", "show ip interface brief", ("interface", "ip_address", "status", "protocol"), r"Interface\s+IP Address", True),
     "mac": ("show mac address-table", "show mac address-table", ("vlan_id", "mac_address", "type", "destination_port"), r"Mac Address Table", True),
     "vlans": ("show vlan", "show vlan", None, r"VLAN\s+Name\s+Status", True),
-    "port_channels": ("show port-channel summary", "show port-channel summary", None, r"Port-Channel\s+Protocol\s+Ports|Number of channels in use", True),
     "arp": ("show ip arp", "show ip arp", ("ip_address", "mac_address", "interface"), r"Address\s+Age", False),
     "routes": ("show ip route", "show ip route", ("vrf", "protocol", "network", "prefix_length", "next_hop", "interface"), r"Codes:|Gateway of last resort|IP routing not enabled", True),
 }
@@ -203,7 +202,9 @@ DIAGNOSTICS = (
 def table(command, template, fields, header, output):
     understood(command, output)
     if not re.search(header, output, re.I):
-        raise ValueError(f"{command}: unrecognized table/header")
+        excerpt = " ".join(output.split())[:60]
+        raise ValueError(f"{command}: unrecognized table/header (output begins: {excerpt!r})" if excerpt
+                         else f"{command}: unrecognized table/header (empty output)")
     rows = parse_output(platform="arista_eos", command=template, data=output)
     if command == "show interfaces status":
         raw_ports = Counter(re.findall(r"(?m)^\s*([A-Za-z][A-Za-z-]*\d\S*)\s+", output))
@@ -228,6 +229,45 @@ def table(command, template, fields, header, output):
         rows = [{key: row[key] for key in fields} for row in rows]
     else:
         rows = [{key: value for key, value in row.items() if key not in VOLATILE_FIELDS} for row in rows]
+    return rows
+
+
+PORT_CHANNEL_HEADER = r"Port-Channel\s+Protocol\s+Ports|Number of channels in use"
+
+
+def port_channel_brief(output):
+    """`show port-channel brief`: a block per channel naming its active ports."""
+    rows, current = [], None
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        block = re.match(r"^Port Channel (Port-Channel\d+)(?:\s*\(.*\))?:\s*$", line)
+        if block:
+            current = {"name": block[1], "active_ports": []}
+            rows.append(current)
+            continue
+        ports = re.match(r"^\s+Active Ports:\s*(.*?)\s*$", line)
+        if ports and current is not None:
+            current["active_ports"] = sorted(ports[1].split())
+            continue
+        raise ValueError(f"show port-channel brief: unrecognized line {line.strip()[:60]!r}")
+    return rows
+
+
+def port_channels(read, config):
+    """`show port-channel summary` where the release has it; older EOS answers only `brief`.
+
+    An empty answer from either command is accepted only when no port-channel
+    is configured, so an unsupported command cannot pass as "none".
+    """
+    configured = set(re.findall(r"(?mi)^interface (Port-Channel\d+)\s*$", config))
+    summary = read("show port-channel summary")
+    if not ERROR.search(summary) and re.search(PORT_CHANNEL_HEADER, summary, re.I):
+        rows = table("show port-channel summary", "show port-channel summary", None, PORT_CHANNEL_HEADER, summary)
+    else:
+        rows = port_channel_brief(understood("show port-channel brief", read("show port-channel brief")))
+    if configured and not rows:
+        raise ValueError(f"no port-channel reported but {len(configured)} configured")
     return rows
 
 
@@ -369,11 +409,14 @@ def collect(read, progress, commands=None):
     snapshot = {"raw": {}, "tables": {}, "errors": {}, "warnings": {}, "routing": {},
                 "diagnostic_commands": list(DIAGNOSTICS)}
 
-    def get(command):
+    def fetch(command):
         progress(command)
         output = read(command)
         snapshot["raw"][command] = output
-        return understood(command, output)
+        return output
+
+    def get(command):
+        return understood(command, fetch(command))
 
     try:
         output = get("show version")
@@ -398,6 +441,10 @@ def collect(read, progress, commands=None):
         except Exception as exc:
             snapshot["errors" if required else "warnings"][key] = str(exc)
     config = snapshot.get("config", "")
+    try:
+        snapshot["tables"]["port_channels"] = port_channels(fetch, config)
+    except Exception as exc:
+        snapshot["errors"]["port_channels"] = str(exc)
     parsers = [("mlag", "show mlag", mlag, True), ("vrfs", "show vrf", vrfs, True),
                ("lldp", "show lldp neighbors", lldp, False),
                ("vrrp", "show vrrp", vrrp, bool(re.search(r"(?m)^\s+vrrp \d+", config)))]

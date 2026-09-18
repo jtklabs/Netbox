@@ -277,7 +277,8 @@ All devices emit `queued` before workers start. Active stages include
 `image_verification`, `ready`, `staging`, `configuring_boot`, `installing`,
 `reconnecting`, `converging`, `postcheck` and `validating`; BIG-IP units also
 emit `backing_up` (UCS archive) and `failing_over`. EOS switches use the IOS XE
-stages; `configuring_boot` is the boot-config change and `installing` the reload.
+stages without `configuring_boot`: `installing` is the `install source` command,
+which changes boot-config and reloads.
 Terminal stages are `dry_run_complete`, `already_current`, `blocked`, `staged`, `staging_failed`,
 `completed`, `completed_with_warnings`, `validation_failed`, `failed` and
 `recovery_required`. `summary` is optional and contains counts/version/gate
@@ -411,16 +412,21 @@ image_source: http://images.example.com/EOS-4.32.1F.swi   # optional; switch-rea
 Order of operations under `--apply`: `write memory`; baseline; the image
 verified on flash, or copied with `copy <image_source> flash:<image>`, and its
 `verify /md5` checked against the profile (an existing file with a different
-checksum is never overwritten); the `ready` gate; `boot system flash:<image>`
-confirmed through `show boot-config`; a fresh check that the running and
-startup configurations are still identical; `reload now`; reconnect; then the
-same convergence loop and comparison report. `--stage-only` copies and
-verifies the image only. A dry run reads everything and writes nothing. EOS
-boots one image file, so there is no install mode, bundle conversion or stack;
-`bundle_conversion_validated`, `volume`, `allow_active` and
-`license_check_date` are rejected in an EOS profile. The reload dialogue
-answers only `Proceed with reload? [confirm]`; a save prompt or any other
-question stops the workflow with `recovery_required` for inspection.
+checksum is never overwritten); the `ready` gate; a fresh check that the
+configuration and release are unchanged since the baseline and that the running
+and startup configurations are still identical; `install source flash:<image>
+now reload`; reconnect; then the same convergence loop and comparison report.
+The driver never writes `boot system` itself: EOS's install command points
+boot-config at the image and reloads, and because the image is already on flash
+and checksum-verified it copies nothing. `show boot-config` is checked against
+the target after the reload. `--stage-only` copies and verifies the image only.
+A dry run reads everything and writes nothing. EOS boots one image file, so
+there is no bundle conversion or stack; `bundle_conversion_validated`,
+`volume`, `allow_active` and `license_check_date` are rejected in an EOS
+profile. The install dialogue answers only `Proceed with reload? [confirm]`; a
+save prompt, any other question, a device error or a return to the prompt
+without the reload broadcast stops the workflow with `recovery_required` for
+inspection.
 
 Prechecks block on: a model outside `models`, a release outside
 `starting_versions`, MLAG in any state other than `Active` or `Disabled`, an
@@ -435,8 +441,13 @@ port channels, spanning-tree port roles/states and root identities, MLAG
 status, port counts and per-MLAG interface state, VRRP groups, LLDP neighbors,
 VRFs, IPv4 routes and ARP per VRF, and the BGP (every VRF, IPv4 and IPv6),
 OSPF, OSPFv3 and IS-IS neighbors detected from the configuration, all as
-unordered sets of stable fields. The running configuration is compared with
-its metadata comments removed. Health takes CPU busy share from `show
+unordered sets of stable fields. Port-channels come from `show port-channel
+summary`; a release that rejects it (older EOS has only `brief`, `detailed`,
+`limits` and `load-balance`) is read with `show port-channel brief`, which
+records each channel's active ports. Either way, an empty answer is accepted
+only when the running configuration has no `interface Port-Channel`; an
+unrecognized table blocks, and the message quotes how the output begins. The
+running configuration is compared with its metadata comments removed. Health takes CPU busy share from `show
 processes top once` (100 minus idle; EOS has no one-minute counter), free
 memory from `show version`, NTP peers, environment alarms and interface error
 counters. Post-checks additionally require the target release, `show
@@ -447,9 +458,12 @@ PoE is not collected. A `router` block other than bgp, ospf, ospfv3, isis or
 the non-neighbor blocks EOS uses (general, multicast, bfd, pim, igmp, msdp and
 similar) blocks the upgrade until a comparator exists.
 
-This flow has been exercised against synthetic SSH transcripts only. Validate
-your exact model, release path and MLAG design in a lab before scheduling
-production switches; Arista's release notes for the target list the supported
+This flow has been exercised against synthetic SSH transcripts only and is
+written for single-supervisor switches: `install source` also copies the image
+and boot-config to a standby supervisor and reloads both, but the prechecks and
+reconnect logic do not model a dual-supervisor chassis. Validate your exact
+model, release path and MLAG design in a lab before scheduling production
+switches; Arista's release notes for the target list the supported
 upgrade paths.
 
 ## BIG-IP upgrades
