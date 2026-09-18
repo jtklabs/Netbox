@@ -241,12 +241,15 @@ NETBOX_VERIFY_TLS=true
 # NET_AWS_REGION=us-east-1
 NETOPS_UPGRADE_QUEUE_STATE_DIR=/var/lib/netops/upgrade-queue
 NETOPS_REPORT_DIR=/var/lib/netops/reports
+# Images the worker downloads itself: BIG-IP uploads, and the SCP push used
+# when a switch cannot copy its image (the worker must reach image_source).
+NETOPS_IMAGE_CACHE=/var/lib/netops/images
 # Optional separate UI feed, sent in addition to NetBox progress:
 # NETOPS_UPGRADE_WEBHOOK_URL=https://inventory.example.com/hooks/upgrades
 # NETOPS_UPGRADE_WEBHOOK_TOKEN=...
 ```
 
-Keep the state and report directories writable only by the worker account. The state directory is persistent: it holds the cron lock and undelivered progress containing claim tokens, written with mode 0600. It must survive restarts. Do not put it in a temporary directory. Credentials remain in the shared environment/AWS; none are stored in the schedule.
+Keep the state, report and image cache directories writable only by the worker account. The state directory is persistent: it holds the cron lock and undelivered progress containing claim tokens, written with mode 0600. It must survive restarts. Do not put it in a temporary directory. Credentials remain in the shared environment/AWS; none are stored in the schedule.
 
 Run one tick manually to process only scheduled audits:
 

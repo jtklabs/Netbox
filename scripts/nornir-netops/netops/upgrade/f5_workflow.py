@@ -17,6 +17,7 @@ from nornir.core.task import Result
 
 from .. import f5_waf
 from . import checks, f5
+from .images import local_image
 from .profile import f5_version
 from .workflow import comparison_report, converge, device_lock, settle
 
@@ -93,31 +94,6 @@ def planned_commands(profile, plan, host):
 
 def ucs_name(host, profile):
     return f"{re.sub(r'[^A-Za-z0-9._-]+', '-', host.name)[:60]}-pre-{profile.target_version}.ucs"
-
-
-def local_image(profile, options, emit):
-    """The ISO on this worker: a local path, or a cached download of the profile URL."""
-    source = profile.image_source
-    if not source:
-        return None
-    if re.match(r"^https?://", source):
-        from ..cli import PROJECT_ROOT
-        cache = Path(getattr(options, "image_cache", None) or PROJECT_ROOT / ".images")
-        path = cache / profile.image
-        if path.is_file() and f5.local_md5(path) == profile.md5.lower():
-            return path
-        emit("staging", f"Downloading {profile.image} to the worker image cache")
-        f5.download(source, path)
-        if f5.local_md5(path) != profile.md5.lower():
-            path.unlink()
-            raise ValueError("downloaded image checksum does not match the approved profile")
-        return path
-    path = Path(source)
-    if not path.is_file():
-        raise ValueError("image_source file is not present on this worker")
-    if f5.local_md5(path) != profile.md5.lower():
-        raise ValueError("local image checksum does not match the approved profile")
-    return path
 
 
 def verify_image(client, profile, options, plan, apply, emit):

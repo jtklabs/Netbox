@@ -35,8 +35,9 @@ def add_arguments(parser, scheduled=False):
     bigip = parser.add_argument_group("BIG-IP upgrades")
     bigip.add_argument("--ucs-dir", default=os.environ.get("NETOPS_UCS_DIR"),
                        help="download each unit's pre-upgrade UCS archive here; otherwise it stays on the unit [$NETOPS_UCS_DIR]")
-    bigip.add_argument("--image-cache", default=os.environ.get("NETOPS_IMAGE_CACHE"),
-                       help="worker directory for images downloaded from an image_source URL [$NETOPS_IMAGE_CACHE; default: <project>/.images]")
+    parser.add_argument("--image-cache", default=os.environ.get("NETOPS_IMAGE_CACHE"),
+                        help="worker directory for images fetched from an image_source URL: BIG-IP uploads and the SCP fallback "
+                             "when a switch cannot copy the image itself [$NETOPS_IMAGE_CACHE; default: <project>/.images]")
     parser.add_argument("--ignore-groups", action="store_true",
                         help="proceed even when the targets include more members of a NetBox redundancy group than may upgrade at once")
     parser.set_defaults(workers=3)

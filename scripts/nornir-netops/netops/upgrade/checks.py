@@ -23,9 +23,13 @@ def canonical(row):
 ERROR = re.compile(r"(?im)^\s*(?:%\s*(?:Invalid|Incomplete|Ambiguous|Unknown|Error|Authorization|Permission)|Error:|FAILED:)")
 
 
+class DeviceError(ValueError):
+    """The device answered a command with an error and is back at its prompt."""
+
+
 def understood(command, output):
     if not isinstance(output, str) or ERROR.search(output):
-        raise ValueError(f"device rejected {command!r}")
+        raise DeviceError(f"device rejected {command!r}")
     return output
 
 

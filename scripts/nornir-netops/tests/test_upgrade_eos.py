@@ -486,6 +486,7 @@ def fake_device(monkeypatch, profile):
         raw = transcript()
         digest = "a" * 32
         fail_reload = False
+        fail_copy = False
         image_exists = True
         lose_mlag = False
 
@@ -521,9 +522,22 @@ def fake_device(monkeypatch, profile):
         def interactive(self, command, timeout, reload=False):
             self.mutations.append(command)
             if command.startswith("copy "):
+                if self.fail_copy:
+                    self.image_exists = self.fail_copy == "partial"
+                    raise checks.DeviceError("device rejected 'copy'")
                 self.image_exists = True
             if reload and self.fail_reload:
                 raise ValueError("injected reload failure")
+
+        def resync(self):
+            self.mutations.append("resync")
+
+        scp_destination = eos_workflow.EosDevice.scp_destination
+        delete_command = eos_workflow.EosDevice.delete_command
+
+        def scp_push(self, local, destination):
+            self.mutations.append(f"scp {local.name} {destination}")
+            self.image_exists = True
 
         def wait_for_target(self, profile):
             self.raw = transcript(profile.target_version, profile.image)
@@ -594,6 +608,24 @@ def test_missing_image_blocks_without_a_source_and_is_copied_with_one(profile, o
     result, reporter = run_device(sourced, options)
     assert not result.failed
     assert fake_device.instances[0].mutations == ["write memory", f"copy {sourced.image_source} flash:{profile.image}", INSTALL]
+
+
+@pytest.mark.parametrize("fail_copy,between", [(True, []), ("partial", ["delete flash:EOS-4.32.1F.swi"])])
+def test_failed_device_copy_is_pushed_to_mnt_flash_over_scp(profile, options, fake_device, monkeypatch, tmp_path, fail_copy, between):
+    from netops.upgrade import workflow
+    options.apply, options.stage_only = True, True
+    fake_device.image_exists = False
+    fake_device.fail_copy = fail_copy
+    local = tmp_path / profile.image
+    local.write_bytes(b"image")
+    monkeypatch.setattr(workflow, "local_image", lambda profile, options, emit: local)
+    sourced = replace(profile, image_source=f"http://images.example.com/{profile.image}")
+    result, reporter = run_device(sourced, options)
+    assert not result.failed and result.changed and reporter.emit.call_args.args[1] == "staged"
+    assert fake_device.instances[0].mutations == ([f"copy {sourced.image_source} flash:{profile.image}", "resync"]
+                                                   + between + [f"scp {profile.image} /mnt/flash/{profile.image}"])
+    plan = reporter.emit.call_args.args[3]["upgrade_plan"]
+    assert plan["image_transfer"] == "scp_push" and plan["device_copy_error"] == "device rejected 'copy'"
 
 
 def test_stage_only_copies_and_verifies_without_boot_or_reload(profile, options, fake_device):

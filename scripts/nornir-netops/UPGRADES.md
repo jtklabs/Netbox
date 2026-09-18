@@ -146,7 +146,22 @@ An existing installer is checksum-verified and reused. If it is missing,
 checksum. Without `--apply`, it only records the planned copy. An existing file
 with a bad checksum is flagged and is never silently overwritten. No boot
 settings, configuration saves, install commands, conversions or reloads run in
-this mode. Images are staged on **active flash**; install distributes software
+this mode.
+
+When the switch answers that its copy failed (a `%Error` and a prompt, for
+example because the image server is unreachable from the management VRF),
+the worker fetches the image itself and pushes it with SCP: the URL is
+downloaded to the image cache (`--image-cache` or `NETOPS_IMAGE_CACHE`,
+default `<project>/.images`) and checksum-verified there, the CLI session is
+brought back to its prompt, a partial file left by the failed copy is removed
+with `delete /force`, and the file is sent over a second SSH session with the
+same login to `flash:/<image>`; the usual `verify /md5` and free-space checks
+follow. IOS XE needs `ip scp server enable` for this; the worker never adds
+it. The fallback runs only for an HTTP(S) `image_source` the worker can reach,
+and only when the device reported the failure: a copy that timed out or
+dropped the session leaves the device's state unknown and is not retried.
+The report records `image_transfer` as `device_copy` or `scp_push` and the
+device's error as `device_copy_error`. Images are staged on **active flash**; install distributes software
 to the stack members during the later upgrade.
 
 Progress and archives label this operation `stage_image`. Successful apply ends
@@ -420,7 +435,11 @@ The driver never writes `boot system` itself: EOS's install command points
 boot-config at the image and reloads, and because the image is already on flash
 and checksum-verified it copies nothing. `show boot-config` is checked against
 the target after the reload. `--stage-only` copies and verifies the image only.
-A dry run reads everything and writes nothing. EOS boots one image file, so
+A dry run reads everything and writes nothing. A copy the switch reports as
+failed falls back to an SCP push from the worker exactly as for IOS XE (see
+above): the image lands in `/mnt/flash/<image>`, a partial file is removed
+with `delete flash:<image>` first, and EOS needs no extra configuration for
+SCP beyond SSH access. EOS boots one image file, so
 there is no bundle conversion or stack; `bundle_conversion_validated`,
 `volume`, `allow_active` and `license_check_date` are rejected in an EOS
 profile. The install dialogue answers only `Proceed with reload? [confirm]`; a
@@ -506,7 +525,8 @@ to it, reconnect, the same convergence loop and the comparison report.
 `--stage-only` uploads and verifies the image only. A dry run reads
 everything and writes nothing. An `image_source` URL is downloaded to the
 worker's image cache first (`--image-cache` or `NETOPS_IMAGE_CACHE`, default
-`<project>/.images`) and checksum-verified there before upload.
+`<project>/.images`, shared with the IOS XE and EOS SCP fallback) and
+checksum-verified there before upload.
 
 Prechecks block on: an unapproved platform, a release outside
 `starting_versions`, an install already in progress on a volume, a device
