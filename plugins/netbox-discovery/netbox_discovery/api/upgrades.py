@@ -150,6 +150,16 @@ class UpgradeCancelView(QueueView):
         return Response({'id': job.pk, 'status': job.status})
 
 
+class UpgradeRequeueView(QueueView):
+    permission = 'add_upgradejob'
+    serializer_class = serializers.Serializer
+
+    def execute(self, request, data, pk):
+        job = queue.requeue(request.user, pk)
+        return Response({'id': job.pk, 'batch_id': job.batch_id, 'status': job.status,
+                         'scheduled_at': job.scheduled_at, 'start_before': job.start_before}, status=201)
+
+
 class UpgradeGroupSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:upgradegroup-detail')
     members = SerializedPKRelatedField(queryset=Device.objects.all(), serializer=DeviceSerializer, nested=True,

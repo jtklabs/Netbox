@@ -10,6 +10,8 @@ Open **Discovery → Software → Upgrade Jobs → Add** on the list page (the s
 
 Open a pending job and click **Edit** to change its operation, profile, scheduled window or description. This updates only that device's job; its device and poller stay fixed, and other jobs in the batch are unchanged. Editing requires `change` permission, plus `apply` permission when the existing or new operation stages an image or installs an upgrade. The worker receives the updated profile when it claims the job. Claimed, running and closed jobs cannot be edited. A stale browser form is rejected if another edit or worker claim happened in the meantime.
 
+A closed job (completed, failed, start window missed or cancelled) offers **Re-queue now**, which creates a new job for the same device with the same profile, operation and poller, due immediately and keeping the original window length, and **Re-queue with changes**, which opens the schedule form filled in from the job. Both are fresh single-device schedules in their own batch: ownership, the profile, redundancy groups and permissions (`add`, plus `apply` for staging and upgrades) are checked again, and a device that already has a queued or active job is refused. A job in recovery must be recovered first.
+
 Operations:
 
 | Operation | What the remote does | Worker needs `--apply` |
@@ -295,6 +297,7 @@ All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the nor
 - `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true}`. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
 - `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state.
 - `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
+- `POST {id}/requeue/` with an empty body: a new pending job for a closed job's device, profile and operation, due now with the same window length, in a new batch. Returns `201` with the new `id`, `batch_id` and window; `409` when the job is not closed or the device already has a queued or active job. Needs `add` (and `apply` for staging/upgrades) like `schedule/`.
 - `GET /` and `GET {id}/`: current queue and progress for a dashboard. These endpoints never expose claim tokens and reject ordinary PATCH/DELETE operations.
 
 - `POST {id}/hold/` and `POST {id}/release/`: `{"reason":"..."}`, required. Hold a pending job, or return a held one to the schedule. `POST release-batch/`: `{"batch_id":"<uuid>","reason":"..."}` releases every held job in the batch and returns the count. All three need `change` on upgrade jobs and a write-enabled token; a refusal from the queue is a `409` with the reason in `detail`.
