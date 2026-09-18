@@ -12,6 +12,7 @@ from pathlib import Path
 from nornir.core.task import Result
 
 from . import checks, report
+from .images import local_image
 from .profile import version
 
 BOOT_COMMANDS = ["no boot system", "boot system flash:packages.conf", "no boot manual"]
@@ -131,7 +132,7 @@ class Device:
         output = self.connection.send_command(command, read_timeout=timeout)
         checks.understood(command, output)
         if INSTALL_FAILURE.search(output):
-            raise ValueError(f"device reported failure for {command}")
+            raise checks.DeviceError(f"device reported failure for {command}")
         return output
 
     def answer(self, tail, reload):
@@ -163,7 +164,7 @@ class Device:
                 transcript += chunk
                 checks.understood(command, transcript)
                 if INSTALL_FAILURE.search(transcript):
-                    raise ValueError("device reported install/copy failure")
+                    raise checks.DeviceError("device reported install/copy failure")
                 tail = transcript[answered:]
                 reply = self.answer(tail, reload)
                 if reply is not None:
@@ -194,6 +195,40 @@ class Device:
                       {"install_output" if reload else "copy_output": transcript})
         raise TimeoutError("install/copy dialogue timed out; do not automatically retry")
 
+    def resync(self):
+        """Bring the CLI back to a clean prompt after a failed dialogue, or give up."""
+        try:
+            self.connection.find_prompt()
+        except Exception as exc:
+            raise ValueError(f"session could not be resynchronized after the failed copy ({type(exc).__name__}); "
+                             "not pushing over SCP") from None
+
+    # Where SCP writes the image, and how a partial file is removed without a prompt.
+    def scp_destination(self, image):
+        return f"flash:/{image}"
+
+    def delete_command(self, image):
+        return f"delete /force flash:{image}"
+
+    def scp_push(self, local, destination):
+        """Push a local file over a second SSH session opened with the same login."""
+        from netmiko.scp_handler import SCPConn
+        marks = {"reported": time.monotonic()}
+
+        def progress4(filename, size, sent, peer):
+            if time.monotonic() - marks["reported"] >= 30:
+                marks["reported"] = time.monotonic()
+                self.emit("staging", f"SCP push {100 * sent // size if size else 0}% ({sent} of {size} bytes)")
+
+        try:
+            scp = SCPConn(self.connection, socket_timeout=120, progress4=progress4)
+            try:
+                scp.scp_transfer_file(str(local), destination)
+            finally:
+                scp.close()
+        except Exception as exc:
+            raise ValueError(f"SCP push to {destination} failed ({type(exc).__name__}: {exc})") from None
+
     def wait_for_target(self, profile):
         self.close()
         deadline = time.monotonic() + self.options.reload_timeout
@@ -211,6 +246,36 @@ class Device:
             self.close()
             time.sleep(self.options.poll_interval)
         raise TimeoutError(f"reload deadline exceeded: {last_error}; manual recovery required")
+
+
+def stage_image(device, profile, plan, present):
+    """Copy the missing image to flash.
+
+    The device pulls image_source first. When it answers that the copy failed,
+    the worker fetches the image itself and pushes it over SCP. A copy that
+    timed out or dropped the session leaves the device's state unknown and is
+    not retried. `present` says whether the image file now exists on flash.
+    """
+    image = f"flash:{profile.image}"
+    device.emit("staging", "Copying target image to flash")
+    try:
+        device.interactive(f"copy {profile.image_source} {image}", device.options.install_timeout)
+        plan["image_transfer"] = "device_copy"
+        return
+    except checks.DeviceError as exc:
+        failure = str(exc)
+    if not re.match(r"^https?://", profile.image_source):
+        raise ValueError(f"device copy failed ({failure}); the SCP fallback needs an HTTP(S) image_source the worker can fetch")
+    plan["device_copy_error"] = failure
+    device.emit("staging", f"Device copy failed ({failure}); pushing the image from the worker over SCP")
+    device.resync()
+    local = local_image(profile, device.options, device.emit)
+    if present():
+        # The file was absent before staging, so only the failed copy can have left it.
+        device.emit("staging", "Removing the partial file left by the failed copy")
+        device.write(device.delete_command(profile.image), timeout=device.options.show_timeout)
+    device.scp_push(local, device.scp_destination(profile.image))
+    plan["image_transfer"] = "scp_push"
 
 
 def verify_image(device, profile, snapshot, plan, apply):
@@ -241,8 +306,8 @@ def verify_image(device, profile, snapshot, plan, apply):
         plan["staging_command"] = f"copy {profile.image_source} {image}"
         if not apply:
             return
-        device.emit("staging", "Copying target image to active flash")
-        device.interactive(f"copy {profile.image_source} {image}", device.options.install_timeout)
+        stage_image(device, profile, plan,
+                    lambda: bool(re.search(r"\b" + re.escape(profile.image) + r"\s*$", device.read(f"dir {image}"), re.M)))
     device.emit("image_verification", "Checking Cisco image checksum")
     output = device.write(f"verify /md5 {image}", timeout=device.options.install_timeout)
     hashes = re.findall(r"\b[a-fA-F0-9]{32}\b", output)

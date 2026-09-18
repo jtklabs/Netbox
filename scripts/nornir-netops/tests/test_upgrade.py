@@ -1,6 +1,7 @@
 """Offline transcripts and failure injection; never connect to real switches."""
 
 import copy
+import hashlib
 import json
 import os
 from dataclasses import asdict
@@ -284,6 +285,16 @@ def fake_device(monkeypatch, profile):
             self.mutations.append(command)
             if self.fail_install:
                 raise ValueError("injected install failure")
+
+        def resync(self):
+            self.mutations.append("resync")
+
+        scp_destination = workflow.Device.scp_destination
+        delete_command = workflow.Device.delete_command
+
+        def scp_push(self, local, destination):
+            self.mutations.append(f"scp {local.name} {destination}")
+            self.image_exists = True
 
         def wait_for_target(self, profile):
             self.raw = transcript(profile.target_version)
@@ -751,6 +762,137 @@ def test_stage_only_bad_existing_checksum_is_not_overwritten(profile, options, f
     assert result.failed and not result.changed
     assert reporter.emit.call_args.args[1] == "blocked"
     assert not fake_device.instances[0].mutations
+
+
+def staged_plan(reporter):
+    return next(call.args[3]["upgrade_plan"] for call in reporter.emit.call_args_list if call.args[1] == "staged")
+
+
+def failing_copy(fake_device, monkeypatch, leaves_partial=False, error=None):
+    """The device answers the copy with an error and is back at its prompt."""
+    original = fake_device.interactive
+
+    def copy(self, command, timeout, reload=False):
+        original(self, command, timeout, reload)
+        if command.startswith("copy "):
+            self.image_exists = leaves_partial
+            raise error or checks.DeviceError("device reported install/copy failure")
+
+    monkeypatch.setattr(fake_device, "interactive", copy)
+
+
+@pytest.fixture
+def cached_image(monkeypatch, tmp_path, profile):
+    path = tmp_path / profile.image
+    path.write_bytes(b"image")
+    monkeypatch.setattr(workflow, "local_image", lambda profile, options, emit: path)
+    return path
+
+
+def test_failed_device_copy_is_pushed_over_scp_from_the_worker(profile, options, fake_device, monkeypatch, cached_image):
+    from dataclasses import replace
+    options.stage_only = options.apply = True
+    fake_device.image_exists = False
+    failing_copy(fake_device, monkeypatch)
+    profile = replace(profile, image_source="https://images.example.com/" + profile.image)
+    result, reporter = run_device(profile, options)
+    assert not result.failed and result.changed
+    assert fake_device.instances[0].mutations == [f"copy {profile.image_source} flash:{profile.image}",
+                                                   "resync", f"scp {profile.image} flash:/{profile.image}"]
+    plan = staged_plan(reporter)
+    assert plan["image_transfer"] == "scp_push" and plan["image_verification"] == "verified"
+    assert plan["device_copy_error"] == "device reported install/copy failure"
+    messages = [call.args[2] for call in reporter.emit.call_args_list if call.args[1] == "staging"]
+    assert any("pushing the image from the worker over SCP" in m for m in messages)
+
+
+def test_partial_file_from_the_failed_copy_is_deleted_before_the_push(profile, options, fake_device, monkeypatch, cached_image):
+    from dataclasses import replace
+    options.stage_only = options.apply = True
+    fake_device.image_exists = False
+    failing_copy(fake_device, monkeypatch, leaves_partial=True)
+    profile = replace(profile, image_source="https://images.example.com/" + profile.image)
+    result, reporter = run_device(profile, options)
+    assert not result.failed
+    mutations = fake_device.instances[0].mutations
+    assert mutations[1:] == ["resync", f"delete /force flash:{profile.image}", f"scp {profile.image} flash:/{profile.image}"]
+
+
+@pytest.mark.parametrize("error,source,expected", [
+    (TimeoutError("install/copy dialogue timed out"), "https://images.example.com/", "timed out"),
+    (None, "tftp://images.example.com/", "SCP fallback needs an HTTP"),
+])
+def test_no_scp_push_after_a_timeout_or_for_a_tftp_source(profile, options, fake_device, monkeypatch, cached_image, error, source, expected):
+    from dataclasses import replace
+    options.stage_only = options.apply = True
+    fake_device.image_exists = False
+    failing_copy(fake_device, monkeypatch, error=error)
+    profile = replace(profile, image_source=source + profile.image)
+    result, reporter = run_device(profile, options)
+    assert result.failed and reporter.emit.call_args.args[1] == "staging_failed"
+    assert expected in reporter.emit.call_args.args[2]
+    assert not any(m.startswith("scp ") for m in fake_device.instances[0].mutations)
+
+
+def test_unresynchronized_session_is_not_pushed_to(profile, options, fake_device, monkeypatch, cached_image):
+    from dataclasses import replace
+    options.stage_only = options.apply = True
+    fake_device.image_exists = False
+    failing_copy(fake_device, monkeypatch)
+
+    def resync(self):
+        raise ValueError("session could not be resynchronized after the failed copy (ReadTimeout); not pushing over SCP")
+
+    monkeypatch.setattr(fake_device, "resync", resync)
+    profile = replace(profile, image_source="https://images.example.com/" + profile.image)
+    result, reporter = run_device(profile, options)
+    assert result.failed and "not pushing over SCP" in reporter.emit.call_args.args[2]
+    assert not any(m.startswith("scp ") for m in fake_device.instances[0].mutations)
+
+
+def test_scp_push_uses_a_second_session_and_wraps_failures(monkeypatch, tmp_path):
+    scp = Mock()
+    monkeypatch.setattr("netmiko.scp_handler.SCPConn", Mock(return_value=scp))
+    device = workflow.Device(SimpleNamespace(), SimpleNamespace(), Mock())
+    device.connection = Mock()
+    local = tmp_path / "x.bin"
+    local.write_bytes(b"x")
+    device.scp_push(local, "flash:/x.bin")
+    scp.scp_transfer_file.assert_called_once_with(str(local), "flash:/x.bin")
+    scp.close.assert_called_once()
+    scp.scp_transfer_file.side_effect = OSError("Administratively disabled")
+    with pytest.raises(ValueError, match=r"SCP push to flash:/x.bin failed \(OSError: Administratively disabled\)"):
+        device.scp_push(local, "flash:/x.bin")
+    assert scp.close.call_count == 2
+    device.connection.find_prompt.side_effect = OSError("gone")
+    with pytest.raises(ValueError, match="not pushing over SCP"):
+        device.resync()
+
+
+def test_local_image_uses_the_cache_and_rejects_bad_downloads(monkeypatch, tmp_path, profile):
+    from dataclasses import replace
+    from netops.upgrade import images
+    options = SimpleNamespace(image_cache=tmp_path / "cache")
+    good = hashlib.md5(b"image").hexdigest()
+    profile = replace(profile, md5=good, image_source="https://images.example.com/" + profile.image)
+    downloads = []
+
+    def download(url, destination):
+        downloads.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"image" if len(downloads) == 1 else b"corrupt")
+
+    monkeypatch.setattr(images, "download", download)
+    emitted = []
+    path = images.local_image(profile, options, lambda stage, message: emitted.append(message))
+    assert path == tmp_path / "cache" / profile.image and downloads == [profile.image_source]
+    assert images.local_image(profile, options, lambda *a: None) == path and len(downloads) == 1
+    path.write_bytes(b"stale")
+    with pytest.raises(ValueError, match="downloaded image checksum"):
+        images.local_image(profile, options, lambda *a: None)
+    assert not path.exists() and len(downloads) == 2
+    with pytest.raises(ValueError, match="not present on this worker"):
+        images.local_image(replace(profile, image_source=str(tmp_path / "missing.bin")), options, lambda *a: None)
 
 
 def test_stage_only_bad_download_reports_staging_failure(profile, options, fake_device):

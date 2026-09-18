@@ -18,7 +18,7 @@ from nornir.core.task import Result
 
 from . import checks, eos_checks
 from .profile import eos_version
-from .workflow import Device, comparison_report, converge, device_lock, settle
+from .workflow import Device, comparison_report, converge, device_lock, settle, stage_image
 
 HEALTHY_MLAG = {"Disabled", "Active"}
 
@@ -31,6 +31,12 @@ def install_command(profile):
 
 class EosDevice(Device):
     reload_success = re.compile(r"going down for reboot|Broadcast message", re.I)
+
+    def scp_destination(self, image):
+        return f"/mnt/flash/{image}"
+
+    def delete_command(self, image):
+        return f"delete flash:{image}"
 
     def answer(self, tail, reload):
         # `install ... now reload` normally reloads without asking; answer the
@@ -136,8 +142,7 @@ def verify_image(device, profile, snapshot, plan, apply):
         plan["staging_command"] = f"copy {profile.image_source} {image}"
         if not apply:
             return
-        device.emit("staging", "Copying target image to flash")
-        device.interactive(f"copy {profile.image_source} {image}", device.options.install_timeout)
+        stage_image(device, profile, plan, lambda: image_size(device.read(f"dir {image}"), profile.image) is not None)
     device.emit("image_verification", "Checking Arista image checksum")
     output = device.write(f"verify /md5 {image}", timeout=device.options.install_timeout)
     hashes = re.findall(r"\b[a-fA-F0-9]{32}\b", output)

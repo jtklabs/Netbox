@@ -8,12 +8,13 @@ collections and keeps only stable fields, so the comparison is unaffected by
 row order or counters.
 """
 
-import hashlib
 import os
 import re
 import time
 from pathlib import Path
 from urllib.parse import quote
+
+from .images import download, local_md5  # noqa: F401  (BIG-IP callers use f5.download/f5.local_md5)
 
 MAX_CHUNK = 1024 * 1024        # iControl REST rejects larger upload chunks.
 TOKEN_TIMEOUT = 36000          # The 10-hour maximum, so slow uploads outlive the default 20 minutes.
@@ -79,34 +80,6 @@ def remote_md5(client, filename, directory=IMAGES):
     except RuntimeError:
         return None
     return out[0].lower() if out and re.fullmatch(r"[0-9a-fA-F]{32}", out[0]) else None
-
-
-def local_md5(path):
-    digest = hashlib.md5()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def download(url, destination):
-    """Stream an image from the distribution server into the worker cache."""
-    import requests
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = destination.with_name(destination.name + ".part")
-    try:
-        with requests.get(url, stream=True, timeout=120, allow_redirects=False) as response:
-            if response.status_code != 200:
-                raise RuntimeError(f"image download returned HTTP {response.status_code}")
-            with open(temporary, "wb") as handle:
-                for block in response.iter_content(chunk_size=4 * 1024 * 1024):
-                    handle.write(block)
-        os.replace(temporary, destination)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"image download failed ({type(exc).__name__})") from None
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 def upload_image(client, path, progress=lambda percent: None):
