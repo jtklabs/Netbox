@@ -751,6 +751,7 @@ how much SNMP the devices will tolerate at once, not CPU.
 | `--collect-only` | scan and log findings, never touch NetBox |
 | `--new-only` | only IPAM addresses, skip rescans of known devices |
 | `--limit N` | scan at most N targets |
+| `--version` | print the build this copy reports to NetBox, e.g. `1.4.0+544aea9` |
 | `-v` | debug logging, including which credential set each device accepted |
 
 Once it looks right, run it from cron or a systemd timer:
@@ -780,6 +781,23 @@ times a day reasonable.
 
 Use a separate lock from the onboarding job so a long sweep never blocks
 onboarding; they are independent and can overlap safely.
+
+### Is that poller on the new build?
+
+Both schedules report the running build to the Discovery plugin, and NetBox
+shows it against the poller as **Scanner version**: the number from
+`snmpinv/__init__.py`, then a fingerprint of the source files, as in
+`1.4.0+544aea9`. The fingerprint moves with any code change, so it answers the
+question even when nobody bumped the number. A poller is installed by copying
+this directory and nothing updates it afterwards — so after copying a new build
+out, compare the two:
+
+```bash
+./snmp_inventory.py --version     # in the copy you just deployed from
+```
+
+If NetBox still shows the old string a few minutes later, the cron on that
+poller is running a different copy than the one you replaced.
 
 ### When a serial is already on another device
 

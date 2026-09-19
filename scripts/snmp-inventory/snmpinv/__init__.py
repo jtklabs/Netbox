@@ -20,6 +20,37 @@ The version is reported to the Discovery plugin at every check-in and shown
 against the poller in NetBox, so bump it with every change a poller must be
 running to benefit from -- it is how "is that poller on the new build yet?" is
 answered without logging in to it.
+
+What is reported is build_version(), not the bare number. The number is bumped
+by hand, and hand bumps get forgotten: it read 1.0.0 across the first forty
+changes, so every poller showed 1.0.0 whatever it was running. The fingerprint
+after the "+" moves whenever the code does, bump or no bump.
 """
 
+import hashlib
+from pathlib import Path
+
 __version__ = "1.4.0"
+
+
+def build_version() -> str:
+    """__version__ plus a fingerprint of the source that is actually running.
+
+    Hashed from the files rather than read from git because a poller is
+    installed by copying this directory — there is no checkout on it to ask.
+    `snmp_inventory.py --version` prints the same string from any copy, which
+    is what a poller's reading in NetBox is compared against.
+    """
+    package = Path(__file__).resolve().parent
+    sources = sorted(package.glob("*.py"))
+    entry_point = package.parent / "snmp_inventory.py"
+    if entry_point.is_file():
+        sources.append(entry_point)
+    digest = hashlib.sha256()
+    try:
+        for source in sources:
+            digest.update(source.name.encode())
+            digest.update(source.read_bytes())
+    except OSError:
+        return __version__
+    return f"{__version__}+{digest.hexdigest()[:7]}"
