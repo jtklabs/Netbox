@@ -47,7 +47,7 @@ from snmpinv import naming
 from snmpinv import onboarding
 from snmpinv import probe as probe_module
 from snmpinv import rules as rules_module
-from snmpinv import __version__
+from snmpinv import build_version
 from snmpinv.bulkstate import BulkState
 from snmpinv.collect import Collector, DeviceFacts
 from snmpinv.model import ScanResult, build_scan_result
@@ -184,6 +184,9 @@ def main(argv=None) -> int:
         "done in %.1fs — %d scanned, %d failed; NetBox: %s",
         elapsed, scanned, failed, netbox.summary(),
     )
+    if not args.collect_only:
+        report_sweep(netbox, config.poller_name, args.summary
+                     or f"sweep: {scanned} scanned, {failed} failed in {elapsed:.0f}s")
     if not args.collect_only and config.sync.sync_cables:
         # The cable pass mostly matters for what it did NOT do — conflicts,
         # unknown neighbors, unmatched ports — and those belong in the
@@ -280,7 +283,7 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
             # would triple it to diagnose a problem that almost never exists.
             jobs = onboarding.check_in(
                 netbox, config.poller_name,
-                version=__version__,
+                version=build_version(),
                 summary=args.summary,
                 claim=not args.dry_run,
                 limit=batch_size,
@@ -330,6 +333,22 @@ def run_onboarding(netbox: NetBox, config, collector: Collector, syncer: Syncer,
              time.time() - started, total, summary or "nothing done",
              netbox.summary())
     return 0
+
+
+def report_sweep(netbox: NetBox, poller_name: str, summary: str) -> None:
+    """Tell the Discovery plugin a sweep ran, and on which build.
+
+    Only --onboard checked in, so a poller that runs the sweep alone never
+    reported a version and NetBox went on showing whatever its last onboarding
+    run had sent. `claim=False` looks at the queue without taking anything
+    from it. Never fatal: the sweep does not need the plugin, and a token with
+    no rights on onboarding requests is refused here and nowhere else.
+    """
+    try:
+        onboarding.check_in(netbox, poller_name, version=build_version(),
+                            summary=summary, claim=False, limit=1)
+    except NetBoxError as exc:
+        log.debug("sweep check-in skipped: %s", exc)
 
 
 def run_command_collection(config) -> None:
@@ -537,6 +556,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-bulk-cache", action="store_true",
                         help="do not read or write the remembered per-device "
                              "GETBULK limits; rediscover them this run")
+    parser.add_argument("--version", action="version", version=build_version(),
+                        help="print the build this copy reports to NetBox and exit")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="warnings and errors only")
     return parser.parse_args(argv)
