@@ -24,14 +24,15 @@ because the master is one of those devices.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .cables import DEFAULT_CABLE_CLASSES, CableSyncer
-from .model import DeviceRecord, InterfaceRecord, ModuleRecord, ScanResult
-from .netbox import NetBox, NetBoxError
+from .model import DeviceRecord, InterfaceRecord, ModuleRecord, ScanResult, svi_vlan_id
+from .netbox import NetBox, NetBoxError, _normalise
 from .vendors import clean_serial
 
 log = logging.getLogger(__name__)
@@ -160,6 +161,11 @@ class SyncOptions:
     # Write HSRP/VRRP groups as NetBox FHRP groups with interface assignments,
     # and ask the discovery plugin to refresh its redundancy groups afterwards.
     sync_fhrp_groups: bool = True
+    # Write the device's VLANs as site-scoped NetBox VLANs, set each switched
+    # port's 802.1Q mode and VLANs from them, and link the prefix behind every
+    # routed VLAN interface to its VLAN. The device is the authority on all
+    # three: what NetBox holds is brought into line on every sweep.
+    sync_vlans: bool = True
 
 
 def _primary_address(device: dict) -> str:
@@ -181,6 +187,15 @@ class Syncer:
         self._vcmp_field_ready = False
         # The routing table of the host being synced; see sync().
         self._vrf_id: int | None = None
+        # The VLAN names the host being synced reported, and whether it
+        # answered for its ports at all; held and cleared like the VRF.
+        self._vlan_names: dict[int, str] = {}
+        self._vlans_reported = False
+        # site -> VLAN id -> the NetBox VLAN, read once per site for the
+        # length of the run. Every switch at a site names the same few hundred
+        # VLANs, and asking for each of them per device is most of a sweep.
+        self._site_vlans: dict[int, dict[int, dict]] = {}
+        self._vlans_seeded: set = set()
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
         # Chassis swaps are detected before the replacement device exists, so
@@ -215,10 +230,14 @@ class Syncer:
         # caller serialises syncs under a lock -- and cleared afterwards so a
         # later host can never inherit it.
         self._vrf_id = vrf_id
+        self._vlan_names = {vlan.vid: vlan.name for vlan in result.vlans}
+        self._vlans_reported = result.vlans_reported
         try:
             self._sync(result, site_id, scanned_address, tenant_id)
         finally:
             self._vrf_id = None
+            self._vlan_names = {}
+            self._vlans_reported = False
 
     def _in_vrf(self) -> dict:
         """The filter that scopes an address lookup to this sync's routing
@@ -1243,6 +1262,14 @@ class Syncer:
                 self._ensure_interface_vdc(netbox_interface, vdc)
             if interface.mac_address:
                 self._ensure_mac(netbox_interface, interface.mac_address)
+            if self.options.sync_vlans:
+                try:
+                    self._sync_interface_vlans(device, netbox_interface, interface, tenant_id)
+                except NetBoxError as exc:
+                    # As with an address below: one port NetBox refuses must
+                    # not cost the device the rest of its interfaces.
+                    log.warning("%s: VLANs not written (%s) — continuing with the device",
+                                interface.name, exc)
             if self.options.sync_ips:
                 for cidr in interface.ip_addresses:
                     try:
@@ -1261,6 +1288,126 @@ class Syncer:
 
         if self.options.set_primary_ip and scanned_address:
             self._ensure_primary_ip(device, scanned_address, tenant_id, vdc=vdc)
+
+    # --- VLANs --------------------------------------------------------------
+
+    VLANS = "/ipam/vlans/"
+    PREFIXES = "/ipam/prefixes/"
+
+    def _sync_interface_vlans(self, device: dict, netbox_interface: dict,
+                              interface: InterfaceRecord, tenant_id: int | None) -> None:
+        site_id = _normalise(device.get("site"))
+        if not site_id:
+            return
+        if (site_id, device.get("id")) not in self._vlans_seeded:
+            # The whole VLAN database, not only the VLANs a port happens to
+            # use: a VLAN with no ports yet is still a VLAN at this site.
+            self._vlans_seeded.add((site_id, device.get("id")))
+            for vid in sorted(self._vlan_names):
+                self._site_vlan(site_id, vid, tenant_id)
+        self._ensure_interface_vlans(netbox_interface, interface, site_id, tenant_id)
+
+        vid = svi_vlan_id(interface.name)
+        if vid is None or not interface.ip_addresses:
+            return
+        vlan = self._site_vlan(site_id, vid, tenant_id)
+        if vlan is not None:
+            for cidr in interface.ip_addresses:
+                self._ensure_prefix_vlan(cidr, vlan, interface.name)
+
+    def _site_vlan(self, site_id: int, vid: int, tenant_id: int | None = None) -> dict | None:
+        """The NetBox VLAN for a VLAN id at a site: the one there, else a new one.
+
+        Scoped to the site and to no VLAN group. VLAN 10 means something
+        different in every building, so the number alone identifies nothing;
+        the site it was seen at does. Whatever already holds that number at
+        the site is reused whichever group it sits in.
+        """
+        if site_id not in self._site_vlans:
+            at_site: dict[int, dict] = {}
+            for existing in self.netbox.all(self.VLANS, {"site_id": site_id}):
+                at_site.setdefault(existing.get("vid"), existing)
+            self._site_vlans[site_id] = at_site
+        at_site = self._site_vlans[site_id]
+        reported = (self._vlan_names.get(vid) or "").strip()[:64]
+        vlan = at_site.get(vid)
+        if vlan is None:
+            payload = {"vid": vid, "name": reported or _default_vlan_name(vid),
+                       "site": site_id, "status": "active"}
+            if tenant_id:
+                payload["tenant"] = tenant_id
+            vlan = self.netbox.create(self.VLANS, payload, label=f"vlan {vid}")
+        elif (reported and reported != vlan.get("name")
+              and vlan.get("name") == _default_vlan_name(vid)):
+            # Only ever off the placeholder. Two switches at a site rarely
+            # spell a VLAN's name the same way, and following the device here
+            # would rename it back and forth on every sweep.
+            vlan = self.netbox.update(self.VLANS, vlan["id"], {"name": reported},
+                                      label=f"vlan {vid} name") or dict(vlan, name=reported)
+        if vlan is not None:
+            at_site[vid] = vlan
+        return vlan
+
+    def _ensure_interface_vlans(self, netbox_interface: dict, interface: InterfaceRecord,
+                                site_id: int, tenant_id: int | None) -> None:
+        if not interface.mode and not self._vlans_reported:
+            # The device said nothing about any port, so it has said nothing
+            # about this one. Only a device that answered for its ports can
+            # be read as calling the rest of them routed.
+            return
+        untagged = tagged = None
+        if interface.mode and interface.untagged_vlan:
+            untagged = self._site_vlan(site_id, interface.untagged_vlan, tenant_id)
+        if interface.mode == "tagged":
+            tagged = [self._site_vlan(site_id, vid, tenant_id) for vid in interface.tagged_vlans]
+        desired_untagged = untagged["id"] if untagged else None
+        desired_tagged = sorted(v["id"] for v in tagged or [] if v)
+
+        current_tagged = sorted(_normalise(v) for v in netbox_interface.get("tagged_vlans") or [])
+        if (_normalise(netbox_interface.get("mode")) or "") == interface.mode \
+                and _normalise(netbox_interface.get("untagged_vlan")) == desired_untagged \
+                and current_tagged == desired_tagged:
+            return
+        # All three together. NetBox validates them against each other, so a
+        # mode change that leaves the old VLANs behind is refused outright.
+        self.netbox.update(
+            "/dcim/interfaces/", netbox_interface["id"],
+            {"mode": interface.mode or None, "untagged_vlan": desired_untagged,
+             "tagged_vlans": desired_tagged},
+            label=f"interface {interface.name} vlans",
+        )
+
+    def _ensure_prefix_vlan(self, cidr: str, vlan: dict, interface_name: str) -> None:
+        """Point the prefix an SVI's address sits in at the SVI's VLAN.
+
+        The prefix whose network is exactly the interface's, in this host's
+        routing table. Never a containing one: the /16 a site is carved from
+        is not VLAN 100 because one /24 inside it is. Prefixes are not created
+        here -- IPAM is somebody's plan, and an address with no prefix is for
+        them to notice.
+        """
+        try:
+            network = ipaddress.ip_interface(cidr).network
+        except ValueError:
+            return
+        if network.prefixlen == network.max_prefixlen or network.is_link_local:
+            return
+        prefix = self.netbox.first(self.PREFIXES, {"prefix": str(network), **self._in_vrf()})
+        if prefix is None:
+            log.debug("%s: no prefix %s in NetBox to link to VLAN %s",
+                      interface_name, network, vlan.get("vid"))
+            return
+        current = prefix.get("vlan") or {}
+        if current.get("id") == vlan.get("id") or current.get("vid") == vlan.get("vid"):
+            # The same number filed under another site is the same VLAN
+            # stretched between them, not a disagreement: claiming it for this
+            # site would have the two ends trade it back on every sweep.
+            return
+        if current:
+            log.info("prefix %s: VLAN %s in NetBox, %s on %s — following the device",
+                     network, current.get("vid"), vlan.get("vid"), interface_name)
+        self.netbox.update(self.PREFIXES, prefix["id"], {"vlan": vlan["id"]},
+                           label=f"prefix {network} vlan {vlan.get('vid')}")
 
     def _ensure_primary_ip(self, device: dict, scanned_address: str,
                            tenant_id: int | None = None, vdc: dict | None = None) -> None:
@@ -1562,6 +1709,12 @@ class Syncer:
 
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+
+def _default_vlan_name(vid: int) -> str:
+    """What a VLAN nobody named is called. Cisco's own default, as it happens,
+    so an unnamed VLAN reads the same in NetBox as on the switch."""
+    return f"VLAN{vid:04d}"
 
 
 def slugify(value: str) -> str:

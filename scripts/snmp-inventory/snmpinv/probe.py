@@ -22,7 +22,7 @@ import sys
 
 from . import mibs, neighbors as neighbors_module, vendors
 from .collect import Collector, DeviceFacts
-from .model import ScanResult, build_scan_result
+from .model import ScanResult, build_scan_result, svi_vlan_id
 from .snmp import CredentialSession, SnmpAuthError, SnmpError, SnmpTimeoutError
 
 __all__ = ('probe', 'facts_to_dict')
@@ -241,8 +241,30 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
                 w(f"  {'':<{_NAME_WIDTH}} “{iface.alias}”\n")
             for cidr in ips_by_index.get(index, []):
                 w(f"  {'':<{_NAME_WIDTH}} {cidr}\n")
+            port = facts.port_vlans.get(index)
+            if port is not None:
+                w(f"  {'':<{_NAME_WIDTH}} {_port_vlans(port)}\n")
     else:
         w("  none reported\n")
+
+    if facts.vlans:
+        _section(w, f"VLANS ({len(facts.vlans)}, from "
+                    f"{'CISCO-VTP-MIB' if facts.vlan_source == 'cisco' else 'Q-BRIDGE-MIB'})")
+        for vid in sorted(facts.vlans):
+            w(f"  {vid:>5}  {facts.vlans[vid].name or '(unnamed)'}\n")
+        if not facts.port_vlans:
+            w("  The VLAN database answered but no port reported membership, so\n")
+            w("  no interface VLANs would be written or cleared.\n")
+        for index in sorted(facts.interfaces):
+            name = facts.interfaces[index].display_name()
+            vid = svi_vlan_id(name)
+            if vid is not None and ips_by_index.get(index):
+                w(f"  {name}: the prefix of {', '.join(ips_by_index[index])} "
+                  f"would be linked to VLAN {vid}\n")
+    else:
+        _section(w, "VLANS (none)")
+        w("  Neither CISCO-VTP-MIB nor Q-BRIDGE-MIB answered. Interface VLANs\n")
+        w("  in NetBox are left as they are for this device.\n")
 
     if facts.neighbors:
         adjacencies = neighbors_module.build_adjacencies(facts.neighbors)
@@ -328,6 +350,28 @@ def _print_report(facts: DeviceFacts, result: ScanResult, out) -> None:
           f"serial {ap.serial or '—'} (access point) | "
           f"software {ap.software_version or '(not reported)'}\n")
     w("\n")
+
+
+def _port_vlans(port) -> str:
+    if port.mode == "access":
+        return f"access vlan {port.untagged}"
+    native = f", native {port.untagged}" if port.untagged else ""
+    if port.mode == "tagged-all":
+        return f"trunk, all vlans{native}"
+    return f"trunk {_ranges(port.tagged) or '(none)'}{native}"
+
+
+def _ranges(vids) -> str:
+    """1,2,3,10 -> "1-3,10", the way a switch prints an allowed list."""
+    out, run = [], []
+    for vid in sorted(vids):
+        if run and vid != run[-1] + 1:
+            out.append(run)
+            run = []
+        run.append(vid)
+    if run:
+        out.append(run)
+    return ",".join(str(r[0]) if len(r) == 1 else f"{r[0]}-{r[-1]}" for r in out)
 
 
 def _section(w, title: str) -> None:
@@ -432,9 +476,18 @@ def facts_to_dict(facts: DeviceFacts, result: ScanResult) -> dict:
                 "speed_mbps": iface.speed_mbps, "mtu": iface.mtu,
                 "mac": iface.phys_address,
                 "admin_up": iface.admin_up, "oper_up": iface.oper_up,
+                "vlans": ({"mode": facts.port_vlans[i].mode,
+                           "untagged": facts.port_vlans[i].untagged,
+                           "tagged": list(facts.port_vlans[i].tagged)}
+                          if i in facts.port_vlans else None),
             }
             for i, iface in sorted(facts.interfaces.items())
         ],
+        "vlans": {
+            "source": facts.vlan_source or None,
+            "database": [{"vid": v.vid, "name": v.name}
+                         for v in sorted(facts.vlans.values(), key=lambda v: v.vid)],
+        },
         "ip_addresses": [
             {"address": e.address, "prefix_length": e.prefix_length, "if_index": e.if_index}
             for e in facts.ips

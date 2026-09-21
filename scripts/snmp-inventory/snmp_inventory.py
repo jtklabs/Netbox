@@ -104,6 +104,7 @@ def main(argv=None) -> int:
         use_bulk=config.snmp.use_bulk and not args.no_bulk,
         max_repetitions=config.snmp.max_repetitions,
         bulk_state=bulk_state,
+        collect_vlans=config.sync.sync_vlans,
     )
     # The domains to take off reported hostnames, kept in the Discovery
     # plugin. Read once per run and before anything is named, so every device,

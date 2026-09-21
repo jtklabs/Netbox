@@ -506,6 +506,9 @@ def scan_payload(result: ScanResult) -> dict:
                         "description": i.description,
                         "speed_kbps": i.speed_kbps,
                         "ip_addresses": list(i.ip_addresses),
+                        "mode": i.mode,
+                        "untagged_vlan": i.untagged_vlan,
+                        "tagged_vlans": list(i.tagged_vlans),
                     }
                     for i in device.interfaces
                 ],
@@ -557,6 +560,9 @@ def scan_result_from_payload(payload: dict, host: str = "") -> ScanResult:
                     description=i.get("description", ""),
                     speed_kbps=i.get("speed_kbps"),
                     ip_addresses=list(i.get("ip_addresses") or []),
+                    mode=i.get("mode") or "",
+                    untagged_vlan=i.get("untagged_vlan"),
+                    tagged_vlans=list(i.get("tagged_vlans") or []),
                 )
                 for i in entry.get("interfaces", [])
             ],

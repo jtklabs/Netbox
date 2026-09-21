@@ -69,6 +69,8 @@ def site(netbox):
         if (extra.get("slug") or "").startswith(SLUG) and extra["id"] != site["id"]:
             for device in netbox.all("/dcim/devices/", {"site_id": extra["id"]}):
                 delete("/dcim/devices/", device["id"])
+            for vlan in netbox.all("/ipam/vlans/", {"site_id": extra["id"]}):
+                delete("/ipam/vlans/", vlan["id"])
             delete("/dcim/sites/", extra["id"])
     for ip in netbox.all("/ipam/ip-addresses/"):
         if str(ip.get("address", "")).startswith("10.90."):
@@ -78,6 +80,9 @@ def site(netbox):
     for vc in netbox.all("/dcim/virtual-chassis/"):
         if vc.get("member_count", 0) == 0:
             delete("/dcim/virtual-chassis/", vc["id"])
+    # The scanned switch's VLANs are scoped to the site and hold it in place.
+    for vlan in netbox.all("/ipam/vlans/", {"site_id": site["id"]}):
+        delete("/ipam/vlans/", vlan["id"])
     delete("/dcim/sites/", site["id"])
 
 

@@ -189,6 +189,36 @@ every address lookup, never neither. Pinned on the NetBox side by the
 Discovery plugin's `test_vrf_routing.py`, since the scanner's own tests run
 against a fake that would believe anything.
 
+### An interface's mode, untagged VLAN and tagged VLANs are validated together
+
+Verified against NetBox 4.6.7 on 2026-09-21. The three fields are checked
+against each other on every write, so they are always sent in one PATCH:
+
+| Request | Result |
+|---|---|
+| `untagged_vlan` on an interface with no `mode` | 400 `Interface mode does not support untagged vlan` |
+| `tagged_vlans` with `mode` anything but `tagged` | 400 `Interface mode does not support tagged vlans` |
+| `{"mode": null}` alone while an untagged VLAN is set | the same 400 — clearing the mode does not clear the VLANs for you |
+| `{"mode": null, "untagged_vlan": null, "tagged_vlans": []}` | 200; `""` for the mode is accepted too and reads back as `null` |
+| a VLAN scoped to another site | 400 `must belong to the same site as the interface's parent device, or it must be global` |
+
+That last one is why VLANs are filed under the **device's** site rather than
+the site a scan was asked to place it at: with `move_devices_between_sites`
+off the two can differ, and only the device's is acceptable.
+
+### VLAN ids are not unique at a site
+
+Two VLANs with the same `vid` and the same `site` are both accepted when
+neither is in a VLAN group; uniqueness is enforced per group only. The scanner
+reads a site's VLANs once and takes the first with each id, so it never makes
+a second, but it will not stop a person from doing so.
+
+### A site with VLANs cannot be deleted
+
+`VLAN.site` protects the site. Every live-test teardown that scans a switch
+deletes the site's VLANs first; without it the site survives, and the next
+run fails creating a site that already exists.
+
 ## Cables
 
 Verified against the live 4.6.7 before the cable sync was written, the same
