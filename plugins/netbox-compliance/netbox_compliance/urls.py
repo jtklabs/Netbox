@@ -38,4 +38,5 @@ urlpatterns = [
          name='configcompliance_changelog', kwargs={'model': ConfigCompliance}),
 
     path('report/', views.ComplianceReportView.as_view(), name='compliance_report'),
+    path('devices/', views.DeviceGridView.as_view(), name='device_grid'),
 ]

@@ -323,3 +323,25 @@ class ComplianceReportForm(forms.Form):
         choices=ConfigComplianceStatusChoices, required=False,
         help_text='Leave empty to show every state',
     )
+
+
+class DeviceGridForm(forms.Form):
+    """Scope for the device grid: the report's filters, plus problems only."""
+
+    region = DynamicModelMultipleChoiceField(
+        queryset=Region.objects.all(), required=False,
+    )
+    site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
+    platform = DynamicModelMultipleChoiceField(
+        queryset=Platform.objects.all(), required=False,
+    )
+    role = DynamicModelMultipleChoiceField(
+        queryset=DeviceRole.objects.all(), required=False, label='Device role',
+    )
+    standard = DynamicModelMultipleChoiceField(
+        queryset=ConfigStandard.objects.all(), required=False,
+        help_text='Leave empty for every standard in force',
+    )
+    problems_only = forms.BooleanField(
+        required=False, label='Only devices with a failure',
+    )

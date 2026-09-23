@@ -10,6 +10,7 @@ claiming a percentage its own table contradicts.
 from dcim.models import Device, Region, Site
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.db.models import Count
+from django.http import HttpResponse
 from django.shortcuts import render
 from django.views import View
 from netbox.views.generic import (
@@ -22,7 +23,7 @@ from netbox.views.generic import (
 )
 from utilities.views import register_model_view
 
-from netbox_compliance import filtersets, forms, scoping, tables
+from netbox_compliance import filtersets, forms, grid, scoping, tables
 from netbox_compliance.models import ConfigCompliance, ConfigStandard
 
 __all__ = (
@@ -238,3 +239,66 @@ class ComplianceReportView(PermissionRequiredMixin, View):
             'device_count': devices.count(),
             'standard_count': len(resolver.standards),
         })
+
+
+class DeviceGridView(PermissionRequiredMixin, View):
+    """One row per device, one column per check — code and configuration together.
+
+    The report above answers "how many devices are missing X"; this answers
+    "what is wrong with this device". Every device in scope is listed, so a
+    device nobody has checked shows as Not checked rather than going missing.
+    ?export=csv returns the same grid as a spreadsheet.
+    """
+
+    permission_required = 'netbox_compliance.view_configcompliance'
+    template_name = 'netbox_compliance/device_grid.html'
+
+    def get(self, request):
+        form = forms.DeviceGridForm(request.GET or None)
+        form.is_valid()
+        data = form.cleaned_data if form.is_bound else {}
+
+        devices = Device.objects.restrict(request.user, 'view').select_related(
+            'site', 'platform', 'role', 'device_type').order_by('name')
+        sites = _sites_in_scope(data.get('region'), data.get('site'))
+        if sites is not None:
+            devices = devices.filter(site__in=sites)
+        if data.get('platform'):
+            devices = devices.filter(platform__in=data['platform'])
+        if data.get('role'):
+            devices = devices.filter(role__in=data['role'])
+
+        standards = None
+        if data.get('standard'):
+            standards = list(scoping.active_standards(
+                queryset=ConfigStandard.objects.filter(pk__in=[s.pk for s in data['standard']])
+            ).prefetch_related('platforms', 'roles', 'sites', 'device_tags'))
+        # Device tags scope some standards; prefetching them is cheaper than a query per device.
+        devices = devices.prefetch_related('tags')
+
+        columns, rows = grid.build(devices, standards=standards)
+        total = len(rows)
+        if data.get('problems_only'):
+            rows = [row for row in rows if row['problems']]
+
+        if request.GET.get('export') == 'csv':
+            return self.csv(columns, rows)
+        return render(request, self.template_name, {
+            'form': form, 'columns': columns, 'rows': rows, 'total_count': total,
+            'problem_count': sum(1 for row in rows if row['problems']),
+            'export_query': request.GET.urlencode(),
+        })
+
+    @staticmethod
+    def csv(columns, rows):
+        import csv
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="device-compliance.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['Device', 'Site', 'Role', 'Platform', 'Failures'] + [c['label'] for c in columns])
+        for row in rows:
+            device = row['device']
+            writer.writerow([device.name, device.site, device.role, device.platform or '', row['problems']]
+                            + [item['label'] if item else 'n/a' for item in row['cells']])
+        return response

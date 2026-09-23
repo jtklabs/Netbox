@@ -1,0 +1,96 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+
+{% block title %}Device Compliance{% endblock %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Filter</h5>
+        <div class="card-body">
+          <form method="get" class="row g-3 align-items-end">
+            {% for field in form %}
+              <div class="col-md-4">
+                {% if field.name == 'problems_only' %}
+                  <div class="form-check">{{ field }} {{ field.label_tag }}</div>
+                {% else %}
+                  {{ field.label_tag }}
+                  {{ field }}
+                {% endif %}
+                {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+              </div>
+            {% endfor %}
+            <div class="col-md-12">
+              <button type="submit" class="btn btn-primary">Run report</button>
+              <a href="{% url 'plugins:netbox_compliance:device_grid' %}" class="btn btn-outline-secondary">Reset</a>
+              <a href="?{% if export_query %}{{ export_query }}&amp;{% endif %}export=csv" class="btn btn-outline-primary">
+                <i class="mdi mdi-download"></i> Export CSV
+              </a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h5 class="card-header">
+      {{ rows|length }} device{{ rows|length|pluralize }}
+      {% if rows|length != total_count %}<span class="text-muted">(with a failure, of {{ total_count }})</span>{% endif %}
+      &middot; <span class="text-danger">{{ problem_count }} with a failure</span>
+    </h5>
+    <div class="card-body table-responsive">
+      {# Pass counts sit under each heading, so a column's state is readable without scrolling. #}
+      <table class="table table-hover table-sm align-middle">
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Site</th>
+            <th>Failures</th>
+            {% for column in columns %}
+              <th class="text-center">
+                {% if column.standard %}<a href="{{ column.standard.get_absolute_url }}">{{ column.label }}</a>{% else %}{{ column.label }}{% endif %}
+                <div class="small fw-normal text-nowrap">
+                  <span class="text-success" title="Passed">{{ column.passed }} <i class="mdi mdi-check"></i></span>
+                  <span class="text-danger" title="Failed">{{ column.failed }} <i class="mdi mdi-close"></i></span>
+                  <span class="text-muted" title="Not checked, exempt or in progress">{{ column.other }} <i class="mdi mdi-help"></i></span>
+                </div>
+              </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>{{ row.device|linkify }}</td>
+              <td>{{ row.device.site|linkify }}</td>
+              <td>{% if row.problems %}<span class="badge text-bg-red">{{ row.problems }}</span>{% else %}<span class="text-success"><i class="mdi mdi-check-circle"></i></span>{% endif %}</td>
+              {% for item in row.cells %}
+                <td class="text-center">
+                  {% if item %}
+                    {% if item.url %}<a href="{{ item.url }}" title="{{ item.title }}">{% else %}<span title="{{ item.title }}">{% endif %}
+                    {% if item.ok is True %}<i class="mdi mdi-check-circle text-success fs-5" aria-label="{{ item.label }}"></i>
+                    {% elif item.ok is False %}<span class="badge text-bg-{{ item.color }}"><i class="mdi mdi-close-circle"></i> {{ item.label }}</span>
+                    {% else %}<span class="badge text-bg-{{ item.color }}">{{ item.label }}</span>{% endif %}
+                    {% if item.url %}</a>{% else %}</span>{% endif %}
+                  {% else %}
+                    <span class="text-muted" title="Does not apply to this device">&mdash;</span>
+                  {% endif %}
+                </td>
+              {% endfor %}
+            </tr>
+          {% empty %}
+            <tr><td colspan="{{ columns|length|add:3 }}" class="text-muted">No devices match.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="text-muted mb-0">
+        A tick is a pass. A red badge needs action: non-compliant, check failed, exemption expired, staging failed or missed its window.
+        A grey badge is not checked, exempt or in progress, never a pass. A dash means the check does not apply to that device.
+        <strong>Running code</strong> is the Lifecycle software verdict; <strong>Code staged</strong> is whether the standard's preferred image has been copied to the device.
+        Hover a cell for detail; click it for the record behind it.
+      </p>
+    </div>
+  </div>
+{% endblock %}
