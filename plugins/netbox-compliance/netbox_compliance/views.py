@@ -287,7 +287,20 @@ class DeviceGridView(PermissionRequiredMixin, View):
             'form': form, 'columns': columns, 'rows': rows, 'total_count': total,
             'problem_count': sum(1 for row in rows if row['problems']),
             'export_query': request.GET.urlencode(),
+            'remediate_url': self.remediate_url(request.user),
         })
+
+    @staticmethod
+    def remediate_url(user):
+        """The Discovery schedule form, when it is installed and this user may queue changes."""
+        from django.apps import apps
+        from django.urls import reverse
+
+        if not apps.is_installed('netbox_discovery'):
+            return ''
+        if not (user.has_perm('netbox_discovery.add_upgradejob') and user.has_perm('netbox_discovery.apply_upgradejob')):
+            return ''
+        return reverse('plugins:netbox_discovery:upgradejob_add')
 
     @staticmethod
     def csv(columns, rows):

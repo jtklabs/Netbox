@@ -41,10 +41,17 @@
       &middot; <span class="text-danger">{{ problem_count }} with a failure</span>
     </h5>
     <div class="card-body table-responsive">
+      {# Selected devices open the Discovery schedule form as a remediation; nothing runs from here. #}
+      {% if remediate_url %}<form method="get" action="{{ remediate_url }}" id="remediate-form">
+        <input type="hidden" name="operation" value="remediate">
+        <button type="submit" class="btn btn-sm btn-primary mb-2"><i class="mdi mdi-wrench"></i> Remediate selected devices</button>
+      {% endif %}
       {# Pass counts sit under each heading, so a column's state is readable without scrolling. #}
       <table class="table table-hover table-sm align-middle">
         <thead>
           <tr>
+            {% if remediate_url %}<th><input type="checkbox" class="form-check-input" title="Select all"
+              onclick="document.querySelectorAll('#remediate-form input[name=devices]').forEach(box => box.checked = this.checked)"></th>{% endif %}
             <th>Device</th>
             <th>Site</th>
             <th>Failures</th>
@@ -63,6 +70,7 @@
         <tbody>
           {% for row in rows %}
             <tr>
+              {% if remediate_url %}<td><input type="checkbox" class="form-check-input" name="devices" value="{{ row.device.pk }}"></td>{% endif %}
               <td>{{ row.device|linkify }}</td>
               <td>{{ row.device.site|linkify }}</td>
               <td>{% if row.problems %}<span class="badge text-bg-red">{{ row.problems }}</span>{% else %}<span class="text-success"><i class="mdi mdi-check-circle"></i></span>{% endif %}</td>
@@ -81,15 +89,17 @@
               {% endfor %}
             </tr>
           {% empty %}
-            <tr><td colspan="{{ columns|length|add:3 }}" class="text-muted">No devices match.</td></tr>
+            <tr><td colspan="{{ columns|length|add:4 }}" class="text-muted">No devices match.</td></tr>
           {% endfor %}
         </tbody>
       </table>
+      {% if remediate_url %}</form>{% endif %}
       <p class="text-muted mb-0">
         A tick is a pass. A red badge needs action: non-compliant, check failed, exemption expired, staging failed or missed its window.
         A grey badge is not checked, exempt or in progress, never a pass. A dash means the check does not apply to that device.
         <strong>Running code</strong> is the Lifecycle software verdict; <strong>Code staged</strong> is whether the standard's preferred image has been copied to the device.
         Hover a cell for detail; click it for the record behind it.
+        {% if remediate_url %}<strong>Remediate selected devices</strong> opens the schedule form with those devices, where you choose the features, the mode and when; each device's poller applies its own standards.yaml.{% endif %}
       </p>
     </div>
   </div>

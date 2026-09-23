@@ -101,6 +101,9 @@ class GridTest(TestCase):
         response = client.get(url, {'problems_only': 'on'})
         self.assertContains(response, 'sw2')
         self.assertNotContains(response, '>sw1<')
+        # Selected devices go to the Discovery schedule form as a remediation.
+        self.assertContains(response, 'Remediate selected devices')
+        self.assertContains(response, f'name="devices" value="{self.devices["sw2"].pk}"')
         response = client.get(url, {'export': 'csv'})
         lines = response.content.decode().splitlines()
         self.assertEqual(lines[0], 'Device,Site,Role,Platform,Failures,Running code,Code staged,NTP servers,Syslog host')

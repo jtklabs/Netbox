@@ -20,7 +20,8 @@ from utilities.views import register_model_view
 
 from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
 from . import upgrade_groups, upgrade_prestage
-from .upgrade_choices import TERMINAL, UpgradeOperationChoices, UpgradeStatusChoices
+from .upgrade_choices import (REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
+                              UpgradeStatusChoices)
 from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
                                  UpgradeJobFilterSet)
 from . import upgrade_queue as queue
@@ -30,18 +31,47 @@ class UpgradePlanForm(forms.Form):
     operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
     scheduled_at = forms.DateTimeField(help_text='Include a UTC offset, for example 2026-09-20T22:00:00-04:00.')
     start_before = forms.DateTimeField(help_text='Latest start for device changes. Running jobs continue past this time.')
-    profile = forms.CharField(widget=forms.Textarea(attrs={'rows': 15}),
-                              help_text='Paste the validated upgrade profile YAML. A copy is saved with every selected device.')
+    profile = forms.CharField(widget=forms.Textarea(attrs={'rows': 15}), required=False,
+                              help_text='Audit, staging and upgrades: paste the validated upgrade profile YAML. '
+                                        'A copy is saved with every selected device.')
+    features = forms.MultipleChoiceField(
+        choices=REMEDIATION_FEATURES, required=False, widget=forms.CheckboxSelectMultiple,
+        label='Remediate', help_text="Remediation only. Each poller applies its own standards.yaml for these.")
+    remediation_mode = forms.ChoiceField(
+        choices=REMEDIATION_MODES, initial='add', required=False, label='Remediation mode',
+        help_text='Replace removes entries the standard does not list, such as an old NTP server.')
     description = forms.CharField(max_length=200, required=False)
 
     def clean_profile(self):
         import yaml
+        if self.cleaned_data.get('operation') == 'remediate':
+            return None
         try:
             data = yaml.safe_load(self.cleaned_data['profile'])
             queue.validate_profile(data, self.cleaned_data.get('operation'))
             return data
         except (yaml.YAMLError, ValueError, TypeError) as exc:
             raise forms.ValidationError(str(exc)) from exc
+
+    def clean(self):
+        data = super().clean()
+        if data.get('operation') == 'remediate':
+            # Keep the checkbox order, so the same choice always makes the same job.
+            chosen = [value for value, _ in REMEDIATION_FEATURES if value in (data.get('features') or [])]
+            data['profile'] = {'features': chosen, 'mode': data.get('remediation_mode') or 'add'}
+            try:
+                queue.validate_profile(data['profile'], 'remediate')
+            except queue.QueueError as exc:
+                self.add_error('features', str(exc))
+        return data
+
+
+def plan_initial(job):
+    """A job's plan as form fields: YAML for an upgrade profile, checkboxes for a remediation."""
+    import yaml
+    if job.operation == 'remediate':
+        return {'features': job.profile.get('features', []), 'remediation_mode': job.profile.get('mode', 'add')}
+    return {'profile': yaml.safe_dump(job.profile, sort_keys=False)}
 
 
 class ScheduleForm(UpgradePlanForm):
@@ -53,7 +83,7 @@ class ScheduleForm(UpgradePlanForm):
     poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
                                     help_text='Normally automatic; choose one when devices have multiple poller tags.')
     field_order = ('site', 'role', 'platform', 'devices', 'poller', 'operation',
-                   'scheduled_at', 'start_before', 'profile', 'description')
+                   'scheduled_at', 'start_before', 'profile', 'features', 'remediation_mode', 'description')
 
     def schedule_data(self):
         data = dict(self.cleaned_data)
@@ -76,7 +106,6 @@ class UpgradeJobEditView(PermissionRequiredMixin, View):
         return get_object_or_404(UpgradeJob.objects.restrict(request.user, 'change'), pk=pk)
 
     def get(self, request, pk):
-        import yaml
         job = self.get_job(request, pk)
         if job.status != 'pending':
             messages.error(request, 'Only pending jobs can be edited. This job has already been claimed or closed.')
@@ -84,7 +113,7 @@ class UpgradeJobEditView(PermissionRequiredMixin, View):
         form = UpgradeJobEditForm(initial={
             'operation': job.operation, 'scheduled_at': job.scheduled_at.isoformat(),
             'start_before': job.start_before.isoformat(), 'description': job.description,
-            'profile': yaml.safe_dump(job.profile, sort_keys=False), 'last_updated': job.last_updated.isoformat(),
+            'last_updated': job.last_updated.isoformat(), **plan_initial(job),
         })
         return render(request, 'netbox_discovery/upgradejob_edit.html', {'object': job, 'form': form})
 
@@ -111,16 +140,25 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
     @staticmethod
     def initial(request):
         """A closed job's device, plan and profile, when the form is opened from one."""
-        import yaml
         from django.utils import timezone
         source = request.GET.get('from_job', '')
         job = UpgradeJob.objects.restrict(request.user, 'view').filter(pk=int(source)).first() if source.isdigit() else None
         if job is None:
-            return {}
+            # Opened with a device selection, e.g. from the Device Compliance grid.
+            initial = {}
+            devices = [int(pk) for pk in request.GET.getlist('devices') if pk.isdigit()]
+            if devices:
+                initial['devices'] = devices
+            if request.GET.get('operation') in UpgradeOperationChoices.values():
+                initial['operation'] = request.GET['operation']
+            features = [value for value, _ in REMEDIATION_FEATURES if value in request.GET.getlist('features')]
+            if features:
+                initial['features'] = features
+            return initial
         scheduled_at, start_before = queue.requeue_window(job, timezone.now())
         return {'devices': [job.device_id], 'poller': job.poller_id, 'operation': job.operation,
                 'scheduled_at': scheduled_at.isoformat(timespec='minutes'), 'start_before': start_before.isoformat(timespec='minutes'),
-                'profile': yaml.safe_dump(job.profile, sort_keys=False), 'description': job.description}
+                'description': job.description, **plan_initial(job)}
 
     def post(self, request):
         form, rows = ScheduleForm(request.POST), []

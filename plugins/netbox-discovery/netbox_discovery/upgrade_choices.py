@@ -4,7 +4,14 @@ from netbox.choices import ChoiceSet
 class UpgradeOperationChoices(ChoiceSet):
     CHOICES = [('audit', 'Pre-upgrade audit', 'cyan'),
                ('stage', 'Stage image only', 'blue'),
-               ('upgrade', 'Install upgrade', 'orange')]
+               ('upgrade', 'Install upgrade', 'orange'),
+               ('remediate', 'Remediate configuration', 'purple')]
+
+
+# configure.py features a queued remediation may run; the poller checks the same list.
+REMEDIATION_FEATURES = [('ntp', 'NTP'), ('syslog', 'Syslog'), ('banner', 'Banner'), ('acl', 'ACLs'),
+                        ('users', 'Local users'), ('snmp', 'SNMP'), ('snmp_packetsize', 'SNMP packet size')]
+REMEDIATION_MODES = [('add', 'Add missing entries only'), ('replace', 'Replace: add missing and remove the rest')]
 
 
 class UpgradeGroupSourceChoices(ChoiceSet):

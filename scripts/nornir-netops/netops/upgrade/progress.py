@@ -44,7 +44,8 @@ class Reporter:
                  "site": host.data.get("site"), "role": host.data.get("role"),
                  "sequence": sequence, "timestamp": archive.now(),
                  "dry_run": not getattr(self.run.args, "apply", False),
-                 "operation": "stage_image" if getattr(self.run.args, "stage_only", False) else "upgrade",
+                 "operation": ("remediate" if getattr(self.run.args, "queue_operation", None) == "remediate" else
+                               "stage_image" if getattr(self.run.args, "stage_only", False) else "upgrade"),
                  "stage": stage, "message": message}
         event["event_id"] = f"{event['run_id']}:{host.name}:{sequence}"
         if self.run.document.get("schedule"):
