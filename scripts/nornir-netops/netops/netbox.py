@@ -379,6 +379,33 @@ def source_interfaces(
     return per_device
 
 
+def site_regions(client: Client, devices: Sequence[Mapping[str, Any]]) -> Dict[int, List[str]]:
+    """Each site's region slugs, nearest first and up to the root.
+
+    Two queries for the whole run: the sites the devices sit in, and every
+    region. The device API names the site but not its region, and a standard
+    set for "us" has to reach a site in a region nested under it.
+    """
+    site_ids = sorted({int(site["id"]) for site in (device.get("site") for device in devices)
+                       if isinstance(site, Mapping) and site.get("id") is not None})
+    if not site_ids:
+        return {}
+    parents: Dict[int, Tuple[Optional[str], Optional[int]]] = {}
+    for region in client.get("dcim/regions/"):
+        parent = region.get("parent") or {}
+        parents[int(region["id"])] = (region.get("slug"), parent.get("id"))
+    chains: Dict[int, List[str]] = {}
+    for site in client.get("dcim/sites/", {"id": site_ids}):
+        chain: List[str] = []
+        region_id = (site.get("region") or {}).get("id")
+        while region_id is not None and region_id in parents and len(chain) < 32:
+            slug, region_id = parents[region_id]
+            if slug:
+                chain.append(slug)
+        chains[int(site["id"])] = chain
+    return chains
+
+
 class NetBoxInventory:
     """Nornir inventory plugin backed by NetBox."""
 
@@ -398,6 +425,7 @@ class NetBoxInventory:
         client: Optional[Client] = None,
         autofilter: bool = False,
         poller: Optional[str] = None,
+        regions: bool = False,
     ) -> None:
         self.client = client or Client(
             url or os.environ.get("NETBOX_URL", ""),
@@ -406,6 +434,7 @@ class NetBoxInventory:
         )
         self.autofilter = autofilter
         self.poller = poller
+        self.regions = regions
         self.filters = dict(filters or {})
         self.source_tags = dict(
             DEFAULT_SOURCE_TAGS if source_tags is None else source_tags
@@ -466,6 +495,8 @@ class NetBoxInventory:
             else {}
         )
 
+        regions = site_regions(self.client, devices) if self.regions else {}
+
         hosts = Hosts()
         skipped: List[str] = []
         for device in devices:
@@ -487,6 +518,12 @@ class NetBoxInventory:
             data["source_interface"] = {}
             data["source_interface_error"] = {}
             data.update(sources.get(device.get("id"), {}))
+            if self.regions:
+                # Nearest region first; `region` is the one --filter can select on.
+                chain = regions.get((device.get("site") or {}).get("id"), [])
+                data["regions"] = chain
+                if chain:
+                    data["region"] = chain[0]
             hosts[str(name)] = Host(
                 name=str(name),
                 hostname=address,
@@ -590,6 +627,10 @@ def init_nornir(args, credentials, standards, workers: int):
     elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
         tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")
         settings["source_tags"] = {"syslog": tag} if tag else {}
+    # Region ancestry costs two extra queries, so only a regional NTP standard asks for it.
+    settings["regions"] = bool(
+        getattr(getattr(args, "feature", None), "name", None) == "ntp" and not getattr(args, "servers", None)
+        and standards is not None and standards.defined("ntp.regions"))
     args._netbox_client = Client(settings["url"], settings["token"], settings["verify_tls"])
 
     return InitNornir(

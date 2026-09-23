@@ -56,7 +56,7 @@
       <p class="text-muted mt-2">A re-queue is a new job for this device with the same profile and operation, due now and keeping this job's window length. It is validated like a fresh schedule: ownership, redundancy groups and permissions apply again.</p>
     {% endif %}
   </div></div>
-  <div class="card"><h5 class="card-header">Profile snapshot</h5><pre class="card-body">{{ profile_text }}</pre></div>
+  <div class="card"><h5 class="card-header">{% if object.operation == 'remediate' %}Remediation (applied from each poller's standards.yaml){% else %}Profile snapshot{% endif %}</h5><pre class="card-body">{{ profile_text }}</pre></div>
 </div><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Validation summary</h5><pre class="card-body">{{ summary_text }}</pre></div>
   <div class="card"><h5 class="card-header">Progress</h5><div class="card-body">

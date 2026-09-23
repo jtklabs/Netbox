@@ -643,6 +643,34 @@ Removal negates the device's own line, so a server configured with options this
 tool does not model still goes away cleanly. `ntp source`, `ntp master` and
 `ntp access-group` are never parsed, so `--replace` can never remove them.
 
+### Servers per region
+
+```yaml
+ntp:
+  servers: [10.50.0.10, 10.50.0.11]     # default: any device no region below matches
+  regions:
+    us-east: [10.1.0.10, 10.1.0.11]
+    emea:
+      servers: [10.2.0.10, 10.2.0.11]
+      prefer: 10.2.0.10
+```
+
+Keys are NetBox **region slugs**. With `--netbox`, each device gets its site's
+region and every parent above it, and the **nearest one listed** wins: a site
+in `atl-metro`, under `us-east`, under `us`, takes the `us-east` set, and would
+take a `us` set if `us-east` had none. A device whose regions are all unlisted
+takes `ntp.servers`; with no `ntp.servers` at all, that device fails before it
+is dialled and the others carry on. A CSV inventory uses a `region` column the
+same way (one region, no parents). `--servers` on the command line replaces
+every set, regions included.
+
+`--replace` then removes any server not in the device's own set, so moving a
+region to new servers is one edit here and one run. Authentication, `source`,
+`vrf` and the source-interface tags apply to regional servers exactly as to the
+default set. Region data costs two extra NetBox queries and is only fetched
+when `ntp.regions` is present. The dry run's report shows which set each
+device got.
+
 ### Authentication
 
 ```yaml

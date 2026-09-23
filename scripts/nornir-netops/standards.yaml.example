@@ -27,6 +27,16 @@ ntp:
   # vrf: MGMT
   # source: Loopback0
 
+  # Servers per NetBox region. A device uses the nearest region in its chain
+  # (its site's region, then that region's parents) that has a set here, and
+  # `servers` above only when none does. Keys are region slugs; with a CSV
+  # inventory, a `region` column does the same. --servers overrides all of it.
+  #regions:
+  #  us-east: [10.1.0.10, 10.1.0.11]
+  #  emea:
+  #    servers: [10.2.0.10, 10.2.0.11]
+  #    prefer: 10.2.0.10
+
   # Authentication. The key material is NOT here: it comes from
   # $NETOPS_NTP_KEY_<id> or --key-secret, and cannot be read back off a device
   # (IOS stores it encrypted), so a changed key needs `--rewrite-keys`.

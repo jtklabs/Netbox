@@ -19,6 +19,7 @@ Operations:
 | Pre-upgrade audit | Full baseline, version/mode/path checks and image readiness; no device writes | No |
 | Stage image only | Check flash; download a missing image and verify its checksum; no install/reload | Yes |
 | Install upgrade | Saves the running configuration, full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
+| Remediate configuration | Runs the chosen `configure.py` features (NTP, syslog, banner, ACLs, local users, SNMP, SNMP packet size) against this poller's `standards.yaml`: a dry run, then the change once NetBox authorizes the start | Yes |
 
 A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way, and one whose `image` is an `EOS-<release>.swi` schedules Arista EOS switches; see [BIG-IP upgrades](UPGRADES.md#big-ip-upgrades) and [Arista EOS upgrades](UPGRADES.md#arista-eos-upgrades). The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
@@ -78,6 +79,49 @@ not part of any redundancy group, because a copy takes nothing out of
 service; the one-job-per-device rule still keeps them from overlapping an
 upgrade of the same device. Creating, changing or running a policy needs
 `apply` on upgrade jobs as well as the policy permission.
+
+## Remediate configuration
+
+Queue the same NTP, syslog and other standards pushes that `configure.py` runs
+by hand. On the schedule form choose **Remediate configuration**, tick the
+features, and choose a mode:
+
+- **Add** puts in whatever the standard lists that is missing and leaves
+  everything else alone (`--add`).
+- **Replace** also removes entries the standard does not list, such as an old
+  NTP server (`--replace`). Dry-run it by hand on one device first.
+
+No profile is needed. NetBox sends only the feature names and the mode; what
+to apply comes from each poller's own `standards.yaml`, the same file its
+hand-run `configure.py` uses. To start from the fleet view, tick devices on
+**Config Compliance → Device Compliance** and click **Remediate selected
+devices**, which opens this form with those devices chosen.
+
+For each device, the poller runs every chosen feature as
+
+```sh
+configure.py <feature> --netbox --netbox-filter id=<device> --no-netbox-autofilter --add|--replace
+```
+
+so source-interface tags, syslog policy writeback, the run archive and the
+rollback journal all work as they do by hand. Every feature is dry-run first.
+A device that is already compliant ends **Completed** without a change.
+Otherwise the job asks NetBox for the start (the same gate as an upgrade; a
+missed window changes nothing), then applies only the features with changes
+pending. The job page shows each feature's result: compliant, changed,
+attention (out of compliance and not something the feature fixes, which ends
+**Completed with warnings**) or failed.
+
+A failure after the start is **Recovery required**, like an upgrade, because
+the device may be half changed. The job message names the rollback journal;
+check the device, run `configure.py rollback <journal>` on the poller if
+needed, then record recovery. A failure in the dry run is a plain failure.
+
+Remediation ignores redundancy groups and dependencies, since a
+configuration push takes nothing out of service, and a failed staging or
+remediation job never holds the rest of its site. It needs `apply` on upgrade
+jobs to schedule and a worker running with `--apply`, and each device must be
+active with a primary IP in NetBox.
 
 ## Redundancy groups, dependencies and holds
 
@@ -256,7 +300,7 @@ PLUGINS_CONFIG = {
   list that no longer apply are marked stale.
 - `hold_site_on_failure` (default `True`) holds the other pending jobs at
   the same site in the same batch when a job ends `failed` or
-  `recovery_required`. `False` limits holds to the failed device's partners
+  `recovery_required`. Staging and remediation jobs neither cause nor receive a site hold. `False` limits holds to the failed device's partners
   and the devices that wait for it.
 
 - `prestage_interval_minutes` (default `60`) is how often the NetBox worker
@@ -358,7 +402,7 @@ If progress remains undeliverable, the poller reports an error and claims no add
 
 All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the normal NetBox API token. The optional UI webhook has its own bearer token and URL; it is not used for queue authentication.
 
-- `POST schedule/`: `{filters, profile, operation, scheduled_at, start_before, poller?, description?, preview?}`. `filters` accepts the same fields as `/api/dcim/devices/`, such as `{"site": ["atl"], "role": ["access"]}`. `profile` is the YAML profile represented as a JSON object. `preview: true` returns targets without creating jobs. Default operation is `audit`. Successful creation returns `batch_id` and `jobs`. Do not blindly retry schedule creation after a lost response; check the queue first.
+- `POST schedule/`: `{filters, profile, operation, scheduled_at, start_before, poller?, description?, preview?}`. For `"operation": "remediate"`, `profile` is `{"features": ["ntp", "syslog"], "mode": "add"}`; features are `ntp`, `syslog`, `banner`, `acl`, `users`, `snmp` and `snmp_packetsize`, and mode is `add` or `replace`. `filters` accepts the same fields as `/api/dcim/devices/`, such as `{"site": ["atl"], "role": ["access"]}`. `profile` is the YAML profile represented as a JSON object. `preview: true` returns targets without creating jobs. Default operation is `audit`. Successful creation returns `batch_id` and `jobs`. Do not blindly retry schedule creation after a lost response; check the queue first.
 - `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true}`. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
 - `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state.
 - `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.

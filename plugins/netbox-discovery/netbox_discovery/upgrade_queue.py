@@ -13,13 +13,17 @@ from django.utils import timezone
 from django.db.models import Q
 
 from .models import DiscoveryPoller, UpgradeGroup, UpgradeJob
-from .upgrade_choices import ACTIVE, TERMINAL, WAITING
+from .upgrade_choices import ACTIVE, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, WAITING
 from .upgrade_groups import GroupError, downstream_of, memberships, plan_waves
 from .utils import plugin_setting
 
 
 class QueueError(ValueError):
     pass
+
+
+# Operations that take nothing out of service, so one failure does not hold the site.
+SITE_HOLD_EXEMPT = ('stage', 'remediate')
 
 
 def owners(device):
@@ -53,6 +57,8 @@ def validate_profile(profile, operation=None):
     # Reject scripts, credential fields and malformed structures at intake too.
     # Staging does not depend on the running release, so a staging profile may
     # leave starting_versions empty.
+    if operation == 'remediate':
+        return validate_remediation(profile)
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
             'minimum_free_bytes', 'bundle_conversion_validated', 'image_source',
             # BIG-IP profiles; the worker's validator applies the family rules.
@@ -69,6 +75,19 @@ def validate_profile(profile, operation=None):
     for key in ('name', 'target_version', 'image', 'md5'):
         if not isinstance(profile[key], str) or not profile[key].strip():
             raise QueueError(f'Profile {key} must be a nonempty string.')
+
+
+def validate_remediation(profile):
+    """Features and a mode only: what to apply comes from each poller's standards.yaml."""
+    features = {value for value, _ in REMEDIATION_FEATURES}
+    if not isinstance(profile, dict) or set(profile) != {'features', 'mode'}:
+        raise QueueError('A remediation names only its features and mode.')
+    chosen = profile['features']
+    if (not isinstance(chosen, list) or not chosen or len(set(chosen)) != len(chosen)
+            or any(feature not in features for feature in chosen)):
+        raise QueueError('Choose at least one remediation feature.')
+    if profile['mode'] not in {value for value, _ in REMEDIATION_MODES}:
+        raise QueueError('Remediation mode must be add or replace.')
 
 
 def select_devices(user, filters):
@@ -94,7 +113,7 @@ def select_devices(user, filters):
 
 def prepare(user, data):
     validate_profile(data['profile'], data['operation'])
-    if data['operation'] not in {'audit', 'stage', 'upgrade'}:
+    if data['operation'] not in {'audit', 'stage', 'upgrade', 'remediate'}:
         raise QueueError('Unsupported upgrade operation.')
     if data['operation'] != 'audit' and not user.has_perm('netbox_discovery.apply_upgradejob'):
         raise QueueError('Scheduling changes requires apply permission on upgrade jobs.')
@@ -116,7 +135,11 @@ def prepare(user, data):
             raise QueueError(f'{device}: poller tenant does not match the device.')
         rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device)})
     devices = [row['device'] for row in rows]
-    groups, downstream = memberships(devices), downstream_of(devices)
+    # A configuration push takes nothing out of service, so redundancy groups
+    # and dependencies do not order it.
+    ordered = data['operation'] != 'remediate'
+    groups = memberships(devices) if ordered else {}
+    downstream = downstream_of(devices) if ordered else {}
     for row in rows:
         row['groups'] = groups.get(row['device'].pk, [])
         row['waits_for'] = downstream.get(row['device'].pk, [])
@@ -235,9 +258,12 @@ def hold_reason(job):
     failed = related.filter(batch_id=job.batch_id, status='failed').first()
     if failed is not None:
         return f'{failed.device_name} ended failed in this batch'
-    if plugin_setting('hold_site_on_failure'):
+    # Site holds guard audits and upgrades: a failed image copy or config push
+    # says nothing about whether the next switch at the site can reload safely.
+    if plugin_setting('hold_site_on_failure') and job.operation not in SITE_HOLD_EXEMPT:
         at_site = UpgradeJob.objects.filter(batch_id=job.batch_id, status__in=('failed', 'recovery_required'),
-                                            device__site_id=job.device.site_id).exclude(pk=job.pk).exclude(pk__in=acknowledged).first()
+                                            device__site_id=job.device.site_id,
+                                            ).exclude(operation__in=SITE_HOLD_EXEMPT).exclude(pk=job.pk).exclude(pk__in=acknowledged).first()
         if at_site is not None:
             return f'{at_site.device_name} ended {at_site.status} at the same site in this batch'
     return ''
@@ -291,8 +317,9 @@ def hold_related(job):
         other.status, other.held_reason, other.message = 'held', detail, f'Held: {detail}'
         other.save()
         held.add(other.pk)
-    if plugin_setting('hold_site_on_failure'):
-        at_site = UpgradeJob.objects.filter(batch_id=job.batch_id, status='pending', device__site_id=job.device.site_id)
+    if plugin_setting('hold_site_on_failure') and job.operation not in SITE_HOLD_EXEMPT:
+        at_site = UpgradeJob.objects.filter(batch_id=job.batch_id, status='pending',
+                                            device__site_id=job.device.site_id).exclude(operation__in=SITE_HOLD_EXEMPT)
         for other in at_site.exclude(pk=job.pk).exclude(pk__in=held).select_for_update():
             detail = f'{reason} at the same site in this batch'
             other.status, other.held_reason, other.message = 'held', detail, f'Held: {detail}'

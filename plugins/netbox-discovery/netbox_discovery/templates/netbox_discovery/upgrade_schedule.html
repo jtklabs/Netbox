@@ -1,10 +1,10 @@
 {% extends 'base/layout.html' %}
 {% load form_helpers %}
-{% block title %}Schedule IOS XE work{% endblock %}
+{% block title %}Schedule device work{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-8">
-  <h1>Schedule IOS XE work</h1>
-  <p>Choose a site and role, or explicit devices. Devices and the profile are captured when you schedule. Select only the master device for each switch stack.</p>
+  <h1>Schedule device work</h1>
+  <p>Choose a site and role, or explicit devices. Devices and the plan are captured when you schedule. Select only the master device for each switch stack. Audits, staging and upgrades take an upgrade profile; <strong>Remediate configuration</strong> takes the features to fix instead, and each poller applies its own <code>standards.yaml</code>.</p>
   <form method="post" class="card card-body">{% csrf_token %}
     {% render_form form %}
     <div><button class="btn btn-secondary" type="submit">Preview devices</button>
