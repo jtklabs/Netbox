@@ -201,9 +201,26 @@ def test_device_filters_do_not_change_interface_tag_queries():
     ]
 
 
-def test_duplicate_netbox_names_do_not_silently_drop_a_device():
-    client = FakeClient([device(), device(id=2, address="10.2.1.1/24")])
-    with pytest.raises(NetBoxError, match="duplicate NetBox device name"):
+def test_duplicate_netbox_names_keep_every_device():
+    client = FakeClient([device(), device(id=2, address="10.2.1.1/24", site={"slug": "rdu"}),
+                         device(id=3, name="core1", address="10.3.1.1/24")])
+    hosts = NetBoxInventory(client=client).load().hosts
+    assert sorted(hosts) == ["core1", "sw1@atl", "sw1@rdu"]
+    assert hosts["sw1@rdu"].hostname == "10.2.1.1"
+    assert {hosts[name].data["device_name"] for name in ("sw1@atl", "sw1@rdu")} == {"sw1"}
+    assert hosts["core1"].data["device_name"] == "core1"
+
+
+def test_same_name_at_the_same_site_falls_back_to_the_id():
+    client = FakeClient([device(), device(id=2, address="10.2.1.1/24"), device(id=3, address="10.3.1.1/24",
+                                                                                site={"slug": "rdu"})])
+    assert sorted(NetBoxInventory(client=client).load().hosts) == ["sw1#1", "sw1#2", "sw1@rdu"]
+
+
+def test_a_real_name_that_collides_with_a_generated_one_is_refused():
+    client = FakeClient([device(), device(id=2, address="10.2.1.1/24", site={"slug": "rdu"}),
+                         device(id=3, name="sw1@rdu", address="10.3.1.1/24")])
+    with pytest.raises(NetBoxError, match="rename one"):
         NetBoxInventory(client=client).load()
 
 
