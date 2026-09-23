@@ -38,10 +38,16 @@ report = PluginMenuItem(
     permissions=['netbox_compliance.view_configcompliance'],
 )
 
+device_grid = PluginMenuItem(
+    link='plugins:netbox_compliance:device_grid',
+    link_text='Device Compliance',
+    permissions=['netbox_compliance.view_configcompliance'],
+)
+
 menu = PluginMenu(
     label='Config Compliance',
     groups=(
-        ('Configuration', (standards, results, report)),
+        ('Configuration', (standards, results, report, device_grid)),
     ),
     icon_class='mdi mdi-clipboard-check-outline',
 )
