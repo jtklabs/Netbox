@@ -1,0 +1,42 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block extra_controls %}
+  {% if perms.netbox_discovery.apply_upgradejob %}
+  <form method="post" action="{% url 'plugins:netbox_discovery:prestagepolicy_run' pk=object.pk %}" class="d-inline">{% csrf_token %}
+    <button class="btn btn-secondary"><i class="mdi mdi-play"></i> Run now</button>
+  </form>
+  {% endif %}
+{% endblock %}
+{% block content %}
+<div class="row"><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Prestage policy</h5><div class="card-body">
+    <table class="table attr-table">
+      <tr><th>Model</th><td>{{ object.device_type|linkify }}</td></tr>
+      <tr><th>Enabled</th><td>{% checkmark object.enabled %}</td></tr>
+      <tr><th>Check a device again after</th><td>{{ object.interval_hours }} hour{{ object.interval_hours|pluralize }}</td></tr>
+      <tr><th>Start window</th><td>{{ object.window_hours }} hour{{ object.window_hours|pluralize }}</td></tr>
+      <tr><th>Keep free on flash</th><td>{% if object.minimum_free_bytes %}{{ object.minimum_free_bytes|filesizeformat }}{% else %}Family minimum{% endif %}</td></tr>
+      <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+      <tr><th>Last run</th><td>{{ object.last_run_at|placeholder }}</td></tr>
+      <tr><th>Last result</th><td>
+        {% if object.last_summary.error %}<span class="text-danger">{{ object.last_summary.error }}</span>
+        {% elif object.last_run_at %}{{ object.last_summary.scheduled }} scheduled, {{ object.last_summary.current }} already current, {{ object.last_summary.skipped }} skipped
+        {% else %}{{ ''|placeholder }}{% endif %}
+      </td></tr>
+    </table>
+    <p class="text-muted">Each run gives every active device of this model a <em>Stage image only</em> job for the preferred version of the software standard that applies to it. A device is left alone while it runs that version, has a queued or active job, or was given the same image within the interval above; a new preferred version is picked up on the next run. The poller claims the jobs with <code>--apply</code>, copies and verifies the image, and never installs or reloads.</p>
+    <a href="{{ jobs_url }}" class="btn btn-sm btn-outline-primary">Staging jobs for this model</a>
+  </div></div>
+</div><div class="col-lg-6">
+  <div class="card"><h5 class="card-header">Next run: {{ summary.scheduled }} to stage, {{ summary.current }} current, {{ summary.skipped }} skipped</h5><div class="card-body">
+    {% if plan_error %}<p class="text-danger">{{ plan_error }}</p>{% endif %}
+    <table class="table table-sm"><thead><tr><th>Device</th><th>Site</th><th>Preferred version</th><th>Next run</th></tr></thead><tbody>
+    {% for row in rows %}<tr>
+      <td>{{ row.device|linkify }}</td><td>{{ row.device.site|linkify }}</td>
+      <td>{% if row.version %}{{ row.version|linkify:"version" }}{% else %}{{ ''|placeholder }}{% endif %}</td>
+      <td>{% if row.action == 'schedule' %}<span class="badge text-bg-blue">{{ row.detail }}</span>{% elif row.action == 'current' %}<span class="badge text-bg-green">{{ row.detail }}</span>{% elif row.recent_job %}<a href="{{ row.recent_job.get_absolute_url }}">{{ row.detail }}</a>{% else %}<span class="text-muted">{{ row.detail }}</span>{% endif %}</td>
+    </tr>{% empty %}<tr><td colspan="4" class="text-muted">No active devices of this model.</td></tr>{% endfor %}
+    </tbody></table>
+  </div></div>
+</div></div>
+{% endblock %}

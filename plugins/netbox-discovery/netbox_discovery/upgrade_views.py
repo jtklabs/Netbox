@@ -5,8 +5,8 @@ from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
-from django.core.exceptions import ValidationError
-from dcim.models import Device, Site, DeviceRole, Platform
+from django.core.exceptions import PermissionDenied, ValidationError
+from dcim.models import Device, DeviceType, Site, DeviceRole, Platform
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from netbox.forms import NetBoxModelFilterSetForm
@@ -18,10 +18,11 @@ from utilities.forms.rendering import FieldSet
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
 from utilities.views import register_model_view
 
-from .models import UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
-from . import upgrade_groups
+from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
+from . import upgrade_groups, upgrade_prestage
 from .upgrade_choices import TERMINAL, UpgradeOperationChoices, UpgradeStatusChoices
-from .upgrade_filtersets import UpgradeDependencyFilterSet, UpgradeGroupFilterSet, UpgradeJobFilterSet
+from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
+                                 UpgradeJobFilterSet)
 from . import upgrade_queue as queue
 
 
@@ -37,7 +38,7 @@ class UpgradePlanForm(forms.Form):
         import yaml
         try:
             data = yaml.safe_load(self.cleaned_data['profile'])
-            queue.validate_profile(data)
+            queue.validate_profile(data, self.cleaned_data.get('operation'))
             return data
         except (yaml.YAMLError, ValueError, TypeError) as exc:
             raise forms.ValidationError(str(exc)) from exc
@@ -372,3 +373,98 @@ class UpgradeDependencyEditView(ObjectEditView):
 @register_model_view(UpgradeDependency, 'delete')
 class UpgradeDependencyDeleteView(ObjectDeleteView):
     queryset = UpgradeDependency.objects.all()
+
+
+class PrestagePolicyForm(NetBoxModelForm):
+    device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), label='Model',
+                                          help_text='Every active device of this model, one job per stack master')
+    fieldsets = (FieldSet('device_type', 'enabled', 'interval_hours', 'window_hours', 'minimum_free_bytes', 'description',
+                          name='Prestage policy'),
+                 FieldSet('tags', name='Tags'))
+
+    class Meta:
+        model = PrestagePolicy
+        fields = ('device_type', 'enabled', 'interval_hours', 'window_hours', 'minimum_free_bytes', 'description',
+                  'comments', 'tags')
+
+
+class PrestagePolicyTable(NetBoxTable):
+    device_type = tables.Column(linkify=True, verbose_name='Model')
+    enabled = columns.BooleanColumn()
+    last_run_at = columns.DateTimeColumn(verbose_name='Last run')
+    last_scheduled = tables.Column(accessor='last_summary__scheduled', verbose_name='Last scheduled', orderable=False)
+
+    class Meta(NetBoxTable.Meta):
+        model = PrestagePolicy
+        fields = ('pk', 'id', 'device_type', 'enabled', 'interval_hours', 'window_hours', 'minimum_free_bytes',
+                  'last_run_at', 'last_scheduled', 'description')
+        default_columns = ('device_type', 'enabled', 'interval_hours', 'window_hours', 'last_run_at', 'last_scheduled')
+
+
+class ApplyRequiredMixin:
+    """Enabling or changing a policy schedules image copies, so it needs apply permission."""
+
+    def dispatch(self, request, *args, **kwargs):
+        if request.user.is_authenticated and not request.user.has_perm('netbox_discovery.apply_upgradejob'):
+            raise PermissionDenied('Prestage policies schedule image staging and need apply permission on upgrade jobs.')
+        return super().dispatch(request, *args, **kwargs)
+
+
+@register_model_view(PrestagePolicy, name='list')
+class PrestagePolicyListView(ObjectListView):
+    queryset = PrestagePolicy.objects.select_related('device_type__manufacturer')
+    table = PrestagePolicyTable
+    filterset = PrestagePolicyFilterSet
+    actions = (AddObject,)
+    template_name = 'netbox_discovery/prestagepolicy_list.html'
+
+
+@register_model_view(PrestagePolicy)
+class PrestagePolicyView(ObjectView):
+    queryset = PrestagePolicy.objects.select_related('device_type__manufacturer')
+    actions = (EditObject, DeleteObject)
+
+    def get_extra_context(self, request, instance):
+        try:
+            rows, error = upgrade_prestage.plan(instance), ''
+        except queue.QueueError as exc:
+            rows, error = [], str(exc)
+        return {'rows': rows, 'plan_error': error, 'summary': upgrade_prestage.summarize(rows),
+                'jobs_url': reverse('plugins:netbox_discovery:upgradejob_list')
+                + f'?operation=stage&device_type_id={instance.device_type_id}'}
+
+
+@register_model_view(PrestagePolicy, 'edit')
+class PrestagePolicyEditView(ApplyRequiredMixin, ObjectEditView):
+    queryset = PrestagePolicy.objects.all()
+    form = PrestagePolicyForm
+
+
+@register_model_view(PrestagePolicy, 'delete')
+class PrestagePolicyDeleteView(ObjectDeleteView):
+    queryset = PrestagePolicy.objects.all()
+
+
+class PrestageRunView(PermissionRequiredMixin, View):
+    """Run now instead of waiting for the next scheduled run, e.g. after changing a standard."""
+    permission_required = 'netbox_discovery.apply_upgradejob'
+    raise_exception = True
+
+    def post(self, request, pk=None):
+        if pk is not None:
+            policy = get_object_or_404(PrestagePolicy.objects.restrict(request.user, 'view'), pk=pk)
+            try:
+                jobs, summary = upgrade_prestage.run_policy(policy)
+            except queue.QueueError as exc:
+                messages.error(request, str(exc))
+            else:
+                messages.success(request, f"Scheduled {summary['scheduled']} staging job(s); "
+                                          f"{summary['current']} already current, {summary['skipped']} skipped.")
+            return redirect(policy.get_absolute_url())
+        results = upgrade_prestage.run()
+        scheduled = sum(summary.get('scheduled', 0) for summary in results.values())
+        failed = [name for name, summary in results.items() if 'error' in summary]
+        messages.success(request, f'Ran {len(results)} enabled policy(ies); scheduled {scheduled} staging job(s).')
+        if failed:
+            messages.error(request, f'Could not run: {", ".join(failed)}. See each policy for the error.')
+        return redirect(reverse('plugins:netbox_discovery:prestagepolicy_list'))

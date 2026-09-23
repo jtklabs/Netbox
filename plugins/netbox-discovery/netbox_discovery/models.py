@@ -29,6 +29,7 @@ __all__ = (
     'UpgradeJob',
     'UpgradeGroup',
     'UpgradeDependency',
+    'PrestagePolicy',
     'CommandOutput',
 )
 
@@ -920,5 +921,5 @@ class StrippedDomain(PrimaryModel):
 
 
 # Imported here so Django discovers these models with the rest of the plugin.
-from .upgrade_models import UpgradeDependency, UpgradeGroup, UpgradeJob  # noqa: E402,F401
+from .upgrade_models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob  # noqa: E402,F401
 from .command_models import CommandOutput  # noqa: E402,F401

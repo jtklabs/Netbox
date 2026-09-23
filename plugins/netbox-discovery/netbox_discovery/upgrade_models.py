@@ -3,6 +3,7 @@ import uuid
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.urls import reverse
 from django.utils import timezone
@@ -118,3 +119,37 @@ class UpgradeDependency(PrimaryModel):
         if self.upstream_id and self.upstream_id == self.downstream_id:
             from django.core.exceptions import ValidationError
             raise ValidationError('A device cannot wait for itself.')
+
+
+class PrestagePolicy(PrimaryModel):
+    """Keep the software standard's preferred image on every device of one model.
+
+    The image, checksum and download link come from the Lifecycle plugin's
+    standard for each device at the time of each run, so changing the standard
+    is all it takes to start copying the new image ahead of the upgrade window.
+    """
+    device_type = models.OneToOneField('dcim.DeviceType', on_delete=models.CASCADE, related_name='prestage_policy',
+                                       verbose_name='Model')
+    enabled = models.BooleanField(default=True)
+    interval_hours = models.PositiveSmallIntegerField(
+        default=24, validators=[MinValueValidator(1)],
+        help_text='Hours before a device that was already given this image is checked again')
+    window_hours = models.PositiveSmallIntegerField(
+        default=4, validators=[MinValueValidator(1)],
+        help_text='Hours a staging job may wait for its poller before its start window closes')
+    minimum_free_bytes = models.BigIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1)],
+        help_text='Flash to keep free after the copy; empty uses the family minimum (1.5 GB, or 100 MB for EOS)')
+    last_run_at = models.DateTimeField(null=True, blank=True, editable=False)
+    last_summary = models.JSONField(default=dict, blank=True, editable=False)
+
+    class Meta:
+        ordering = ('device_type__manufacturer__name', 'device_type__model')
+        verbose_name = 'prestage policy'
+        verbose_name_plural = 'prestage policies'
+
+    def __str__(self):
+        return f'Prestage {self.device_type}'
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:prestagepolicy', args=[self.pk])

@@ -2,12 +2,13 @@ import django_filters
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 from dcim.models import Device
-from .models import UpgradeDependency, UpgradeGroup, UpgradeJob
+from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
 
 
 class UpgradeJobFilterSet(NetBoxModelFilterSet):
     site_id = django_filters.NumberFilter(field_name='device__site_id')
     role_id = django_filters.NumberFilter(field_name='device__role_id')
+    device_type_id = django_filters.NumberFilter(field_name='device__device_type_id')
     poller = django_filters.CharFilter(field_name='poller__name')
 
     class Meta:
@@ -37,3 +38,14 @@ class UpgradeDependencyFilterSet(NetBoxModelFilterSet):
 
     def search(self, queryset, name, value):
         return queryset.filter(Q(upstream__name__icontains=value) | Q(downstream__name__icontains=value))
+
+
+class PrestagePolicyFilterSet(NetBoxModelFilterSet):
+    manufacturer_id = django_filters.NumberFilter(field_name='device_type__manufacturer_id')
+
+    class Meta:
+        model = PrestagePolicy
+        fields = ('id', 'device_type_id', 'enabled', 'interval_hours', 'window_hours')
+
+    def search(self, queryset, name, value):
+        return queryset.filter(Q(device_type__model__icontains=value) | Q(description__icontains=value))

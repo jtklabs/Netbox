@@ -83,7 +83,7 @@ def run(args, style):
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
     from ..features.waf import connection_settings
-    profile = Profile.load(args.profile)
+    profile = Profile.load(args.profile, staging=args.stage_only)
     args.f5 = connection_settings(args)
     settings = settings_from_env()
     args.standards = load_standards(args.standards, PROJECT_ROOT)

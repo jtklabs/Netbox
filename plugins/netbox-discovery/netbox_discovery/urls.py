@@ -111,7 +111,7 @@ urlpatterns = [
 ]
 
 from . import command_views, upgrade_views
-from .models import UpgradeDependency, UpgradeGroup, UpgradeJob
+from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
 
 urlpatterns += [
     path('command-outputs/<int:pk>/', command_views.CommandOutputRawView.as_view(), name='commandoutput_raw'),
@@ -138,6 +138,15 @@ urlpatterns += [
     path('upgrade-groups/<int:pk>/delete/', upgrade_views.UpgradeGroupDeleteView.as_view(), name='upgradegroup_delete'),
     path('upgrade-groups/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradegroup_changelog',
          kwargs={'model': UpgradeGroup}),
+    path('prestage-policies/', upgrade_views.PrestagePolicyListView.as_view(), name='prestagepolicy_list'),
+    path('prestage-policies/add/', upgrade_views.PrestagePolicyEditView.as_view(), name='prestagepolicy_add'),
+    path('prestage-policies/run/', upgrade_views.PrestageRunView.as_view(), name='prestagepolicy_run_all'),
+    path('prestage-policies/<int:pk>/', upgrade_views.PrestagePolicyView.as_view(), name='prestagepolicy'),
+    path('prestage-policies/<int:pk>/edit/', upgrade_views.PrestagePolicyEditView.as_view(), name='prestagepolicy_edit'),
+    path('prestage-policies/<int:pk>/delete/', upgrade_views.PrestagePolicyDeleteView.as_view(), name='prestagepolicy_delete'),
+    path('prestage-policies/<int:pk>/run/', upgrade_views.PrestageRunView.as_view(), name='prestagepolicy_run'),
+    path('prestage-policies/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='prestagepolicy_changelog',
+         kwargs={'model': PrestagePolicy}),
     path('upgrade-dependencies/', upgrade_views.UpgradeDependencyListView.as_view(), name='upgradedependency_list'),
     path('upgrade-dependencies/add/', upgrade_views.UpgradeDependencyEditView.as_view(), name='upgradedependency_add'),
     path('upgrade-dependencies/<int:pk>/', upgrade_views.UpgradeDependencyView.as_view(), name='upgradedependency'),

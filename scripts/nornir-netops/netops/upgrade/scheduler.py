@@ -166,7 +166,7 @@ def validate_assignment(job, apply):
         raise ValueError('Upgrade queue returned a mutating job without --apply')
     if not isinstance(job.get('device'), str) or not job['device'].strip():
         raise ValueError('Upgrade queue returned an invalid device name')
-    return Profile.from_mapping(job['profile'])
+    return Profile.from_mapping(job['profile'], staging=job['operation'] == 'stage')
 
 
 def execute_job(task, args, client, outbox):

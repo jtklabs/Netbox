@@ -48,9 +48,11 @@ def address_of(device):
     return str(ipaddress.ip_interface(str(primary.address)).ip)
 
 
-def validate_profile(profile):
+def validate_profile(profile, operation=None):
     # The remote uses the full IOS XE Profile validator before connecting.
     # Reject scripts, credential fields and malformed structures at intake too.
+    # Staging does not depend on the running release, so a staging profile may
+    # leave starting_versions empty.
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
             'minimum_free_bytes', 'bundle_conversion_validated', 'image_source',
             # BIG-IP profiles; the worker's validator applies the family rules.
@@ -61,7 +63,8 @@ def validate_profile(profile):
     if len(json.dumps(profile)) > 16000:
         raise QueueError('Upgrade profile is too large.')
     for key in ('models', 'starting_versions'):
-        if not isinstance(profile[key], list) or not profile[key] or not all(isinstance(x, str) for x in profile[key]):
+        optional = key == 'starting_versions' and operation == 'stage'
+        if not isinstance(profile[key], list) or not (profile[key] or optional) or not all(isinstance(x, str) for x in profile[key]):
             raise QueueError(f'Profile {key} must be a nonempty list of strings.')
     for key in ('name', 'target_version', 'image', 'md5'):
         if not isinstance(profile[key], str) or not profile[key].strip():
@@ -90,7 +93,7 @@ def select_devices(user, filters):
 
 
 def prepare(user, data):
-    validate_profile(data['profile'])
+    validate_profile(data['profile'], data['operation'])
     if data['operation'] not in {'audit', 'stage', 'upgrade'}:
         raise QueueError('Unsupported upgrade operation.')
     if data['operation'] != 'audit' and not user.has_perm('netbox_discovery.apply_upgradejob'):

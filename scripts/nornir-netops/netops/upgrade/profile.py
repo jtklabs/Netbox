@@ -82,11 +82,13 @@ class Profile:
         return version(value)
 
     @classmethod
-    def load(cls, path):
-        return cls.from_mapping(yaml.safe_load(Path(path).read_text()))
+    def load(cls, path, staging=False):
+        return cls.from_mapping(yaml.safe_load(Path(path).read_text()), staging=staging)
 
     @classmethod
-    def from_mapping(cls, data):
+    def from_mapping(cls, data, staging=False):
+        """A staging profile may leave starting_versions empty: copying an image
+        does not depend on what is running, so any release may receive it."""
         if not isinstance(data, dict):
             raise ValueError("upgrade profile must be a mapping")
         data = dict(data)
@@ -94,7 +96,7 @@ class Profile:
         if set(data) - allowed:
             raise ValueError(f"unknown upgrade profile fields: {sorted(set(data) - allowed)}")
         for key in ("models", "starting_versions"):
-            if not isinstance(data.get(key), list) or not data[key]:
+            if not isinstance(data.get(key), list) or (not data[key] and not (staging and key == "starting_versions")):
                 raise ValueError(f"profile {key} must be a nonempty list")
             data[key] = tuple(data[key])
         try:
