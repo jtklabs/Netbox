@@ -170,6 +170,10 @@ def plan_ntp(
     context = context or {}
     variables = context.get("variables") or {}
     configured = {entry.key for entry in current}
+    if variables.get("regions") and isinstance(context.get("notes"), list):
+        # Say which set this device was measured against; with regions it differs per device.
+        region = variables.get("region")
+        context["notes"].append(f"NTP servers for region {region}" if region else "NTP servers: default set (no region matched)")
 
     to_add = [key for key in desired if key not in configured]
     if variables.get("rewrite_keys"):
@@ -299,36 +303,21 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def build_desired(args: argparse.Namespace) -> Desired:
     standards = standards_of(args)
 
-    # A flag beats the file, so a one-off run never needs the file edited.
+    # A flag beats the file, so a one-off run never needs the file edited --
+    # and it beats the regional sets too: --servers means these, everywhere.
+    regions: Dict[str, Dict[str, Any]] = {}
     if args.servers:
         wanted = [chunk for value in args.servers for chunk in value.split(",")]
-        preferred = args.prefer
+        servers, prefer = server_set(wanted, args.prefer, "--servers")
     else:
-        wanted, preferred = [], args.prefer
-        for item in standards.entries("ntp.servers"):
-            record = host_and_port(item)
-            wanted.append(record["host"])
-            if record.get("prefer") and not preferred:
-                preferred = record["host"]
-        preferred = preferred or standards.value("ntp.prefer")
-
-    servers: List[str] = []
-    seen = set()
-    for value in wanted:
-        if not str(value).strip():
-            continue
-        host = normalize(validate_address(str(value)))
-        if host not in seen:
-            seen.add(host)
-            servers.append(host)
-    if not servers:
+        wanted, flagged = _listed(standards.entries("ntp.servers"), None)
+        servers, prefer = server_set(wanted, args.prefer or flagged or standards.value("ntp.prefer"),
+                                     "ntp.servers", allow_empty=True)
+        regions = regional_sets(standards)
+    if not servers and not regions:
         raise ValueError(
-            "no NTP servers given: pass --servers or set ntp.servers in the standards file"
+            "no NTP servers given: pass --servers or set ntp.servers (or ntp.regions) in the standards file"
         )
-
-    prefer = normalize(validate_address(str(preferred))) if preferred else None
-    if prefer and prefer not in seen:
-        raise ValueError(f"preferred server {preferred} is not one of the desired servers")
 
     # --- authentication -----------------------------------------------------
     auth = standards.section("ntp").get("authentication") or {}
@@ -377,6 +366,9 @@ def build_desired(args: argparse.Namespace) -> Desired:
         keys=keys,
         variables={
             "entries": entries,
+            "servers": servers,
+            "regions": regions,
+            "key_id": key_id,
             "vrf": _word(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
             "source": source,
@@ -388,27 +380,115 @@ def build_desired(args: argparse.Namespace) -> Desired:
     )
 
 
+def _listed(items, preferred):
+    """Hosts and the preferred one from a list of servers as the standards file writes them."""
+    wanted = []
+    for item in items:
+        record = host_and_port(item)
+        wanted.append(record["host"])
+        if record.get("prefer") and not preferred:
+            preferred = record["host"]
+    return wanted, preferred
+
+
+def server_set(wanted, preferred, where, allow_empty=False):
+    """Validated, de-duplicated servers in order, and the preferred one if any."""
+    servers: List[str] = []
+    for value in wanted:
+        if not str(value).strip():
+            continue
+        host = normalize(validate_address(str(value)))
+        if host not in servers:
+            servers.append(host)
+    if not servers and not allow_empty:
+        raise ValueError(f"{where}: no NTP servers listed")
+    prefer = normalize(validate_address(str(preferred))) if preferred else None
+    if prefer and prefer not in servers:
+        raise ValueError(f"{where}: preferred server {preferred} is not one of the desired servers")
+    return servers, prefer
+
+
+def regional_sets(standards) -> Dict[str, Dict[str, Any]]:
+    """`ntp.regions`: NetBox region slug -> its own servers, checked before any device is dialled.
+
+        ntp:
+          servers: [10.50.0.10]            # everyone no region below matches
+          regions:
+            us-east: [10.1.0.10, 10.1.0.11]
+            emea:
+              servers: [10.2.0.10, 10.2.0.11]
+              prefer: 10.2.0.10
+    """
+    section = standards.section("ntp").get("regions")
+    if section is None:
+        return {}
+    if not isinstance(section, Mapping):
+        raise StandardsError("ntp.regions must map region slugs to server lists")
+    regions = {}
+    for slug, value in section.items():
+        where = f"ntp.regions.{slug}"
+        if isinstance(value, Mapping):
+            unknown = set(value) - {"servers", "prefer"}
+            if unknown:
+                raise StandardsError(f"{where}: unknown keys {sorted(unknown)}; use servers and prefer")
+            items, preferred = value.get("servers") or [], value.get("prefer")
+        else:
+            items, preferred = value, None
+        if isinstance(items, (str, bytes)) or not isinstance(items, Sequence):
+            raise StandardsError(f"{where} must be a list of servers")
+        servers, prefer = server_set(*_listed([standards.resolve(item) for item in items], preferred), where)
+        regions[str(slug).strip().lower()] = {"servers": servers, "prefer": prefer, "region": str(slug)}
+    return regions
+
+
+def region_for(host, regions):
+    """The nearest of the device's regions that has its own servers, or None."""
+    data = getattr(host, "data", {}) or {}
+    chain = data.get("regions")
+    if not chain:
+        # A CSV can carry a `region` column; NetBox inventory supplies the whole chain.
+        chain = [data["region"]] if data.get("region") else []
+    for slug in chain:
+        found = regions.get(str(slug).strip().lower())
+        if found:
+            return found
+    return None
+
+
 def per_device(keys, variables, host):
-    """Swap in this device's source interface, if the inventory knows one."""
+    """This device's servers (its region's, if it has one) and source interface."""
+    servers, prefer = variables.get("servers", []), variables.get("prefer")
+    regions = variables.get("regions") or {}
+    regional = region_for(host, regions) if regions else None
+    if regional:
+        servers, prefer = regional["servers"], regional["prefer"]
+    elif not servers:
+        where = (getattr(host, "data", {}) or {}).get("region") or "no region"
+        raise ValueError(f"no NTP servers for this device ({where}): add its region under ntp.regions "
+                         "or set ntp.servers as the default")
+
     source, authoritative = source_for(host, "ntp")
-    if not authoritative:
-        return keys, variables  # a CSV has no opinion; the file's value stands
-    source = validate_word(str(source), "interface") if source else None
-    if source == variables.get("source"):
+    if authoritative:
+        source = validate_word(str(source), "interface") if source else None
+    else:
+        source = variables.get("source")  # a CSV has no opinion; the file's value stands
+    if servers == variables.get("servers") and source == variables.get("source"):
         return keys, variables
 
-    entries = dict(variables["entries"])
-    rebuilt: List[str] = []
-    for key in keys:
-        record = entries[key]
-        if record["kind"] != "server":
-            rebuilt.append(key)
-            continue
-        new_key = _server_key(record["host"], record.get("key"), source)
-        entries.pop(key, None)
-        entries[new_key] = {**record, "source": source}
-        rebuilt.append(new_key)
-    return rebuilt, {**variables, "entries": entries, "source": source}
+    entries = {key: record for key, record in variables["entries"].items() if record["kind"] != "server"}
+    server_keys = []
+    for server in servers:
+        key = _server_key(server, variables.get("key_id"), source)
+        server_keys.append(key)
+        entries[key] = {"kind": "server", "host": server, "key": variables.get("key_id"), "source": source}
+    # Servers sit after the key and trusted-key, and before `ntp authenticate`.
+    others = [key for key in keys if variables["entries"][key]["kind"] != "server"]
+    cut = others.index("authenticate") if "authenticate" in others else len(others)
+    rebuilt = others[:cut] + server_keys + others[cut:]
+    changed = {"entries": entries, "source": source, "servers": servers, "prefer": prefer}
+    if regional:
+        changed["region"] = regional["region"]
+    return rebuilt, {**variables, **changed}
 
 
 FEATURE = Feature(
