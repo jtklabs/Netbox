@@ -379,6 +379,35 @@ def source_interfaces(
     return per_device
 
 
+def host_names(devices: Sequence[Mapping[str, Any]]) -> Dict[Any, str]:
+    """A unique inventory name per device, keyed by NetBox ID.
+
+    NetBox allows the same name at different sites (and more), and a fleet run
+    has to reach every one of them. A unique name is used as-is; a shared one
+    becomes name@site, or name#id when the site does not tell them apart.
+    Device IDs, not names, are what every NetBox write uses.
+    """
+    def label(device):
+        return str(device.get("name") or f"device-{device.get('id')}")
+
+    counts: Dict[str, int] = {}
+    for device in devices:
+        counts[label(device)] = counts.get(label(device), 0) + 1
+    by_site: Dict[str, int] = {}
+    for device in devices:
+        if counts[label(device)] > 1:
+            key = f"{label(device)}@{_slug(device.get('site')) or 'no-site'}"
+            by_site[key] = by_site.get(key, 0) + 1
+    names = {}
+    for device in devices:
+        name = label(device)
+        if counts[name] > 1:
+            at_site = f"{name}@{_slug(device.get('site')) or 'no-site'}"
+            name = at_site if by_site[at_site] == 1 else f"{name}#{device.get('id')}"
+        names[device.get("id")] = name
+    return names
+
+
 def site_regions(client: Client, devices: Sequence[Mapping[str, Any]]) -> Dict[int, List[str]]:
     """Each site's region slugs, nearest first and up to the root.
 
@@ -497,20 +526,25 @@ class NetBoxInventory:
 
         regions = site_regions(self.client, devices) if self.regions else {}
 
+        names = host_names([device for device in devices if _address(device)])
+
         hosts = Hosts()
         skipped: List[str] = []
         for device in devices:
-            name = device.get("name") or f"device-{device.get('id')}"
+            label = device.get("name") or f"device-{device.get('id')}"
             address = _address(device)
             if not address:
-                skipped.append(str(name))
+                skipped.append(str(label))
                 continue
-            if str(name) in hosts:
-                raise NetBoxError(
-                    f"duplicate NetBox device name {name!r}; narrow --netbox-filter "
-                    "so each inventory host has a unique name"
-                )
+            name = names[device["id"]]
+            if name in hosts:
+                # Only when a device is literally named like another's
+                # disambiguated name, e.g. "sw1@atl"; never guess between them.
+                raise NetBoxError(f"two NetBox devices would both be inventory host {name!r}; rename one")
             data = device_data(device)
+            # The NetBox name as-is, which --limit also matches: the host name
+            # differs from it only when another device shares it.
+            data["device_name"] = str(label)
             if self.autofilter:
                 data["poller_selection"] = ownership[device["id"]]
             # An empty mapping still means "NetBox was asked", which is what

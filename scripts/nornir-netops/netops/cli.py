@@ -824,7 +824,18 @@ def _apply_filters(nr, args: argparse.Namespace):
     targets = nr
     if args.limit:
         wanted = {v.strip() for v in args.limit.split(",") if v.strip()}
-        targets = targets.filter(filter_func=lambda h, w=wanted: h.name in w or h.hostname in w)
+        # A NetBox name shared by several devices becomes name@site in the
+        # inventory. Asking for the bare name is only a problem when it is
+        # actually ambiguous: say which ones, rather than pick or run them all.
+        for value in sorted(wanted):
+            shared = [h for h in nr.inventory.hosts.values()
+                      if h.name != value and h.data.get("device_name") == value]
+            if len(shared) > 1 and value not in nr.inventory.hosts:
+                choices = ", ".join(f"{h.name} ({h.hostname})" for h in shared)
+                raise ValueError(f"--limit {value} matches {len(shared)} NetBox devices: {choices}; "
+                                 "give one of those names or its address")
+        targets = targets.filter(filter_func=lambda h, w=wanted: (
+            h.name in w or h.hostname in w or h.data.get("device_name") in w))
     for expression in args.filter:
         column, separator, value = expression.partition("=")
         if not separator:

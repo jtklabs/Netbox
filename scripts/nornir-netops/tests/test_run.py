@@ -1629,6 +1629,30 @@ def run_netbox(feature, *extra):
     return cli.main([feature, "--no-env-file", "--netbox", *extra])
 
 
+def test_duplicate_name_elsewhere_does_not_stop_a_limited_run(device, login, netbox, capsys):
+    other = nb_device(4, "sw2", "10.9.9.9", "cisco-ios")
+    other["site"] = {"slug": "rdu"}
+    netbox["devices"].append(other)
+    # sw2 is shared; sw1 is not, and a run limited to it goes ahead.
+    assert run_netbox("ntp", "--limit", "sw1") == cli.EXIT_OK
+    assert "inventory: NetBox (1 device(s))" in capsys.readouterr().out
+
+
+def test_limit_to_a_shared_name_says_which_devices(device, login, netbox, capsys):
+    other = nb_device(4, "sw2", "10.9.9.9", "cisco-ios")
+    other["site"] = {"slug": "rdu"}
+    netbox["devices"].append(other)
+    assert run_netbox("ntp", "--limit", "sw2") == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "--limit sw2 matches 2 NetBox devices" in err
+    assert "sw2@atl (10.1.1.3)" in err and "sw2@rdu (10.9.9.9)" in err
+    # Either disambiguated name, or the address, picks exactly one.
+    for choice in ("sw2@rdu", "10.9.9.9"):
+        assert run_netbox("ntp", "--limit", choice) == cli.EXIT_OK
+        out = capsys.readouterr().out
+        assert "inventory: NetBox (1 device(s))" in out and "sw2@rdu" in out
+
+
 def test_netbox_supplies_the_inventory(device, login, netbox, capsys):
     assert run_netbox("ntp") == cli.EXIT_OK
     out = capsys.readouterr().out

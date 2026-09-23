@@ -204,6 +204,15 @@ custom fields land in host data, so `--filter site=atl` works exactly as it
 does with a CSV. A device with no platform is autodetected as usual; one with
 no primary IP is skipped, because there is nothing to connect to.
 
+NetBox can hold two devices with the same name (at different sites, say), and
+every one is still a host. A name shared by several devices becomes
+`name@site` in the inventory, or `name#<NetBox id>` when they share a site as
+well; a unique name is used as-is. `--limit sw1` picks sw1 when only one
+device has that name, whatever else in the fleet is duplicated. When the name
+itself is shared, the run stops before connecting and lists the matches: give
+`--limit sw1@rdu` or the device's address instead. Results written back to
+NetBox always go by device ID, never by name.
+
 ### Limit NetBox inventory to this poller
 
 Use `--netbox-autofilter` to follow the ownership rules used by
