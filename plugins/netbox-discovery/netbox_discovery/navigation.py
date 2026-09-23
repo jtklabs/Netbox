@@ -112,6 +112,15 @@ menu = PluginMenu(
                     permissions=['netbox_discovery.add_upgradedependency'],
                 ),),
             ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:prestagepolicy_list', link_text='Prestage Policies',
+                permissions=['netbox_discovery.view_prestagepolicy'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:prestagepolicy_add', title='Add a policy',
+                    icon_class='mdi mdi-plus-thick',
+                    permissions=['netbox_discovery.add_prestagepolicy', 'netbox_discovery.apply_upgradejob'],
+                ),),
+            ),
         )),
     ),
     icon_class='mdi mdi-radar',

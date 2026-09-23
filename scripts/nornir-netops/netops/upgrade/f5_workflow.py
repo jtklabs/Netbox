@@ -47,7 +47,7 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
     if unit and unit.get("model") not in profile.models and info.get("platform_id") not in profile.models:
         blockers.append("hardware platform is not approved by this profile")
     at_target = bool(current) and f5_version(current) == f5_version(profile.target_version)
-    if current and not at_target and f5_version(current) not in {f5_version(v) for v in profile.starting_versions}:
+    if current and profile.starting_versions and not at_target and f5_version(current) not in {f5_version(v) for v in profile.starting_versions}:
         blockers.append("current release is not an approved starting version")
     plan = {"blockers": blockers, "bundle_conversion": False, "upgrade_needed": not at_target, "already_current": at_target,
             "starting_versions": [current] if current else [], "target_version": profile.target_version,

@@ -39,6 +39,14 @@ def test_malformed_assignment_is_rejected(job, field, value):
         scheduler.validate_assignment(job, True)
 
 
+def test_staging_assignment_may_omit_starting_versions(job):
+    job['profile']['starting_versions'] = []
+    with pytest.raises(ValueError, match='starting_versions'):
+        scheduler.validate_assignment(job, True)
+    job['operation'] = 'stage'
+    assert scheduler.validate_assignment(job, True).starting_versions == ()
+
+
 def test_mutating_assignment_requires_local_apply(job):
     with pytest.raises(ValueError, match='without --apply'):
         scheduler.validate_assignment(job, False)

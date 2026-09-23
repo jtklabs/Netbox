@@ -52,7 +52,8 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
     target = version(profile.target_version)
     at_target = versions == {target}
     conversion = "BUNDLE" in modes
-    if not at_target and not versions <= {version(v) for v in profile.starting_versions}:
+    # A staging profile with no starting versions accepts any release.
+    if profile.starting_versions and not at_target and not versions <= {version(v) for v in profile.starting_versions}:
         blockers.append("current release is not an approved starting version")
     plan = {"blockers": blockers, "bundle_conversion": conversion,
             "upgrade_needed": not at_target, "already_current": at_target and not conversion,

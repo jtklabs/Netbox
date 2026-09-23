@@ -8,15 +8,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from dcim.api.serializers import DeviceSerializer
+from dcim.api.serializers import DeviceSerializer, DeviceTypeSerializer
 from dcim.models import Device
 from netbox.api.fields import SerializedPKRelatedField
 
-from .. import upgrade_groups
+from .. import upgrade_groups, upgrade_prestage
 from .. import upgrade_queue as queue
-from ..models import DiscoveryPoller, UpgradeDependency, UpgradeGroup, UpgradeJob
+from ..models import DiscoveryPoller, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
 from ..upgrade_choices import UpgradeOperationChoices
-from ..upgrade_filtersets import UpgradeDependencyFilterSet, UpgradeGroupFilterSet, UpgradeJobFilterSet
+from ..upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
+                                  UpgradeJobFilterSet)
 
 
 class UpgradeJobSerializer(NetBoxModelSerializer):
@@ -244,3 +245,43 @@ class UpgradeRefreshGroupsView(QueueView):
 
     def execute(self, request, data):
         return Response(upgrade_groups.refresh_discovered())
+
+
+class PrestagePolicySerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:prestagepolicy-detail')
+    device_type = DeviceTypeSerializer(nested=True)
+
+    def validate(self, data):
+        # A policy schedules image copies, so it needs the same right as scheduling one.
+        if not self.context['request'].user.has_perm('netbox_discovery.apply_upgradejob'):
+            raise PermissionDenied('Prestage policies schedule image staging and need apply permission on upgrade jobs.')
+        return super().validate(data)
+
+    class Meta:
+        model = PrestagePolicy
+        fields = ('id', 'url', 'display', 'device_type', 'enabled', 'interval_hours', 'window_hours',
+                  'minimum_free_bytes', 'last_run_at', 'last_summary',
+                  'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated')
+        brief_fields = ('id', 'url', 'display', 'device_type', 'enabled')
+        read_only_fields = ('last_run_at', 'last_summary')
+
+
+class PrestagePolicyViewSet(NetBoxModelViewSet):
+    queryset = PrestagePolicy.objects.select_related('device_type__manufacturer').prefetch_related('tags')
+    serializer_class = PrestagePolicySerializer
+    filterset_class = PrestagePolicyFilterSet
+
+
+class PrestageRunSerializer(serializers.Serializer):
+    policy = serializers.PrimaryKeyRelatedField(queryset=PrestagePolicy.objects.all(), required=False)
+
+
+class PrestageRunView(QueueView):
+    permission = 'apply_upgradejob'
+    serializer_class = PrestageRunSerializer
+
+    def execute(self, request, data):
+        if data.get('policy') is not None:
+            jobs, summary = upgrade_prestage.run_policy(data['policy'])
+            return Response({str(data['policy'].device_type): summary})
+        return Response(upgrade_prestage.run())

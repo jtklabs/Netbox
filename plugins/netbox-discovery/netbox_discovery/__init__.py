@@ -91,7 +91,39 @@ class DiscoveryConfig(PluginConfig):
         # Largest show-command output the API accepts, in bytes. Larger files
         # stay on the poller and are listed here with a note.
         'command_output_max_bytes': 16 * 1024 * 1024,
+        # How often the worker runs the prestage policies, in minutes. Each
+        # policy's own interval decides when a device is checked again; this
+        # only bounds how soon a changed standard is picked up. 0 turns the
+        # schedule off (Run now still works).
+        'prestage_interval_minutes': 60,
     }
+
+    def ready(self):
+        super().ready()
+        _register_prestage_system_job()
+
+
+def _register_prestage_system_job():
+    """Put the prestage run on the worker's schedule, as NetBox does for housekeeping.
+
+    The rqworker enqueues everything in registry['system_jobs'] at startup and
+    JobRunner re-enqueues after each run. Registered here rather than with
+    @system_job because the interval comes from settings.
+    """
+    from netbox.registry import registry
+
+    from netbox_discovery.utils import plugin_setting
+
+    try:
+        interval = int(plugin_setting('prestage_interval_minutes') or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    if interval <= 0:
+        return
+
+    from netbox_discovery.jobs import PrestageJob
+
+    registry['system_jobs'][PrestageJob] = {'interval': interval}
 
 
 config = DiscoveryConfig

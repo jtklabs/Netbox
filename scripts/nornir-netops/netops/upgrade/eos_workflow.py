@@ -73,7 +73,7 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
         blockers.append("hardware model is not approved by this profile")
     target = eos_version(profile.target_version)
     at_target = bool(current) and eos_version(current) == target
-    if current and not at_target and eos_version(current) not in {eos_version(v) for v in profile.starting_versions}:
+    if current and profile.starting_versions and not at_target and eos_version(current) not in {eos_version(v) for v in profile.starting_versions}:
         blockers.append("current release is not an approved starting version")
     boot = snapshot.get("boot", {}).get("image")
     mlag = (snapshot.get("tables", {}).get("mlag") or [{}])[0]

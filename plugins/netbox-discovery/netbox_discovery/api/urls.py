@@ -21,7 +21,8 @@ urlpatterns = router.urls
 from django.urls import path
 from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, UpgradeReportView, UpgradeCancelView,
                        UpgradeGroupViewSet, UpgradeDependencyViewSet, UpgradeHoldView, UpgradeReleaseView,
-                       UpgradeReleaseBatchView, UpgradeRefreshGroupsView, UpgradeRequeueView)
+                       UpgradeReleaseBatchView, UpgradeRefreshGroupsView, UpgradeRequeueView, PrestagePolicyViewSet,
+                       PrestageRunView)
 
 from .commands import CommandOutputViewSet
 
@@ -29,6 +30,7 @@ router.register('upgrade-jobs', UpgradeJobViewSet)
 router.register('upgrade-groups', UpgradeGroupViewSet)
 router.register('upgrade-dependencies', UpgradeDependencyViewSet)
 router.register('command-outputs', CommandOutputViewSet)
+router.register('prestage-policies', PrestagePolicyViewSet)
 urlpatterns = [
     path('upgrade-jobs/schedule/', ScheduleView.as_view(), name='upgradejob-schedule'),
     path('upgrade-jobs/check-in/', UpgradeCheckInView.as_view(), name='upgradejob-check-in'),
@@ -39,4 +41,5 @@ urlpatterns = [
     path('upgrade-jobs/<int:pk>/release/', UpgradeReleaseView.as_view(), name='upgradejob-release'),
     path('upgrade-jobs/<int:pk>/requeue/', UpgradeRequeueView.as_view(), name='upgradejob-requeue'),
     path('upgrade-groups/refresh/', UpgradeRefreshGroupsView.as_view(), name='upgradegroup-refresh'),
+    path('prestage-policies/run/', PrestageRunView.as_view(), name='prestagepolicy-run'),
 ] + router.urls

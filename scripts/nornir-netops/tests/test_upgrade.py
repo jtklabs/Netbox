@@ -935,6 +935,22 @@ def test_stage_only_retains_starting_version_gate(profile, options, fake_device)
     assert not fake_device.instances[0].mutations
 
 
+def test_stage_only_without_starting_versions_accepts_any_release(profile):
+    # A prestage profile from NetBox names no starting versions: a copy does not depend on them.
+    from dataclasses import replace
+    snapshot = baseline(transcript("17.6.5"))
+    assert "starting version" in " ".join(workflow.preflight(snapshot, profile, stage_only=True)["blockers"])
+    plan = workflow.preflight(snapshot, replace(profile, starting_versions=()), stage_only=True)
+    assert "starting version" not in " ".join(plan["blockers"])
+
+
+def test_empty_starting_versions_are_only_valid_for_staging(profile):
+    data = {**asdict(profile), "models": list(profile.models), "starting_versions": []}
+    assert Profile.from_mapping(data, staging=True).starting_versions == ()
+    with pytest.raises(ValueError, match="starting_versions must be a nonempty list"):
+        Profile.from_mapping(data)
+
+
 def test_stage_only_cli_and_archive_operation():
     from netops import cli, archive
     args = cli.build_parser().parse_args(["upgrade", "--profile", "test.yaml", "--stage-only", "--apply"])

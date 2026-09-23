@@ -4,7 +4,7 @@ NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing i
 
 ## In NetBox
 
-Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in.
+Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in. Only [prestage policies](#prestage-images-by-model) run on NetBox's own worker, the one that already runs its housekeeping.
 
 Open **Discovery → Software → Upgrade Jobs → Add** on the list page (the sidebar **+** also works). Choose a site and role, optionally a platform or explicit devices. Paste the same validated YAML profile used by `configure.py upgrade --profile`; specify the scheduled start and **start before**, including a UTC offset. Preview shows the matching devices and pollers. Scheduling captures those devices, management addresses, poller assignments, and a separate copy of the profile. Later inventory changes cannot add devices to a batch.
 
@@ -24,7 +24,60 @@ A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way, 
 
 Select only the virtual chassis **master** for a stack. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
 
-**Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. The `write memory` that an install job runs at the start of its prechecks is the one device write that precedes that check. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
+**Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. The `write memory` that an install job runs at the start of its prechecks is the one device write that precedes that check. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant; a [prestage policy](#prestage-images-by-model) does that for every device of a model. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
+
+## Prestage images by model
+
+A **prestage policy** keeps the software standard's preferred image on flash
+ahead of the upgrade window, so the upgrade itself does not wait for a copy.
+Open **Discovery → Software → Prestage Policies → Add**, choose a **Model**
+(device type) and save. That is all the configuration a model needs: the
+image, its MD5 checksum and its download link come from the Lifecycle
+plugin's software standard, and change when the standard does.
+
+Each run, every **active** device of that model gets a *Stage image only* job
+for the preferred version of the standard that applies to it (a device-type
+standard first, then a platform standard), one job per stack on its master.
+A device is left alone, with the reason shown on the policy page, when it:
+
+- already runs the preferred version (from its Lifecycle software record);
+- is marked **Do not upgrade** in Lifecycle;
+- has no standard with a preferred version, or that version has no image
+  filename, no image URL, or a checksum that is not MD5;
+- already has a queued or active job of any kind;
+- was given the same image (a staging or upgrade job) within the policy's
+  **interval**, whatever that job's outcome;
+- has no primary IP, or not exactly one poller tag.
+
+A device with no collected version still gets the image. When the standard's
+preferred version changes, its image is a new image, so the next run stages
+it on every device without waiting out the interval.
+
+| Field | Meaning |
+| --- | --- |
+| Model | The device type. One policy per model. |
+| Enabled | Clear it to stop scheduling without losing the settings. |
+| Interval hours | How long a device that was given this image is left before it is checked again (default 24). A check of a device that still has the image changes nothing on it. |
+| Window hours | How long each staging job may wait for its poller before it expires (default 4). |
+| Minimum free bytes | Flash to keep free after the copy. Empty uses the family minimum: 1.5 GB, or 100 MB for EOS. |
+
+The policy page lists what the next run would do for every device of the
+model, and the result of the last run. **Run now** on a policy, or **Run
+enabled policies now** on the list, runs straight away, for example after
+changing a standard. Otherwise the NetBox worker runs every enabled policy
+every `prestage_interval_minutes` (default 60; see
+[Plugin settings](#plugin-settings)). Restart the worker container after
+deploying so it picks up the schedule.
+
+The jobs are ordinary staging jobs in the queue, one batch per policy run,
+with the description `Prestage <version> (<model>)`. They need a worker
+running with `--apply`. Their profile lists every model in the stack and
+**no starting versions**: copying an image does not depend on the running
+release, so a staging job with no starting versions accepts any. They are
+not part of any redundancy group, because a copy takes nothing out of
+service; the one-job-per-device rule still keeps them from overlapping an
+upgrade of the same device. Creating, changing or running a policy needs
+`apply` on upgrade jobs as well as the policy permission.
 
 ## Redundancy groups, dependencies and holds
 
@@ -175,7 +228,7 @@ The **Source** column says where an entry came from: *Manual*, *FHRP group
 
 ### Plugin settings
 
-Both settings belong to the discovery plugin and go in `PLUGINS_CONFIG` in
+These settings belong to the discovery plugin and go in `PLUGINS_CONFIG` in
 `configuration/plugins.py`. The file has no `netbox_discovery` block until
 one of them is overridden:
 
@@ -187,6 +240,8 @@ PLUGINS_CONFIG = {
         "upgrade_tier_roles": ["core", "distribution", "access"],
         # Hold the rest of a site's batch when one device there fails.
         "hold_site_on_failure": True,
+        # Minutes between runs of the prestage policies; 0 turns it off.
+        "prestage_interval_minutes": 60,
     },
 }
 ```
@@ -204,8 +259,13 @@ PLUGINS_CONFIG = {
   `recovery_required`. `False` limits holds to the failed device's partners
   and the devices that wait for it.
 
+- `prestage_interval_minutes` (default `60`) is how often the NetBox worker
+  runs the enabled prestage policies. It bounds how soon a changed standard
+  is picked up; each policy's own interval decides when a device is checked
+  again. `0` removes the scheduled run; **Run now** still works.
+
 NetBox reads its configuration at start-up, so restart its containers after
-changing either one. On the scanner side, `sync_fhrp_groups = false` under `[sync]` in the
+changing any of them. On the scanner side, `sync_fhrp_groups = false` under `[sync]` in the
 `snmp-inventory` configuration stops both the FHRP write and the refresh
 request at the end of a sweep; the **Refresh discovered groups** button still
 works.
@@ -217,6 +277,8 @@ Use NetBox Object Permissions on the `netbox_discovery.UpgradeJob` object type:
 - Operators: `view`, `add` to schedule audits; also `apply` to schedule staging/upgrades. `change` permits cancelling pending jobs and recording recovery. Apply is a separate permission so audit schedulers cannot authorize reloads.
 - Workers: `run` to claim jobs and report/heartbeat. They do not need add, apply, change, or delete permission on upgrade jobs. Give the token write capability; read-only tokens cannot claim work.
 - Operators need view access to the selected DCIM devices. Optional filters use NetBox's own device filterset. Add/apply/run/change object constraints are enforced, including for batch creation.
+
+Prestage policies are `netbox_discovery.PrestagePolicy`. Viewing them needs `view`; adding, changing or running one also needs `apply` on `UpgradeJob`, because every run schedules image staging. Deleting one needs only `delete`.
 
 Redundancy groups and dependencies have their own object types, `netbox_discovery.UpgradeGroup` and `netbox_discovery.UpgradeDependency`:
 
@@ -312,6 +374,8 @@ Redundancy groups and dependencies are ordinary NetBox REST resources under `/ap
 - `source`, `key` and `stale` are read-only on both; anything created through the API is manual.
 - `POST upgrade-groups/refresh/` with an empty body runs the same refresh as the button and returns `{"groups", "dependencies", "stale_groups", "stale_dependencies"}`. It needs `change` on redundancy groups and a write-enabled token.
 
+Prestage policies are under `/api/plugins/discovery/prestage-policies/`: `device_type` (id), `enabled`, `interval_hours`, `window_hours`, `minimum_free_bytes`, `description`, `comments`, `tags`; `last_run_at` and `last_summary` are read-only. Filters: `device_type_id`, `manufacturer_id`, `enabled` and `q`. `POST prestage-policies/run/` with an empty body runs every enabled policy, or with `{"policy": <id>}` one policy, and returns each model's summary. Writes and runs need `apply` on upgrade jobs and a write-enabled token. `GET upgrade-jobs/?operation=stage&device_type_id=<id>` lists the staging jobs for a model.
+
 ```bash
 # An F5 pair that must go one at a time (members are NetBox device ids)
 curl -sS -X POST "$NETBOX_URL/api/plugins/discovery/upgrade-groups/" \
@@ -324,4 +388,4 @@ curl -sS -X POST "$NETBOX_URL/api/plugins/discovery/upgrade-dependencies/" \
   -d '{"upstream": 731, "downstream": 655}'
 ```
 
-Deployment requires plugin migrations through `0008_upgrade_poller_last_seen` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.
+Deployment requires plugin migrations through `0013_prestagepolicy` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.
