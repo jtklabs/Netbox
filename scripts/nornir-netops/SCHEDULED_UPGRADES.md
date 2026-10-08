@@ -590,7 +590,84 @@ and `mode` profile as remediation. `apply: false` workers can claim both
 Configuration audit support requires plugin migration `0017_configuration_audit`
 and the matching worker release. Do not schedule it to older workers.
 
-Deployment requires Discovery migrations through `0017_configuration_audit`,
+### Recurring configuration audits
+
+Use **Device Operations > Audit Schedules** for daily or weekly read-only checks.
+Select active devices by tenant, site, platform, model, device tags or explicit
+device IDs, or explicitly select all active devices. Different scope fields
+intersect. Selection is resolved again on every run, with one job per standalone
+device or virtual chassis master and a maximum of 1,000 matching devices per
+schedule. Split larger scopes into multiple schedules.
+
+Choose individual standards, a saved remediation profile, or model defaults.
+These profiles select what to check, but the operation is always `audit_config`:
+no configuration changes, image staging, or upgrades are authorized. Exact match
+uses `mode: replace`; Required entries present uses `mode: add`, both read-only.
+Each occurrence pins the latest accessible profile and applicable standard
+revisions into a new batch of jobs. Remediation must be scheduled separately.
+
+Timing uses an IANA time zone (for example `America/New_York`). Daily/weekly
+wall times survive DST: the first fall-back occurrence is used once, and missing
+spring-forward times shift forward by the gap. After downtime, only one catch-up
+batch is created, then the next future occurrence is scheduled. The start window
+begins at dispatch, not at the missed occurrence. The NetBox RQ worker checks due
+schedules every minute; it must be running. Restart it after installing the
+plugin update. Scheduling state and history live in PostgreSQL, not Redis.
+If Redis loses queued work, restart the NetBox worker; audit-dispatcher startup
+replaces its orphaned Redis entry while retaining schedules and run history.
+
+An unfinished occurrence blocks the next one, which is recorded as skipped.
+Unclaimed jobs past their start window expire, including when their poller is
+offline. Active/recovery jobs continue to block until a worker or operator
+resolves them. Pausing a schedule stops future occurrences, not already queued
+jobs. Schedule deletion is protected once it has run history; pause it instead.
+
+The creator, or the last person to edit a schedule, becomes its `run_as` user.
+That user needs permission to view the schedule, devices, profiles and standards,
+and add upgrade jobs within the selected scope. Permissions and active-user
+status are checked again each run. Grant schedule add/change/view permissions to
+operators and audit-run view permission for history. No apply permission is
+required. Failure to resolve any device aborts the whole batch with a recorded
+failure; it does not silently queue a partial batch.
+
+Audit schedules show next/last dispatch and an overdue indicator; run history
+links to individual job outcomes. A queued run is not a successful/compliant
+result. The existing Compliance Report and reporting API receive actual audit
+verdicts with the checked standard revision. Failed or expired jobs do not create
+a compliant verdict; prior results retain their timestamps and existing
+`stale_after_days` behavior (default 30 days).
+
+REST endpoints:
+
+- `/api/plugins/discovery/audit-schedules/`: CRUD, pause with `enabled: false`.
+- `/api/plugins/discovery/audit-runs/`: read-only history, filter by `schedule_id`
+  or `outcome`; includes `job_status_counts` for visible jobs.
+- `/api/plugins/discovery/upgrade-jobs/?audit_run_id=ID` or
+  `?audit_schedule_id=ID`: device job history, snapshots and results.
+
+Example schedule body (replace the tenant ID):
+
+```json
+{
+  "name": "Daily NTP audit",
+  "enabled": true,
+  "frequency": "daily",
+  "local_time": "02:00:00",
+  "time_zone": "America/New_York",
+  "window_hours": 4,
+  "filters": {"status": ["active"], "tenant_id": [12]},
+  "profile_source": "custom",
+  "profile": {"features": ["ntp"], "mode": "replace"}
+}
+```
+
+For weekly schedules also supply `weekday` (Monday=0 through Sunday=6).
+For a saved profile use `profile_source: "saved"`, `saved_profile: ID` and
+`profile: {}`. For model defaults use `profile_source: "model"`,
+`saved_profile: null` and `profile: {}`. `run_as`, `next_run_at` and `last_run_at`
+are server-managed, not caller-supplied.
+
+Deployment requires Discovery migrations through `0018_auditrun_upgradejob_audit_run_auditschedule_and_more`,
 Config Compliance migration `0002_configstandard_definition_yaml_and_more`, and
 the matching worker release. Workers receive frozen plans, standard revisions
 and any pinned management endpoint or cluster membership. Lab validation of the

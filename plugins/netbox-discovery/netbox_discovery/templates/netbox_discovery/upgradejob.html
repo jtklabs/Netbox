@@ -9,6 +9,7 @@
       <tr><th>Upgrade poller last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
       <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
       <tr><th>Profile at scheduling</th><td>{{ object.profile_name|default:'Custom settings' }}</td></tr>
+      {% if object.audit_run_id %}<tr><th>Recurring audit</th><td><a href="{{ object.audit_run.get_absolute_url }}">{{ object.audit_run.schedule }}: {{ object.audit_run.scheduled_for }}</a></td></tr>{% endif %}
       <tr><th>Status</th><td>{{ object.get_status_display }}</td></tr>
       <tr><th>Scheduled start</th><td>{{ object.scheduled_at }}</td></tr>
       <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>

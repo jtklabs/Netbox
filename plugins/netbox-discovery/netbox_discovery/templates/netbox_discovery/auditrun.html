@@ -1,0 +1,17 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<h2>{{ object.schedule|linkify }}</h2>
+<table class="table attr-table">
+  <tr><th>Scheduled for</th><td>{{ object.scheduled_for }}</td></tr>
+  <tr><th>Dispatched</th><td>{{ object.dispatched_at }}</td></tr>
+  <tr><th>Dispatch result</th><td>{{ object.get_outcome_display }}</td></tr>
+  <tr><th>Detail</th><td>{{ object.message }}</td></tr>
+  {% for count in counts %}<tr><th>{{ count.status }}</th><td>{{ count.count }}</td></tr>{% endfor %}
+</table>
+<h2>Audit jobs</h2>
+<table class="table"><thead><tr><th>Device</th><th>Status</th><th>Detail</th><th>Completed</th></tr></thead><tbody>
+{% for job in jobs %}<tr><td><a href="{{ job.get_absolute_url }}">{{ job.device_name }}</a></td><td>{{ job.get_status_display }}</td><td>{{ job.message }}</td><td>{{ job.completed_at|placeholder }}</td></tr>
+{% empty %}<tr><td colspan="4">No visible jobs.</td></tr>{% endfor %}
+</tbody></table>
+{% endblock %}

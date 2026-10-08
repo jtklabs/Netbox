@@ -26,6 +26,7 @@ from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, Upgr
 
 from .commands import CommandOutputViewSet
 from .profiles import JobProfileViewSet, DeviceTypeProfileViewSet
+from .audits import AuditScheduleViewSet, AuditRunViewSet
 
 router.register('upgrade-jobs', UpgradeJobViewSet)
 router.register('upgrade-groups', UpgradeGroupViewSet)
@@ -34,6 +35,8 @@ router.register('command-outputs', CommandOutputViewSet)
 router.register('prestage-policies', PrestagePolicyViewSet)
 router.register('job-profiles', JobProfileViewSet)
 router.register('model-profiles', DeviceTypeProfileViewSet)
+router.register('audit-schedules', AuditScheduleViewSet)
+router.register('audit-runs', AuditRunViewSet)
 urlpatterns = [
     path('upgrade-jobs/schedule/', ScheduleView.as_view(), name='upgradejob-schedule'),
     path('upgrade-jobs/check-in/', UpgradeCheckInView.as_view(), name='upgradejob-check-in'),

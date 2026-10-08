@@ -111,7 +111,23 @@ urlpatterns = [
 ]
 
 from . import command_views, upgrade_views, profile_views
+from . import audit_views
+from .models import AuditSchedule, AuditRun
 from .models import DeviceTypeProfile, JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+
+urlpatterns += [
+    path('audit-schedules/', audit_views.AuditScheduleListView.as_view(), name='auditschedule_list'),
+    path('audit-schedules/add/', audit_views.AuditScheduleEditView.as_view(), name='auditschedule_add'),
+    path('audit-schedules/<int:pk>/', audit_views.AuditScheduleView.as_view(), name='auditschedule'),
+    path('audit-schedules/<int:pk>/edit/', audit_views.AuditScheduleEditView.as_view(), name='auditschedule_edit'),
+    path('audit-schedules/<int:pk>/delete/', audit_views.AuditScheduleDeleteView.as_view(), name='auditschedule_delete'),
+    path('audit-schedules/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='auditschedule_changelog',
+         kwargs={'model': AuditSchedule}),
+    path('audit-runs/', audit_views.AuditRunListView.as_view(), name='auditrun_list'),
+    path('audit-runs/<int:pk>/', audit_views.AuditRunView.as_view(), name='auditrun'),
+    path('audit-runs/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='auditrun_changelog',
+         kwargs={'model': AuditRun}),
+]
 
 for route, model in (('job-profiles', JobProfile), ('model-profiles', DeviceTypeProfile)):
     name = model._meta.model_name

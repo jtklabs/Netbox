@@ -33,7 +33,7 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
                   'completed_at', 'last_seen_at', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
-                  'description', 'created', 'last_updated')
+                  'audit_run', 'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
         read_only_fields = fields
 

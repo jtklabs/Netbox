@@ -86,6 +86,14 @@ menu = PluginMenu(
         ('Changes', (replacements, issues)),
         ('Software', (
             PluginMenuItem(
+                link='plugins:netbox_discovery:auditschedule_list', link_text='Audit Schedules',
+                permissions=['netbox_discovery.view_auditschedule'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:auditschedule_add', title='Add an audit schedule',
+                    icon_class='mdi mdi-calendar-plus', permissions=['netbox_discovery.add_auditschedule'],
+                ),),
+            ),
+            PluginMenuItem(
                 link='plugins:netbox_discovery:jobprofile_list', link_text='Job Profiles',
                 permissions=['netbox_discovery.view_jobprofile'],
                 buttons=(PluginMenuButton(

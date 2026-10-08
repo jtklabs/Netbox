@@ -1,0 +1,23 @@
+{% extends 'generic/object_edit.html' %}
+{% block form %}
+{{ block.super }}
+<script>
+(() => {
+  const frequency = document.getElementById('id_frequency');
+  const source = document.getElementById('id_profile_source');
+  const show = (id, visible) => {
+    const row = document.getElementById(id)?.closest('.row');
+    if (row) row.hidden = !visible;
+  };
+  const sync = () => {
+    show('id_weekday', frequency.value === 'weekly');
+    show('id_saved_profile', source.value === 'saved');
+    show('id_features', source.value === 'custom');
+    show('id_comparison', source.value === 'custom');
+  };
+  frequency.addEventListener('change', sync);
+  source.addEventListener('change', sync);
+  sync();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col-lg-6">
+  <h2>Audit schedule</h2>
+  <table class="table attr-table">
+    <tr><th>Enabled</th><td>{% checkmark object.enabled %}</td></tr>
+    <tr><th>Frequency</th><td>{{ object.get_frequency_display }}{% if object.frequency == 'weekly' %}, {{ object.get_weekday_display }}{% endif %}</td></tr>
+    <tr><th>Start time</th><td>{{ object.local_time|time:"H:i" }} ({{ object.time_zone }})</td></tr>
+    <tr><th>Start window</th><td>{{ object.window_hours }} hours</td></tr>
+    <tr><th>Next run</th><td>{{ object.next_run_at|placeholder }} {% if object.overdue %}<span class="badge text-bg-warning">Overdue</span>{% endif %}</td></tr>
+    <tr><th>Last dispatch</th><td>{{ object.last_run_at|placeholder }}</td></tr>
+    <tr><th>Run as</th><td>{{ object.run_as|placeholder }}</td></tr>
+    <tr><th>Profile source</th><td>{{ object.get_profile_source_display }}</td></tr>
+    <tr><th>Profile</th><td>{{ object.saved_profile|linkify }}</td></tr>
+    {% if object.profile %}<tr><th>Standards</th><td>{{ object.profile.features|join:", " }}</td></tr><tr><th>Comparison</th><td>{% if object.profile.mode == 'replace' %}Exact match{% else %}Required entries present{% endif %}</td></tr>{% endif %}
+  </table>
+</div><div class="col-lg-6">
+  <h2>Device scope</h2>
+  <table class="table"><tbody>{% for label, value in scope %}<tr><th>{{ label }}</th><td>{{ value }}</td></tr>{% endfor %}</tbody></table>
+  <a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?audit_schedule_id={{ object.pk }}">Audit jobs</a>
+</div></div>
+<h2>Recent runs</h2>
+<table class="table"><thead><tr><th>Scheduled for</th><th>Dispatched</th><th>Dispatch result</th><th>Jobs</th><th>Detail</th></tr></thead><tbody>
+{% for run in runs %}<tr><td><a href="{{ run.get_absolute_url }}">{{ run.scheduled_for }}</a></td><td>{{ run.dispatched_at }}</td><td>{{ run.get_outcome_display }}</td><td>{{ run.job_count }}</td><td>{{ run.message }}</td></tr>
+{% empty %}<tr><td colspan="5">No visible runs.</td></tr>{% endfor %}
+</tbody></table>
+<a href="{% url 'plugins:netbox_discovery:auditrun_list' %}?schedule_id={{ object.pk }}">All runs</a>
+{% endblock %}

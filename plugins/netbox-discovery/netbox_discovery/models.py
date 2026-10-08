@@ -917,3 +917,4 @@ class StrippedDomain(PrimaryModel):
 from .upgrade_models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob  # noqa: E402,F401
 from .command_models import CommandOutput  # noqa: E402,F401
 from .profile_models import DeviceTypeProfile, JobProfile  # noqa: E402,F401
+from .audit_models import AuditSchedule, AuditRun  # noqa: E402,F401

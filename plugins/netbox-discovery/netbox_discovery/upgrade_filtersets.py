@@ -10,10 +10,11 @@ class UpgradeJobFilterSet(NetBoxModelFilterSet):
     role_id = django_filters.NumberFilter(field_name='device__role_id')
     device_type_id = django_filters.NumberFilter(field_name='device__device_type_id')
     poller = django_filters.CharFilter(field_name='poller__name')
+    audit_schedule_id = django_filters.NumberFilter(field_name='audit_run__schedule_id')
 
     class Meta:
         model = UpgradeJob
-        fields = ('id', 'batch_id', 'device_id', 'poller_id', 'status', 'operation', 'run_id')
+        fields = ('id', 'batch_id', 'device_id', 'poller_id', 'status', 'operation', 'run_id', 'audit_run_id')
 
     def search(self, queryset, name, value):
         return queryset.filter(Q(device_name__icontains=value) | Q(description__icontains=value))

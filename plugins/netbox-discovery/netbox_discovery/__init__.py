@@ -101,6 +101,9 @@ class DiscoveryConfig(PluginConfig):
     def ready(self):
         super().ready()
         _register_prestage_system_job()
+        from netbox.registry import registry
+        from .jobs import AuditScheduleJob
+        registry['system_jobs'][AuditScheduleJob] = {'interval': 1}
 
 
 def _register_prestage_system_job():

@@ -286,6 +286,8 @@ def check_target(job):
 def edit_pending(user, pk, data):
     # Serialize edits with claims so a worker's captured assignment cannot change.
     job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
+    if job.audit_run_id and data['operation'] != 'audit_config':
+        raise QueueError('Recurring audit jobs are read-only. Schedule remediation separately.')
     if job.status != 'pending':
         raise QueueError('Only pending jobs can be edited. This job has already been claimed or closed.')
     if data['last_updated'] != job.last_updated:
