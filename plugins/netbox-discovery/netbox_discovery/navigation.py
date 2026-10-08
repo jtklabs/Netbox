@@ -1,4 +1,5 @@
 from netbox.plugins import PluginMenu, PluginMenuButton, PluginMenuItem
+from django.conf import settings
 
 onboarding = PluginMenuItem(
     link='plugins:netbox_discovery:onboardingrequest_list',
@@ -84,15 +85,11 @@ menu = PluginMenu(
     groups=(
         ('Onboarding', (onboarding, pollers, rules, stripped_domains)),
         ('Changes', (replacements, issues)),
-        ('Software', (
-            PluginMenuItem(
-                link='plugins:netbox_discovery:auditschedule_list', link_text='Audit Schedules',
-                permissions=['netbox_discovery.view_auditschedule'],
-                buttons=(PluginMenuButton(
-                    link='plugins:netbox_discovery:auditschedule_add', title='Add an audit schedule',
-                    icon_class='mdi mdi-calendar-plus', permissions=['netbox_discovery.add_auditschedule'],
-                ),),
-            ),
+        ('Software and Standards', (
+            *((PluginMenuItem(
+                link='plugins:netbox_compliance:configstandard_list', link_text='Standards',
+                permissions=['netbox_compliance.view_configstandard'],
+            ),) if 'netbox_compliance' in settings.PLUGINS else ()),
             PluginMenuItem(
                 link='plugins:netbox_discovery:jobprofile_list', link_text='Job Profiles',
                 permissions=['netbox_discovery.view_jobprofile'],
@@ -102,20 +99,19 @@ menu = PluginMenu(
                 ),),
             ),
             PluginMenuItem(
+                link='plugins:netbox_discovery:platformprofile_list', link_text='Platform Profiles',
+                permissions=['netbox_discovery.view_platformprofile'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:platformprofile_add', title='Assign a standards profile to a platform',
+                    icon_class='mdi mdi-plus-thick', permissions=['netbox_discovery.add_platformprofile'],
+                ),),
+            ),
+            PluginMenuItem(
                 link='plugins:netbox_discovery:devicetypeprofile_list', link_text='Model Profiles',
                 permissions=['netbox_discovery.view_devicetypeprofile'],
                 buttons=(PluginMenuButton(
                     link='plugins:netbox_discovery:devicetypeprofile_add', title='Assign profiles to a model',
                     icon_class='mdi mdi-plus-thick', permissions=['netbox_discovery.add_devicetypeprofile'],
-                ),),
-            ),
-            PluginMenuItem(
-                link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
-                permissions=['netbox_discovery.view_upgradejob'],
-                buttons=(PluginMenuButton(
-                    link='plugins:netbox_discovery:upgradejob_add', title='Schedule upgrades',
-                    icon_class='mdi mdi-calendar-plus',
-                    permissions=['netbox_discovery.add_upgradejob'],
                 ),),
             ),
             PluginMenuItem(
@@ -144,6 +140,26 @@ menu = PluginMenu(
                     icon_class='mdi mdi-plus-thick',
                     permissions=['netbox_discovery.add_prestagepolicy', 'netbox_discovery.apply_upgradejob'],
                 ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:auditschedule_list', link_text='Audit Schedules',
+                permissions=['netbox_discovery.view_auditschedule'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:auditschedule_add', title='Schedule standards audit or remediation',
+                    icon_class='mdi mdi-calendar-plus', permissions=['netbox_discovery.add_auditschedule'],
+                ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
+                permissions=['netbox_discovery.view_upgradejob'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:upgradejob_add', title='Schedule upgrade',
+                    icon_class='mdi mdi-calendar-plus', permissions=['netbox_discovery.add_upgradejob'],
+                ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:standardsjob_list', link_text='Standards Jobs',
+                permissions=['netbox_discovery.view_upgradejob'],
             ),
         )),
     ),

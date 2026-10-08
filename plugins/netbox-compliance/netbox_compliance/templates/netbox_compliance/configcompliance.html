@@ -49,6 +49,8 @@
             <tr><th>Source</th>
               <td>{% badge object.get_source_display bg_color=object.get_source_color %}</td></tr>
             <tr><th>Last checked</th><td>{{ object.last_checked|placeholder }}</td></tr>
+            <tr><th>Checked revision</th><td>{% if object.standard_revision %}<a href="{% url 'plugins:netbox_compliance:standard_revision' pk=object.standard_id number=object.checked_revision %}">v{{ object.checked_revision }}</a>{% else %}Unknown{% endif %}</td></tr>
+            <tr><th>Current revision</th><td>v{{ object.standard.revision }}{% if object.revision_outdated %} <span class="text-warning">Audit needs rerunning against the current standard.</span>{% endif %}</td></tr>
             <tr><th>Freshness</th>
               <td>
                 {% if object.is_stale %}
@@ -72,6 +74,11 @@
     </div>
   </div>
 
+  {% if audit_job %}<p>Audit / remediation job: <a href="{{ audit_job.get_absolute_url }}">#{{ audit_job.pk }}</a></p>{% endif %}
+  {% include 'netbox_compliance/inc/feature_findings.html' with checks=object.findings.checks %}
+  {% if object.findings.job_id and not object.findings.checks %}
+    <p class="text-muted">This result has no detailed findings. Run a new audit with the updated worker to capture the comparison and proposed changes.</p>
+  {% endif %}
   {% if object.missing_entries or object.extra_entries or object.violations %}
     <div class="row">
       <div class="col col-md-12">
@@ -90,7 +97,7 @@
               <h6>Unexpected — present on the device, not named by the standard</h6>
               <ul class="font-monospace">
                 {% for item in object.extra_entries %}
-                  <li>{{ item.line|default:item.key }}
+                  <li>{% if item.line %}{{ item.line }}{% else %}{{ item.key }}{% endif %}
                     {% if item.context %}<span class="text-muted">(in {{ item.context }})</span>{% endif %}
                   </li>
                 {% endfor %}

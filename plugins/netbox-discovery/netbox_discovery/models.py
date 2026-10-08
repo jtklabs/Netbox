@@ -141,12 +141,10 @@ class DiscoveryPoller(PrimaryModel):
         every change that matters under a wall of heartbeats.
         """
         now = timezone.now()
-        fields = {'last_seen_at': now}
-        if upgrade:
-            fields['upgrade_last_seen_at'] = now
-        if version:
+        fields = {'upgrade_last_seen_at' if upgrade else 'last_seen_at': now}
+        if version and not upgrade:
             fields['version'] = version
-        if summary:
+        if summary and not upgrade:
             fields['last_scan_summary'] = summary
         DiscoveryPoller.objects.filter(pk=self.pk).update(**fields)
         for key, value in fields.items():
@@ -916,5 +914,5 @@ class StrippedDomain(PrimaryModel):
 # Imported here so Django discovers these models with the rest of the plugin.
 from .upgrade_models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob  # noqa: E402,F401
 from .command_models import CommandOutput  # noqa: E402,F401
-from .profile_models import DeviceTypeProfile, JobProfile  # noqa: E402,F401
+from .profile_models import DeviceTypeProfile, JobProfile, PlatformProfile  # noqa: E402,F401
 from .audit_models import AuditSchedule, AuditRun  # noqa: E402,F401

@@ -1,5 +1,7 @@
 """Queued remediation: dry run, NetBox's start gate, then apply, one feature at a time."""
 from types import SimpleNamespace
+import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -7,6 +9,67 @@ import pytest
 from netops.upgrade import remediation, scheduler
 
 ONE = 'inventory: NetBox (1 device(s))\nsummary: 1 device(s)\n'
+
+
+def test_structured_findings_are_forwarded_without_raw_output(monkeypatch, tmp_path):
+    monkeypatch.setenv('NETOPS_REPORT_DIR', str(tmp_path))
+
+    def execute(argv, **kwargs):
+        report = Path(argv[argv.index('--report') + 1])
+        report.write_text(json.dumps({'devices': {'sw1': {
+            'desired': ['192.0.2.10'], 'current': ['ntp server 192.0.2.99'],
+            'add': ['192.0.2.10'], 'commands': ['ntp server 192.0.2.10'],
+            'output': 'unfiltered diagnostic must never be forwarded',
+        }}}))
+        return SimpleNamespace(returncode=2, stdout=ONE, stderr='')
+
+    monkeypatch.setattr(remediation.subprocess, 'run', execute)
+    emit = Recorder()
+    remediation.run_job(None, {**job(['ntp']), 'operation': 'audit_config'}, None, emit)
+    summary = emit.events[-1][2]['progress_summary']
+    assert summary['compliance_details']['ntp']['commands'] == ['ntp server 192.0.2.10']
+    assert 'unfiltered' not in json.dumps(summary)
+    assert len(list(tmp_path.glob('queued-*.json'))) == 1
+
+
+def test_details_are_bounded_and_redacted():
+    from netops.debuglog import protect
+    protect(['unique-test-password'])
+    details = remediation.report_details({'devices': {'sw1': {
+        'commands': ['ntp authentication-key 10 md5 unique-test-password'],
+        'current': ['x' * 400] * 100, 'desired': ['y' * 400] * 100,
+        'notes': ['z' * 400] * 100,
+    }}})
+    assert details['truncated']
+    assert len(json.dumps(details).encode()) <= 3500
+    assert 'unique-test-password' not in json.dumps(details)
+    assert '<redacted>' in details['commands'][0]
+
+
+def test_post_change_findings_replace_prechange_plan(monkeypatch):
+    count = 0
+
+    def invoke(feature, device_id, mode, apply, args):
+        nonlocal count
+        count += 1
+        args.compliance_details[feature] = {'commands': ['ntp server 192.0.2.10'] if count == 1 else []}
+        return (2 if count == 1 else 0), ONE
+
+    monkeypatch.setattr(remediation, 'invoke', invoke)
+    emit = Recorder()
+    remediation.run_job(None, job(['ntp']), None, emit)
+    precheck = next(payload for stage, _, payload in emit.events if stage == 'precheck_complete')
+    assert precheck['progress_summary']['compliance_details']['ntp']['commands']
+    assert emit.events[-1][2]['progress_summary']['compliance_details']['ntp']['commands'] == []
+
+
+def test_missing_archive_does_not_reuse_earlier_findings(monkeypatch, tmp_path):
+    monkeypatch.setenv('NETOPS_REPORT_DIR', str(tmp_path))
+    monkeypatch.setattr(remediation.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=1, stdout='', stderr='failure'))
+    args = SimpleNamespace(compliance_details={'ntp': {'commands': ['old plan']}})
+    remediation.invoke('ntp', 42, 'replace', False, args)
+    assert 'old plan' not in json.dumps(args.compliance_details)
+    assert args.compliance_details['ntp']['notes']
 
 
 def job(features=('ntp', 'syslog'), mode='add'):

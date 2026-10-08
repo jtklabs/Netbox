@@ -263,5 +263,5 @@ local_accounts:
 #netbox:
 #  url: https://netbox.example.com
 #  source_tags:
-#    ntp: ntp-source
-#    syslog: syslog-source
+#    ntp: service-source
+#    syslog: service-source

@@ -1,4 +1,4 @@
-"""Database-backed recurring, read-only configuration audits."""
+"""Database-backed configuration audits and optional remediation."""
 from datetime import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -14,7 +14,8 @@ from netbox.models import PrimaryModel
 class AuditSchedule(PrimaryModel):
     name = models.CharField(max_length=100, unique=True)
     enabled = models.BooleanField(default=True)
-    frequency = models.CharField(max_length=10, choices=(('daily', 'Daily'), ('weekly', 'Weekly')), default='daily')
+    remediate = models.BooleanField(default=False, verbose_name='Audit and remediate')
+    frequency = models.CharField(max_length=10, choices=(('now', 'Now (one time)'), ('daily', 'Daily'), ('weekly', 'Weekly')), default='daily')
     weekday = models.PositiveSmallIntegerField(default=0, choices=list(enumerate(
         ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'))))
     local_time = models.TimeField(default=time(2))
@@ -22,7 +23,7 @@ class AuditSchedule(PrimaryModel):
     window_hours = models.PositiveSmallIntegerField(default=4, validators=[MinValueValidator(1), MaxValueValidator(24)])
     filters = models.JSONField(default=dict)
     profile_source = models.CharField(max_length=10, default='custom', choices=(
-        ('custom', 'Selected standards'), ('saved', 'Saved profile'), ('model', 'Model defaults')))
+        ('custom', 'Selected standards'), ('saved', 'Saved profile'), ('model', 'Device defaults (model, then platform)')))
     saved_profile = models.ForeignKey('netbox_discovery.JobProfile', on_delete=models.PROTECT,
                                      blank=True, null=True, related_name='audit_schedules')
     profile = models.JSONField(default=dict, blank=True)
@@ -51,9 +52,9 @@ class AuditSchedule(PrimaryModel):
             ZoneInfo(self.time_zone)
         except (ZoneInfoNotFoundError, ValueError):
             raise ValidationError({'time_zone': 'Enter an IANA time zone, such as America/New_York or UTC.'})
-        allowed = {'status', 'tenant_id', 'site_id', 'platform_id', 'device_type_id', 'tag_id', 'id'}
+        allowed = {'status', 'region_id', 'tenant_id', 'site_id', 'platform_id', 'device_type_id', 'tag_id', 'id'}
         if not isinstance(self.filters, dict) or not self.filters or set(self.filters) - allowed:
-            raise ValidationError({'filters': 'Select devices using status, tenant_id, site_id, platform_id, device_type_id, tag_id or id.'})
+            raise ValidationError({'filters': 'Select devices using status, region_id, tenant_id, site_id, platform_id, device_type_id, tag_id or id.'})
         if 'status' in self.filters and self.filters['status'] != ['active']:
             raise ValidationError({'filters': 'Recurring audits target active inventory; status must be ["active"].'})
         from dcim.filtersets import DeviceFilterSet
@@ -75,20 +76,28 @@ class AuditSchedule(PrimaryModel):
             except QueueError as exc:
                 raise ValidationError({'profile': str(exc)}) from exc
         elif self.profile:
-            raise ValidationError({'profile': 'Selected standards cannot be combined with a saved profile or model defaults.'})
+            raise ValidationError({'profile': 'Selected standards cannot be combined with a saved profile or device defaults.'})
 
     @transaction.atomic
     def save(self, *args, **kwargs):
         from .audit_scheduling import next_occurrence
         previous = type(self).objects.select_for_update().filter(pk=self.pk).first() if self.pk else None
         timing = ('enabled', 'frequency', 'weekday', 'local_time', 'time_zone')
-        if not previous or any(getattr(previous, f) != getattr(self, f) for f in timing):
+        if previous and previous.frequency == self.frequency == 'now' and previous.last_run_at:
+            # Editing or re-enabling a consumed one-shot must never replay changes.
+            self.enabled = False
+            self.next_run_at = None
+            self.last_run_at = previous.last_run_at
+        elif not previous or any(getattr(previous, f) != getattr(self, f) for f in timing):
             self.next_run_at = next_occurrence(self, timezone.now()) if self.enabled else None
         else:
             # A form loaded before dispatch must not restore an already-consumed occurrence.
             self.next_run_at = previous.next_run_at
             self.last_run_at = previous.last_run_at
         super().save(*args, **kwargs)
+        if self.enabled and self.frequency == 'now' and self.next_run_at:
+            from .audit_scheduling import dispatch_now
+            transaction.on_commit(lambda pk=self.pk: dispatch_now(pk))
 
 
 class AuditRun(PrimaryModel):

@@ -120,6 +120,8 @@ def config_cells(devices, standards=None, user=None):
         if row['is_stale']:
             title += ' (stale)'
         title += f'; checked v{row["checked_revision"] or "?"}, current v{row["current_revision"]}'
+        if row['inheritance_note']:
+            title += f'; {row["inheritance_note"]}'
         url = record.get_absolute_url() if record is not None else standard.get_absolute_url()
         cells[(row['device'].pk, standard.pk)] = cell(row['status_label'], row['status_color'],
                                                       CONFIG_OK.get(row['status']), url, title)

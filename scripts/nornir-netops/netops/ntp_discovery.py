@@ -4,10 +4,10 @@ import re
 
 from . import archive
 from .core import canonical_platform, validate_word
-from .netbox import NetBoxError
+from .netbox import NetBoxError, SERVICE_SOURCE_TAG, LEGACY_SOURCE_TAGS
 
 PLATFORMS = ('cisco_ios', 'arista_eos', 'cisco_nxos')
-SOURCE_TAG = 'ntp-source'
+SOURCE_TAG = SERVICE_SOURCE_TAG
 FIELDS = {
     'ntp_discovery': ('json', 'NTP source discovery', 'Latest SSH observation; not an approved standard.'),
     'ntp_vrf': ('text', 'NTP VRF', 'Selected NTP VRF. Use default for the global routing table; blank means unset.'),
@@ -111,19 +111,11 @@ def interface_vrf(output, expected):
     return next(iter(vrfs), 'default')
 
 
-def discover(task):
-    from nornir.core.task import Result
-    from .runner import _check_understood, netmiko_send_command, SHOW_TIMEOUT
-    platform = canonical_platform(task.host.platform)
+def observe(platform, read):
+    """Read one source/VRF observation using the caller's existing SSH session."""
+    platform = canonical_platform(platform)
     if platform not in PLATFORMS:
         raise ValueError(f'NTP source discovery is not supported for {platform}')
-
-    def read(command):
-        output = task.run(task=netmiko_send_command, name=command, command_string=command,
-                          enable=True, read_timeout=SHOW_TIMEOUT).result or ''
-        _check_understood(command, output)
-        return output
-
     observation = source_config('\n'.join(read(command) for command in SHOW_COMMANDS), platform)
     if observation['status'] == 'resolved':
         vrf = interface_vrf(read('show running-config interface ' + observation['source']), observation['source'])
@@ -131,12 +123,26 @@ def discover(task):
         if vrf != observation['vrf']:
             observation.update(status='ambiguous', reason='NTP server VRF and source interface VRF disagree')
     observation.update(platform=platform, checked_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    return observation
+
+
+def discover(task):
+    from nornir.core.task import Result
+    from .runner import _check_understood, netmiko_send_command, SHOW_TIMEOUT
+
+    def read(command):
+        output = task.run(task=netmiko_send_command, name=command, command_string=command,
+                          enable=True, read_timeout=SHOW_TIMEOUT).result or ''
+        _check_understood(command, output)
+        return output
+
+    observation = observe(task.host.platform, read)
     return Result(host=task.host, result=observation, changed=False)
 
 
-def ensure_fields(client):
+def ensure_fields(client, fields=None):
     missing = []
-    for name, (kind, label, description) in FIELDS.items():
+    for name, (kind, label, description) in (FIELDS if fields is None else fields).items():
         rows = client.get('extras/custom-fields/', {'name': name})
         if not rows:
             missing.append((name, kind, label, description))
@@ -149,17 +155,20 @@ def ensure_fields(client):
     for name, kind, label, description in missing:
         client.request_object('POST', 'extras/custom-fields/', {
             'name': name, 'type': kind, 'label': label, 'description': description,
-            'object_types': ['dcim.device'], 'required': False, 'group_name': 'NTP', 'is_cloneable': False,
+            'object_types': ['dcim.device'], 'required': False,
+            'group_name': label.split(' ', 1)[0], 'is_cloneable': False,
         })
 
 
-def sync_device(client, host, observation, source_tag=SOURCE_TAG):
+def sync_device(client, host, observation, source_tag=SOURCE_TAG, *, feature='ntp'):
     """Bootstrap only missing intent; later discovery never moves an existing tag."""
+    label = feature.upper()
+    vrf_field = f'{feature}_vrf'
     device_id = host.data.get('netbox_id')
     if not device_id:
-        raise NetBoxError('NTP discovery writeback requires NetBox inventory identity')
+        raise NetBoxError(f'{label} discovery writeback requires NetBox inventory identity')
     path = f'dcim/devices/{int(device_id)}/'
-    client.request_object('PATCH', path, {'custom_fields': {'ntp_discovery': observation}})
+    client.request_object('PATCH', path, {'custom_fields': {f'{feature}_discovery': observation}})
     if observation['status'] != 'resolved':
         return {'status': 'attention', 'reason': observation.get('reason', observation['status'])}
     device = client.request_object('GET', path)
@@ -177,32 +186,36 @@ def sync_device(client, host, observation, source_tag=SOURCE_TAG):
         return {'status': 'attention', 'reason': 'Source interface does not match exactly one NetBox interface'}
     interface = matches[0]
     tagged = [row for row in rows if any(tag.get('slug') == source_tag for tag in row.get('tags', []))]
-    selected_vrf = (device.get('custom_fields') or {}).get('ntp_vrf')
+    if source_tag == SERVICE_SOURCE_TAG and not tagged:
+        legacy = [row for row in rows if any(tag.get('slug') in LEGACY_SOURCE_TAGS for tag in row.get('tags', []))]
+        if legacy and {row['id'] for row in legacy} != {interface['id']}:
+            return {'status': 'attention', 'reason': 'Legacy source tags disagree with discovery; select one service-source interface'}
+    selected_vrf = (device.get('custom_fields') or {}).get(vrf_field)
     if ((tagged and [row['id'] for row in tagged] != [interface['id']])
             or (selected_vrf and selected_vrf != observation['vrf'])):
-        return {'status': 'attention', 'reason': 'Existing NTP selection differs; manual settings preserved'}
+        return {'status': 'attention', 'reason': f'Existing {label} selection differs; manual settings preserved'}
     if not tagged:
         tags = client.get('extras/tags/', {'slug': source_tag})
         if not tags:
             tags = [client.request_object('POST', 'extras/tags/', {'name': source_tag, 'slug': source_tag})]
         if len(tags) != 1 or tags[0]['slug'] != source_tag:
-            raise NetBoxError('NTP source tag lookup was ambiguous')
+            raise NetBoxError(f'{label} source tag lookup was ambiguous')
         interface_path = f"dcim/interfaces/{int(interface['id'])}/"
         current = client.request_object('GET', interface_path)
         client.request_object('PATCH', interface_path, {'tags': list(dict.fromkeys(
             [tag['id'] for tag in current.get('tags', [])] + [tags[0]['id']]))})
         written = client.request_object('GET', interface_path)
         if not any(tag.get('slug') == source_tag for tag in written.get('tags', [])):
-            raise NetBoxError('NTP interface tag did not verify after write')
+            raise NetBoxError(f'{label} interface tag did not verify after write')
     if not selected_vrf:
         current = client.request_object('GET', path)
-        current_vrf = (current.get('custom_fields') or {}).get('ntp_vrf')
+        current_vrf = (current.get('custom_fields') or {}).get(vrf_field)
         if current_vrf and current_vrf != observation['vrf']:
-            raise NetBoxError('NTP VRF changed during discovery; manual setting preserved')
-        client.request_object('PATCH', path, {'custom_fields': {'ntp_vrf': observation['vrf']}})
+            raise NetBoxError(f'{label} VRF changed during discovery; manual setting preserved')
+        client.request_object('PATCH', path, {'custom_fields': {vrf_field: observation['vrf']}})
     actual = client.request_object('GET', path)
-    if (actual.get('custom_fields') or {}).get('ntp_vrf') != observation['vrf']:
-        raise NetBoxError('NTP VRF did not verify after write')
+    if (actual.get('custom_fields') or {}).get(vrf_field) != observation['vrf']:
+        raise NetBoxError(f'{label} VRF did not verify after write')
     return {'status': 'written' if not tagged or not selected_vrf else 'unchanged',
             'interface_id': interface['id'], 'source': interface['name'], 'vrf': observation['vrf']}
 

@@ -44,6 +44,7 @@
       {# Selected devices open the Discovery schedule form as a remediation; nothing runs from here. #}
       {% if remediate_url %}<form method="get" action="{{ remediate_url }}" id="remediate-form">
         <input type="hidden" name="operation" value="remediate">
+        <input type="hidden" name="frequency" value="now">
         <button type="submit" class="btn btn-sm btn-primary mb-2"><i class="mdi mdi-wrench"></i> Remediate selected devices</button>
       {% endif %}
       {# Pass counts sit under each heading, so a column's state is readable without scrolling. #}
@@ -99,7 +100,6 @@
         A grey badge is not checked, exempt or in progress, never a pass. A dash means the check does not apply to that device.
         <strong>Running code</strong> is the Lifecycle software verdict; <strong>Code staged</strong> is whether the standard's preferred image has been copied to the device.
         Hover a cell for detail; click it for the record behind it.
-        {% if remediate_url %}<strong>Remediate selected devices</strong> opens the schedule form with those devices, where you choose the features, the mode and when; each device's poller applies its own standards.yaml.{% endif %}
       </p>
     </div>
   </div>

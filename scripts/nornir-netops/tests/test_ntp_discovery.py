@@ -137,7 +137,7 @@ def test_bootstrap_preserves_unrelated_data_and_is_idempotent():
     assert sync(client)['status'] == 'written'
     assert client.device['custom_fields']['ntp_vrf'] == 'default'
     assert client.device['custom_fields']['unrelated'] == 'keep'
-    assert {tag['slug'] for tag in client.interfaces[0]['tags']} == {'unrelated', 'ntp-source'}
+    assert {tag['slug'] for tag in client.interfaces[0]['tags']} == {'unrelated', 'service-source'}
     client.writes.clear()
     assert sync(client)['status'] == 'unchanged'
     assert len(client.writes) == 1  # refresh observation only

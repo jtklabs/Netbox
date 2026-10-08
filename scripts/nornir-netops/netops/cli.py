@@ -187,8 +187,8 @@ def _connection_arguments(parent: argparse.ArgumentParser) -> None:
         "--netbox-source-tag",
         action="append",
         metavar="TAG",
-        help="interface tag naming a source interface, e.g. ntp-source "
-        "(repeatable; defaults to ntp-source and syslog-source)",
+        help="interface tag naming a source interface, e.g. service-source "
+        "(repeatable; service-source applies to NTP and syslog)",
     )
 
     cache = parent.add_argument_group(
@@ -516,6 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
     gather.add_argument("--output-dir", metavar="DIR", default=os.environ.get("NETOPS_COLLECT_DIR"),
                         help="where the text files are written [$NETOPS_COLLECT_DIR; default: <project>/collected]")
     gather.add_argument("--no-upload", action="store_true", help="keep the files on this host only; do not post them to NetBox")
+    gather.add_argument("--no-ntp-discovery", action="store_true",
+                        help="skip automatic NTP source/VRF discovery and NetBox tag initialization")
+    gather.add_argument("--no-syslog-discovery", action="store_true",
+                        help="skip automatic syslog source/VRF discovery and NetBox tag initialization")
+    gather.add_argument("--syslog-source-tag", default=os.environ.get("NETBOX_SYSLOG_SOURCE_TAG"),
+                        help="syslog interface tag [$NETBOX_SYSLOG_SOURCE_TAG; default: service-source]")
 
     for check in CHECKS.values():
         checker = subs.add_parser(

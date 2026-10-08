@@ -1,27 +1,30 @@
 {% extends 'generic/object.html' %}
 {% load helpers %}
+{% block breadcrumbs %}
+<li class="breadcrumb-item">{% if object.operation == 'remediate' or object.operation == 'audit_config' %}<a href="{% url 'plugins:netbox_discovery:standardsjob_list' %}">Standards Jobs</a>{% else %}<a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}">Upgrade Jobs</a>{% endif %}</li>
+{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Scheduled work</h5><div class="card-body">
     <table class="table attr-table">
       <tr><th>Device</th><td>{{ object.device|linkify }} ({{ object.address }})</td></tr>
       <tr><th>Poller</th><td>{{ object.poller|linkify }}</td></tr>
-      <tr><th>Upgrade poller last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
+      <tr><th>Worker last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
       <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
       <tr><th>Profile at scheduling</th><td>{{ object.profile_name|default:'Custom settings' }}</td></tr>
-      {% if object.audit_run_id %}<tr><th>Recurring audit</th><td><a href="{{ object.audit_run.get_absolute_url }}">{{ object.audit_run.schedule }}: {{ object.audit_run.scheduled_for }}</a></td></tr>{% endif %}
+      {% if object.audit_run_id %}<tr><th>Standards run</th><td><a href="{{ object.audit_run.get_absolute_url }}">{{ object.audit_run.schedule }}: {{ object.audit_run.scheduled_for }}</a></td></tr>{% endif %}
       <tr><th>Status</th><td>{{ object.get_status_display }}</td></tr>
       <tr><th>Scheduled start</th><td>{{ object.scheduled_at }}</td></tr>
       <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>
       <tr><th>Job last update</th><td>{{ object.last_seen_at|default:'No job updates yet' }}</td></tr>
       <tr><th>Requested by</th><td>{{ object.requested_by|placeholder }}</td></tr>
-      <tr><th>Batch</th><td><a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a> (wave {{ object.planned_wave }})</td></tr>
+      <tr><th>Batch</th><td><a href="{% if object.operation == 'remediate' or object.operation == 'audit_config' %}{% url 'plugins:netbox_discovery:standardsjob_list' %}{% else %}{% url 'plugins:netbox_discovery:upgradejob_list' %}{% endif %}?batch_id={{ object.batch_id }}">{{ object.batch_id }}</a> (wave {{ object.planned_wave }})</td></tr>
       <tr><th>Redundancy groups</th><td>{{ object.groups|join:", "|placeholder }}</td></tr>
       <tr><th>Waits for</th><td>{% for device in waits_for_devices %}{{ device|linkify }}{% if not forloop.last %}, {% endif %}{% empty %}{{ ''|placeholder }}{% endfor %}</td></tr>
       {% if object.held_reason %}<tr><th>Held because</th><td class="text-warning">{{ object.held_reason }}</td></tr>{% endif %}
       <tr><th>Remote run</th><td>{{ object.run_id|placeholder }}</td></tr>
     </table>
-    <p class="text-muted">Upgrade poller last seen includes queue check-ins, even when no jobs are due, and active-job heartbeats or progress reports. Job last update starts when this job is claimed. Refresh to see new activity.</p>
+    <p class="text-muted">Worker last seen includes queue check-ins, even when no jobs are due, and active-job heartbeats or progress reports. Job last update starts when this job is claimed. Refresh to see new activity.</p>
     <p><strong>{{ object.stage }}</strong> {{ object.message }}</p>
     {% if object.heartbeat_stale %}<p class="text-danger">This worker has not sent a heartbeat for over five minutes. Check the remote and the switch before taking further action.</p>{% endif %}
     {% if perms.netbox_discovery.change_upgradejob %}
@@ -51,11 +54,15 @@
       {% endif %}
     {% endif %}
     {% if requeueable and perms.netbox_discovery.add_upgradejob %}
+      {% if object.operation == 'remediate' or object.operation == 'audit_config' %}
+      {% if perms.netbox_discovery.add_auditschedule %}<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}?from_job={{ object.pk }}">Schedule another standards run</a>{% endif %}
+      {% else %}
       <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_requeue' pk=object.pk %}" class="d-inline">{% csrf_token %}
         <button class="btn btn-primary">Re-queue now</button>
       </form>
       <a class="btn btn-outline-primary" href="{% url 'plugins:netbox_discovery:upgradejob_add' %}?from_job={{ object.pk }}">Re-queue with changes</a>
       <p class="text-muted mt-2">A re-queue is a new job for this device with the same profile and operation, due now and keeping this job's window length. It is validated like a fresh schedule: ownership, redundancy groups and permissions apply again.</p>
+      {% endif %}
     {% endif %}
   </div></div>
   <div class="card"><h5 class="card-header">{% if object.operation == 'remediate' %}Remediation profile{% else %}Profile snapshot{% endif %}</h5><pre class="card-body">{{ profile_text }}</pre></div>
@@ -68,6 +75,7 @@
   </tbody></table>
   {% endif %}
 </div><div class="col-lg-6">
+  {% include 'netbox_compliance/inc/feature_findings.html' with checks=object.summary.compliance_details %}
   <div class="card"><h5 class="card-header">Validation summary</h5><pre class="card-body">{{ summary_text }}</pre></div>
   <div class="card"><h5 class="card-header">Progress</h5><div class="card-body">
     <p class="text-muted">Refresh to see new progress. The latest 500 events are shown; the full archive stays on the remote.</p>

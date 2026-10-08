@@ -58,6 +58,27 @@ command sets and posts each output to the discovery plugin, which stores the
 files in NetBox and lists them on the device page. See the nornir-netops
 README, "Collect show commands into NetBox".
 
+That SSH step also discovers NTP and syslog source interfaces and VRFs on IOS/IOS-XE,
+NX-OS and Arista EOS. It adds `service-source` to exactly one matching existing
+NetBox interface and fills the device's `ntp_vrf` custom field only when no
+conflicting selection exists. No additional device tag is required. Conflicts,
+missing interfaces and ambiguous sources are reported rather than guessed;
+existing tags/VRFs are preserved. The observation is saved in `ntp_discovery`.
+The SSH collector's NetBox token needs device/interface change permissions
+and, on first use, permission to create those custom fields and the source tag
+(or an administrator can create them beforehand). Other platforms do not
+auto-tag NTP sources. Add `--no-ntp-discovery` to `commands.extra_args` to opt
+out. `--dry-run` passes `--no-upload` to the SSH collector, preventing these
+NetBox writes; `--collect-only` does not invoke the SSH collector at all.
+
+Syslog shares the `service-source` interface tag with NTP, with separate device
+custom fields `syslog_vrf` and `syslog_discovery`. Legacy `ntp-source` and
+`syslog-source` tags remain readable if they agree on one interface; conflicts
+require review. NX-OS also reads `show logging server` to confirm an omitted VRF.
+Use `--no-syslog-discovery` in `commands.extra_args` to disable it; both
+discoveries are enabled by default in the SSH collector. The source tag can
+be overridden with `--syslog-source-tag` or `NETBOX_SYSLOG_SOURCE_TAG`.
+
 On the NetBox side, the poller posts each output to
 `POST /api/plugins/discovery/command-outputs/` (JSON: `device`, `command`,
 `filename`, `content`, plus `platform`, `poller`, `ok`, `error` and

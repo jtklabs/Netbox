@@ -196,6 +196,7 @@ def test_device_filters_do_not_change_interface_tag_queries():
     ).load()
     assert inventory.hosts["sw1"].data["source_interface"]["ntp"] == "Loopback0"
     assert client.calls[1:] == [
+        ("dcim/interfaces/", {"tag": "service-source"}),
         ("dcim/interfaces/", {"tag": "ntp-source"}),
         ("dcim/interfaces/", {"tag": "syslog-source"}),
     ]

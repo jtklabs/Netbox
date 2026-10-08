@@ -95,7 +95,7 @@ to its REST configuration.
 | `--severity LEVEL` | Override `syslog.severity`. Choices: `emergencies`, `alerts`, `critical`, `errors`, `warnings`, `notifications`, `informational`, `debugging`. Applies to switches. |
 | `--source INTERFACE` | Override `syslog.source` for CSV/direct inventory. NetBox source-interface tags take precedence. Applies to switches. |
 | `--origin-id VALUE` | Cisco message identifier: `hostname`, `ip`, `ipv6`, or a literal string. Defaults to `syslog.origin_id`. Arista/F5 do not configure it. |
-| `--syslog-source-tag TAG` | NetBox interface tag identifying the switch's source interface. Default: `NETBOX_SYSLOG_SOURCE_TAG`, then the configured `syslog` source tag, then `syslog-source`. |
+| `--syslog-source-tag TAG` | NetBox interface tag identifying the switch's source interface. Default: `NETBOX_SYSLOG_SOURCE_TAG`, then the configured `syslog` source tag, then shared `service-source`. |
 | `--policy audit\|add\|manage\|netbox` | Select the logging action; see the policy table below. |
 | `--netbox-checked-field NAME` | NetBox device datetime field for the last completed logging check. Default: `NETBOX_CHECKED_FIELD`, then `syslog_last_checked`. |
 
@@ -407,7 +407,7 @@ comma-separated tag string.
 | `--netbox-autofilter` | Restrict NetBox candidates to this poller's device/site/region tags or site-scoped prefixes. Default: `NETBOX_AUTOFILTER=false`. Requires a poller identity. |
 | `--no-netbox-autofilter` | Disable poller ownership filtering even if enabled in the environment. |
 | `--poller NAME` | Same identity as SNMP inventory's `[poller] name`. Default: `NETOPS_POLLER`. Accepts a bare name or `poller-NAME` tag; does not enable filtering by itself. |
-| `--netbox-source-tag TAG` | Interface tag identifying an NTP/syslog source, such as `ntp-source`; repeatable. Overrides the source-tag set from `netbox.source_tags`; default tags are `ntp-source` and `syslog-source`. |
+| `--netbox-source-tag TAG` | Interface tag identifying a source; repeatable. `service-source` selects the shared interface for NTP and syslog and is the default. Overrides the source-tag set from `netbox.source_tags`. |
 
 Autofilter applies to configuration features, `discover` and checks when their
 inventory is NetBox. Its environment setting is ignored for CSV/direct-IP and

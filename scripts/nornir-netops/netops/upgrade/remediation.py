@@ -18,10 +18,12 @@ secret redaction, the active archive) that concurrent jobs must not share.
 
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,12 +81,55 @@ def project_root():
 
 def invoke(feature, device_id, mode, apply, args):
     """Run one feature; returns (exit code, output). A timeout is a failure."""
+    directory = Path(getattr(args, 'report_dir', None) or os.environ.get('NETOPS_REPORT_DIR')
+                     or project_root() / 'reports').expanduser().resolve()
+    report = directory / f'queued-{device_id}-{feature}-{uuid.uuid4().hex}.json'
+    args.compliance_details[feature] = {}
     try:
-        done = subprocess.run(command(feature, device_id, mode, apply, args), capture_output=True, text=True,
+        done = subprocess.run(command(feature, device_id, mode, apply, args) + ['--report', str(report)], capture_output=True, text=True,
                               timeout=TIMEOUT, cwd=project_root(), stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return EXIT_FAILED, f'{feature} did not finish within {TIMEOUT // 60} minutes'
+    try:
+        details = report_details(json.loads(report.read_text(encoding='utf-8')))
+        if apply:
+            # An attempted command is not proof of the remaining drift. A
+            # successful write is followed by a fresh read-only verification.
+            details.pop('commands', None)
+            details.setdefault('notes', []).append('Change attempt: run a fresh audit to establish remaining drift if verification fails.')
+        args.compliance_details[feature] = details
+    except (OSError, ValueError, TypeError):
+        args.compliance_details[feature] = {'notes': ['Detailed findings unavailable; see the worker run archive.']}
     return done.returncode, (done.stdout or '') + (done.stderr or '')
+
+
+def report_details(document):
+    """Only publish bounded, already-redacted fields from the structured archive."""
+    from ..archive import clean
+    if not isinstance(document, dict):
+        return {}
+    devices = document.get('devices', {})
+    if not isinstance(devices, dict) or len(devices) != 1:
+        return {}
+    row = next(iter(devices.values()))
+    if not isinstance(row, dict):
+        return {}
+    details = {}
+    for key in ('add', 'remove', 'commands', 'advisories', 'notes', 'current', 'desired'):
+        values = row.get(key, [])
+        if isinstance(values, list):
+            details[key] = [str(clean(value))[:500] for value in values[:40]]
+            if len(values) > 40 or any(len(str(value)) > 500 for value in values):
+                details['truncated'] = True
+    if row.get('error'):
+        details['error'] = str(clean(row['error']))[:500]
+    # Seven features must fit inside the API's 64 KiB progress-summary limit.
+    while len(json.dumps(details).encode()) > 3500:
+        largest = max((key for key in details if isinstance(details[key], list) and details[key]),
+                      key=lambda key: len(json.dumps(details[key])))
+        details[largest].pop()
+        details['truncated'] = True
+    return details
 
 
 def one_device(output):
@@ -104,6 +149,7 @@ def run_job(task, job, args, emit):
     if not isinstance(snapshot, dict) or not snapshot.get('document') or not snapshot.get('revisions'):
         raise ValueError('Job has no versioned NetBox standards; re-create it before execution')
     options = copy.copy(args) if args is not None else SimpleNamespace()
+    options.compliance_details = {}
     # Both the dry run and apply read the same private snapshot, never a local fallback.
     with tempfile.TemporaryDirectory(prefix='netops-standards-') as directory:
         path = Path(directory) / 'standards.json'
@@ -140,6 +186,7 @@ def run_job(task, job, args, emit):
                 summary['mobility_conductor'] = conductor
             if 'compliance_results' in payload:
                 summary['compliance_results'] = payload['compliance_results']
+                summary['compliance_details'] = copy.deepcopy(options.compliance_details)
             # Reporter sends progress_summary to NetBox and keeps the full
             # payload in the local archive.
             return emit(stage, message, {**payload, 'progress_summary': summary,

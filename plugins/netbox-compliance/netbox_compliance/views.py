@@ -174,6 +174,15 @@ class ConfigComplianceListView(ObjectListView):
 class ConfigComplianceView(ObjectView):
     queryset = ConfigCompliance.objects.select_related('device', 'standard')
 
+    def get_extra_context(self, request, instance):
+        from django.apps import apps
+        if not apps.is_installed('netbox_discovery'):
+            return {'audit_job': None}
+        from netbox_discovery.models import UpgradeJob
+        job_id = instance.findings.get('job_id')
+        job = UpgradeJob.objects.restrict(request.user, 'view').filter(pk=job_id).first() if type(job_id) is int else None
+        return {'audit_job': job}
+
 
 @register_model_view(ConfigCompliance, 'edit')
 class ConfigComplianceEditView(ObjectEditView):
@@ -345,9 +354,10 @@ class DeviceGridView(PermissionRequiredMixin, View):
 
         if not apps.is_installed('netbox_discovery'):
             return ''
-        if not (user.has_perm('netbox_discovery.add_upgradejob') and user.has_perm('netbox_discovery.apply_upgradejob')):
+        if not (user.has_perm('netbox_discovery.add_upgradejob') and user.has_perm('netbox_discovery.apply_upgradejob')
+                and user.has_perm('netbox_discovery.add_auditschedule')):
             return ''
-        return reverse('plugins:netbox_discovery:upgradejob_add')
+        return reverse('plugins:netbox_discovery:auditschedule_add')
 
     @staticmethod
     def csv(columns, rows):

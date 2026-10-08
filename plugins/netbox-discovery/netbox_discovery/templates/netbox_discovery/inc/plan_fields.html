@@ -2,6 +2,8 @@
 {% render_errors form %}
 {% for field in form.hidden_fields %}{{ field }}{% endfor %}
 {% for field in form.visible_fields %}
+  {% if field.name == 'all_active' %}<h2 class="mt-4">Device scope</h2>{% endif %}
+  {% if field.name == 'time_zone' %}<h2 class="mt-4">Timing</h2>{% endif %}
   <div data-plan-field="{{ field.name }}">{% render_field field %}</div>
 {% endfor %}
 <script>

@@ -10,9 +10,8 @@ is exactly where somebody decides whether a box is fit to leave in service.
 from django.conf import settings
 from netbox.plugins import PluginTemplateExtension
 
-from netbox_compliance.choices import ConfigCheckResultChoices, ConfigComplianceStatusChoices
-from netbox_compliance.models import ConfigCompliance
-from netbox_compliance.scoping import StandardResolver
+from netbox_compliance.models import ConfigStandard
+from netbox_compliance.scoping import device_standard_rows
 
 PLUGIN_SETTINGS = settings.PLUGINS_CONFIG.get('netbox_compliance', {})
 
@@ -23,28 +22,16 @@ class DeviceComplianceCard(PluginTemplateExtension):
     def _rows(self, device):
         if device is None:
             return []
-        standards = StandardResolver().for_device(device)
-        if not standards:
-            return []
-        records = {
-            record.standard_id: record
-            for record in ConfigCompliance.objects.filter(
-                device=device, standard__in=standards
-            ).select_related('standard')
-        }
-        rows = []
-        for standard in standards:
-            record = records.get(standard.pk)
-            status = record.status if record else ConfigCheckResultChoices.RESULT_UNKNOWN
-            rows.append({
-                'standard': standard,
-                'record': record,
-                'status': status,
-                'label': _label(status),
-                'color': ConfigComplianceStatusChoices.colors.get(status),
-                'findings': record.finding_count if record else 0,
-                'is_stale': record.is_stale if record else False,
-            })
+        from netbox_compliance.scoping import active_standards
+        request = self.context.get('request')
+        user = request.user if request is not None else None
+        standards = ConfigStandard.objects.all()
+        if user is not None:
+            standards = standards.restrict(user, 'view')
+        rows = device_standard_rows([device], standards=list(active_standards(queryset=standards).prefetch_related(
+            'platforms', 'roles', 'sites', 'device_tags')), user=user)
+        for row in rows:
+            row.update(label=row['status_label'], color=row['status_color'])
         return rows
 
     def _render(self):
@@ -63,11 +50,6 @@ class DeviceComplianceCard(PluginTemplateExtension):
         if PLUGIN_SETTINGS.get('compliance_card_position') == 'left_page':
             return self._render()
         return ''
-
-
-def _label(status):
-    labels = {entry[0]: entry[1] for entry in ConfigComplianceStatusChoices.CHOICES}
-    return labels.get(status, status)
 
 
 template_extensions = [DeviceComplianceCard]

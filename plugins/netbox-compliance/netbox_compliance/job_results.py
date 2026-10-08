@@ -29,6 +29,24 @@ def record_job_results(job, summary, checked_at):
         record.last_checked = checked_at
         record.source = 'ssh'
         record.findings = {'job_id': job.pk, 'run_id': job.run_id}
-        record.observed = ''
-        record.error_message = 'Feature check failed; see the linked job.' if result == 'error' else ''
+        details = summary.get('compliance_details', {})
+        checks = {feature: details[feature] for feature in job.profile['features']
+                  if FEATURE_SECTIONS[feature] == pinned['section'] and isinstance(details, dict)
+                  and isinstance(details.get(feature), dict)}
+        checks = {feature: {
+            **{key: [item for item in check.get(key, []) if isinstance(item, str)]
+               for key in ('add', 'remove', 'current', 'desired', 'commands', 'notes', 'advisories')
+               if isinstance(check.get(key), list)},
+            'error': check.get('error') if isinstance(check.get('error'), str) else '',
+            'truncated': check.get('truncated') is True,
+        } for feature, check in checks.items()}
+        record.findings['checks'] = checks
+        record.findings['missing'] = [f'{feature}: {item}' for feature, check in checks.items()
+                                      for item in check.get('add', []) if verdicts.get(feature) == 'non-compliant']
+        record.findings['extra'] = [{'line': f'{feature}: {item}'} for feature, check in checks.items()
+                                    for item in check.get('remove', []) if verdicts.get(feature) == 'non-compliant']
+        record.observed = '\n\n'.join(f'{feature}:\n' + '\n'.join(map(str, check.get('current', [])))
+                                      for feature, check in checks.items() if check.get('current'))
+        errors = [str(check['error']) for check in checks.values() if check.get('error')]
+        record.error_message = ('\n'.join(errors) or 'Feature check failed; see the linked job.') if result == 'error' else ''
         record.save()

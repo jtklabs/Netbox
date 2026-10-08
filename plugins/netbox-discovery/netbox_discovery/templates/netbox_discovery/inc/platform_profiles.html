@@ -1,0 +1,12 @@
+{% load helpers %}
+<div class="card">
+  <h2 class="card-header">Standards profile</h2>
+  <div class="card-body">
+    {% if assignment %}
+    <p>{{ assignment.remediation_profile|linkify }}</p>
+    <a href="{{ assignment.get_absolute_url }}">View assignment</a>
+    {% elif perms.netbox_discovery.add_platformprofile %}
+    <a href="{% url 'plugins:netbox_discovery:platformprofile_add' %}?platform={{ object.pk }}"><i class="mdi mdi-plus"></i> Assign standards profile</a>
+    {% else %}<p>No standards profile assigned.</p>{% endif %}
+  </div>
+</div>

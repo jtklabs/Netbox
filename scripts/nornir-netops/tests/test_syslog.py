@@ -210,8 +210,10 @@ def test_an_injected_origin_id_is_rejected():
 
 
 def test_the_show_command_asks_for_defaults():
-    for support in FEATURE.platforms.values():
-        assert support.show_command == "show running-config all | include ^logging"
+    for platform in ('cisco_ios', 'arista_eos'):
+        assert FEATURE.platforms[platform].show_command == "show running-config all | include ^logging"
+    assert FEATURE.platforms['cisco_nxos'].commands == (
+        'show running-config | include ^logging', 'show logging server')
 
 
 def test_a_severity_already_at_the_default_is_compliant():

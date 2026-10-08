@@ -1,0 +1,12 @@
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'host' %}
+{% set options = nxos_options[key] %}
+logging server {{ item.host }} {{ options.severity }}{% if item.port != 514 %} port {{ item.port }}{% endif %} facility {{ options.facility }} use-vrf {{ vrf or 'default' }}
+{% elif item.kind == 'source' %}
+logging source-interface {{ item.source }}
+{% endif %}
+{% endfor %}
+{% for entry in remove %}
+no logging server {{ entry.data.host }}
+{% endfor %}

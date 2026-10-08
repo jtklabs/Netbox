@@ -1,12 +1,11 @@
 from django.db.models import Count
-from django.utils import timezone
 from netbox.api.serializers import NetBoxModelSerializer
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import serializers
 
 from ..models import AuditSchedule, AuditRun
 from ..audit_views import AuditScheduleFilterSet, AuditRunFilterSet
-from ..audit_scheduling import payload
+from ..audit_scheduling import validate_profile_access
 from .. import upgrade_queue as queue
 
 
@@ -16,7 +15,7 @@ class AuditScheduleSerializer(NetBoxModelSerializer):
 
     class Meta:
         model = AuditSchedule
-        fields = ('id', 'url', 'display', 'name', 'enabled', 'frequency', 'weekday', 'local_time', 'time_zone',
+        fields = ('id', 'url', 'display', 'name', 'enabled', 'remediate', 'frequency', 'weekday', 'local_time', 'time_zone',
                   'window_hours', 'filters', 'profile_source', 'saved_profile', 'profile', 'run_as',
                   'next_run_at', 'last_run_at', 'overdue', 'description', 'comments', 'tags', 'custom_fields',
                   'created', 'last_updated')
@@ -27,13 +26,13 @@ class AuditScheduleSerializer(NetBoxModelSerializer):
         attrs = super().validate(attrs)
         user = self.context['request'].user
         if not user.has_perm('netbox_discovery.add_upgradejob'):
-            raise serializers.ValidationError('Scheduling audits requires permission to add upgrade jobs.')
+            raise serializers.ValidationError('Scheduling audits requires permission to add device jobs.')
         candidate = AuditSchedule()
-        for field in ('name', 'enabled', 'filters', 'profile_source', 'saved_profile', 'profile', 'window_hours'):
+        for field in ('name', 'enabled', 'remediate', 'filters', 'profile_source', 'saved_profile', 'profile', 'window_hours'):
             setattr(candidate, field, attrs.get(field, getattr(self.instance or candidate, field)))
-        if candidate.enabled:
+        if candidate.enabled or candidate.remediate:
             try:
-                queue.prepare(user, payload(candidate, timezone.now(), user))
+                validate_profile_access(candidate, user)
             except queue.QueueError as exc:
                 raise serializers.ValidationError(str(exc)) from exc
         return attrs

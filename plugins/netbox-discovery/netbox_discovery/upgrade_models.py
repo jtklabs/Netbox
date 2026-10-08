@@ -53,7 +53,9 @@ class UpgradeJob(PrimaryModel):
 
     class Meta:
         ordering = ('-scheduled_at', '-pk')
-        permissions = [('run_upgradejob', 'Execute scheduled upgrade jobs'),
+        verbose_name = 'device job'
+        verbose_name_plural = 'device jobs'
+        permissions = [('run_upgradejob', 'Execute scheduled device jobs'),
                        ('apply_upgradejob', 'Schedule image staging and upgrades')]
         indexes = [models.Index(fields=('poller', 'status', 'scheduled_at'), name='upgrade_due_idx')]
         # Recovery keeps the device fenced until a person has checked it.

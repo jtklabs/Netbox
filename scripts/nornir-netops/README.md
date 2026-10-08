@@ -337,8 +337,7 @@ nothing at all. That is not a fleet-wide standard, so it is not in the
 standards file -- it is a **tag on the interface** in NetBox:
 
 ```
-Loopback0    tags: ntp-source
-Vlan10       tags: syslog-source
+Loopback0    tags: service-source
 ```
 
 The rule that follows:
@@ -350,35 +349,45 @@ The rule that follows:
 | two or more | **That device fails**, naming the interfaces. |
 
 ```console
-sw1 (10.1.1.1) [cisco_ios] FAILED -- 2 interfaces are tagged ntp-source
+sw1 (10.1.1.1) [cisco_ios] FAILED -- 2 interfaces are tagged service-source
     in NetBox (Loopback0, Vlan10); exactly one may be
 ```
 
-The failure is per device and per standard: the rest of the fleet is planned
-normally, and a device whose `ntp_source_interface` is ambiguous can still have
-its syslog source applied. It is caught **before the device is read or
+The shared tag selects one interface for both NTP and syslog. Ambiguity blocks
+both services on that device; the rest of the fleet is planned normally.
+It is caught **before the device is read or
 written**, and picking one would be guessing -- the wrong source interface is
 the kind of thing that quietly breaks return traffic rather than failing
 visibly.
 
-The tags consulted default to `ntp-source` and `syslog-source`;
+Both services default to the interface tag `service-source`;
 `--netbox-source-tag`, or `netbox.source_tags` in the standards file, changes
 that:
 
 ```yaml
 netbox:
   source_tags:
-    ntp: ntp-source
-    syslog: syslog-source
+    ntp: service-source
+    syslog: service-source
 ```
 
-A bare list works too, in which case the part before `-source` names the
+A bare list works too: `[service-source]` selects the shared tag for both
+services. For other tags the part before `-source` names the
 feature -- so `snmp-source` wires itself to `snmp` once that feature learns to
 use one.
 
 NetBox is asked **once per tag for the whole fleet**, not once per device -- a
 single query the server is built to answer, rather than a round trip per device
 per standard.
+
+Older `ntp-source` and `syslog-source` assignments remain readable when a
+device has no `service-source` selection. Matching legacy selections are
+combined; different interfaces fail closed for both services. Discovery adds
+the shared tag only when the old selections agree with the observation and
+never deletes old tags. An explicit `service-source` selection takes precedence
+over legacy tags. Conflicting NTP/syslog observations in the same collection
+run are reported without initializing either selection. Existing explicit
+per-service tag overrides remain supported; remove them to use the shared default.
 
 ### Discover NTP sources over SSH
 
@@ -404,7 +413,7 @@ or VRFs across servers, and interface/VRF mismatches require manual review.
 
 `--sync-netbox` records the observation and timestamp in the device JSON custom
 field `ntp_discovery`. If exactly one existing NetBox interface matches, it can
-add `ntp-source` (or the configured NTP source tag) and fill the device text
+add `service-source` (or the configured NTP source tag) and fill the device text
 custom field `ntp_vrf`. `default` explicitly selects the global routing table;
 a blank field falls back to the standard's VRF. NTP audits and remediation
 consume this per-device selection together with the interface tag.
@@ -422,6 +431,40 @@ custom fields and the source tag; an administrator can provision these first.
 The fields must be assigned to devices, with types JSON and text respectively.
 Writes use the normal NetBox API/change log. This command does not install a
 schedule or enable a poller; test a limited preview before scheduling it.
+
+The inventory SSH collector (`configure.py collect --netbox`) now performs
+the same discovery automatically on IOS/IOS-XE, NX-OS and EOS, using its
+existing SSH session. It initializes missing selections after collecting the
+device outputs, so the next NTP audit/remediation can consume them. Other
+platforms still collect their normal command outputs but do not auto-tag NTP
+sources. No device opt-in tag is needed; normal poller ownership selects the
+devices. Stack members without a primary IP are not SSH targets: configure
+the source on the stack master's NetBox interface.
+
+For the SNMP inventory sweep to invoke this SSH step, enable it in the poller's
+`snmp-inventory.conf` (and configure nornir-netops's SSH credentials and NetBox
+token as usual):
+
+```ini
+[commands]
+run_after_sweep = true
+netops_dir = /opt/nornir-netops
+```
+
+The `service-source` tag belongs on the **interface**, not the device. It is created
+and assigned automatically when discovery is unambiguous. The VRF is the device
+custom field `ntp_vrf`, not a tag; the last observation is `ntp_discovery`.
+Existing conflicting selections require manual review and are never moved or
+cleared by collection. For a manual selection, tag exactly one interface and
+set `ntp_vrf` to the intended VRF name or `default` for global routing.
+
+`collect --no-ntp-discovery` disables this feature. `collect --no-upload`
+retains observations in the local run archive but makes no NetBox writes;
+SNMP inventory `--dry-run` passes this flag through automatically. Source
+discovery/writeback failures do not discard the other collected outputs.
+Collector exit codes include 2 for NTP selections needing review and 1 for
+SSH/writeback errors. This does not change device configuration or establish
+compliance: audits still compare the live device against the approved standard.
 
 ### What this means for the templates
 
@@ -776,7 +819,7 @@ legacy `aruba_conductor`, `aruba_config_path` custom fields and
 `/md/campus/00:11:22:33:44:55`), and set `aruba_conductor` or
 `ntp.aruba.conductor` explicitly. Use IPv4 literals for NTP servers, including regional lists;
 DNS names and IPv6 are deliberately rejected by this adapter. Tag one `VlanN`
-interface or `Loopback0` with `ntp-source`. Without a selection, the existing
+interface or `Loopback0` with `service-source`. Without a selection, the existing
 source is preserved. Nondefault VRFs, preference and managed authentication are
 not supported. Existing authentication bindings survive iburst-only corrections.
 
@@ -981,10 +1024,44 @@ notifications` clears the setting whatever argument it is given, so negating a
 stale one after setting the new value would undo the change -- setting it
 replaces the old value by itself. Only collectors are removed by `--replace`.
 
+### Syslog Source Discovery
+
+Inventory SSH collection now discovers syslog sources on IOS/IOS-XE, NX-OS,
+and Arista EOS alongside NTP. Enable `[commands] run_after_sweep = true` in
+the SNMP poller configuration to run both after each sweep. The collector
+uses its existing SSH credentials and session; it sends only show commands.
+
+- `service-source` is the shared **interface** tag, automatically assigned when all
+  collectors share one explicit source/VRF and exactly one NetBox interface
+  matches. No additional device opt-in tag is needed.
+- `syslog_vrf` is a device text custom field, consumed by audits/remediation.
+  It overrides `syslog.vrf`; `default` selects global routing and blank leaves
+  the standard's VRF in effect.
+- `syslog_discovery` is a device JSON custom field containing the latest
+  observation and timestamp. This is not a compliance result or approved
+  collector list.
+
+The collector creates these fields/tag when permitted. Its token needs device
+and interface change permissions, plus initial custom-field/tag creation
+permissions (or an administrator can provision them). NTP and syslog use the
+same interface tag by default; their VRF fields and observations remain separate.
+Existing conflicting selections, missing interfaces, mixed sources/VRFs and
+missing explicit sources require manual review. Discovery never moves or
+clears an existing selection. Stack members without primary IPs are not SSH
+targets; use the stack master's interface selection.
+
+Use `collect --no-syslog-discovery` to disable just syslog discovery, or
+`--no-upload` to preview both discoveries without any NetBox writes. SNMP
+`--dry-run` propagates `--no-upload`. The custom tag can be selected with
+`--syslog-source-tag`, `NETBOX_SYSLOG_SOURCE_TAG`, or the existing
+`netbox.source_tags.syslog` mapping. Conflicts and write errors are recorded
+per feature without discarding collected command outputs or the other
+feature's discovery. No syslog collector addresses are learned into standards.
+
 ### Cisco and Arista NetBox policies
 
 `syslog` uses the same `--policy audit|add|manage|netbox` selector for Cisco
-IOS/IOS-XE, Arista EOS, and F5. With `--policy netbox`, each device independently
+IOS/IOS-XE, NX-OS, Arista EOS, and F5. With `--policy netbox`, each device independently
 follows its `syslog-audit`, `syslog-add`, or `syslog-manage` device tag. No tag
 means audit. Explicit audit/add/manage (or the existing `--add` / `--replace`)
 overrides device tags. Without `--apply`, every policy remains a dry run.
@@ -1001,7 +1078,7 @@ overrides device tags. Without `--apply`, every policy remains a dry run.
 ./configure.py syslog --netbox --limit my-switch --policy manage --apply --yes
 ```
 
-Tag the desired **interface** in NetBox with `syslog-source`: for example,
+Tag the desired **interface** in NetBox with `service-source`: for example,
 `Loopback0` on a Cisco device and `Management1` on an Arista device. The script
 joins interfaces to devices by NetBox device ID and uses the tagged interface
 name for `logging source-interface`. Device policy tags and interface source
@@ -1021,7 +1098,7 @@ and are independent of device filters.
 ```dotenv
 NETOPS_INVENTORY=netbox
 NETOPS_SYSLOG_POLICY=netbox
-NETBOX_SYSLOG_SOURCE_TAG=syslog-source
+NETBOX_SYSLOG_SOURCE_TAG=service-source
 ```
 
 `NETOPS_SYSLOG_POLICY` supplies the shared default; the existing
@@ -1042,6 +1119,20 @@ verification or requested save leaves that device's previous fields unchanged.
 Applied `--no-verify` runs do not stamp; `--no-save` still verifies and records
 the observed running configuration. Dry runs only preview the field values.
 Rollback reports preserve the previous source interface, severity and collectors.
+
+NX-OS uses `logging server` with per-collector severity rather than IOS's
+global `logging trap`. Audits read both the logging configuration and
+`show logging server` so an omitted VRF is resolved from observed state,
+not assumed. Missing/contradictory state fails for review. Updating an existing
+collector does not subsequently negate it; only unwanted collector hosts are
+removed in replace mode. Existing facility is preserved, and severity is
+preserved unless the standard specifies it. NX-OS excludes `origin_id`.
+Secure/TLS or unrecognized NX-OS server options fail closed for manual review,
+never silently downgrade to UDP. Read-back verification and rollback use the
+same platform-specific settings.
+
+Syntax references: [Cisco NX-OS logging configuration](https://www.cisco.com/c/en/us/td/docs/switches/datacenter/nexus9000/sw/106x/config-guides/sys-mgmt/cisco-nexus-9000-series-nx-os-system-management-configuration-guide-release-106x/m-configuring-system-message-logging.html)
+and [Arista logging commands](https://www.arista.com/en/um-eos/eos-switch-administration-commands).
 
 When `syslog.vrf` is configured in the standards file, collectors and tagged
 sources are rendered and verified in that VRF. VRF membership is not inferred
@@ -2530,6 +2621,10 @@ listed in NetBox with that note. Known credentials are redacted before the
 text is written or sent. The poller token needs add, change and view
 permission on the plugin's command outputs. `snmp-inventory` can run this
 after every sweep with `run_after_sweep` in its `[commands]` section.
+On IOS/IOS-XE, NX-OS and EOS it also discovers the configured NTP source and
+initializes missing NetBox interface tags/VRF selections. See
+[Discover NTP sources over SSH](#discover-ntp-sources-over-ssh) for permissions,
+conflict handling and the `--no-ntp-discovery` opt-out.
 
 ### NetBox-scheduled upgrades
 

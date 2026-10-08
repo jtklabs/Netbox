@@ -5,7 +5,7 @@
   <h5 class="card-header">
     Config Compliance
     <div class="card-actions">
-      <a href="{% url 'plugins:netbox_compliance:configcompliance_list' %}?device_id={{ object.pk }}"
+      <a href="{% url 'plugins:netbox_compliance:configcompliance_list' %}?device_id={% if compliance_rows.0.source_device %}{{ compliance_rows.0.source_device.pk }}{% else %}{{ object.pk }}{% endif %}"
          class="btn btn-sm btn-ghost-primary">
         <i class="mdi mdi-chevron-right-box-outline" aria-hidden="true"></i> All results
       </a>
@@ -29,6 +29,7 @@
             {% if row.findings %}
               <span class="text-muted ms-1">{{ row.findings }} finding{{ row.findings|pluralize }}</span>
             {% endif %}
+            {% if row.inherited %}<div class="text-muted small">{{ row.inheritance_note }}</div>{% endif %}
           </td>
         </tr>
       {% endfor %}

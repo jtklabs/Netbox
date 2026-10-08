@@ -253,11 +253,11 @@ class JobProfileTest(UpgradeFixture, TestCase):
             with self.subTest(page=name):
                 response = client.get(reverse('plugins:netbox_discovery:' + name, args=args))
                 self.assertEqual(response.status_code, 200)
-        now = timezone.now()
-        response = client.post(reverse('plugins:netbox_discovery:upgradejob_add'),
-                               {'device_type': self.device.device_type_id, 'operation': 'remediate',
-                                'profile_source': 'model', 'scheduled_at': now.isoformat(),
-                                'start_before': (now + timedelta(hours=1)).isoformat(), 'schedule': 'yes'})
+        with self.captureOnCommitCallbacks(execute=True):
+            response = client.post(reverse('plugins:netbox_discovery:auditschedule_add'),
+                                   {'name': 'Model standards', 'enabled': True, 'remediate': True,
+                                    'frequency': 'now', 'window_hours': 1, 'models': [self.device.device_type_id],
+                                    'profile_source': 'model'})
         self.assertEqual(response.status_code, 302, response.context['form'].errors if response.context else None)
         self.assertEqual(UpgradeJob.objects.get().profile, self.remediation.plan)
 

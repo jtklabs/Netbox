@@ -56,11 +56,12 @@ class OnboardingRequestTable(NetBoxTable):
 class DiscoveryPollerTable(NetBoxTable):
     name = tables.Column(linkify=True)
     tenant = tables.Column(linkify=True)
-    last_seen_at = columns.DateTimeColumn(verbose_name='Last check-in')
+    last_seen_at = columns.DateTimeColumn(verbose_name='Discovery check-in', default='Never checked in')
+    upgrade_last_seen_at = columns.DateTimeColumn(verbose_name='Upgrade / standards check-in', default='Never checked in')
     # Asked positively: a BooleanColumn draws false as a red cross, so a column
     # headed "Stale" put a red cross against every healthy poller.
     is_checking_in = columns.BooleanColumn(
-        verbose_name='Checking in', orderable=False,
+        verbose_name='Discovery checking in', orderable=False,
     )
     open_requests = tables.Column(
         accessor='requests__count', orderable=False, verbose_name='Open requests'
@@ -70,10 +71,10 @@ class DiscoveryPollerTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DiscoveryPoller
         fields = (
-            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'is_checking_in', 'version',
+            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version',
             'last_scan_summary', 'open_requests', 'description', 'tags',
         )
-        default_columns = ('name', 'last_seen_at', 'is_checking_in', 'version',
+        default_columns = ('name', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version',
                        'last_scan_summary')
 
 

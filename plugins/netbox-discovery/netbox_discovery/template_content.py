@@ -1,7 +1,7 @@
 """The Device Configuration State panel on every device page."""
 from netbox.plugins import PluginTemplateExtension
 
-from .models import CommandOutput, DeviceTypeProfile
+from .models import CommandOutput, DeviceTypeProfile, PlatformProfile
 
 
 class DeviceCommandOutputs(PluginTemplateExtension):
@@ -28,4 +28,16 @@ class DeviceTypeJobProfiles(PluginTemplateExtension):
         return self.render('netbox_discovery/inc/model_profiles.html', extra_context={'assignment': assignment})
 
 
-template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles]
+class PlatformJobProfiles(PluginTemplateExtension):
+    models = ['dcim.platform']
+
+    def right_page(self):
+        request = self.context['request']
+        if not request.user.has_perm('netbox_discovery.view_platformprofile'):
+            return ''
+        assignment = PlatformProfile.objects.restrict(request.user, 'view').filter(
+            platform=self.context['object']).select_related('remediation_profile').first()
+        return self.render('netbox_discovery/inc/platform_profiles.html', extra_context={'assignment': assignment})
+
+
+template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles]

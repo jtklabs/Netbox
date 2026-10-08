@@ -19,6 +19,7 @@ last_checked with a queryset update — no signals, no changelog — and only a
 changed one goes through save().
 """
 
+from dcim.filtersets import DeviceFilterSet
 from dcim.models import Device
 from django.db.models import Count
 from django.db import transaction
@@ -27,6 +28,7 @@ from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 
 from netbox_compliance import filtersets
 from netbox_compliance.api.serializers import (
@@ -35,7 +37,7 @@ from netbox_compliance.api.serializers import (
     ConfigStandardSerializer,
 )
 from netbox_compliance.models import ConfigCompliance, ConfigStandard
-from netbox_compliance.scoping import active_standards
+from netbox_compliance.scoping import active_standards, device_standard_rows
 
 __all__ = (
     'ConfigStandardViewSet',
@@ -66,6 +68,50 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
     ).prefetch_related('tags')
     serializer_class = ConfigComplianceSerializer
     filterset_class = filtersets.ConfigComplianceFilterSet
+
+    @action(detail=False, methods=['get'])
+    def effective(self, request):
+        """Effective standards per device, including live stack-master inheritance.
+
+        Pagination counts devices, not checks. The ordinary list remains the
+        recorded evidence; this endpoint includes inherited and unchecked rows.
+        """
+        if not request.user.has_perm('netbox_compliance.view_configcompliance'):
+            return Response({'detail': 'View permission on config compliance is required.'}, status=403)
+        filters = request.query_params.copy()
+        for key in ('limit', 'offset', 'format'):
+            filters.pop(key, None)
+        if 'device_id' in filters:
+            filters.setlist('id', filters.pop('device_id'))
+        unknown = set(filters) - set(DeviceFilterSet.base_filters)
+        if unknown:
+            raise ValidationError({'filters': f'Unknown device filters: {sorted(unknown)}'})
+        selection = DeviceFilterSet(filters, queryset=Device.objects.restrict(request.user, 'view'))
+        if not selection.is_valid():
+            raise ValidationError(selection.errors)
+        devices = selection.qs.select_related('site', 'platform', 'role').prefetch_related('tags').order_by('pk')
+        page = self.paginate_queryset(devices)
+        devices = list(page if page is not None else devices)
+        standards = list(active_standards(queryset=ConfigStandard.objects.restrict(request.user, 'view'))
+                         .prefetch_related('platforms', 'roles', 'sites', 'device_tags'))
+        results = {device.pk: {'device_id': device.pk, 'device_name': str(device), 'standards': []}
+                   for device in devices}
+        for row in device_standard_rows(devices, standards=standards, user=request.user):
+            record, source = row['record'], row['source_device']
+            results[row['device'].pk]['standards'].append({
+                'standard_id': row['standard'].pk, 'standard_name': row['standard'].name,
+                'status': row['status'], 'inherited': row['inherited'],
+                'source_device_id': source.pk if source is not None else None,
+                'source_device_name': str(source) if source is not None else None,
+                'inheritance_note': row['inheritance_note'],
+                'record_id': record.pk if record is not None else None,
+                'record_url': record.get_absolute_url() if record is not None else None,
+                'findings': record.findings if record is not None else {},
+                'last_checked': row['last_checked'], 'is_stale': row['is_stale'],
+                'checked_revision': row['checked_revision'], 'current_revision': row['current_revision'],
+            })
+        results = list(results.values())
+        return self.get_paginated_response(results) if page is not None else Response(results)
 
     @action(detail=False, methods=['post'], url_path='report')
     def report(self, request):

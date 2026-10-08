@@ -153,10 +153,10 @@ class AuditScheduleTest(TestCase):
         self.assertEqual(self.dispatch().outcome, 'failed')
         self.assertFalse(UpgradeJob.objects.exists())
 
-    def test_failed_selection_preserves_history_and_advances(self):
+    def test_empty_selection_is_skipped_and_advances(self):
         self.schedule.filters = {'id': [99999999]}
         self.schedule.save()
-        self.assertEqual(self.dispatch().outcome, 'failed')
+        self.assertEqual(self.dispatch().outcome, 'skipped')
         self.schedule.refresh_from_db()
         self.assertGreater(self.schedule.next_run_at, self.now)
         self.assertFalse(UpgradeJob.objects.exists())
@@ -177,7 +177,7 @@ class AuditScheduleTest(TestCase):
 
     def test_recurring_job_cannot_be_changed_into_remediation(self):
         job = self.dispatch().jobs.first()
-        with self.assertRaisesRegex(queue.QueueError, 'read-only'):
+        with self.assertRaisesRegex(queue.QueueError, 'retain their audit or remediation mode'):
             queue.edit_pending(self.user, job.pk, {**self.data, 'last_updated': job.last_updated})
 
     def test_dispatch_registration(self):
@@ -273,7 +273,13 @@ class AuditScheduleTest(TestCase):
         for index, device in enumerate(self.devices):
             device.virtual_chassis = vc
             device.vc_position = index + 1
+            if index:
+                device.primary_ip4 = None
+                device.primary_ip6 = None
             device.save()
+        # A scope matching only a member must still audit its master once.
+        self.schedule.filters = {'id': [self.devices[1].pk]}
+        self.schedule.save()
         run = self.dispatch()
         self.assertEqual(run.outcome, 'queued', run.message)
         self.assertEqual(list(run.jobs.values_list('device_id', flat=True)), [self.devices[0].pk])
@@ -354,6 +360,183 @@ class AuditScheduleTest(TestCase):
         self.devices[1].save()
         self.make_due(self.now)
         self.assertEqual(self.dispatch().job_count, 2)
+
+
+class RegionalAuditTest(TestCase):
+    """Region targeting and profile eligibility, including scopes larger than a batch."""
+
+    make_due = AuditScheduleTest.make_due
+    dispatch = AuditScheduleTest.dispatch
+
+    def setUp(self):
+        AuditScheduleTest.setUp(self)
+        from dcim.models import Region, Site
+        self.region = Region.objects.create(name='East', slug='east')
+        self.child = Region.objects.create(name='Metro', slug='metro', parent=self.region)
+        self.site.region = self.child
+        self.site.save()
+        self.outside = Site.objects.create(name='Outside', slug='outside',
+                                           region=Region.objects.create(name='West', slug='west'))
+        self.schedule.filters = {'region_id': [self.region.pk]}
+        self.schedule.profile_source = 'model'
+        self.schedule.profile = {}
+        self.schedule.save()
+
+    def assign_profile(self):
+        profile = JobProfile.objects.create(name='Regional NTP', kind='remediate',
+                                             plan={'features': ['ntp'], 'mode': 'replace'})
+        DeviceTypeProfile.objects.create(device_type=self.devices[0].device_type, remediation_profile=profile)
+        return profile
+
+    def test_parent_region_includes_children_but_not_other_regions(self):
+        self.assign_profile()
+        self.devices[1].site = self.outside
+        self.devices[1].save()
+        run = self.dispatch()
+        self.assertEqual(run.outcome, 'queued', run.message)
+        self.assertEqual(list(run.jobs.values_list('device_id', flat=True)), [self.devices[0].pk])
+
+    def test_model_defaults_exclude_unassigned_models(self):
+        from dcim.models import DeviceType
+        self.assign_profile()
+        self.devices[1].device_type = DeviceType.objects.create(model='Unassigned', slug='unassigned',
+            manufacturer=self.devices[0].device_type.manufacturer)
+        self.devices[1].save()
+        run = self.dispatch()
+        self.assertEqual(run.outcome, 'queued', run.message)
+        self.assertEqual(run.job_count, 1)
+        self.assertIn('1 devices without a matching accessible model profile excluded', run.message)
+
+    def test_empty_match_skips_then_picks_up_new_assignments(self):
+        run = self.dispatch()
+        self.assertEqual(run.outcome, 'skipped', run.message)
+        self.assertFalse(run.jobs.exists())
+        self.assign_profile()
+        self.make_due(self.now)
+        self.assertEqual(self.dispatch().job_count, 2)
+
+    def test_saved_profile_only_targets_assigned_models(self):
+        from dcim.models import DeviceType
+        profile = self.assign_profile()
+        other = JobProfile.objects.create(name='Other profile', kind='remediate',
+                                           plan={'features': ['syslog'], 'mode': 'replace'})
+        dtype = DeviceType.objects.create(model='Other model', slug='other-model',
+                                          manufacturer=self.devices[0].device_type.manufacturer)
+        DeviceTypeProfile.objects.create(device_type=dtype, remediation_profile=other)
+        self.devices[1].device_type = dtype
+        self.devices[1].save()
+        self.schedule.profile_source = 'saved'
+        self.schedule.saved_profile = profile
+        self.schedule.save()
+        run = self.dispatch()
+        self.assertEqual(run.job_count, 1, run.message)
+        self.assertEqual(run.jobs.get().device_id, self.devices[0].pk)
+
+    def test_ui_can_save_region_before_devices_or_profiles_exist(self):
+        from dcim.models import Region
+        region = Region.objects.create(name='New region', slug='new-region')
+        client = Client()
+        client.force_login(self.user)
+        response = client.post(reverse('plugins:netbox_discovery:auditschedule_add'), {
+            'name': 'Future region', 'enabled': True, 'frequency': 'daily', 'weekday': 0,
+            'local_time': '03:00', 'time_zone': 'America/New_York', 'window_hours': 4,
+            'regions': [region.pk], 'profile_source': 'model', 'comparison': 'replace'})
+        self.assertEqual(response.status_code, 302,
+                         response.context and response.context['form'].errors)
+        saved = AuditSchedule.objects.get(name='Future region')
+        self.assertEqual(saved.filters, {'status': ['active'], 'region_id': [region.pk]})
+        response = client.get(reverse('plugins:netbox_discovery:auditschedule_edit', args=[saved.pk]))
+        self.assertEqual(response.context['form'].initial['regions'], [region.pk])
+        self.assertContains(client.get(saved.get_absolute_url()), 'New region')
+
+    def test_api_can_save_region_without_matching_profiles(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        response = client.post(reverse('plugins-api:netbox_discovery-api:auditschedule-list'), {
+            'name': 'API region', 'filters': {'region_id': [self.region.pk]}, 'profile_source': 'model'}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_invalid_region_is_rejected(self):
+        self.schedule.filters = {'region_id': [99999999]}
+        with self.assertRaises(ValidationError):
+            self.schedule.full_clean()
+
+    def test_region_filters_intersect_with_site_filters(self):
+        self.assign_profile()
+        self.schedule.filters['site_id'] = [self.outside.pk]
+        self.schedule.save()
+        run = self.dispatch()
+        self.assertEqual(run.outcome, 'skipped')
+        self.assertFalse(run.jobs.exists())
+
+    def test_matching_profiles_must_be_accessible(self):
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+        from netbox_compliance.models import ConfigStandard
+        from users.models import ObjectPermission
+        self.assign_profile()
+        user = get_user_model().objects.create_user('regional-auditor')
+        for model, actions in ((Device, ['view']), (ConfigStandard, ['view']),
+                               (DeviceTypeProfile, ['view']), (AuditSchedule, ['view']),
+                               (UpgradeJob, ['add', 'view'])):
+            permission = ObjectPermission.objects.create(name=f'regional-{model.__name__}', actions=actions)
+            permission.object_types.add(ContentType.objects.get_for_model(model))
+            permission.users.add(user)
+        self.schedule.run_as = user
+        self.schedule.save()
+        run = self.dispatch()
+        self.assertEqual(run.outcome, 'skipped', run.message)
+        self.assertFalse(run.jobs.exists())
+
+    def test_saving_does_not_validate_live_inventory(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        with patch.object(queue, 'prepare', side_effect=AssertionError('Must not prepare devices when saving')):
+            response = client.post(reverse('plugins-api:netbox_discovery-api:auditschedule-list'), {
+                'name': 'Future custom audit', 'filters': {'region_id': [self.region.pk]},
+                'profile_source': 'custom', 'profile': {'features': ['ntp'], 'mode': 'replace'}}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def add_large_inventory(self):
+        from dcim.models import Device
+        Device.objects.bulk_create([
+            Device(name=f'region-device-{i}', site=self.site, role=self.devices[0].role,
+                   device_type=self.devices[0].device_type) for i in range(999)])
+        self.assign_profile()
+
+    def test_large_region_uses_multiple_queue_batches_in_one_run(self):
+        self.add_large_inventory()
+
+        def enqueue(user, data):
+            self.assertLessEqual(len(data['filters']['id']), 1000)
+            return UpgradeJob.objects.bulk_create([
+                UpgradeJob(device_id=pk, device_name=f'device-{pk}', poller=self.poller,
+                           address='192.0.2.1', operation=data['operation'], profile={'features': ['ntp'], 'mode': 'replace'},
+                           scheduled_at=data['scheduled_at'], start_before=data['start_before'])
+                for pk in data['filters']['id']])
+
+        with patch.object(queue, 'schedule', side_effect=enqueue) as mocked:
+            run = self.dispatch()
+        self.assertEqual(run.job_count, 1001, run.message)
+        self.assertEqual(run.jobs.count(), 1001)
+        self.assertEqual([len(call.args[1]['filters']['id']) for call in mocked.call_args_list], [1000, 1])
+
+    def test_later_batch_failure_rolls_back_earlier_jobs(self):
+        self.add_large_inventory()
+        original = queue.schedule
+        calls = []
+
+        def enqueue(user, data):
+            calls.append(data)
+            if len(calls) == 2:
+                raise queue.QueueError('Second batch rejected')
+            return original(user, {**data, 'filters': {'id': [self.devices[0].pk]}})
+
+        with patch.object(queue, 'schedule', side_effect=enqueue):
+            run = self.dispatch()
+        self.assertEqual(run.outcome, 'failed')
+        self.assertEqual(run.job_count, 0)
+        self.assertFalse(UpgradeJob.objects.exists())
 
 
 class ConcurrentAuditTest(TransactionTestCase):

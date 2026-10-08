@@ -5,18 +5,23 @@
 (() => {
   const frequency = document.getElementById('id_frequency');
   const source = document.getElementById('id_profile_source');
+  const remediate = document.getElementById('id_remediate');
   const show = (id, visible) => {
     const row = document.getElementById(id)?.closest('.row');
     if (row) row.hidden = !visible;
   };
   const sync = () => {
     show('id_weekday', frequency.value === 'weekly');
+    show('id_local_time', frequency.value !== 'now');
+    show('id_time_zone', frequency.value !== 'now');
     show('id_saved_profile', source.value === 'saved');
     show('id_features', source.value === 'custom');
     show('id_comparison', source.value === 'custom');
+    show('id_allow_clearpass_cluster_changes', source.value === 'custom' && remediate.checked);
   };
   frequency.addEventListener('change', sync);
   source.addEventListener('change', sync);
+  remediate.addEventListener('change', sync);
   sync();
 })();
 </script>

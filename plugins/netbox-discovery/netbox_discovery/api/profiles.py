@@ -1,12 +1,12 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from dcim.models import DeviceType
-from dcim.api.serializers import DeviceTypeSerializer
+from dcim.models import DeviceType, Platform
+from dcim.api.serializers import DeviceTypeSerializer, PlatformSerializer
 from netbox.api.serializers import NetBoxModelSerializer
 from netbox.api.viewsets import NetBoxModelViewSet
-from ..models import DeviceTypeProfile, JobProfile
-from ..profile_filtersets import DeviceTypeProfileFilterSet, JobProfileFilterSet
+from ..models import DeviceTypeProfile, JobProfile, PlatformProfile
+from ..profile_filtersets import DeviceTypeProfileFilterSet, JobProfileFilterSet, PlatformProfileFilterSet
 from ..profile_assignments import (AssignmentConflict, assign_models, selected_models, validate_selection,
                                    validate_model_replacement)
 
@@ -135,3 +135,63 @@ class DeviceTypeProfileViewSet(NetBoxModelViewSet):
     queryset = DeviceTypeProfile.objects.select_related('device_type', 'upgrade_profile', 'remediation_profile')
     serializer_class = DeviceTypeProfileSerializer
     filterset_class = DeviceTypeProfileFilterSet
+
+
+class PlatformProfileSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:platformprofile-detail')
+    platform = PlatformSerializer(nested=True)
+    remediation_profile = JobProfileSerializer(nested=True)
+    replace_existing = serializers.BooleanField(write_only=True, required=False, default=False)
+
+    class Meta:
+        model = PlatformProfile
+        fields = ('id', 'url', 'display', 'platform', 'remediation_profile', 'replace_existing',
+                  'description', 'comments', 'tags', 'custom_fields', 'created', 'last_updated')
+        brief_fields = ('id', 'url', 'display', 'platform', 'remediation_profile')
+
+    def check_platform(self, platform):
+        if PlatformProfile.objects.filter(platform=platform).exclude(pk=getattr(self.instance, 'pk', None)).exists():
+            raise serializers.ValidationError({'platform': 'This platform already has a standards profile assignment.'})
+
+    def validate(self, attrs):
+        if self.nested:
+            return super().validate(attrs)
+        replace = attrs.pop('replace_existing', False)
+        attrs = super().validate(attrs)
+        self.check_platform(attrs.get('platform', getattr(self.instance, 'platform', None)))
+        candidate = PlatformProfile(pk=getattr(self.instance, 'pk', None), remediation_profile=attrs.get(
+            'remediation_profile', getattr(self.instance, 'remediation_profile', None)))
+        try:
+            validate_model_replacement(candidate, replace, fields=('remediation_profile_id',))
+        except ValidationError as exc:
+            raise serializers.ValidationError({'replace_existing': exc.messages}) from exc
+        attrs['replace_existing'] = replace
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        validated_data.pop('replace_existing', None)
+        platform = validated_data['platform']
+        list(Platform.objects.select_for_update().filter(pk=platform.pk))
+        self.check_platform(platform)
+        return super().create(validated_data)
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        replace = validated_data.pop('replace_existing', False)
+        platform = validated_data.get('platform', instance.platform)
+        list(Platform.objects.select_for_update().filter(pk=platform.pk))
+        self.check_platform(platform)
+        candidate = PlatformProfile(pk=instance.pk, remediation_profile=validated_data.get(
+            'remediation_profile', instance.remediation_profile))
+        try:
+            validate_model_replacement(candidate, replace, fields=('remediation_profile_id',))
+        except ValidationError as exc:
+            raise serializers.ValidationError({'replace_existing': exc.messages}) from exc
+        return super().update(instance, validated_data)
+
+
+class PlatformProfileViewSet(NetBoxModelViewSet):
+    queryset = PlatformProfile.objects.select_related('platform', 'remediation_profile')
+    serializer_class = PlatformProfileSerializer
+    filterset_class = PlatformProfileFilterSet

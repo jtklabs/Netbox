@@ -125,3 +125,106 @@ def test_cli_wiring():
     args = build_parser().parse_args(["collect", "--netbox", "--commands", "x.yaml", "--no-upload"])
     assert args.command == "collect" and args.commands == "x.yaml" and args.no_upload
     assert build_parser().parse_args(["collect", "--ip", "10.0.0.1", "--platform", "cisco_ios"]).output_dir is None
+    assert not args.no_ntp_discovery
+    assert build_parser().parse_args(["collect", "--no-ntp-discovery"]).no_ntp_discovery
+
+
+@pytest.mark.parametrize("platform,source_line,server_line,interface,vrf_line,vrf", [
+    ("cisco_ios", "ntp source Loopback0", "ntp server 192.0.2.1", "Loopback0", "", "default"),
+    ("cisco_xe", "ntp source Loopback0", "ntp server 192.0.2.1", "Loopback0", "", "default"),
+    ("cisco_nxos", "ntp source-interface mgmt0", "ntp server 192.0.2.1 use-vrf management",
+     "mgmt0", "vrf member management", "management"),
+    ("arista_eos", "ntp local-interface vrf MGMT Management1", "ntp server vrf MGMT 192.0.2.1",
+     "Management1", "vrf MGMT", "MGMT"),
+])
+def test_collection_discovers_source_on_existing_ssh_session(tmp_path, platform, source_line, server_line,
+                                                            interface, vrf_line, vrf):
+    from netops.core import canonical_platform
+    from netops.ntp_discovery import SHOW_COMMANDS
+    task, connection = make_task(platform=platform, replies={
+        SHOW_COMMANDS[0]: server_line, SHOW_COMMANDS[1]: source_line, SHOW_COMMANDS[2]: "",
+        f"show running-config interface {interface}": f"interface {interface}\n {vrf_line}\n!",
+    })
+    task.host.get_connection = Mock(return_value=connection)
+    catalog = {canonical_platform(platform): {"driver": canonical_platform(platform), "enable": True,
+                                             "commands": [{"command": "show version", "timeout": 60}]}}
+    result = collect.collect_commands(task, catalog, tmp_path)
+    observation = result.result["ntp_discovery"]
+    assert observation["status"] == "resolved"
+    assert (observation["source"], observation["vrf"]) == (interface, vrf)
+    assert observation["checked_at"]
+    task.host.get_connection.assert_called_once()
+    assert all(command.startswith("show ") for command, _ in connection.sent)
+    assert not result.changed
+
+
+@pytest.mark.parametrize("reply", [TimeoutError("SSH timeout"), "% Invalid input detected"])
+def test_ntp_failure_does_not_discard_inventory_outputs(tmp_path, reply):
+    from netops.ntp_discovery import SHOW_COMMANDS
+    task, _ = make_task(replies={SHOW_COMMANDS[0]: reply})
+    result = collect.collect_commands(task, collect.load_catalog(), tmp_path)
+    assert result.result["outputs"] and not result.failed
+    assert result.result["ntp_discovery"]["status"] == "error"
+
+
+@pytest.mark.parametrize("platform,enabled", [("cisco_ios", False), ("f5_tmsh", True), ("aruba_os", True)])
+def test_disabled_and_unsupported_source_discovery_is_skipped(tmp_path, platform, enabled):
+    from netops.ntp_discovery import SHOW_COMMANDS
+    task, connection = make_task(platform=platform)
+    result = collect.collect_commands(task, collect.load_catalog(), tmp_path, discover_ntp=enabled)
+    assert "ntp_discovery" not in result.result
+    assert not any(command in SHOW_COMMANDS for command, _ in connection.sent)
+
+
+@pytest.mark.parametrize("mode,expected", [("write", 0), ("preview", 0), ("conflict", 2),
+                                          ("ssh-error", 1), ("field-error", 1), ("disabled", 0)])
+def test_collector_run_syncs_and_reports_ntp_separately(monkeypatch, tmp_path, mode, expected):
+    from nornir.core.task import MultiResult, Result
+    from netops import cli, ntp_discovery
+    from netops.netbox import NetBoxError
+    from test_ntp_discovery import Client
+
+    client = Client()
+    host = SimpleNamespace(name="sw1", hostname="192.0.2.10", data={"netbox_id": 1})
+    observation = ntp_discovery.source_config("ntp source Lo0\nntp server 192.0.2.1", "cisco_ios")
+    if mode == "conflict":
+        client.device["custom_fields"]["ntp_vrf"] = "MANUAL"
+    if mode == "ssh-error":
+        observation = {"status": "error", "reason": "SSH timeout"}
+    if mode == "field-error":
+        monkeypatch.setattr(ntp_discovery, "ensure_fields", Mock(side_effect=NetBoxError("permission denied")))
+    result = MultiResult("collect")
+    data = {"platform": "cisco_ios", "outputs": [], "ntp_discovery": observation}
+    if mode == "disabled":
+        del data["ntp_discovery"]
+    result.append(Result(host=host, result=data))
+    targets = SimpleNamespace(inventory=SimpleNamespace(hosts={"sw1": host}),
+                              run=Mock(return_value={"sw1": result}))
+    monkeypatch.setattr(cli, "_connect", lambda args, style: (targets, SimpleNamespace(describe=lambda: "test"), 0))
+    monkeypatch.setattr(collect, "netbox_client", lambda args: client)
+    uploaded = Mock(return_value=(0, 0))
+    monkeypatch.setattr(collect, "upload", uploaded)
+    records = {}
+    monkeypatch.setattr(collect.archive, "capture", lambda data: records.update(data))
+    args = build_parser().parse_args(["collect", "--netbox", "--no-standards", "--output-dir", str(tmp_path)]
+                                     + (["--no-upload"] if mode == "preview" else [])
+                                     + (["--no-ntp-discovery"] if mode == "disabled" else []))
+    assert collect.run(args, cli.Style(False), Mock()) == expected
+    assert targets.run.call_args.kwargs["discover_ntp"] == (mode != "disabled")
+    if mode in ("preview", "disabled", "field-error"):
+        assert client.writes == []
+    if mode != "preview":
+        uploaded.assert_called_once()
+    else:
+        uploaded.assert_not_called()
+    if mode == "write":
+        assert client.device["custom_fields"]["ntp_vrf"] == "default"
+        assert any(tag["slug"] == "service-source" for tag in client.interfaces[0]["tags"])
+        assert records["sw1"]["ntp_writeback"]["status"] == "written"
+    elif mode == "conflict":
+        assert client.device["custom_fields"]["ntp_vrf"] == "MANUAL"
+        assert records["sw1"]["ntp_writeback"]["status"] == "attention"
+        assert not any(tag["slug"] == "service-source" for tag in client.interfaces[0]["tags"])
+    elif mode == "ssh-error":
+        assert client.device["custom_fields"]["ntp_discovery"]["status"] == "error"
+        assert "ntp_vrf" not in client.device["custom_fields"]

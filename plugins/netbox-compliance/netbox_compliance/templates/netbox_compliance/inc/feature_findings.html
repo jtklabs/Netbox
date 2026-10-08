@@ -1,0 +1,15 @@
+{% for feature, check in checks.items %}
+<section class="mb-4">
+  <h3>{{ feature|upper }} comparison</h3>
+  {% if check.error %}<p class="text-danger">{{ check.error }}</p>{% endif %}
+  {% if check.desired %}<h4>Expected entries</h4><pre>{% for entry in check.desired %}{{ entry }}{% if not forloop.last %}
+{% endif %}{% endfor %}</pre>{% endif %}
+  {% if check.current %}<h4>Observed entries</h4><pre>{% for entry in check.current %}{{ entry }}{% if not forloop.last %}
+{% endif %}{% endfor %}</pre>{% endif %}
+  {% if check.commands %}<h4>Proposed changes (redacted)</h4><pre>{% for entry in check.commands %}{{ entry }}{% if not forloop.last %}
+{% endif %}{% endfor %}</pre>{% endif %}
+  {% for note in check.advisories %}<p class="text-warning">{{ note }}</p>{% endfor %}
+  {% for note in check.notes %}<p>{{ note }}</p>{% endfor %}
+  {% if check.truncated %}<p class="text-warning">Findings shortened for reporting. The complete redacted plan is in the worker run archive.</p>{% endif %}
+</section>
+{% endfor %}

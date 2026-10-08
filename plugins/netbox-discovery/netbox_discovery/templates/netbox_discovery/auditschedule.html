@@ -5,8 +5,9 @@
   <h2>Audit schedule</h2>
   <table class="table attr-table">
     <tr><th>Enabled</th><td>{% checkmark object.enabled %}</td></tr>
+    <tr><th>Operation</th><td>{% if object.remediate %}Audit and remediate{% else %}Audit only{% endif %}</td></tr>
     <tr><th>Frequency</th><td>{{ object.get_frequency_display }}{% if object.frequency == 'weekly' %}, {{ object.get_weekday_display }}{% endif %}</td></tr>
-    <tr><th>Start time</th><td>{{ object.local_time|time:"H:i" }} ({{ object.time_zone }})</td></tr>
+    {% if object.frequency != 'now' %}<tr><th>Start time</th><td>{{ object.local_time|time:"H:i" }} ({{ object.time_zone }})</td></tr>{% endif %}
     <tr><th>Start window</th><td>{{ object.window_hours }} hours</td></tr>
     <tr><th>Next run</th><td>{{ object.next_run_at|placeholder }} {% if object.overdue %}<span class="badge text-bg-warning">Overdue</span>{% endif %}</td></tr>
     <tr><th>Last dispatch</th><td>{{ object.last_run_at|placeholder }}</td></tr>
@@ -18,7 +19,7 @@
 </div><div class="col-lg-6">
   <h2>Device scope</h2>
   <table class="table"><tbody>{% for label, value in scope %}<tr><th>{{ label }}</th><td>{{ value }}</td></tr>{% endfor %}</tbody></table>
-  <a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}?audit_schedule_id={{ object.pk }}">Audit jobs</a>
+  <a href="{% url 'plugins:netbox_discovery:standardsjob_list' %}?audit_schedule_id={{ object.pk }}">Standards jobs</a>
 </div></div>
 <h2>Recent runs</h2>
 <table class="table"><thead><tr><th>Scheduled for</th><th>Dispatched</th><th>Dispatch result</th><th>Jobs</th><th>Detail</th></tr></thead><tbody>

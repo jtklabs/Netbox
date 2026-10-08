@@ -25,7 +25,7 @@ from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, Upgr
                        PrestageRunView)
 
 from .commands import CommandOutputViewSet
-from .profiles import JobProfileViewSet, DeviceTypeProfileViewSet
+from .profiles import JobProfileViewSet, DeviceTypeProfileViewSet, PlatformProfileViewSet
 from .audits import AuditScheduleViewSet, AuditRunViewSet
 
 router.register('upgrade-jobs', UpgradeJobViewSet)
@@ -35,6 +35,7 @@ router.register('command-outputs', CommandOutputViewSet)
 router.register('prestage-policies', PrestagePolicyViewSet)
 router.register('job-profiles', JobProfileViewSet)
 router.register('model-profiles', DeviceTypeProfileViewSet)
+router.register('platform-profiles', PlatformProfileViewSet)
 router.register('audit-schedules', AuditScheduleViewSet)
 router.register('audit-runs', AuditRunViewSet)
 urlpatterns = [

@@ -1,0 +1,7 @@
+{% extends 'generic/object_list.html' %}
+{% block title %}Standards Jobs{% endblock %}
+{% block extra_controls %}
+{% if perms.netbox_discovery.add_auditschedule %}
+<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}"><i class="mdi mdi-plus-thick"></i> Add schedule</a>
+{% endif %}
+{% endblock %}

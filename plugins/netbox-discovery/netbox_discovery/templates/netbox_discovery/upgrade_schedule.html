@@ -1,10 +1,10 @@
 {% extends 'base/layout.html' %}
 {% load form_helpers %}
-{% block title %}Schedule device work{% endblock %}
+{% block title %}Schedule upgrade{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-8">
-  <h1>Schedule device work</h1>
-  {% if perms.netbox_discovery.add_auditschedule %}<a class="btn btn-outline-secondary mb-3" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}"><i class="mdi mdi-calendar-refresh"></i> Recurring audit</a>{% endif %}
+  <h1>Schedule upgrade</h1>
+  {% if perms.netbox_discovery.add_auditschedule %}<a class="btn btn-outline-secondary mb-3" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}"><i class="mdi mdi-calendar-refresh"></i> Standards audit / remediation</a>{% endif %}
   <form method="post">{% csrf_token %}
     {% include 'netbox_discovery/inc/plan_fields.html' %}
     <div><button class="btn btn-secondary" type="submit">Preview devices</button>

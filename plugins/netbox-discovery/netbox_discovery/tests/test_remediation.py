@@ -83,28 +83,28 @@ class RemediationTest(TestCase):
     def test_schedule_form_builds_the_plan_from_checkboxes(self):
         client = Client()
         client.force_login(self.user)
-        url = reverse('plugins:netbox_discovery:upgradejob_add')
-        now = timezone.now()
-        response = client.post(url, {'devices': [self.devices[0].pk], 'operation': 'remediate',
-                                     'scheduled_at': now.isoformat(), 'start_before': (now + timedelta(hours=1)).isoformat(),
-                                     'features': ['syslog', 'ntp'], 'remediation_mode': 'replace', 'schedule': 'yes'})
+        url = reverse('plugins:netbox_discovery:auditschedule_add')
+        data = {'name': 'Immediate remediation', 'enabled': True, 'frequency': 'now', 'window_hours': 1,
+                'devices': [self.devices[0].pk], 'remediate': True, 'profile_source': 'custom',
+                'features': ['ntp', 'syslog'], 'comparison': 'replace'}
+        with self.captureOnCommitCallbacks(execute=True):
+            response = client.post(url, data)
         self.assertEqual(response.status_code, 302, response.content[:2000])
         job = UpgradeJob.objects.get()
         self.assertEqual(job.profile, {'features': ['ntp', 'syslog'], 'mode': 'replace'})
 
-        response = client.post(url, {'devices': [self.devices[1].pk], 'operation': 'remediate',
-                                     'scheduled_at': now.isoformat(), 'start_before': (now + timedelta(hours=1)).isoformat(),
-                                     'remediation_mode': 'add', 'schedule': 'yes'})
-        self.assertContains(response, 'Choose at least one remediation feature')
+        response = client.post(url, {**data, 'name': 'Missing standards', 'features': []})
+        self.assertContains(response, 'Choose at least one standard to audit')
 
     def test_form_opens_with_devices_from_the_grid(self):
         client = Client()
         client.force_login(self.user)
         response = client.get(reverse('plugins:netbox_discovery:upgradejob_add'),
-                              {'operation': 'remediate', 'devices': [self.devices[0].pk, self.devices[1].pk]})
+                              {'operation': 'remediate', 'devices': [self.devices[0].pk, self.devices[1].pk]}, follow=True)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context['form'].initial['devices'], [self.devices[0].pk, self.devices[1].pk])
-        self.assertEqual(response.context['form'].initial['operation'], 'remediate')
+        self.assertTrue(response.context['form'].initial['remediate'])
+        self.assertEqual(response.context['form'].initial['frequency'], 'now')
 
     def test_pending_remediation_can_be_edited(self):
         job = queue.schedule(self.user, {**self.data, 'filters': {'id': [self.devices[0].pk]}})[0]
@@ -151,6 +151,49 @@ class RemediationTest(TestCase):
         with self.assertRaisesRegex(queue.QueueError, 'acknowledge'):
             queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
                                             'stage': 'ready', 'message': 'Applying'})
+
+    def test_findings_reach_detail_and_api_and_clear_after_verification(self):
+        from netbox_compliance.models import ConfigCompliance
+        queue.schedule(self.user, {**self.data, 'filters': {'id': [self.devices[0].pk]}})
+        job = queue.claim(self.user, self.poller, 1, True)[0]
+        detail = {'add': ['192.0.2.10'], 'remove': ['192.0.2.99'],
+                  'desired': ['192.0.2.10'], 'current': ['ntp server 192.0.2.99'],
+                  'commands': ['no ntp server 192.0.2.99', 'ntp server 192.0.2.10'],
+                  'advisories': ['Review before applying.']}
+        summary = {'compliance_results': {'ntp': 'non-compliant', 'syslog': 'compliant'},
+                   'compliance_details': {'ntp': detail}}
+        queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                        'stage': 'precheck_complete', 'message': 'Checked', 'summary': summary})
+        result = ConfigCompliance.objects.get(device=job.device, standard__name='NTP')
+        self.assertEqual(result.findings['checks']['ntp']['commands'], detail['commands'])
+        self.assertEqual(result.missing_entries, ['ntp: 192.0.2.10'])
+        self.assertIn('ntp server 192.0.2.99', result.observed)
+        self.client.force_login(self.user)
+        for url in (result.get_absolute_url(), job.get_absolute_url()):
+            response = self.client.get(url)
+            for text in ('Expected entries', 'Observed entries', 'Proposed changes', 'ntp server 192.0.2.10'):
+                self.assertContains(response, text)
+        response = self.client.get(result.get_absolute_url())
+        self.assertContains(response, job.get_absolute_url())
+        response = self.client.get(f'/api/plugins/compliance/config-compliance/{result.pk}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['findings']['checks']['ntp']['commands'], detail['commands'])
+        from netbox_compliance.job_results import record_job_results
+        record_job_results(job, {'compliance_results': {'ntp': 'compliant'},
+                                 'compliance_details': {'ntp': {'current': ['ntp server 192.0.2.10']}}}, timezone.now())
+        result.refresh_from_db()
+        self.assertEqual(result.result, 'compliant')
+        self.assertFalse(result.missing_entries)
+        self.assertFalse(result.findings['checks']['ntp'].get('commands'))
+
+    def test_old_findings_show_explicit_unavailable_message(self):
+        from netbox_compliance.job_results import record_job_results
+        from netbox_compliance.models import ConfigCompliance
+        job = queue.schedule(self.user, self.data)[0]
+        record_job_results(job, {'compliance_results': {'ntp': 'non-compliant'}}, timezone.now())
+        result = ConfigCompliance.objects.get(device=job.device, standard__name='NTP')
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get(result.get_absolute_url()), 'This result has no detailed findings')
 
     def test_read_only_audit_claims_without_apply_and_records_revision_results(self):
         from netbox_compliance.models import ConfigCompliance, ConfigStandard

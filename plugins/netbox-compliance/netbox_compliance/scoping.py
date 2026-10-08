@@ -23,6 +23,7 @@ somebody has already scanned is a report that gets greener the less work you do.
 
 from datetime import date
 
+from dcim.models import Device, VirtualChassis
 from django.db.models import Q
 
 from netbox_compliance.choices import (
@@ -122,6 +123,20 @@ def standards_for_device(device, on_date=None):
     return StandardResolver(on_date).for_device(device)
 
 
+def compliance_sources(devices, user=None):
+    """Read stack verdicts from the current master, never from copied member rows."""
+    chassis = dict(VirtualChassis.objects.filter(
+        pk__in={device.virtual_chassis_id for device in devices if device.virtual_chassis_id}
+    ).values_list('pk', 'master_id'))
+    masters = Device.objects.filter(pk__in={pk for pk in chassis.values() if pk}).select_related(
+        'site', 'platform', 'role').prefetch_related('tags')
+    if user is not None:
+        masters = masters.restrict(user, 'view')
+    masters = {device.pk: device for device in masters}
+    return {device.pk: masters.get(chassis.get(device.virtual_chassis_id))
+            if device.virtual_chassis_id else device for device in devices}
+
+
 def device_standard_rows(devices, on_date=None, standards=None, user=None):
     """One row per (device, standard-in-scope) pair, whether or not it was checked.
 
@@ -132,9 +147,10 @@ def device_standard_rows(devices, on_date=None, standards=None, user=None):
     """
     resolver = StandardResolver(on_date, standards=standards)
     devices = list(devices)
+    sources = compliance_sources(devices, user=user)
 
     records = ConfigCompliance.objects.filter(
-        device__in=[d.pk for d in devices]
+        device__in={source.pk for source in sources.values() if source is not None}
     ).select_related('standard', 'standard_revision')
     if user is not None:
         records = records.restrict(user, 'view')
@@ -142,18 +158,25 @@ def device_standard_rows(devices, on_date=None, standards=None, user=None):
 
     rows = []
     for device in devices:
-        for standard in resolver.for_device(device):
-            record = by_pair.get((device.pk, standard.pk))
+        source = sources[device.pk]
+        inherited = source is None or source.pk != device.pk
+        note = (f'Inherited from stack master {source}' if source is not None else
+                'Stack master is missing or inaccessible') if inherited else ''
+        for standard in resolver.for_device(source or device):
+            record = by_pair.get((source.pk, standard.pk)) if source is not None else None
             if record is not None:
                 # Reuse the objects already in hand rather than letting the FKs
                 # re-fetch them once per row.
-                record.device = device
+                record.device = source
                 record.standard = standard
                 status = record.status
             else:
                 status = ConfigCheckResultChoices.RESULT_UNKNOWN
             rows.append({
                 'device': device,
+                'source_device': source,
+                'inherited': inherited,
+                'inheritance_note': note,
                 'standard': standard,
                 'record': record,
                 'status': status,

@@ -1744,7 +1744,7 @@ def test_the_ambiguity_is_reported_before_the_device_is_touched(
     assert device["commands"] == {}  # not even read
 
 
-def test_one_standard_being_ambiguous_leaves_the_others_alone(
+def test_explicit_service_override_is_independent_of_shared_legacy_conflicts(
     device, login, netbox, capsys
 ):
     netbox["interfaces"]["ntp-source"] = [
@@ -1752,7 +1752,7 @@ def test_one_standard_being_ambiguous_leaves_the_others_alone(
         tagged("Vlan10", 1),
     ]
     netbox["interfaces"]["syslog-source"] = [tagged("Loopback0", 1)]
-    assert run_netbox("syslog", "--limit", "sw1") == cli.EXIT_OK
+    assert run_netbox("syslog", "--limit", "sw1", "--syslog-source-tag", "syslog-source") == cli.EXIT_OK
     assert "logging source-interface Loopback0" in capsys.readouterr().out
 
 

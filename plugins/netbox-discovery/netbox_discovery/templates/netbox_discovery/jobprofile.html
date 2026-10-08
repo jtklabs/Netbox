@@ -12,5 +12,13 @@
   {% empty %}<tr><td colspan="2">No models assigned.</td></tr>{% endfor %}
   </tbody></table>
   {% if perms.netbox_discovery.add_devicetypeprofile %}<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:devicetypeprofile_add' %}?{% if object.kind == 'remediate' %}remediation_profile{% else %}upgrade_profile{% endif %}={{ object.pk }}"><i class="mdi mdi-plus"></i> Assign to model</a>{% endif %}
+  {% if object.kind == 'remediate' %}
+  <h2 class="mt-4">Assigned platforms</h2>
+  <table class="table"><thead><tr><th>Platform</th><th>Assignment</th></tr></thead><tbody>
+  {% for assignment in platform_assignments %}<tr><td>{{ assignment.platform|linkify }}</td><td><a href="{{ assignment.get_absolute_url }}">View</a></td></tr>
+  {% empty %}<tr><td colspan="2">No platforms assigned.</td></tr>{% endfor %}
+  </tbody></table>
+  {% if perms.netbox_discovery.add_platformprofile %}<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:platformprofile_add' %}?remediation_profile={{ object.pk }}"><i class="mdi mdi-plus"></i> Assign to platform</a>{% endif %}
+  {% endif %}
 </div></div>
 {% endblock %}

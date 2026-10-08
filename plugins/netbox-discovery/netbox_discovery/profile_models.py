@@ -41,8 +41,9 @@ class JobProfile(PrimaryModel):
             raise ValidationError(str(exc)) from exc
         if self.pk:
             original = type(self).objects.filter(pk=self.pk).values_list('kind', flat=True).first()
-            if original != self.kind and (self.upgrade_models.exists() or self.remediation_models.exists()):
-                raise ValidationError({'kind': 'Remove model assignments before changing the profile type.'})
+            if original != self.kind and (self.upgrade_models.exists() or self.remediation_models.exists()
+                                          or self.remediation_platforms.exists()):
+                raise ValidationError({'kind': 'Remove model assignments and platform assignments before changing the profile type.'})
 
 
 class DeviceTypeProfile(PrimaryModel):
@@ -83,3 +84,37 @@ class DeviceTypeProfile(PrimaryModel):
                 raise ValidationError({field: 'Select a profile of the matching type.'})
         if not self.upgrade_profile_id and not self.remediation_profile_id:
             raise ValidationError('Select at least one profile.')
+
+
+class PlatformProfile(PrimaryModel):
+    platform = models.OneToOneField('dcim.Platform', on_delete=models.CASCADE, related_name='standards_profile')
+    remediation_profile = models.ForeignKey(JobProfile, on_delete=models.PROTECT,
+                                            related_name='remediation_platforms',
+                                            limit_choices_to={'kind': 'remediate'})
+
+    class Meta:
+        ordering = ('platform__name',)
+        verbose_name = 'platform profile assignment'
+
+    def __str__(self):
+        return str(self.platform)
+
+    def get_absolute_url(self):
+        return reverse('plugins:netbox_discovery:platformprofile', args=[self.pk])
+
+    def clean(self):
+        super().clean()
+        if self.remediation_profile_id and self.remediation_profile.kind != 'remediate':
+            raise ValidationError({'remediation_profile': 'Select a configuration standards profile.'})
+
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        from dcim.models import Platform
+        list(Platform.objects.select_for_update().filter(pk=self.platform_id))
+        return super().save(*args, **kwargs)
+
+    @transaction.atomic
+    def delete(self, *args, **kwargs):
+        from dcim.models import Platform
+        list(Platform.objects.select_for_update().filter(pk=self.platform_id))
+        return super().delete(*args, **kwargs)

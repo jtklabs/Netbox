@@ -1,0 +1,18 @@
+{% extends 'base/layout.html' %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<form method="post">
+  {% csrf_token %}
+  {{ form.selection }}
+  {{ form.non_field_errors }}{{ form.selection.errors }}
+  <table class="table table-striped">
+    <thead><tr><th>Job</th><th>Device</th><th>Operation</th><th>Status</th><th>Scheduled</th></tr></thead>
+    <tbody>{% for job in jobs %}<tr><td><a href="{{ job.get_absolute_url }}">{{ job.pk }}</a></td><td>{{ job.device_name }}</td><td>{{ job.get_operation_display }}</td><td>{{ job.get_status_display }}</td><td>{{ job.scheduled_at }}</td></tr>{% endfor %}</tbody>
+  </table>
+  <p class="text-warning">{{ jobs|length }} selected. Active jobs and execution history are protected. Recurring audit schedules are unchanged.</p>
+  <div class="mb-3"><label class="form-label" for="{{ form.reason.id_for_label }}">Reason{% if action == 'hold' %} (required){% endif %}</label>{{ form.reason }}{{ form.reason.errors }}</div>
+  <button class="btn {% if action == 'delete' %}btn-danger{% else %}btn-primary{% endif %}" name="confirm" value="yes" type="submit">Confirm {{ action }}</button>
+  <a class="btn btn-outline-secondary" href="{% url list_url %}">Back</a>
+</form>
+{% endblock %}

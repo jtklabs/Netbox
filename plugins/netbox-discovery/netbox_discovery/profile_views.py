@@ -3,7 +3,7 @@ import yaml
 from django import forms
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from dcim.models import DeviceType
+from dcim.models import DeviceType, Platform
 import django_tables2 as tables
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
 from netbox.tables import NetBoxTable
@@ -13,8 +13,8 @@ from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultiple
 from utilities.views import register_model_view
 from utilities.exceptions import AbortRequest
 
-from .models import JobProfile, DeviceTypeProfile
-from .profile_filtersets import JobProfileFilterSet, DeviceTypeProfileFilterSet
+from .models import JobProfile, DeviceTypeProfile, PlatformProfile
+from .profile_filtersets import JobProfileFilterSet, DeviceTypeProfileFilterSet, PlatformProfileFilterSet
 from .upgrade_choices import REMEDIATION_FEATURES, REMEDIATION_MODES
 from .upgrade_queue import validate_profile
 from .profile_assignments import (AssignmentConflict, assign_models, selected_models, validate_selection,
@@ -220,6 +220,8 @@ class JobProfileView(ObjectView):
     def get_extra_context(self, request, instance):
         from django.db.models import Q
         return {'plan_yaml': profile_yaml(instance.resolved_plan()),
+                'platform_assignments': PlatformProfile.objects.restrict(request.user, 'view').filter(
+                    remediation_profile=instance).select_related('platform'),
                 'assignments': DeviceTypeProfile.objects.restrict(request.user, 'view').filter(
                     Q(upgrade_profile=instance) | Q(remediation_profile=instance)).select_related('device_type')}
 
@@ -263,3 +265,67 @@ class DeviceTypeProfileEditView(ObjectEditView):
 @register_model_view(DeviceTypeProfile, 'delete')
 class DeviceTypeProfileDeleteView(ObjectDeleteView):
     queryset = DeviceTypeProfile.objects.all()
+
+
+class PlatformProfileForm(NetBoxModelForm):
+    platform = DynamicModelChoiceField(queryset=Platform.objects.all())
+    remediation_profile = DynamicModelChoiceField(queryset=JobProfile.objects.filter(kind='remediate'),
+                                                  query_params={'kind': 'remediate'}, label='Standards profile')
+    replace_existing = forms.BooleanField(required=False, label='Replace existing assignments')
+
+    class Meta:
+        model = PlatformProfile
+        fields = ('platform', 'remediation_profile', 'replace_existing', 'description', 'comments', 'tags')
+
+    def clean(self):
+        super().clean()
+        data = self.cleaned_data
+        candidate = PlatformProfile(pk=self.instance.pk, remediation_profile=data.get('remediation_profile'))
+        validate_model_replacement(candidate, data.get('replace_existing', False), fields=('remediation_profile_id',))
+        return data
+
+    @transaction.atomic
+    def save(self, commit=True):
+        if commit:
+            list(Platform.objects.select_for_update().filter(pk=self.instance.platform_id))
+            try:
+                validate_model_replacement(self.instance, self.cleaned_data.get('replace_existing', False),
+                                           fields=('remediation_profile_id',))
+            except ValidationError as exc:
+                raise AbortRequest('; '.join(exc.messages)) from exc
+        return super().save(commit=commit)
+
+
+class PlatformProfileTable(NetBoxTable):
+    platform = tables.Column(linkify=lambda record: record.get_absolute_url())
+    remediation_profile = tables.Column(linkify=True, verbose_name='Standards profile')
+
+    class Meta(NetBoxTable.Meta):
+        model = PlatformProfile
+        fields = ('pk', 'id', 'platform', 'remediation_profile', 'description')
+        default_columns = ('platform', 'remediation_profile', 'description')
+
+
+@register_model_view(PlatformProfile, name='list')
+class PlatformProfileListView(ObjectListView):
+    queryset = PlatformProfile.objects.select_related('platform', 'remediation_profile')
+    table = PlatformProfileTable
+    filterset = PlatformProfileFilterSet
+    actions = (AddObject,)
+
+
+@register_model_view(PlatformProfile)
+class PlatformProfileView(ObjectView):
+    queryset = PlatformProfile.objects.select_related('platform', 'remediation_profile')
+    actions = (EditObject, DeleteObject)
+
+
+@register_model_view(PlatformProfile, 'edit')
+class PlatformProfileEditView(ObjectEditView):
+    queryset = PlatformProfile.objects.all()
+    form = PlatformProfileForm
+
+
+@register_model_view(PlatformProfile, 'delete')
+class PlatformProfileDeleteView(ObjectDeleteView):
+    queryset = PlatformProfile.objects.all()

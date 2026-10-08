@@ -4,7 +4,28 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from dcim.models import DeviceType
 
-from .profile_models import DeviceTypeProfile
+from .profile_models import DeviceTypeProfile, PlatformProfile, JobProfile
+
+
+def default_profile_ids(user, devices, kind):
+    """Model defaults override platform standards, even when an override is hidden."""
+    field = assignment_field(kind) + '_id'
+    models = DeviceTypeProfile.objects.filter(device_type_id__in={d.device_type_id for d in devices})
+    overrides = set(models.exclude(**{field: None}).values_list('device_type_id', flat=True))
+    model_defaults = dict(models.restrict(user, 'view').values_list('device_type_id', field))
+    platforms = {}
+    if kind == 'remediate':
+        platforms = dict(PlatformProfile.objects.restrict(user, 'view').filter(
+            platform_id__in={d.platform_id for d in devices if d.platform_id}
+        ).values_list('platform_id', 'remediation_profile_id'))
+    visible = set(JobProfile.objects.restrict(user, 'view').filter(kind=kind).values_list('pk', flat=True))
+    result = {}
+    for device in devices:
+        selected = (model_defaults.get(device.device_type_id) if device.device_type_id in overrides
+                    else platforms.get(device.platform_id))
+        if selected in visible:
+            result[device.pk] = selected
+    return result
 
 
 class AssignmentConflict(ValidationError):
@@ -23,13 +44,13 @@ def selected_models(profile):
     return DeviceType.objects.filter(**{f'job_profiles__{assignment_field(profile.kind)}': profile})
 
 
-def validate_model_replacement(instance, replace=False):
+def validate_model_replacement(instance, replace=False, fields=('upgrade_profile_id', 'remediation_profile_id')):
     if not instance.pk or replace:
         return
-    original = DeviceTypeProfile.objects.filter(pk=instance.pk).first()
+    original = type(instance).objects.filter(pk=instance.pk).first()
     if original is None:
         raise ValidationError('This assignment no longer exists. Reload before saving.')
-    for field in ('upgrade_profile_id', 'remediation_profile_id'):
+    for field in fields:
         previous, selected = getattr(original, field), getattr(instance, field)
         if previous and selected and previous != selected:
             raise ValidationError('This replaces an existing default. Select Replace existing assignments to confirm.')

@@ -78,6 +78,26 @@ class Switch:
         return "\n".join(commands)
 
 
+class Nexus(Switch):
+    def __init__(self):
+        super().__init__()
+        self.lines = ['logging server 192.0.2.99 5 use-vrf default', 'logging source-interface Loopback9']
+
+    def apply(self, commands):
+        self.writes.extend(commands)
+        for command in commands:
+            tokens = command.split()
+            if tokens[:3] == ['no', 'logging', 'server']:
+                self.lines = [line for line in self.lines if line.split()[:3] != ['logging', 'server', tokens[3]]]
+            elif tokens[:2] == ['logging', 'server']:
+                self.lines = [line for line in self.lines if line.split()[:3] != tokens[:3]]
+                self.lines.append(command)
+            elif tokens[:2] == ['logging', 'source-interface'] and not self.ignore_source:
+                self.lines = [line for line in self.lines if not line.startswith('logging source-interface ')]
+                self.lines.append(command)
+        return '\n'.join(commands)
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     session = InventorySession()
@@ -139,7 +159,40 @@ def test_dry_run_loads_tagged_sources_without_any_writes(setup):
         assert row["netbox_writeback"]["status"] == "planned"
         assert setup.boxes[name].writes == [] and setup.boxes[name].saves == 0
     assert setup.nb.writes == []
-    assert [args["tag"] for method, path, args in setup.nb.calls if path == "dcim/interfaces/"] == ["syslog-source"]
+    assert [args["tag"] for method, path, args in setup.nb.calls if path == "dcim/interfaces/"] == [
+        "service-source", "ntp-source", "syslog-source"]
+
+
+@pytest.mark.parametrize('policy,ignore_source', [('audit', False), ('manage', False), ('manage', True)])
+def test_nxos_cli_audit_apply_and_readback(setup, monkeypatch, policy, ignore_source):
+    setup.nb.devices[7]['platform'] = {'slug': 'cisco-nxos'}
+    setup.nb.devices[7]['custom_fields']['syslog_vrf'] = 'management'
+    nexus = setup.boxes['ios'] = Nexus()
+    nexus.ignore_source = ignore_source
+    show = runner.netmiko_send_command
+
+    def read(task, command_string, **kwargs):
+        if command_string == 'show logging server':
+            nexus.reads.append(command_string)
+            return Result(host=task.host, result='Logging server: enabled')
+        return show(task, command_string, **kwargs)
+
+    monkeypatch.setattr(runner, 'netmiko_send_command', read)
+    code, report = setup.run('--policy', policy, '--apply')
+    row = report['devices']['ios']
+    assert 'show logging server' in nexus.reads
+    if policy == 'audit':
+        assert code == cli.EXIT_OK and not row['syslog_compliant']
+        assert nexus.writes == [] and nexus.saves == 0
+    elif ignore_source:
+        assert code == cli.EXIT_FAILED
+        assert not row['verified'] and nexus.saves == 0
+    else:
+        assert code == cli.EXIT_OK and row['syslog_compliant'] and row['verified']
+        assert nexus.saves == 1
+        assert 'logging server 192.0.2.50 6 facility local7 use-vrf management' in nexus.lines
+        assert 'no logging server 192.0.2.99' in nexus.writes
+        assert not any('logging trap' in command or 'origin-id' in command for command in nexus.writes)
 
 
 @pytest.mark.parametrize("policy", ["audit", "add", "manage"])

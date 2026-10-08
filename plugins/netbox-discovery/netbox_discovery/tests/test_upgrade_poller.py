@@ -65,6 +65,7 @@ class UpgradePollerTest(UpgradeFixture, TestCase):
             self.poller.refresh_from_db()
             job.refresh_from_db()
             self.assertEqual(self.poller.upgrade_last_seen_at, received)
+            self.assertIsNone(self.poller.last_seen_at)
             self.assertEqual(job.last_seen_at, received)
 
     def test_invalid_reports_do_not_mark_worker_alive(self):
@@ -85,7 +86,7 @@ class UpgradePollerTest(UpgradeFixture, TestCase):
         browser.force_login(self.user)
         for url in (reverse('plugins:netbox_discovery:upgradejob_list'), job.get_absolute_url()):
             response = browser.get(url)
-            self.assertContains(response, 'Upgrade poller last seen')
+            self.assertContains(response, 'Worker last seen')
             self.assertContains(response, 'Job last update')
             self.assertContains(response, 'Never checked in')
             self.assertContains(response, 'No job updates yet')

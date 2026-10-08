@@ -113,7 +113,7 @@ urlpatterns = [
 from . import command_views, upgrade_views, profile_views
 from . import audit_views
 from .models import AuditSchedule, AuditRun
-from .models import DeviceTypeProfile, JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+from .models import DeviceTypeProfile, PlatformProfile, JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
 
 urlpatterns += [
     path('audit-schedules/', audit_views.AuditScheduleListView.as_view(), name='auditschedule_list'),
@@ -129,7 +129,7 @@ urlpatterns += [
          kwargs={'model': AuditRun}),
 ]
 
-for route, model in (('job-profiles', JobProfile), ('model-profiles', DeviceTypeProfile)):
+for route, model in (('job-profiles', JobProfile), ('model-profiles', DeviceTypeProfile), ('platform-profiles', PlatformProfile)):
     name = model._meta.model_name
     view = model.__name__
     urlpatterns += [
@@ -150,7 +150,11 @@ urlpatterns += [
 
 urlpatterns += [
     path('upgrades/', upgrade_views.UpgradeJobListView.as_view(), name='upgradejob_list'),
+    path('standards-jobs/', upgrade_views.StandardsJobListView.as_view(), name='standardsjob_list'),
     path('upgrades/add/', upgrade_views.UpgradeScheduleView.as_view(), name='upgradejob_add'),
+    path('upgrades/bulk-hold/', upgrade_views.UpgradeBulkActionView.as_view(action='hold'), name='upgradejob_bulk_hold'),
+    path('upgrades/bulk-cancel/', upgrade_views.UpgradeBulkActionView.as_view(action='cancel'), name='upgradejob_bulk_cancel'),
+    path('upgrades/bulk-delete/', upgrade_views.UpgradeBulkActionView.as_view(action='delete'), name='upgradejob_bulk_delete'),
     path('upgrades/<int:pk>/', upgrade_views.UpgradeJobView.as_view(), name='upgradejob'),
     path('upgrades/<int:pk>/edit/', upgrade_views.UpgradeJobEditView.as_view(), name='upgradejob_edit'),
     path('upgrades/<int:pk>/cancel/', upgrade_views.UpgradeCancelView.as_view(), name='upgradejob_cancel'),

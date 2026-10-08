@@ -193,7 +193,7 @@ def main(argv=None) -> int:
         # end-of-run summary, not scattered per-device through the log.
         log.info("cables: %s", syncer.cables.summary())
     if not args.collect_only and scanned and config.commands.run_after_sweep:
-        run_command_collection(config)
+        run_command_collection(config, dry_run=args.dry_run)
     if not args.collect_only and config.sync.sync_fhrp_groups and scanned:
         # Groups and dependencies are derived from what the whole sweep wrote,
         # so this runs once at the end rather than per device.
@@ -351,7 +351,7 @@ def report_sweep(netbox: NetBox, poller_name: str, summary: str) -> None:
         log.debug("sweep check-in skipped: %s", exc)
 
 
-def run_command_collection(config) -> None:
+def run_command_collection(config, *, dry_run=False) -> None:
     """Hand the freshly synced fleet to nornir-netops for its per-platform show commands."""
     import shlex
     import subprocess
@@ -368,6 +368,8 @@ def run_command_collection(config) -> None:
     if config.poller_name:
         command += ["--poller", config.poller_name]
     command += shlex.split(config.commands.extra_args)
+    if dry_run:
+        command.append("--no-upload")
     log.info("collecting show commands: %s", " ".join(shlex.quote(part) for part in command))
     try:
         completed = subprocess.run(command, cwd=directory, check=False)

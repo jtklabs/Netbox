@@ -3,7 +3,7 @@
 {% block title %}Edit {{ object }}{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-8">
-  <h1>Edit upgrade job</h1>
+  <h1>Edit device job</h1>
   <p><a href="{{ object.get_absolute_url }}">{{ object }}</a> &middot; Poller: {{ object.poller }} &middot; {{ object.address }}</p>
   <p>Update this pending job's operation, schedule or profile. The device and poller stay fixed. Other jobs in the batch are unchanged. Once a worker claims this job, it cannot be edited.</p>
   <form method="post">{% csrf_token %}

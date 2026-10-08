@@ -1,18 +1,25 @@
 """NetBox schedule form, queue table and per-device progress."""
 from django import forms
+from django.conf import settings
+from datetime import datetime
+from zoneinfo import ZoneInfo, available_timezones
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
 from django.core.exceptions import PermissionDenied, ValidationError
-from dcim.models import Device, DeviceType, Site, DeviceRole, Platform
+from dcim.models import Device, DeviceType, Site, DeviceRole, Platform, Region
+from tenancy.models import Tenant
+from extras.models import Tag
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from netbox.forms import NetBoxModelFilterSetForm
 from django.db.models import Count
 from netbox.views.generic import ObjectDeleteView, ObjectEditView, ObjectListView, ObjectView
-from netbox.object_actions import AddObject, DeleteObject, EditObject
+from netbox.object_actions import AddObject, DeleteObject, EditObject, ObjectAction
 from netbox.forms import NetBoxModelForm
 from utilities.forms.rendering import FieldSet
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
@@ -28,12 +35,32 @@ from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilte
 from . import upgrade_queue as queue
 
 
+class LocalScheduleDateTimeField(forms.DateTimeField):
+    """Defer timezone conversion until the form's selected zone is available."""
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            parsed = parse_datetime(value.strip())
+        except (AttributeError, TypeError, ValueError):
+            parsed = None
+        if parsed is None:
+            raise forms.ValidationError(self.error_messages['invalid'], code='invalid')
+        return parsed
+
+
 class UpgradePlanForm(forms.Form):
     operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
-    scheduled_at = forms.DateTimeField(help_text='Include a UTC offset, for example 2026-09-20T22:00:00-04:00.')
-    start_before = forms.DateTimeField(help_text='Latest start for device changes. Running jobs continue past this time.')
+    time_zone = forms.ChoiceField(choices=[(zone, zone) for zone in sorted(available_timezones())], required=False)
+    scheduled_at = LocalScheduleDateTimeField(label='Scheduled start', widget=forms.DateTimeInput(
+        format='%Y-%m-%dT%H:%M:%S', attrs={'type': 'datetime-local', 'step': '1'}))
+    start_before = LocalScheduleDateTimeField(widget=forms.DateTimeInput(
+        format='%Y-%m-%dT%H:%M:%S', attrs={'type': 'datetime-local', 'step': '1'}),
+        help_text='Latest start for device changes. Running jobs continue past this time.')
     profile_source = forms.ChoiceField(
-        choices=(('model', 'Device model defaults'), ('saved', 'Saved profile'), ('custom', 'Custom settings')),
+        choices=(('model', 'Device defaults (model, then platform)'), ('saved', 'Saved profile'), ('custom', 'Custom settings')),
         initial='model', required=False)
     saved_profile = DynamicModelChoiceField(queryset=JobProfile.objects.all(), required=False,
                                             help_text='Must match the selected operation.')
@@ -49,6 +76,17 @@ class UpgradePlanForm(forms.Form):
     description = forms.CharField(max_length=200, required=False)
     allow_clearpass_cluster_changes = forms.BooleanField(
         label='Allow ClearPass cluster-wide changes', required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initial.setdefault('time_zone', settings.TIME_ZONE)
+        zone = ZoneInfo(self.initial['time_zone'])
+        for field in ('scheduled_at', 'start_before'):
+            value = self.initial.get(field)
+            if isinstance(value, str):
+                value = parse_datetime(value)
+            if isinstance(value, datetime):
+                self.initial[field] = value.astimezone(zone).replace(tzinfo=None) if timezone.is_aware(value) else value
 
     def clean_profile_source(self):
         # Older callers post the inline plan without a source selector.
@@ -67,6 +105,18 @@ class UpgradePlanForm(forms.Form):
 
     def clean(self):
         data = super().clean()
+        zone = ZoneInfo(data.get('time_zone') or settings.TIME_ZONE)
+        for field in ('scheduled_at', 'start_before'):
+            value = data.get(field)
+            if value is None or timezone.is_aware(value):
+                continue
+            aware = value.replace(tzinfo=zone)
+            if aware.astimezone(ZoneInfo('UTC')).astimezone(zone).replace(tzinfo=None) != value:
+                self.add_error(field, 'This local time does not exist because of daylight saving time. Choose another time.')
+            elif aware.utcoffset() != value.replace(tzinfo=zone, fold=1).utcoffset():
+                self.add_error(field, 'This local time occurs twice because of daylight saving time. Select UTC to specify the intended time.')
+            else:
+                data[field] = aware
         if data.get('profile_source') == 'saved':
             profile = data.get('saved_profile')
             kind = 'remediate' if data.get('operation') in CONFIG_OPERATIONS else 'upgrade'
@@ -96,29 +146,79 @@ def plan_initial(job):
 
 
 class ScheduleForm(UpgradePlanForm):
-    site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False)
-    role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
-    platform = DynamicModelChoiceField(queryset=Platform.objects.all(), required=False)
-    device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), required=False, label='Model')
+    saved_profile = DynamicModelChoiceField(queryset=JobProfile.objects.filter(kind='upgrade'), required=False,
+                                            query_params={'kind': 'upgrade'})
+    all_active = forms.BooleanField(required=False, label='All active devices')
+    regions = DynamicModelMultipleChoiceField(queryset=Region.objects.all(), required=False)
+    tenants = DynamicModelMultipleChoiceField(queryset=Tenant.objects.all(), required=False)
+    sites = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
+    roles = DynamicModelMultipleChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    platforms = DynamicModelMultipleChoiceField(queryset=Platform.objects.all(), required=False)
+    models = DynamicModelMultipleChoiceField(queryset=DeviceType.objects.all(), required=False)
+    device_tags = DynamicModelMultipleChoiceField(queryset=Tag.objects.all(), required=False)
     devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False,
                                               help_text='Optional explicit devices; combined with the filters above.')
     poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
                                     help_text='Normally automatic; choose one when devices have multiple poller tags.')
-    field_order = ('site', 'role', 'platform', 'device_type', 'devices', 'poller', 'operation',
-                   'scheduled_at', 'start_before', 'profile_source', 'saved_profile', 'profile',
+    field_order = ('all_active', 'regions', 'tenants', 'sites', 'roles', 'platforms', 'models', 'device_tags',
+                   'devices', 'poller', 'operation', 'time_zone', 'scheduled_at', 'start_before', 'profile_source', 'saved_profile', 'profile',
                    'features', 'remediation_mode', 'allow_clearpass_cluster_changes', 'description')
+
+    scope_fields = {'regions': 'region_id', 'tenants': 'tenant_id', 'sites': 'site_id', 'roles': 'role_id',
+                    'platforms': 'platform_id', 'models': 'device_type_id', 'device_tags': 'tag_id', 'devices': 'id'}
+
+    def __init__(self, *args, **kwargs):
+        data = kwargs.get('data', args[0] if args else None)
+        if data is not None:
+            data = data.copy()
+            for old, new in (('site', 'sites'), ('role', 'roles'), ('platform', 'platforms'), ('device_type', 'models')):
+                if data.get(old) and new not in data:
+                    if hasattr(data, 'setlist'):
+                        data.setlist(new, [data[old]])
+                    else:
+                        data[new] = [data[old]]
+            if args:
+                args = (data, *args[1:])
+            else:
+                kwargs['data'] = data
+        super().__init__(*args, **kwargs)
+        self.fields['operation'].choices = [(value, label) for value, label in UpgradeOperationChoices
+                                            if value not in CONFIG_OPERATIONS]
+        self.fields['profile_source'].choices = (
+            ('model', 'Model defaults'), ('saved', 'Saved profile'), ('custom', 'Custom settings'))
+        for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
+            self.fields.pop(name)
+
+    def clean(self):
+        data = super().clean()
+        narrowed = any(data.get(field) for field in self.scope_fields)
+        if not narrowed and not data.get('all_active'):
+            self.add_error('all_active', 'Choose a device scope or explicitly select all active devices.')
+        if narrowed and data.get('all_active'):
+            self.add_error('all_active', 'Clear All active devices to use a narrower scope.')
+        return data
 
     def schedule_data(self):
         data = dict(self.cleaned_data)
-        data['filters'] = {key + '_id': [data[key].pk] for key in ('site', 'role', 'platform', 'device_type') if data[key]}
-        if data['devices']:
-            data['filters']['id'] = [obj.pk for obj in data['devices']]
+        data['filters'] = {'status': ['active'], **{
+            key: [obj.pk for obj in data[field]] for field, key in self.scope_fields.items() if data.get(field)}}
         data['poller'] = data['poller'].name if data['poller'] else ''
         return data
 
 
 class UpgradeJobEditForm(UpgradePlanForm):
     last_updated = forms.DateTimeField(widget=forms.HiddenInput)
+
+    def __init__(self, *args, job=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if job is not None:
+            is_config = job.operation in CONFIG_OPERATIONS
+            self.fields['operation'].choices = [(value, label) for value, label in UpgradeOperationChoices
+                if (value in CONFIG_OPERATIONS) == is_config and (not job.audit_run_id or value == job.operation)]
+            self.fields['saved_profile'].queryset = JobProfile.objects.filter(kind='remediate' if is_config else 'upgrade')
+            if not is_config:
+                for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
+                    self.fields.pop(name)
 
 
 class UpgradeJobEditView(PermissionRequiredMixin, View):
@@ -133,7 +233,7 @@ class UpgradeJobEditView(PermissionRequiredMixin, View):
         if job.status != 'pending':
             messages.error(request, 'Only pending jobs can be edited. This job has already been claimed or closed.')
             return redirect(job.get_absolute_url())
-        form = UpgradeJobEditForm(initial={
+        form = UpgradeJobEditForm(job=job, initial={
             'operation': job.operation, 'scheduled_at': job.scheduled_at.isoformat(),
             'start_before': job.start_before.isoformat(), 'description': job.description,
             'last_updated': job.last_updated.isoformat(), **plan_initial(job),
@@ -142,11 +242,11 @@ class UpgradeJobEditView(PermissionRequiredMixin, View):
 
     def post(self, request, pk):
         job = self.get_job(request, pk)
-        form = UpgradeJobEditForm(request.POST)
+        form = UpgradeJobEditForm(request.POST, job=job)
         if form.is_valid():
             try:
                 job = queue.edit_pending(request.user, pk, form.cleaned_data)
-                messages.success(request, 'Upgrade job updated.')
+                messages.success(request, 'Device job updated.')
                 return redirect(job.get_absolute_url())
             except (queue.QueueError, ValidationError) as exc:
                 form.add_error(None, str(exc))
@@ -158,6 +258,13 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
     raise_exception = True
 
     def get(self, request):
+        source = request.GET.get('from_job', '')
+        config_job = source.isdigit() and UpgradeJob.objects.restrict(request.user, 'view').filter(
+            pk=int(source), operation__in=CONFIG_OPERATIONS).exists()
+        if request.GET.get('operation') in CONFIG_OPERATIONS or config_job:
+            params = request.GET.copy()
+            params['frequency'] = 'now'
+            return redirect(reverse('plugins:netbox_discovery:auditschedule_add') + '?' + params.urlencode())
         return render(request, 'netbox_discovery/upgrade_schedule.html', {'form': ScheduleForm(initial=self.initial(request))})
 
     @staticmethod
@@ -171,7 +278,7 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
             initial = {}
             model = request.GET.get('device_type', '')
             if model.isdigit():
-                initial['device_type'] = int(model)
+                initial['models'] = [int(model)]
             devices = [int(pk) for pk in request.GET.getlist('devices') if pk.isdigit()]
             if devices:
                 initial['devices'] = devices
@@ -208,12 +315,12 @@ class UpgradeJobTable(NetBoxTable):
     poller = tables.Column(linkify=True)
     status = columns.ChoiceFieldColumn()
     operation = columns.ChoiceFieldColumn()
-    scheduled_at = columns.DateTimeColumn()
+    scheduled_at = columns.DateTimeColumn(verbose_name='Scheduled start')
     last_seen_at = columns.DateTimeColumn(verbose_name='Job last update', default='No job updates yet')
     groups = columns.TemplateColumn(template_code='{{ value|join:", " }}', verbose_name='Groups', orderable=False)
     planned_wave = tables.Column(verbose_name='Wave')
     poller_last_seen_at = columns.DateTimeColumn(accessor='poller__upgrade_last_seen_at',
-                                                verbose_name='Upgrade poller last seen', default='Never checked in')
+                                                verbose_name='Worker last seen', default='Never checked in')
 
     class Meta(NetBoxTable.Meta):
         model = UpgradeJob
@@ -226,19 +333,115 @@ class UpgradeJobTable(NetBoxTable):
 class UpgradeFilterForm(NetBoxModelFilterSetForm):
     model = UpgradeJob
     status = forms.ChoiceField(choices=[('', '---------')] + list(UpgradeStatusChoices), required=False)
-    operation = forms.ChoiceField(choices=[('', '---------')] + list(UpgradeOperationChoices), required=False)
+    operation = forms.ChoiceField(choices=[('', '---------')] + [
+        (value, label) for value, label in UpgradeOperationChoices if value not in CONFIG_OPERATIONS], required=False)
     poller_id = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False)
     site_id = DynamicModelChoiceField(queryset=Site.objects.all(), required=False)
     role_id = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
 
 
+class StandardsJobFilterForm(UpgradeFilterForm):
+    operation = forms.ChoiceField(choices=[('', '---------')] + [
+        (value, label) for value, label in UpgradeOperationChoices if value in CONFIG_OPERATIONS], required=False)
+
+
+class BulkHoldJobs(ObjectAction):
+    name = 'bulk_hold'
+    label = 'Hold selected'
+    multi = True
+    permissions_required = {'change'}
+    template_name = 'netbox_discovery/buttons/bulk_jobs.html'
+
+
+class BulkCancelJobs(BulkHoldJobs):
+    name = 'bulk_cancel'
+    label = 'Cancel selected'
+
+
+class BulkDeleteJobs(BulkHoldJobs):
+    name = 'bulk_delete'
+    label = 'Delete selected'
+    permissions_required = {'delete'}
+
+
 @register_model_view(UpgradeJob, name='list')
 class UpgradeJobListView(ObjectListView):
-    queryset = UpgradeJob.objects.select_related('device', 'poller')
+    queryset = UpgradeJob.objects.exclude(operation__in=CONFIG_OPERATIONS).select_related('device', 'poller')
+    template_name = 'netbox_discovery/upgradejob_list.html'
     table = UpgradeJobTable
     filterset = UpgradeJobFilterSet
     filterset_form = UpgradeFilterForm
-    actions = (AddObject,)
+    actions = (AddObject, BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
+
+
+class StandardsJobListView(UpgradeJobListView):
+    queryset = UpgradeJob.objects.filter(operation__in=CONFIG_OPERATIONS).select_related('device', 'poller')
+    template_name = 'netbox_discovery/standardsjob_list.html'
+    filterset_form = StandardsJobFilterForm
+    actions = (BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
+
+
+class BulkJobForm(forms.Form):
+    selection = forms.JSONField(widget=forms.HiddenInput)
+    reason = forms.CharField(max_length=1000, required=False,
+                            widget=forms.Textarea(attrs={'rows': 3, 'class': 'form-control'}))
+
+    def clean_selection(self):
+        values = self.cleaned_data['selection']
+        if not isinstance(values, list) or not values or any(type(pk) is not int or pk < 1 for pk in values):
+            raise forms.ValidationError('Select at least one job.')
+        return sorted(set(values))
+
+
+class UpgradeBulkActionView(PermissionRequiredMixin, View):
+    action = None
+    raise_exception = True
+
+    def get_permission_required(self):
+        permission = 'delete' if self.action == 'delete' else 'change'
+        return (f'netbox_discovery.{permission}_upgradejob',)
+
+    def post(self, request):
+        queryset = UpgradeJob.objects.restrict(request.user, 'view')
+        scope = request.GET.get('job_scope')
+        list_url = 'plugins:netbox_discovery:standardsjob_list' if scope == 'standards' else 'plugins:netbox_discovery:upgradejob_list'
+        if scope == 'standards':
+            queryset = queryset.filter(operation__in=CONFIG_OPERATIONS)
+        elif scope == 'upgrade':
+            queryset = queryset.exclude(operation__in=CONFIG_OPERATIONS)
+        form = BulkJobForm(request.POST) if request.POST.get('confirm') == 'yes' else None
+        if form is None:
+            if request.POST.get('_all'):
+                filtered = UpgradeJobFilterSet(request.GET, queryset=queryset, request=request)
+                if not filtered.is_valid():
+                    messages.error(request, 'Invalid filters. No jobs were changed.')
+                    return redirect(list_url)
+                pks = list(filtered.qs.values_list('pk', flat=True))
+            else:
+                try:
+                    pks = [int(pk) for pk in request.POST.getlist('pk')]
+                except ValueError:
+                    pks = []
+            if not pks:
+                messages.warning(request, 'Select at least one job.')
+                return redirect(list_url)
+            form = BulkJobForm(initial={'selection': pks})
+        elif form.is_valid():
+            pks = form.cleaned_data['selection']
+            try:
+                if queryset.filter(pk__in=pks).count() != len(pks):
+                    raise queue.QueueError('Select accessible jobs in this section only.')
+                count = queue.bulk_action(request.user, pks, self.action, form.cleaned_data['reason'])
+                messages.success(request, f'{count} jobs ' + {'hold': 'held.', 'cancel': 'cancelled.', 'delete': 'deleted.'}[self.action])
+                return redirect(list_url)
+            except queue.QueueError as exc:
+                form.add_error(None, str(exc))
+        else:
+            pks = []
+        return render(request, 'netbox_discovery/upgradejob_bulk.html', {
+            'form': form, 'jobs': queryset.filter(pk__in=pks).order_by('pk'),
+            'action': self.action, 'title': f'{self.action.title()} scheduled jobs', 'list_url': list_url,
+        })
 
 
 @register_model_view(UpgradeJob)

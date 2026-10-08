@@ -109,10 +109,13 @@ class ComplianceReportTable(tables.Table):
     status = columns.TemplateColumn(
         template_code=(
             '{% load helpers %}'
+            '{% if record.record %}<a href="{{ record.record.get_absolute_url }}" title="View findings and proposed changes">{% endif %}'
             '{% badge record.status_label bg_color=record.status_color %}'
+            '{% if record.record %}</a>{% endif %}'
             '{% if record.is_stale %}<span class="text-warning ms-1" '
             'title="Not checked recently"><i class="mdi mdi-clock-alert-outline"></i>'
             '</span>{% endif %}'
+            '{% if record.inherited %}<div class="text-muted small">{{ record.inheritance_note }}</div>{% endif %}'
         ),
         orderable=False,
     )

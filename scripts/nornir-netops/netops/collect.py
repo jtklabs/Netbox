@@ -18,8 +18,9 @@ from pathlib import Path
 
 import yaml
 
-from . import archive
+from . import archive, ntp_discovery, syslog_discovery
 from .core import canonical_platform
+from .netbox import SERVICE_SOURCE_TAG
 from .debuglog import redact
 
 PACKAGE_CATALOG = Path(__file__).with_name("commands.yaml")
@@ -104,7 +105,7 @@ def write_output(directory, filename, text):
     return target
 
 
-def collect_commands(task, catalog, output_dir, emit=None):
+def collect_commands(task, catalog, output_dir, emit=None, discover_ntp=True, discover_syslog=True):
     """Nornir task: run the platform's command set on one device and file the outputs."""
     from nornir.core.task import Result
 
@@ -148,6 +149,24 @@ def collect_commands(task, catalog, output_dir, emit=None):
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             record.update(path=str(path), size=len(text.encode("utf-8")), sha256=digest)
             records["outputs"].append(record)
+        for feature, module, enabled in (("ntp", ntp_discovery, discover_ntp),
+                                         ("syslog", syslog_discovery, discover_syslog)):
+            if not enabled or platform not in module.PLATFORMS:
+                continue
+            from .runner import _check_understood, SHOW_TIMEOUT
+
+            def read(command):
+                output = connection.send_command(command, read_timeout=SHOW_TIMEOUT) or ""
+                _check_understood(command, output)
+                return output
+
+            try:
+                records[f"{feature}_discovery"] = module.observe(platform, read)
+            except Exception as exc:  # Discovery must not discard collected command outputs.
+                records[f"{feature}_discovery"] = {
+                    "status": "error", "reason": redact(str(exc))[:500], "platform": platform,
+                    "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
     finally:
         host.platform = original
         try:
@@ -192,15 +211,18 @@ def netbox_client(args):
 
 
 def run(args, style, log):
-    from .cli import EXIT_FAILED, EXIT_OK, EXIT_USAGE, PROJECT_ROOT, _connect, _exception_of
+    from .cli import EXIT_DIFF, EXIT_FAILED, EXIT_OK, EXIT_USAGE, PROJECT_ROOT, _connect, _exception_of
     from .errors import summarize
-    from .netbox import NetBoxError
+    from .netbox import NetBoxError, settings_from
     from .standards import Standards, StandardsError, load as load_standards
 
     try:
         args.standards = Standards() if getattr(args, "no_standards", False) else load_standards(args.standards, PROJECT_ROOT)
         catalog = load_catalog(args.commands, PROJECT_ROOT)
-    except (StandardsError, CatalogError) as exc:
+        source_tags = settings_from(args.standards, args)["source_tags"]
+        if args.syslog_source_tag:
+            source_tags['syslog'] = args.syslog_source_tag
+    except (StandardsError, CatalogError, NetBoxError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return EXIT_USAGE
     targets, credentials, code = _connect(args, style)
@@ -210,7 +232,8 @@ def run(args, style, log):
     print(f"collecting from {len(targets.inventory.hosts)} device(s), {min(args.workers, len(targets.inventory.hosts))} at a time; "
           f"catalog {catalog['__source__']}; files under {output_dir}")
     print(f"credentials: {credentials.describe()}")
-    results = targets.run(task=collect_commands, catalog=catalog, output_dir=output_dir)
+    results = targets.run(task=collect_commands, catalog=catalog, output_dir=output_dir,
+                         discover_ntp=not args.no_ntp_discovery, discover_syslog=not args.no_syslog_discovery)
 
     client = None
     upload_enabled = bool(args.netbox and not args.no_upload)
@@ -223,7 +246,8 @@ def run(args, style, log):
     poller = getattr(args, "poller", None) or os.environ.get("NETOPS_POLLER") or ""
     poller = poller.lower().removeprefix("poller-") if poller else ""
 
-    failed = 0
+    fields_ready, fields_errors = set(), {}
+    failed = attention = 0
     records = {}
     for name in sorted(results):
         result, host = results[name], targets.inventory.hosts[name]
@@ -254,9 +278,47 @@ def run(args, style, log):
             except NetBoxError as exc:
                 line += style.bad(f"; NetBox upload failed: {redact(str(exc))}")
                 failed += 1
-        print(line)
         records[name] = {"status": "completed", "platform": data["platform"],
                          "outputs": [{k: v for k, v in o.items()} for o in outputs]}
+        shared_sources = {ntp_discovery.interface_name(data[f"{feature}_discovery"]["source"]).lower()
+                          for feature in ("ntp", "syslog")
+                          if source_tags.get(feature) == SERVICE_SOURCE_TAG
+                          and data.get(f"{feature}_discovery", {}).get("status") == "resolved"}
+        for feature, module in (("ntp", ntp_discovery), ("syslog", syslog_discovery)):
+            observation = data.get(f"{feature}_discovery")
+            if not observation:
+                continue
+            if len(shared_sources) > 1 and source_tags.get(feature) == SERVICE_SOURCE_TAG:
+                observation = {**observation, "status": "ambiguous",
+                               "reason": "NTP and syslog use different interfaces; select one service-source interface"}
+            outcome = {"status": observation["status"], "reason": observation.get("reason", "")}
+            if upload_enabled:
+                try:
+                    if client is None:
+                        raise NetBoxError("NetBox client unavailable")
+                    source_tag = source_tags.get(feature)
+                    if not source_tag:
+                        raise NetBoxError(f"{feature.upper()} source tag is disabled in NetBox settings")
+                    if feature not in fields_ready and feature not in fields_errors:
+                        try:
+                            module.ensure_fields(client)
+                            fields_ready.add(feature)
+                        except NetBoxError as exc:
+                            fields_errors[feature] = redact(str(exc))
+                    if feature in fields_errors:
+                        raise NetBoxError(fields_errors[feature])
+                    outcome = module.sync_device(client, host, observation, source_tag)
+                except NetBoxError as exc:
+                    outcome = {"status": "error", "reason": redact(str(exc))}
+            records[name][f"{feature}_discovery"] = observation
+            records[name][f"{feature}_writeback"] = outcome if upload_enabled else {"status": "disabled"}
+            if observation["status"] == "error" or outcome["status"] == "error":
+                failed += 1
+            elif outcome["status"] in ("attention", "ambiguous", "unconfigured"):
+                attention += 1
+            detail = outcome.get("reason") or observation.get("reason")
+            line += f"; {feature.upper()} source: {outcome['status']}" + (f" ({detail})" if detail else "")
+        print(line)
     archive.capture(records)
     total = len(results)
     summary = [f"{total} device(s)", f"{sum(1 for r in records.values() if r['status'] == 'completed')} collected"]
@@ -265,6 +327,8 @@ def run(args, style, log):
         summary.append(style.dim(f"{skipped} without a command set"))
     if failed:
         summary.append(style.bad(f"{failed} failed"))
+    if attention:
+        summary.append(style.warn(f"{attention} source selection(s) need review"))
     print()
     print(style.bold("summary: ") + ", ".join(summary))
-    return EXIT_FAILED if failed else EXIT_OK
+    return EXIT_FAILED if failed else EXIT_DIFF if attention else EXIT_OK

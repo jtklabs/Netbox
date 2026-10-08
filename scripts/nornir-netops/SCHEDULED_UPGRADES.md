@@ -6,7 +6,7 @@ NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing i
 
 Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in. Only [prestage policies](#prestage-images-by-model) run on NetBox's own worker, the one that already runs its housekeeping.
 
-Open **Device Operations → Software → Job Profiles** to save named upgrade or remediation
+Open **Device Operations → Software and Standards → Job Profiles** to save named upgrade or remediation
 profiles. Upgrade profiles contain the validated YAML used by
 `configure.py upgrade --profile`. Remediation profiles contain checked features
 and an add/replace mode; their configuration values come from versioned YAML
@@ -39,16 +39,23 @@ form identifies the affected defaults and asks for **Replace existing assignment
 before saving again. Assigned profiles cannot be deleted until their assignments
 are removed, and their type cannot change while assigned.
 
-Open **Device Operations → Software → Upgrade Jobs → Add** on the list page (the sidebar
-**+** also works). Choose a site, role, platform, model or explicit devices, and
-the scheduled start and **start before**, including a UTC offset. **Device model
-defaults** resolves the appropriate profile for each selected device: upgrade
-profiles for audits, staging and upgrades, remediation profiles for remediation.
+Open **Device Operations → Software and Standards → Upgrade Jobs → Add** on the list page (the sidebar
+**+** also works). Choose regions, tenants, sites, roles, platforms, models, device
+tags or explicit devices. Scope filters intersect; regions include child regions.
+An empty scope is rejected unless **All active devices** is explicitly selected.
+One-off scheduling still validates every execution device and is limited to 1,000
+devices per submission; it does not silently skip incompatible devices.
+Choose a **Time zone**, then use the date/time pickers for **Scheduled start** and
+**Start before**. Ambiguous or nonexistent daylight-saving times are rejected;
+select UTC to specify an exact instant around a clock change. Existing UTC-offset
+payloads and API endpoints remain compatible. **Device defaults
+(model, then platform)** resolves the appropriate profile for each selected device:
+model-specific upgrade profiles for pre-upgrade audits, staging and upgrades.
 Mixed-model batches can therefore use different plans. Alternatively choose a
 **Saved profile** for the selection, or **Custom settings** for a one-off plan.
-Remediation checkboxes appear for custom remediation settings.
+Use **Audit Schedules** for configuration standards instead.
 
-Choose **Audit configuration standards (read-only)** to check the same saved
+Leave **Audit and remediate** unchecked in Audit Schedules to check the same saved
 remediation profiles or custom feature selection without changing devices.
 This is separate from **Pre-upgrade audit**, which checks software upgrade
 readiness. Standards audits pin the applicable YAML revisions and write their
@@ -68,10 +75,10 @@ automatically enabled by choosing an audit operation.
 Preview shows matching devices, models, resolved profiles and pollers. A missing,
 inaccessible or incompatible default rejects the entire selection. Scheduling
 captures the devices, management addresses, poller assignments and a separate
-copy of each plan. Editing a saved profile or model assignment affects future
+copy of each plan. Editing a saved profile, model or platform assignment affects future
 schedules only; existing jobs retain their snapshots. Later inventory changes
-cannot add devices to a batch. Users resolving model defaults need view access
-to both the assignments (`devicetypeprofile`) and saved profiles (`jobprofile`),
+cannot add devices to a batch. Users resolving device defaults need view access
+to the applicable assignments (`devicetypeprofile` or `platformprofile`) and saved profiles (`jobprofile`),
 in addition to existing device and scheduling permissions.
 
 Open a pending job and click **Edit** to change its operation, profile, scheduled window or description. This updates only that device's job; its device and poller stay fixed, and other jobs in the batch are unchanged. Editing requires `change` permission, plus `apply` permission when the existing or new operation stages an image or installs an upgrade. The worker receives the updated profile when it claims the job. Claimed, running and closed jobs cannot be edited. A stale browser form is rejected if another edit or worker claim happened in the meantime.
@@ -96,7 +103,7 @@ before choosing the starting/target releases.
 
 A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way, and one whose `image` is an `EOS-<release>.swi` schedules Arista EOS switches; see [BIG-IP upgrades](UPGRADES.md#big-ip-upgrades) and [Arista EOS upgrades](UPGRADES.md#arista-eos-upgrades). The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
-Select only the virtual chassis **master** for a stack. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
+Stack selections resolve to the NetBox virtual chassis **master**, with one job per stack even when the selection includes multiple members. Members do not need management IPs or separate profiles: the job uses the master's IP, profile and ownership. A member-only selection also resolves to its master. Missing or inaccessible masters block scheduling; the master still needs a management IP. Recurring audits also require an active master. Device `poller-*` tags take precedence over site tags and then the nearest tagged ancestor region. When more than one poller tag applies, choose a matching poller explicitly. Unlike an inventory sweep, a scheduled upgrade is assigned to exactly one poller; it does not use prefix-based inventory unions or a default-region fallback. Missing ownership, ambiguous ownership and tenant mismatches block scheduling. The worker checks the saved ownership and management address again at dispatch and before authorizing changes.
 
 **Start before is a latest start for device changes, not a forced stop or guaranteed completion time.** NetBox checks it again after prechecks, before copying an image or changing boot configuration. The `write memory` that an install job runs at the start of its prechecks is the one device write that precedes that check. A transfer, install, reload or recovery already underway continues past it. Prestage images ahead of the upgrade window when download time is significant; a [prestage policy](#prestage-images-by-model) does that for every device of a model. Slots become available on the next cron tick after a batch finishes; allow time for earlier batches and prechecks.
 
@@ -104,7 +111,7 @@ Select only the virtual chassis **master** for a stack. Device `poller-*` tags t
 
 An **image staging policy** keeps the software standard's preferred image on flash
 ahead of the upgrade window, so the upgrade itself does not wait for a copy.
-Open **Device Operations → Software → Automatic Image Staging → Add**, choose a **Model**
+Open **Device Operations → Software and Standards → Automatic Image Staging → Add**, choose a **Model**
 (device type) and save. That is all the configuration a model needs: the
 image, its MD5 checksum and its download link come from the Lifecycle
 plugin's software standard, and change when the standard does.
@@ -263,7 +270,7 @@ active with a primary IP in NetBox.
 Two switches in an HSRP pair, the A and B closets on one floor, or the F5
 units behind one load balancer must not be upgraded at the same time, and a
 core should not go until the closets it serves are done. **Device Operations →
-Software → Redundancy Groups** and **Upgrade Dependencies** hold that
+Software and Standards → Redundancy Groups** and **Upgrade Dependencies** hold that
 knowledge, and the queue enforces it:
 
 - A **group** is a set of devices of which at most **members upgrading at
@@ -313,7 +320,7 @@ queue for anything that needs ordering.
 Start from what discovery already found, then add what it cannot see.
 
 1. **Let discovery make the first pass.** Run an `snmp-inventory` sweep, or
-   open **Device Operations → Software → Redundancy Groups** and click **Refresh
+   open **Device Operations → Software and Standards → Redundancy Groups** and click **Refresh
    discovered groups**. Every HSRP or VRRP group with two or more devices
    appears as a group with a limit of 1 and the source *FHRP group*; every
    cable between two tiers appears under **Upgrade Dependencies** with the
@@ -513,6 +520,48 @@ Create the log location with suitable ownership first and rotate it. Set `NETOPS
 
 Each device has its own NetBox status, phase, baseline and post-validation counts, timestamps, run ID, and event history. Filter the job list by batch, poller, site, role, status or operation. The detail page shows the most recent 500 events; refresh to see updates. The separate bearer-authenticated webhook remains available for a future dashboard and includes `scheduled_job_id` and `batch_id` for scheduled work. Full baseline/configuration snapshots stay in the private remote archive.
 
+In the Compliance Report, click a recorded status to open its findings. New
+configuration audits record the redacted expected/observed entries, proposed
+commands, and feature advisories; these also appear on the job detail page.
+The result links back to the job and its pinned standards. Older results need
+a new audit with the updated worker to collect these details. Large findings
+are explicitly marked as shortened; the complete archive stays on the worker.
+The result API exposes these under `findings.checks` at
+`/api/plugins/compliance/config-compliance/`, and job summaries expose them
+under `summary.compliance_details`.
+
+Configuration-compliance reports, grid cells and device cards inherit a stack
+member's standards and verdicts from the current virtual chassis master. The
+report identifies the source and links to the master's findings. Results are
+not copied to members: revisions, overdue checks, errors and unknown states
+remain identical to the master's current evidence. Historical member records
+do not override that evidence. A missing or inaccessible master never produces
+a passing result. Device counts include members, while job counts count stacks.
+
+For external reports, `GET /api/plugins/compliance/config-compliance/effective/`
+returns these effective results, including unchecked devices and inheritance
+metadata. Use `?device_id=123` for one member, or normal DCIM device filters such
+as `region_id`, `tenant_id` and `platform_id`. Pagination counts devices; each
+device contains its `standards` array with source device, record link, verdict,
+findings, checked time and revision. The original results endpoint remains the
+raw recorded evidence, without fabricated member records.
+
+Use the job-list checkboxes and **Hold selected**, **Cancel selected**, or
+**Delete selected** to manage multiple scheduled jobs. Each action has a
+confirmation screen, including when selecting all filtered results. Hold
+requires a reason and pending jobs; cancel accepts pending or held jobs.
+Delete accepts pending/held jobs or cancelled jobs only if never claimed.
+Object permissions and state are rechecked under row locks for the whole
+selection: a refusal leaves all jobs unchanged. Execution history and active
+jobs cannot be bulk-deleted. These actions do not pause the recurring audit
+schedule itself; pause that schedule separately to stop future occurrences.
+
+The Pollers list has separate sortable **Discovery check-in** and
+**Upgrade / standards check-in** columns. Worker contact no longer refreshes
+the discovery timestamp or overwrites the scanner version/scan summary.
+Previously mixed discovery timestamps settle to real discovery check-ins
+after the next scan; no historical timestamp is fabricated during deployment.
+
 The job list and detail page show two separate timestamps:
 
 - **Upgrade poller last seen** records the server's receipt of an `upgrade-poll` queue check-in (including idle ticks), or an accepted job heartbeat/progress report. It applies to every job assigned to that poller. SNMP-only check-ins do not update it.
@@ -527,7 +576,7 @@ There is **no automatic replay of a claimed upgrade**:
 - A worker lost during prechecks is marked failed at the next check-in after five minutes without a heartbeat. No start authorization was issued. Create a new schedule after inspecting the failure.
 - A worker lost after NetBox authorizes changes is marked **Recovery required**. Its device remains locked against further scheduled work. An original worker that merely lost NetBox connectivity may still finish and report its outcome.
 - Failed post-validation, ambiguous install outcomes, and errors after apply authorization also require recovery. Inspect the switch and its archive, stop any surviving worker, then use **Record recovery and release device**, describing the verified state. This releases the scheduling lock; it sends no rollback command.
-- Only pending jobs can be cancelled. Active installs are not interrupted by a UI cancellation.
+- Pending and held jobs can be cancelled. Active installs are not interrupted by a UI cancellation.
 
 Before changes, the NetBox ready acknowledgement and any configured webhook must succeed. Afterwards, the upgrade engine continues recovery through a callback outage. Progress is saved locally before delivery and retried on the next cron tick, using the same job/sequence for deduplication. A start authorization is never put in the deferred-delivery spool. A lost claim response is not retried; those claims expire without device changes.
 
@@ -590,21 +639,68 @@ and `mode` profile as remediation. `apply: false` workers can claim both
 Configuration audit support requires plugin migration `0017_configuration_audit`
 and the matching worker release. Do not schedule it to older workers.
 
-### Recurring configuration audits
+### Standards audit and remediation schedules
 
-Use **Device Operations > Audit Schedules** for daily or weekly read-only checks.
-Select active devices by tenant, site, platform, model, device tags or explicit
+Use **Device Operations > Audit Schedules** for all standards work. Leave
+**Audit and remediate** unchecked for read-only checks; check it to audit and
+apply the selected standard's required changes. Choose **Now (one time)**,
+**Daily**, or **Weekly**. Upgrade Jobs is reserved for image staging,
+pre-upgrade checks and software installation; Standards Jobs contains standards
+audit/remediation execution history, including older jobs.
+Select active devices by region, tenant, site, platform, model, device tags or explicit
 device IDs, or explicitly select all active devices. Different scope fields
-intersect. Selection is resolved again on every run, with one job per standalone
-device or virtual chassis master and a maximum of 1,000 matching devices per
-schedule. Split larger scopes into multiple schedules.
+intersect. Region selection includes sites in that region and its child regions.
+Selection is resolved again on every run, with one job per standalone device or
+virtual chassis master. Larger scopes are queued in batches of up to 1,000 devices
+within the same audit run; there is no 1,000-device limit on the recurring scope.
+Schedules can be saved before devices or profile assignments exist. An occurrence
+with no eligible devices is recorded as skipped and checked again next time.
 
-Choose individual standards, a saved remediation profile, or model defaults.
-These profiles select what to check, but the operation is always `audit_config`:
-no configuration changes, image staging, or upgrades are authorized. Exact match
-uses `mode: replace`; Required entries present uses `mode: add`, both read-only.
+Choose individual standards, a saved remediation profile, or **Device defaults
+(model, then platform)**. Device defaults use a model's assigned remediation
+profile first, falling back to its platform's standards profile. A saved profile
+targets only devices whose effective default is that exact profile.
+Other devices are excluded, with an excluded-device count in
+the run history. Selected standards remain an explicit override for all scoped
+devices, without requiring a model profile assignment.
+These profiles select what to check. The default operation is `audit_config`,
+which never authorizes configuration changes. Selecting Audit and remediate
+uses `remediate`, which checks current configuration and applies needed changes.
+Exact match uses `mode: replace`; Required entries present uses `mode: add`.
 Each occurrence pins the latest accessible profile and applicable standard
-revisions into a new batch of jobs. Remediation must be scheduled separately.
+revisions into a new batch of jobs. ClearPass cluster-wide remediation retains
+its separate approval flag in a saved profile or the selected-standards form.
+
+**Now (one time)** dispatches immediately after the schedule transaction commits;
+it does not wait for the recurring dispatcher. Jobs execute when the assigned
+poller next checks in. The schedule is disabled and its next-run time cleared
+after that single dispatch, even if no devices match or validation fails.
+Editing or re-enabling a consumed one-time schedule does not replay it: create
+a new schedule for another run. Unexpected dispatcher failures leave it due
+for the background scheduler to retry. A disabled Now schedule waits until enabled.
+
+Use **Device Operations > Platform Profiles** to assign a saved standards
+profile to an existing NetBox platform, such as Cisco IOS. The same assignment
+can be reached through **Assign to platform** on a remediation job profile.
+For example, assign an NTP profile to Cisco IOS, then create a regional audit
+using Device defaults: devices in that region (including child regions) with
+that platform will be audited, regardless of their hardware model.
+A nonempty model-specific remediation assignment overrides the whole platform
+profile; the two profiles are not merged. An upgrade-only model assignment does
+not block the platform standards default. Devices without a platform or model
+standards assignment are excluded from recurring default-profile audits.
+An inaccessible model override never falls back silently to a platform profile.
+
+Platform assignments apply to configuration audits and remediation only.
+Software upgrade profiles still require explicit hardware-model assignments.
+Existing queued jobs retain their frozen profile and standard revisions.
+Platform assignments support normal NetBox object permissions and changelog,
+and CRUD at `/api/plugins/discovery/platform-profiles/` using `platform` and
+`remediation_profile` IDs. Replacing an existing default requires
+`replace_existing: true`. Install migration `0019_platform_standards_profiles`
+and grant operators/run-as accounts view access to the platform assignments
+and their job profiles. The API value `profile_source: "model"` is retained for
+compatibility and now resolves model-then-platform defaults for standards jobs.
 
 Timing uses an IANA time zone (for example `America/New_York`). Daily/weekly
 wall times survive DST: the first fall-back occurrence is used once, and missing
@@ -626,9 +722,13 @@ The creator, or the last person to edit a schedule, becomes its `run_as` user.
 That user needs permission to view the schedule, devices, profiles and standards,
 and add upgrade jobs within the selected scope. Permissions and active-user
 status are checked again each run. Grant schedule add/change/view permissions to
-operators and audit-run view permission for history. No apply permission is
-required. Failure to resolve any device aborts the whole batch with a recorded
-failure; it does not silently queue a partial batch.
+operators and audit-run view permission for history. Read-only audits need no
+apply permission. Audit and remediate requires `apply_upgradejob` permission
+at save and dispatch, and the poller must run with `--apply`; an audit-only worker
+will not execute those jobs. After eligibility filtering, failure to resolve any selected device
+aborts the entire occurrence, including earlier queue batches, with a recorded
+failure. Poller, address and applicable-standard checks happen at dispatch, not
+while saving the recurring scope.
 
 Audit schedules show next/last dispatch and an overdue indicator; run history
 links to individual job outcomes. A queued run is not a successful/compliant
@@ -640,12 +740,15 @@ a compliant verdict; prior results retain their timestamps and existing
 REST endpoints:
 
 - `/api/plugins/discovery/audit-schedules/`: CRUD, pause with `enabled: false`.
+  `remediate` defaults to `false`; set it to `true` to authorize remediation.
+  Use `frequency: "now"` for immediate one-time dispatch; otherwise `daily` or
+  `weekly`. Existing schedules stay audit-only after migration `0021`.
 - `/api/plugins/discovery/audit-runs/`: read-only history, filter by `schedule_id`
   or `outcome`; includes `job_status_counts` for visible jobs.
 - `/api/plugins/discovery/upgrade-jobs/?audit_run_id=ID` or
   `?audit_schedule_id=ID`: device job history, snapshots and results.
 
-Example schedule body (replace the tenant ID):
+Example schedule body (replace the region ID):
 
 ```json
 {
@@ -655,9 +758,9 @@ Example schedule body (replace the tenant ID):
   "local_time": "02:00:00",
   "time_zone": "America/New_York",
   "window_hours": 4,
-  "filters": {"status": ["active"], "tenant_id": [12]},
-  "profile_source": "custom",
-  "profile": {"features": ["ntp"], "mode": "replace"}
+  "filters": {"status": ["active"], "region_id": [12]},
+  "profile_source": "model",
+  "profile": {}
 }
 ```
 

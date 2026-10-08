@@ -89,7 +89,12 @@ workers = 8
 [commands]
 # After each sweep, run nornir-netops's `configure.py collect` for the devices
 # this poller owns: per-platform show commands, filed on the NetBox device page.
+# Includes NTP/syslog source-interface tagging/VRF discovery on IOS/IOS-XE, NX-OS and EOS.
+# Enable for daily sweeps; needs SSH credentials and NetBox device/interface write
+# access in nornir-netops. Existing source selections are preserved on conflict.
 run_after_sweep = false
 netops_dir = /opt/nornir-netops
 # python = /opt/nornir-netops/.venv/bin/python
 # extra_args = --workers 5
+# To collect outputs without NTP source discovery: extra_args = --no-ntp-discovery
+# To disable both: extra_args = --no-ntp-discovery --no-syslog-discovery

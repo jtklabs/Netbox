@@ -9,7 +9,7 @@ in host data, so `--filter site=atl` works exactly as it does with a CSV.
 **Interface tags.** A source interface is a property of the device, not of the
 fleet: one switch sources syslog from Loopback0, another from Vlan10, and a
 third from nothing at all. That is recorded in NetBox as a *tag* on the
-interface -- `ntp-source` on the one interface that is the source.
+interface -- `service-source` on the one interface shared by source-aware services.
 
 The rule that follows:
 
@@ -82,8 +82,10 @@ def slugify(value: str) -> str:
     return _SLUG_STRIP.sub("-", str(value).strip().lower()).strip("-")
 
 #: Interface tags consulted by default, as feature -> tag slug. A tag is a
-#: slug in NetBox, so `ntp-source` rather than `ntp_source_interface`.
-DEFAULT_SOURCE_TAGS = {"ntp": "ntp-source", "syslog": "syslog-source"}
+#: slug in NetBox, so `service-source` rather than a device custom-field name.
+SERVICE_SOURCE_TAG = "service-source"
+LEGACY_SOURCE_TAGS = ("ntp-source", "syslog-source")
+DEFAULT_SOURCE_TAGS = {"ntp": SERVICE_SOURCE_TAG, "syslog": SERVICE_SOURCE_TAG}
 
 _SOURCE_SUFFIX = "-source"
 
@@ -116,7 +118,13 @@ def source_tags(configured: Any) -> Dict[str, str]:
         return {str(feature): str(tag) for feature, tag in configured.items()}
     if isinstance(configured, str) or not isinstance(configured, Sequence):
         raise NetBoxError("netbox.source_tags must be a mapping or a list of tag slugs")
-    return {feature_of(str(tag)): str(tag) for tag in configured}
+    tags = {}
+    for tag in configured:
+        if str(tag) == SERVICE_SOURCE_TAG:
+            tags.update(DEFAULT_SOURCE_TAGS)
+        else:
+            tags[feature_of(str(tag))] = str(tag)
+    return tags
 
 
 class Client:
@@ -358,22 +366,42 @@ def source_interfaces(
     server is built to answer.
     """
     per_device: Dict[int, Dict[str, Any]] = {}
+    cache = {}
+
+    def tagged(slug):
+        if slug not in cache:
+            cache[slug] = client.get("dcim/interfaces/", {"tag": slug})
+        return cache[slug]
+
     for feature, tag in tags.items():
         # Device filters belong to dcim/devices: name, tag, id and custom
         # fields mean something different on interfaces. Join by device ID
         # below, after the inventory has selected the devices.
-        query = {"tag": tag}
-        interfaces = client.get("dcim/interfaces/", query)
+        interfaces = tagged(tag)
+        labels = {}
+        if tag == SERVICE_SOURCE_TAG:
+            # Explicit shared intent wins. Otherwise preserve old selections,
+            # but combine both services so differing legacy sources fail closed.
+            selected = {(row.get("device") or {}).get("id") for row in interfaces}
+            legacy = {}
+            for old_tag in LEGACY_SOURCE_TAGS:
+                for row in tagged(old_tag):
+                    device_id = (row.get("device") or {}).get("id")
+                    if device_id not in selected:
+                        legacy[(device_id, row.get("id", row.get("name")))] = row
+                        labels.setdefault(device_id, set()).add(old_tag)
+            interfaces = [*interfaces, *legacy.values()]
         single, ambiguous = resolve_sources(interfaces, tag)
         for device_id, name in single.items():
             per_device.setdefault(device_id, {}).setdefault("source_interface", {})[
                 feature
             ] = name
         for device_id, names in ambiguous.items():
+            label = "/".join(sorted(labels[device_id])) if device_id in labels else tag
             per_device.setdefault(device_id, {}).setdefault("source_interface_error", {})[
                 feature
             ] = (
-                f"{len(names)} interfaces are tagged {tag} in NetBox "
+                f"{len(names)} interfaces are tagged {label} in NetBox "
                 f"({', '.join(names)}); exactly one may be"
             )
     return per_device
@@ -684,7 +712,7 @@ def init_nornir(args, credentials, standards, workers: int):
     if getattr(getattr(args, "feature", None), "name", None) in ("waf", "nac"):
         # WAF and NAC do not use NTP/syslog source-interface tags.
         settings["source_tags"] = {}
-    elif getattr(args, 'command', None) == 'discover-ntp':
+    elif getattr(args, 'command', None) in ('discover-ntp', 'collect'):
         settings['source_tags'] = {}
     elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
         tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")

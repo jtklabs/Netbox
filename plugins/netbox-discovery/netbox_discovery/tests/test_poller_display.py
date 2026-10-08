@@ -56,7 +56,9 @@ class PollerFreshnessTest(TestCase):
         poller.touch()
         content = self.client.get(
             reverse('plugins:netbox_discovery:discoverypoller_list')).content.decode()
-        self.assertIn('Checking in', content)
+        self.assertIn('Discovery checking in', content)
+        self.assertIn('Discovery check-in', content)
+        self.assertIn('Upgrade / standards check-in', content)
         self.assertNotIn('>Stale<', content)
 
     def test_the_detail_page_says_the_healthy_case_out_loud(self):
@@ -89,3 +91,27 @@ class PollerFreshnessTest(TestCase):
                     kwargs={'pk': poller.pk}))
         self.assertIn('is_stale', response.data)
         self.assertFalse(response.data['is_stale'])
+
+    def test_worker_cannot_refresh_discovery_or_replace_its_summary(self):
+        poller = DiscoveryPoller.objects.create(name='separate')
+        poller.touch(version='scanner', summary='Scan finished')
+        seen = poller.last_seen_at
+        poller.touch(version='worker', summary='Idle', upgrade=True)
+        poller.refresh_from_db()
+        self.assertEqual(poller.last_seen_at, seen)
+        self.assertEqual(poller.version, 'scanner')
+        self.assertEqual(poller.last_scan_summary, 'Scan finished')
+        self.assertGreater(poller.upgrade_last_seen_at, seen)
+
+    def test_both_checkin_columns_sort(self):
+        from netbox_discovery.tables import DiscoveryPollerTable
+        now = timezone.now()
+        earlier = now - timedelta(hours=1)
+        a = DiscoveryPoller.objects.create(name='alpha', last_seen_at=now, upgrade_last_seen_at=earlier)
+        b = DiscoveryPoller.objects.create(name='beta', last_seen_at=earlier, upgrade_last_seen_at=now)
+        for column, expected in (('last_seen_at', [b, a]), ('upgrade_last_seen_at', [a, b])):
+            table = DiscoveryPollerTable(DiscoveryPoller.objects.all(), order_by=column)
+            self.assertTrue(table.columns[column].orderable)
+            self.assertEqual([row.record for row in table.rows], expected)
+            table.order_by = '-' + column
+            self.assertEqual([row.record for row in table.rows], list(reversed(expected)))

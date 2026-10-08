@@ -7,6 +7,7 @@
   <tr><th>Remediation profile</th><td>{{ object.remediation_profile|linkify }}</td></tr>
 </table>
 {% if perms.netbox_discovery.add_upgradejob %}
-<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:upgradejob_add' %}?device_type={{ object.device_type_id }}"><i class="mdi mdi-calendar-plus"></i> Schedule device work</a>
+<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:upgradejob_add' %}?device_type={{ object.device_type_id }}"><i class="mdi mdi-calendar-plus"></i> Schedule upgrade</a>
+<a class="btn btn-outline-primary" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}?device_type={{ object.device_type_id }}"><i class="mdi mdi-calendar-refresh"></i> Schedule standards</a>
 {% endif %}
 {% endblock %}

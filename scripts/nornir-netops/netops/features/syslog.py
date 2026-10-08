@@ -30,7 +30,8 @@ from ..core import MODE_REPLACE, Desired, Entry, Feature, PlatformSupport, norma
 from ..core import validate_address, validate_text, validate_word
 from ..netbox import source_for
 from ..standards import host_and_port, of as standards_of
-from .. import f5_syslog
+from .. import f5_syslog, syslog_nxos
+from ..ntp_discovery import interface_name
 from .waf import add_arguments as f5_arguments, connection_settings, selected_policy, device_policy
 
 SHOW_COMMAND = "show running-config all | include ^logging"
@@ -105,6 +106,7 @@ def parse_logging(output: str) -> List[Entry]:
             if index + 1 == len(tokens):
                 raise ValueError(f"invalid syslog VRF configuration: {line}")
             vrf = tokens[index + 1]
+            vrf = None if vrf == 'default' else vrf
             tokens = tokens[:index] + tokens[index + 2:]
             if len(tokens) < 3:
                 raise ValueError(f"invalid syslog VRF configuration: {line}")
@@ -117,9 +119,10 @@ def parse_logging(output: str) -> List[Entry]:
                 Entry(key=f"origin:{arguments}", line=line, data={"kind": "origin"})
             )
         elif tokens[1] in ("source-interface", "local-interface") and len(tokens) >= 3:
+            source = interface_name(''.join(tokens[2:]))
             entries.append(
-                Entry(key=_source_key(tokens[2], vrf), line=line,
-                      data={"kind": "source", "source": tokens[2], "vrf": vrf})
+                Entry(key=_source_key(source, vrf), line=line,
+                      data={"kind": "source", "source": source, "vrf": vrf})
             )
         elif tokens[1] == "host" and len(tokens) >= 3:
             if tokens[2] == "ipv6":
@@ -152,6 +155,8 @@ def plan_syslog(
     context: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[str], List[Entry]]:
     context = context or {}
+    if context.get('platform') == 'cisco_nxos':
+        return syslog_nxos.plan(current, desired, mode, context)
     ignores = context.get("ignores") or ()
     entries: Mapping[str, Any] = (context.get("variables") or {}).get("entries", {})
     # A platform that cannot express a kind of line simply does not get it.
@@ -191,12 +196,19 @@ def audit_fields(current, desired, context):
     }
 
 
+def reverse(commands, current, removed, context):
+    from ..rollback import default_reversal
+    if context.get('platform') == 'cisco_nxos':
+        return syslog_nxos.reverse(commands, current, removed, context)
+    return default_reversal(commands, current, removed, context.get('secrets', ()))
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     f5_arguments(parser)
     parser.add_argument(
         "--syslog-source-tag", default=os.environ.get("NETBOX_SYSLOG_SOURCE_TAG"),
         metavar="TAG", help="NetBox interface tag for the syslog source "
-        "[$NETBOX_SYSLOG_SOURCE_TAG; default: syslog-source]",
+        "[$NETBOX_SYSLOG_SOURCE_TAG; default: service-source]",
     )
     parser.add_argument(
         "-d",
@@ -272,7 +284,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
 
     source = args.source or standards.value("syslog.source")
     if source:
-        source = validate_word(str(source), "interface")
+        source = interface_name(str(source))
         key = _source_key(source, vrf)
         keys.append(key)
         entries[key] = {"kind": "source", "source": source}
@@ -300,17 +312,31 @@ def per_device(keys, variables, host):
     falling back to the fleet-wide value.
     """
     source, authoritative = source_for(host, "syslog")
-    if not authoritative:
+    vrf = variables.get("vrf")
+    selected_vrf = (getattr(host, "data", {}) or {}).get("syslog_vrf")
+    if selected_vrf:
+        vrf = None if selected_vrf == "default" else validate_word(str(selected_vrf), "syslog VRF")
+    if not authoritative and vrf == variables.get("vrf"):
         return keys, variables
-    source = validate_word(str(source), "interface") if source else None
+    if not authoritative:
+        source = next((entry["source"] for entry in variables["entries"].values()
+                       if entry["kind"] == "source"), None)
+    source = interface_name(str(source)) if source else None
 
-    entries = {k: v for k, v in variables["entries"].items() if v["kind"] != "source"}
-    keys = [k for k in keys if variables["entries"][k]["kind"] != "source"]
+    entries, rebuilt = {}, []
+    for key in keys:
+        entry = variables["entries"][key]
+        if entry["kind"] == "source":
+            continue
+        if entry["kind"] == "host":
+            key = _destination_key(entry["host"], entry["port"], vrf)
+        entries[key] = entry
+        rebuilt.append(key)
     if source:
-        key = _source_key(source, variables.get("vrf"))
-        keys.append(key)
+        key = _source_key(source, vrf)
+        rebuilt.append(key)
         entries[key] = {"kind": "source", "source": source}
-    return keys, {**variables, "entries": entries}
+    return rebuilt, {**variables, "entries": entries, "vrf": vrf}
 
 
 FEATURE = Feature(
@@ -318,6 +344,8 @@ FEATURE = Feature(
     help="converge the syslog collectors, trap severity and source interface",
     platforms={
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_logging, IOS_SAMPLE),
+        "cisco_nxos": PlatformSupport(syslog_nxos.SHOW_COMMAND, syslog_nxos.parse, syslog_nxos.SAMPLE,
+                                      ignores=("origin",), extra_commands=(syslog_nxos.STATUS_COMMAND,)),
         # EOS has no `logging origin-id`; the nearest thing is `logging format
         # hostname ...`, which is a different setting rather than a spelling of
         # this one. Declared here so an EOS device is not reported out of
@@ -334,5 +362,6 @@ FEATURE = Feature(
     platform_runs={"f5_tmsh": f5_syslog.run},
     execution_policy=execution_policy,
     audit_fields=audit_fields,
+    reverse=reverse,
     verify_with_plan=True,
 )

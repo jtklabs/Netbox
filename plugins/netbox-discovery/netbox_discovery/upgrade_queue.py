@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from django.db.models import Q
+from django.db.models import Case, F, Q, When
 
 from .models import DeviceTypeProfile, DiscoveryPoller, JobProfile, UpgradeGroup, UpgradeJob
 from .upgrade_choices import (ACTIVE, CONFIG_OPERATIONS, READ_ONLY_OPERATIONS,
@@ -22,6 +22,39 @@ from .utils import plugin_setting
 
 class QueueError(ValueError):
     pass
+
+
+@transaction.atomic
+def bulk_action(user, pks, action, reason=''):
+    """Lock the entire selection before checking state or changing any job."""
+    if action not in ('hold', 'cancel', 'delete'):
+        raise QueueError('Unknown scheduled job action.')
+    permission = 'delete' if action == 'delete' else 'change'
+    if not user.has_perm(f'netbox_discovery.{permission}_upgradejob'):
+        raise QueueError('You do not have permission for this action.')
+    pks = set(pks)
+    jobs = list(UpgradeJob.objects.restrict(user, 'view').restrict(user, permission)
+                .filter(pk__in=pks).order_by('pk').select_for_update())
+    if not pks or len(jobs) != len(pks):
+        raise QueueError('Select accessible jobs only. No jobs were changed.')
+    if action == 'hold' and not reason.strip():
+        raise QueueError('A reason is required to hold jobs.')
+    for job in jobs:
+        allowed = ('pending',) if action == 'hold' else WAITING
+        if action == 'delete':
+            allowed = (*WAITING, 'cancelled')
+        if job.status not in allowed or (action == 'delete' and (job.claimed_at or job.started_at)):
+            label = {'hold': 'held', 'cancel': 'cancelled', 'delete': 'deleted'}[action]
+            raise QueueError(f'Job {job.pk} ({job.device_name}) cannot be {label} in its current state. '
+                             'No jobs were changed; active and executed jobs are protected.')
+    for job in jobs:
+        if action == 'delete':
+            job.delete()
+        elif action == 'hold':
+            hold(user, job.pk, reason)
+        else:
+            cancel(user, job.pk, reason)
+    return len(jobs)
 
 
 # Operations that take nothing out of service, so one failure does not hold the site.
@@ -101,6 +134,25 @@ def validate_remediation(profile):
         raise QueueError('ClearPass cluster-change approval requires the NTP standard.')
 
 
+def execution_devices(user, queryset, limit=None):
+    """Resolve stack members to their visible master before profiles and IP checks."""
+    targets = queryset.order_by().annotate(execution_id=Case(
+        When(virtual_chassis__isnull=True, then=F('pk')),
+        default=F('virtual_chassis__master_id'),
+    )).values_list('execution_id', flat=True).distinct()
+    ids = set(targets[:limit + 1] if limit else targets)
+    if None in ids:
+        raise QueueError('A selected virtual chassis has no master. Assign its master before scheduling.')
+    if limit and len(ids) > limit:
+        raise QueueError(f'Selection must contain between 1 and {limit} execution devices (one per stack).')
+    devices = list(Device.objects.restrict(user, 'view').filter(pk__in=ids).select_related(
+        'site__region', 'primary_ip4', 'primary_ip6', 'virtual_chassis', 'device_type', 'platform'
+    ).prefetch_related('tags').order_by('pk'))
+    if len(devices) != len(ids):
+        raise QueueError('A selected stack master is outside your device permissions.')
+    return devices
+
+
 def select_devices(user, filters):
     if not isinstance(filters, dict) or not filters:
         raise QueueError('Choose at least one device filter; an unfiltered fleet is not allowed.')
@@ -115,8 +167,7 @@ def select_devices(user, filters):
     selected = DeviceFilterSet(filters, queryset=Device.objects.restrict(user, 'view'))
     if not selected.is_valid():
         raise QueueError(str(selected.errors))
-    devices = list(selected.qs.select_related('site__region', 'primary_ip4', 'primary_ip6',
-                                              'virtual_chassis', 'device_type').prefetch_related('tags')[:1001])
+    devices = execution_devices(user, selected.qs, limit=1000)
     if not devices or len(devices) > 1000:
         raise QueueError('Selection must contain between 1 and 1000 devices.')
     return devices
@@ -130,26 +181,25 @@ def resolve_profiles(user, data, devices):
         validate_profile(data.get('profile'), data['operation'])
         return {device.pk: (deepcopy(data['profile']), '') for device in devices}
     if source not in ('model', 'saved'):
-        raise QueueError('Select model defaults, a saved profile, or custom settings.')
+        raise QueueError('Select device defaults, a saved profile, or custom settings.')
     if data.get('profile') is not None:
-        raise QueueError('Custom settings cannot be combined with a saved profile or model defaults.')
+        raise QueueError('Custom settings cannot be combined with a saved profile or device defaults.')
     profiles = JobProfile.objects.restrict(user, 'view').filter(kind=kind)
     if source == 'saved':
         selected = data.get('saved_profile')
         profile = profiles.filter(pk=getattr(selected, 'pk', selected)).first()
         if profile is None:
             raise QueueError('Choose an accessible saved profile matching this operation.')
-        defaults = {device.device_type_id: profile.pk for device in devices}
+        defaults = {device.pk: profile.pk for device in devices}
     else:
-        field = 'remediation_profile_id' if kind == 'remediate' else 'upgrade_profile_id'
-        defaults = dict(DeviceTypeProfile.objects.restrict(user, 'view').filter(
-            device_type_id__in={device.device_type_id for device in devices}).values_list('device_type_id', field))
+        from .profile_assignments import default_profile_ids
+        defaults = default_profile_ids(user, devices, kind)
     available = {profile.pk: profile for profile in profiles.filter(pk__in=set(defaults.values()))}
     resolved = {}
     for device in devices:
-        profile = available.get(defaults.get(device.device_type_id))
+        profile = available.get(defaults.get(device.pk))
         if profile is None:
-            raise QueueError(f'{device}: no accessible {kind} profile assigned to model {device.device_type}.')
+            raise QueueError(f'{device}: no accessible {kind} profile assigned to its model or platform.')
         plan = profile.resolved_plan()
         if kind == 'upgrade' and not DeviceTypeProfile.objects.restrict(user, 'view').filter(
                 device_type_id=device.device_type_id, upgrade_profile=profile).exists():
@@ -286,8 +336,8 @@ def check_target(job):
 def edit_pending(user, pk, data):
     # Serialize edits with claims so a worker's captured assignment cannot change.
     job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
-    if job.audit_run_id and data['operation'] != 'audit_config':
-        raise QueueError('Recurring audit jobs are read-only. Schedule remediation separately.')
+    if job.audit_run_id and data['operation'] != job.operation:
+        raise QueueError('Scheduled standards jobs must retain their audit or remediation mode. Create a new schedule to change it.')
     if job.status != 'pending':
         raise QueueError('Only pending jobs can be edited. This job has already been claimed or closed.')
     if data['last_updated'] != job.last_updated:
@@ -468,7 +518,7 @@ def report(user, pk, data):
     # Server receive time shows upgrade-worker activity independently of SNMP.
     # Invalid reports roll this back with the surrounding transaction.
     now = timezone.now()
-    DiscoveryPoller.objects.filter(pk=job.poller_id).update(last_seen_at=now, upgrade_last_seen_at=now)
+    DiscoveryPoller.objects.filter(pk=job.poller_id).update(upgrade_last_seen_at=now)
     # Terminal event retries acknowledge without changing the completed result.
     if job.status in TERMINAL:
         if data.get('sequence', 0) and data['sequence'] <= job.sequence:

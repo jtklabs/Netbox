@@ -1,0 +1,11 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<table class="table attr-table">
+  <tr><th>Platform</th><td>{{ object.platform|linkify }}</td></tr>
+  <tr><th>Standards profile</th><td>{{ object.remediation_profile|linkify }}</td></tr>
+  <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+</table>
+{% include 'inc/panels/tags.html' %}
+{% include 'inc/panels/comments.html' %}
+{% endblock %}

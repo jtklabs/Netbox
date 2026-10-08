@@ -65,3 +65,8 @@ class ComplianceReportTenantTest(TestCase):
         self.assertEqual(response.context['device_count'], 1)
         self.assertEqual(response.context['total_count'], 1)
         self.assertEqual(response.context['row_count'], 0)
+
+    def test_report_status_links_to_findings(self):
+        response = self.report()
+        for result in ConfigCompliance.objects.all():
+            self.assertContains(response, f'href="{result.get_absolute_url()}" title="View findings and proposed changes"')

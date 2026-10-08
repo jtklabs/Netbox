@@ -1,6 +1,6 @@
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
-from .models import JobProfile, DeviceTypeProfile
+from .models import JobProfile, DeviceTypeProfile, PlatformProfile
 
 
 class JobProfileFilterSet(NetBoxModelFilterSet):
@@ -19,3 +19,12 @@ class DeviceTypeProfileFilterSet(NetBoxModelFilterSet):
 
     def search(self, queryset, name, value):
         return queryset.filter(Q(device_type__model__icontains=value) | Q(description__icontains=value))
+
+
+class PlatformProfileFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = PlatformProfile
+        fields = ('id', 'platform_id', 'remediation_profile_id')
+
+    def search(self, queryset, name, value):
+        return queryset.filter(Q(platform__name__icontains=value) | Q(description__icontains=value))
