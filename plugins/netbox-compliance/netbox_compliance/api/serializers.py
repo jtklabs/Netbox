@@ -32,6 +32,20 @@ __all__ = (
 
 
 class ConfigStandardSerializer(NetBoxModelSerializer):
+    def create(self, validated_data):
+        from netbox_compliance.revisions import revision_batch
+        with revision_batch():
+            instance = super().create(validated_data)
+        instance.refresh_from_db(fields=['revision'])
+        return instance
+
+    def update(self, instance, validated_data):
+        from netbox_compliance.revisions import revision_batch
+        with revision_batch():
+            instance = super().update(instance, validated_data)
+        instance.refresh_from_db(fields=['revision'])
+        return instance
+
     url = serializers.HyperlinkedIdentityField(
         view_name='plugins-api:netbox_compliance-api:configstandard-detail'
     )
@@ -46,6 +60,7 @@ class ConfigStandardSerializer(NetBoxModelSerializer):
         help_text='Template variables the checker must supply itself — typically the secret',
     )
     result_count = serializers.IntegerField(read_only=True, required=False)
+    revision = serializers.IntegerField(read_only=True)
 
     # Nested rather than bare primary keys, following netbox_quotes: the portal
     # renders "which platforms is this standard for" straight off the list, and
@@ -58,7 +73,7 @@ class ConfigStandardSerializer(NetBoxModelSerializer):
     class Meta:
         model = ConfigStandard
         fields = (
-            'url', 'id', 'display', 'name', 'check_type',
+            'url', 'id', 'display', 'name', 'check_type', 'definition_yaml', 'revision',
             'match_pattern', 'expected_entries', 'entries',
             'add_template', 'remove_template', 'runtime_variables',
             'auto_remediable', 'allow_enforce', 'remediation_notes',
@@ -80,6 +95,8 @@ class ConfigComplianceSerializer(NetBoxModelSerializer):
     finding_count = serializers.IntegerField(read_only=True)
     needs_manual_fix = serializers.BooleanField(read_only=True)
     is_stale = serializers.BooleanField(read_only=True)
+    checked_revision = serializers.IntegerField(read_only=True, allow_null=True)
+    revision_outdated = serializers.BooleanField(read_only=True)
 
     device = DeviceSerializer(nested=True)
     standard = ConfigStandardSerializer(nested=True)
@@ -89,7 +106,7 @@ class ConfigComplianceSerializer(NetBoxModelSerializer):
         fields = (
             'url', 'id', 'display', 'device', 'standard',
             'result', 'status', 'observed', 'findings', 'finding_count',
-            'error_message', 'source', 'last_checked', 'is_stale',
+            'error_message', 'source', 'last_checked', 'is_stale', 'checked_revision', 'revision_outdated',
             'pre_change_config', 'pre_change_at', 'last_remediated', 'remediation_log',
             'exempt', 'exempt_reason', 'exempt_approved_by', 'exempt_approved_on',
             'exempt_review_by', 'needs_manual_fix',
@@ -115,6 +132,7 @@ class ConfigCheckReportSerializer(serializers.Serializer):
         required=False, help_text='Standard name. Give this or standard_id.'
     )
     standard_id = serializers.IntegerField(required=False)
+    revision = serializers.IntegerField(required=False, min_value=1)
 
     result = serializers.ChoiceField(choices=ConfigCheckResultChoices)
     observed = serializers.CharField(

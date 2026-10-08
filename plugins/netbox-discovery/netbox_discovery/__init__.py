@@ -1,4 +1,4 @@
-"""Discovery plugin — onboard a device by typing its IP address.
+"""Device Operations plugin — onboarding, upgrades, and configuration remediation.
 
 The job this does: someone racks a switch, types its management address into a
 form, and comes back to a fully populated device in NetBox. Nothing else is
@@ -50,8 +50,8 @@ from netbox.plugins import PluginConfig
 
 class DiscoveryConfig(PluginConfig):
     name = 'netbox_discovery'
-    verbose_name = 'Discovery'
-    description = 'Onboard devices by IP address, discovered by remote SNMP pollers'
+    verbose_name = 'Device Operations'
+    description = 'Device onboarding, software upgrades, and configuration remediation'
     version = '0.1.0'
     author = 'Nova Team'
     author_email = 'noreply@example.com'

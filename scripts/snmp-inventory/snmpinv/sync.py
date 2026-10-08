@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -94,12 +95,8 @@ SOFTWARE_VERSION_CUSTOM_FIELD = {
 }
 
 
-# Where a replaced unit's record goes. `inventory` says "we still have this
-# metal, it is just not in service", which is what an RMA'd or shelved unit
-# actually is; `decommissioning` and `offline` are the other sensible answers
-# depending on how the estate is run.
+# Retained only for loading old configuration files.
 RETIRED_DEVICE_STATUS = "inventory"
-RETIRED_TAG = "replaced"
 # Put on a device by the Discovery plugin when its request was entered by
 # hand. Somebody typed that model and serial because the box could not be
 # scanned, and a later scan that resolves to the record must not overwrite
@@ -145,10 +142,8 @@ class SyncOptions:
     # record was not. Leaving it also allows a virtual chassis to end up split
     # across two sites, which is never right.
     move_devices_between_sites: bool = True
-    # A serial that changed under a name we already knew means the metal was
-    # swapped. Retiring the old record rather than overwriting its serial keeps
-    # the thread on a unit that may still be under support — serials are what
-    # contracts and quotes are matched on.
+    # Legacy configuration accepted for compatibility. Changes now preserve
+    # the device ID and retain the previous serial in HardwareReplacement.
     retain_replaced_hardware: bool = True
     retired_device_status: str = RETIRED_DEVICE_STATUS
     # Write CDP/LLDP adjacencies as Cable objects. The classes tuple is the
@@ -183,9 +178,8 @@ class Syncer:
         self._vrf_id: int | None = None
         self._use_lifecycle: bool | None = None
         self._replacements_ok: bool | None = None
-        # Chassis swaps are detected before the replacement device exists, so
-        # the audit row waits here until it has something to point at.
-        self._pending_replacements: list[dict] = []
+        self._record_hardware_changes = True
+        self._target_device_id = None
         # Version readings are batched and sent once at the end of a run. The
         # ingest endpoint takes a list, and one call for a fleet beats one call
         # per device across a WAN.
@@ -194,7 +188,8 @@ class Syncer:
     # --- entry point --------------------------------------------------------
 
     def sync(self, result: ScanResult, site_id: int | None, scanned_address: str = "",
-             tenant_id: int | None = None, vrf_id: int | None = None) -> None:
+             tenant_id: int | None = None, vrf_id: int | None = None,
+             device_id: int | None = None, record_hardware_changes: bool = True) -> None:
         """Write one scanned host — a single device or a whole stack.
 
         `tenant_id` files the result against the company that owns it. It
@@ -209,16 +204,24 @@ class Syncer:
         lookup across all tables finds the other network's copy: the sync
         would decline to steal it and the device would land with no address,
         or worse, be matched to the other network's device by it.
+
+        `device_id` pins a regular inventory rescan to its selected device.
+        Onboarding passes `record_hardware_changes=False` to establish the
+        baseline without producing replacement events.
         """
         # Held for the length of this one sync rather than passed down a dozen
         # signatures. Safe because a Syncer writes one host at a time -- every
         # caller serialises syncs under a lock -- and cleared afterwards so a
         # later host can never inherit it.
         self._vrf_id = vrf_id
+        self._target_device_id = device_id
+        self._record_hardware_changes = record_hardware_changes
         try:
             self._sync(result, site_id, scanned_address, tenant_id)
         finally:
             self._vrf_id = None
+            self._target_device_id = None
+            self._record_hardware_changes = True
 
     def _in_vrf(self) -> dict:
         """The filter that scopes an address lookup to this sync's routing
@@ -257,8 +260,9 @@ class Syncer:
             # would "find" the master's record for that member, and the
             # serial mismatch would then read as the master being swapped.
             address = scanned_address if record is primary else ""
+            target_id = self._target_device_id if record is primary and not result.is_stack else None
             device = self._ensure_device(record, site_id, virtual_chassis, tenant_id,
-                                         scanned_address=address)
+                                         scanned_address=address, device_id=target_id)
             if device is not None:
                 created.append((record, device))
                 if record.context is not None and record.context.is_vcmp_guest:
@@ -359,7 +363,7 @@ class Syncer:
     def _ensure_device(self, record: DeviceRecord, site_id: int,
                        virtual_chassis: dict | None,
                        tenant_id: int | None = None,
-                       scanned_address: str = "") -> dict | None:
+                       scanned_address: str = "", device_id: int | None = None) -> dict | None:
         manufacturer = self._ensure_manufacturer(record.manufacturer)
         device_type = self._ensure_device_type(manufacturer, record.model, record.part_number)
         role = self._ensure_role(
@@ -367,12 +371,14 @@ class Syncer:
         )
         platform = self._ensure_platform(record.platform, manufacturer)
 
-        existing = self._find_device(record, site_id, scanned_address, virtual_chassis)
+        existing = (self.netbox.get(f"{DEVICES_ENDPOINT}{device_id}/") if device_id else
+                    self._find_device(record, site_id, scanned_address, virtual_chassis, tenant_id))
+        self._report_duplicate_serial(record, existing, scanned_address)
         manual = existing is not None and self._is_manual(existing)
 
         desired: dict = {}
-        if record.serial:
-            desired["serial"] = record.serial
+        if clean_serial(record.serial):
+            desired["serial"] = clean_serial(record.serial)
         if tenant_id:
             desired["tenant"] = tenant_id
         if device_type:
@@ -399,16 +405,11 @@ class Syncer:
             log.debug("%s: entered by hand; identity left as typed", record.name)
             return self._patch_device(existing, desired, record)
         if existing is not None:
-            replaced = self._handle_serial_change(existing, record, site_id)
-            if replaced is not None:
-                # The old record has been retired and given up the name; fall
-                # through and create a fresh device for the new hardware.
-                existing = None
-            else:
-                self._log_model_correction(existing, device_type, record)
-                self._apply_site_move(existing, site_id, desired, record)
-                self._follow_naming_rule(existing, record, site_id, desired)
-                return self._patch_device(existing, desired, record)
+            self._handle_serial_change(existing, record)
+            self._log_model_correction(existing, device_type, record)
+            self._apply_site_move(existing, site_id, desired, record)
+            self._follow_naming_rule(existing, record, site_id, desired)
+            return self._patch_device(existing, desired, record)
 
         if device_type is None:
             # Without a model we cannot pick a device type, and NetBox requires
@@ -433,7 +434,6 @@ class Syncer:
         payload.update({k: v for k, v in desired.items() if k != "device_type"})
         created = self.netbox.create("/dcim/devices/", payload,
                                      label=f"device {record.name}")
-        self._flush_pending_replacements(record, created)
         return created
 
     @staticmethod
@@ -453,7 +453,8 @@ class Syncer:
             return True
         if (virtual_chassis is not None and record.vc_position is not None
                 and virtual_chassis.get("id") is not None
-                and (device.get("virtual_chassis") or {}).get("id") == virtual_chassis["id"]):
+                and (device.get("virtual_chassis") or {}).get("id") == virtual_chassis["id"]
+                and device.get("vc_position") == record.vc_position):
             return True
         primary_address = _primary_address(device)
         return bool(scanned_address and primary_address and scanned_address == primary_address)
@@ -469,6 +470,11 @@ class Syncer:
         """
         path = "/dcim/virtual-chassis/"
         name = result.virtual_chassis_name
+        if self._target_device_id:
+            target = self.netbox.get(f"{DEVICES_ENDPOINT}{self._target_device_id}/")
+            current = target.get("virtual_chassis") or {}
+            if current.get("id"):
+                return self.netbox.get(f"{path}{current['id']}/")
         found = self.netbox.first(path, {"name": name})
         if found is not None:
             return found
@@ -525,22 +531,11 @@ class Syncer:
         log.info("%s: renamed %r to follow the hostname rule", current, record.name)
         desired["name"] = record.name
 
-    def _handle_serial_change(self, existing: dict, record: DeviceRecord,
-                              site_id: int) -> dict | None:
-        """Retire a device whose serial no longer matches what is at the address.
-
-        A different serial under the same name is a chassis swap — an RMA, or a
-        spare pulled off the shelf. Overwriting the serial in place would make
-        the old unit vanish from NetBox entirely, and with it any support
-        contract or quote matched on that serial. So the old record is kept,
-        retired and renamed to free the name, and the caller creates a new
-        device for the metal that is actually there now.
-
-        Returns the retired record when a swap happened, else None.
-        """
+    def _handle_serial_change(self, existing: dict, record: DeviceRecord) -> None:
+        """Retain the old serial in history, keeping the inventory device ID."""
         old_serial = clean_serial(existing.get("serial") or "")
         new_serial = clean_serial(record.serial)
-        if not self.options.retain_replaced_hardware:
+        if not self._record_hardware_changes:
             return None
         # Only a change between two known serials counts. Filling in a blank is
         # the first successful read, not a replacement — and case-insensitively,
@@ -549,61 +544,13 @@ class Syncer:
         if not old_serial or not new_serial or old_serial.lower() == new_serial.lower():
             return None
 
-        log.warning(
-            "%s: serial changed %s -> %s — the old unit is being retained as a "
-            "separate device rather than overwritten",
-            record.name, old_serial, new_serial,
-        )
-
-        retired_name = self._retired_name(existing.get("name") or record.name, old_serial)
-        changes = {
-            "name": retired_name,
-            "status": self.options.retired_device_status,
-            # Free the address so the retired record is not rescanned and does
-            # not hold the IP the replacement needs.
-            "primary_ip4": None,
-        }
-        self.netbox.update("/dcim/devices/", existing["id"], changes,
-                           label=f"retire replaced device {existing.get('name')}")
-        self._tag_retired(existing)
         self._record_replacement(
-            kind="chassis", device_id=None, replaced_device_id=existing["id"],
+            kind="chassis", device_id=existing["id"], replaced_device_id=None,
             old_serial=old_serial, new_serial=new_serial, model=record.model,
-            pending_for=record,
-        )
-        return existing
-
-    @staticmethod
-    def _retired_name(name: str, old_serial: str) -> str:
-        """Free the live name while keeping the retired record recognisable.
-
-        Device names are unique per (name, site, tenant), so the old record has
-        to give the name up before the replacement can take it. The serial in
-        the suffix is the RETIRED unit's own — it uniquifies a name that gets
-        retired more than once over the years.
-
-        Wording matters here and was got wrong once: "[replaced ABC123]" was
-        read in the fleet as this device having replaced serial ABC123 — its
-        own serial, since that is whose serial it is — when the intent was the
-        passive "this record WAS replaced; it was unit ABC123". "retired" is
-        unambiguous about which side of the swap this record is on.
-        """
-        suffix = f" [retired {old_serial}]"
-        return (name[: 64 - len(suffix)] + suffix) if len(name) + len(suffix) > 64 else name + suffix
-
-    def _tag_retired(self, device: dict) -> None:
-        tags = [t.get("slug") for t in device.get("tags", []) if t.get("slug")]
-        if RETIRED_TAG in tags:
-            return
-        self.netbox.ensure_tag(RETIRED_TAG, name="Replaced")
-        self.netbox.update(
-            "/dcim/devices/", device["id"],
-            {"tags": [{"slug": slug} for slug in tags + [RETIRED_TAG]]},
-            label=f"tag {device.get('name')} replaced",
         )
 
     def _record_replacement(self, kind, device_id, replaced_device_id,
-                            old_serial, new_serial, model, pending_for=None,
+                            old_serial, new_serial, model,
                             module_bay="") -> None:
         """Log the swap where it can be reported on.
 
@@ -612,16 +559,18 @@ class Syncer:
         is the only surviving trace — Module.module_bay is not nullable, so the
         old row cannot stay once the bay is refilled.
         """
-        if not self._replacements_available():
+        if device_id is None or device_id < 0:
             return
-        if device_id is None:
-            # The replacement device does not exist yet; hold it until it does.
-            self._pending_replacements.append({
-                "kind": kind, "replaced_device": replaced_device_id,
-                "old_serial": old_serial, "new_serial": new_serial,
-                "model_name": model, "module_bay": module_bay,
-                "_for_serial": new_serial,
-            })
+        if not self._replacements_available():
+            raise NetBoxError("Cannot change hardware serial without the hardware history endpoint")
+        # Retry after a failed inventory PATCH must reuse the audit row. Only
+        # compare the latest transition, so A -> B -> A -> B remains history.
+        latest = self.netbox.first(REPLACEMENT_ENDPOINT, {
+            "device_id": device_id, "kind": kind, "module_bay": module_bay,
+            "ordering": "-detected_at",
+        })
+        if latest and (latest["old_serial"].casefold(), latest["new_serial"].casefold()) == (
+                old_serial.casefold(), new_serial.casefold()):
             return
         self._post_replacement({
             "kind": kind, "device": device_id, "replaced_device": replaced_device_id,
@@ -631,87 +580,91 @@ class Syncer:
 
     def _post_replacement(self, payload: dict) -> None:
         payload.setdefault("detected_at", datetime.now(timezone.utc).isoformat())
-        try:
-            self.netbox.create(REPLACEMENT_ENDPOINT, payload,
-                               label="hardware replacement %s -> %s"
-                                     % (payload["old_serial"], payload["new_serial"]))
-        except NetBoxError as exc:
-            # The inventory is already correct; losing the audit row is not
-            # worth failing the scan over, but it must be said out loud.
-            log.error("could not record hardware replacement: %s", exc)
+        self.netbox.create(REPLACEMENT_ENDPOINT, payload,
+                           label="hardware replacement %s -> %s"
+                                 % (payload["old_serial"], payload["new_serial"]))
 
     def _replacements_available(self) -> bool:
         if self._replacements_ok is None:
             self._replacements_ok = self.netbox.endpoint_available(REPLACEMENT_ENDPOINT)
             if not self._replacements_ok:
                 log.warning(
-                    "the Discovery plugin is not installed, so serial changes cannot "
-                    "be recorded; replaced devices are still retained"
+                    "the Device Operations hardware history endpoint is unavailable; "
+                    "existing serials will not be overwritten"
                 )
         return self._replacements_ok
 
-    def _flush_pending_replacements(self, record: DeviceRecord, device: dict) -> None:
-        """Attach held replacement rows once the new device exists."""
-        if not self._pending_replacements or device is None or device.get("id", 0) < 0:
-            return
-        remaining = []
-        for pending in self._pending_replacements:
-            if pending.get("_for_serial") == record.serial.strip():
-                payload = {k: v for k, v in pending.items() if not k.startswith("_")}
-                payload["device"] = device["id"]
-                self._post_replacement(payload)
-            else:
-                remaining.append(pending)
-        self._pending_replacements = remaining
-
     def _find_device(self, record: DeviceRecord, site_id: int,
                      scanned_address: str = "",
-                     virtual_chassis: dict | None = None) -> dict | None:
-        """The record this scan belongs to, or None to create one.
-
-        The rule that matters more than any match: a scan never lands on a
-        record that might be a different box. The old rules did exactly that
-        twice over -- a serial alone claimed the first record carrying it,
-        and a name alone claimed a record at any site -- so a serial typed on
-        two devices, or two branch switches both called core-sw-01 with no
-        serial, quietly overwrote each other. Duplicate serials are allowed
-        now (a VDC, a guest, a vendor reusing one) and are never refused or
-        reported; what is refused is the guess.
-
-        With a serial: the records carrying it, and among them the one that
-        agrees on name or address. A rename keeps the address, a re-address
-        keeps the name; a record agreeing on neither is a different box.
-
-        Then, with or without a serial: the device with the polled address on
-        one of its interfaces -- an address belongs to one box -- else the
-        name at the site being scanned. This is how a record made without a
-        serial (entered by hand, imported from a sheet) gets its serial when
-        the box first reports one, and how a swapped chassis is noticed: the
-        name matches and the serial does not, which _handle_serial_change
-        reads as a replacement. Never the name elsewhere: names repeat across
-        sites, and matching one moved devices between sites.
-
-        None means a new record, beside whatever carries the serial.
-        """
-        if record.serial:
-            candidates = self._devices_with_serial(record.serial)
-            for device in candidates:
-                if self._is_this_device(device, record, scanned_address, virtual_chassis):
-                    return device
-            if candidates:
-                log.warning(
-                    "%s: serial %s is already on %s, which agrees on neither name nor "
-                    "address; %r is treated as a separate device with the same serial",
-                    scanned_address or record.name, record.serial,
-                    ", ".join(d.get("name") or "device %s" % d.get("id") for d in candidates),
-                    record.name,
-                )
+                     virtual_chassis: dict | None = None,
+                     tenant_id: int | None = None) -> dict | None:
+        """Use slot, VRF-scoped address, then site-scoped name; never serial alone."""
+        if virtual_chassis is not None and record.vc_position is not None:
+            members = self.netbox.all(DEVICES_ENDPOINT, {
+                "virtual_chassis_id": virtual_chassis["id"], "vc_position": record.vc_position,
+            })
+            member = self._unique_device(members, record.name)
+            if member is not None:
+                return member
         by_address = self._device_at_address(scanned_address)
+        if (by_address and virtual_chassis
+                and (by_address.get("virtual_chassis") or {}).get("id") == virtual_chassis["id"]):
+            # A new member may have become master; the shared management IP
+            # still belongs to yesterday's master until this scan completes.
+            by_address = None
         if by_address is not None:
             return by_address
-        if record.name:
-            return self.netbox.first(DEVICES_ENDPOINT, {"name": record.name, "site_id": site_id})
-        return None
+        names = {record.name, *record.former_names} - {""}
+        candidates = {}
+        serial = clean_serial(record.serial).casefold()
+        for name in names:
+            for device in self.netbox.all(DEVICES_ENDPOINT, {"name__ie": name, "site_id": site_id}):
+                if name != record.name and (not serial or
+                        clean_serial(device.get("serial") or "").casefold() != serial):
+                    continue
+                tenant = device.get("tenant") or {}
+                stored_tenant = tenant.get("id") if isinstance(tenant, dict) else tenant
+                if tenant_id is not None and stored_tenant not in (None, tenant_id):
+                    continue
+                if (virtual_chassis
+                        and (device.get("virtual_chassis") or {}).get("id") == virtual_chassis["id"]):
+                    continue
+                candidates[device["id"]] = device
+        return self._unique_device(list(candidates.values()), record.name)
+
+    @staticmethod
+    def _unique_device(candidates, name):
+        if len(candidates) > 1:
+            raise NetBoxError(f"Ambiguous inventory identity for {name}; no device overwritten")
+        return candidates[0] if candidates else None
+
+    def _report_duplicate_serial(self, record, existing, address):
+        serial = clean_serial(record.serial)
+        if not serial:
+            return
+        others = [d for d in self._devices_with_serial(serial)
+                  if existing is None or d["id"] != existing["id"]]
+        if not others:
+            return
+        detail = "Serial %s is already on %s. Devices are kept separate; review the duplicate serial." % (
+            serial, ", ".join(f"{d.get('name')} (ID {d['id']})" for d in others))
+        log.warning("%s: %s; separate device with the same serial", address or record.name, detail)
+        path = "/plugins/discovery/issues/"
+        if not self.netbox.endpoint_available(path):
+            return
+        lookup = {"kind": "duplicate-serial", "status": "open",
+                  "address": address, "serial": serial.upper()}
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            issue = self.netbox.first(path, lookup)
+            payload = {"device": others[0]["id"], "reported_name": record.name,
+                       "detail": detail, "last_seen_at": now}
+            if issue:
+                self.netbox.update(path, issue["id"], payload)
+            else:
+                self.netbox.create(path, {**lookup, **payload, "detected_at": now})
+        except NetBoxError as exc:
+            log.error("Could not report duplicate serial: %s", exc)
 
     def _device_at_address(self, address: str) -> dict | None:
         """The device carrying `address` on one of its interfaces, if any."""
@@ -719,6 +672,7 @@ class Syncer:
             return None
         # In this host's routing table only: the same address in another VRF
         # is another network's device.
+        devices = {}
         for ip in self.netbox.all("/ipam/ip-addresses/", {"address": address, **self._in_vrf()}):
             if ip.get("assigned_object_type") != "dcim.interface" or not ip.get("assigned_object_id"):
                 continue
@@ -730,10 +684,10 @@ class Syncer:
                 device_id = device.get("id") if isinstance(device, dict) else device
             if device_id:
                 try:
-                    return self.netbox.get(f"{DEVICES_ENDPOINT}{device_id}/")
+                    devices[device_id] = self.netbox.get(f"{DEVICES_ENDPOINT}{device_id}/")
                 except NetBoxError:
                     return None
-        return None
+        return self._unique_device(list(devices.values()), address)
 
     @staticmethod
     def _is_manual(device: dict) -> bool:
@@ -778,11 +732,7 @@ class Syncer:
                 scanned_address or record.name, context.detail,
             )
             return True
-        chassis = candidates[0]
-        if len(candidates) > 1:
-            log.warning("%s: serial %s is on %d devices; using %s as the chassis",
-                        scanned_address or record.name, record.serial, len(candidates),
-                        chassis.get("name"))
+        chassis = self._unique_device(candidates, f"VDC chassis serial {record.serial}")
 
         vdc = self._ensure_vdc(chassis, record, tenant_id)
         if vdc is None:
@@ -886,7 +836,7 @@ class Syncer:
         # to a guest.
         hosts = [d for d in candidates
                  if not (d.get("custom_fields") or {}).get(VCMP_HOST_FIELD)]
-        return (hosts or candidates)[0] if candidates else None
+        return self._unique_device(hosts or candidates, f"vCMP host serial {chassis_serial}")
 
     def _ensure_vcmp_host_field(self) -> None:
         if self._vcmp_field_ready:
@@ -914,9 +864,8 @@ class Syncer:
                          record: DeviceRecord) -> None:
         """Move a device whose NetBox site disagrees with the scan.
 
-        A device is matched by serial first, and a serial is site-independent —
-        so a unit that was racked somewhere else is found and then quietly left
-        at its old site. For a stack that is worse than untidy: the members
+        An inventory ID or address can identify a relocated device. Without
+        updating the site, a stack can be split: the members
         scanned for the first time land at the new site while the one already in
         NetBox stays behind, and the virtual chassis ends up spanning two sites.
         """
@@ -1136,12 +1085,17 @@ class Syncer:
     def _sync_modules(self, device: dict | None, record: DeviceRecord) -> None:
         if device is None or not record.modules:
             return
+        bay_counts = Counter(_fit(m.bay_name.strip(), MODULE_BAY_NAME_LENGTH) for m in record.modules)
         for module in record.modules:
+            bay_name = _fit(module.bay_name.strip(), MODULE_BAY_NAME_LENGTH)
+            if not bay_name or bay_counts[bay_name] > 1:
+                log.warning("%s: ambiguous module bay %r; inventory and replacement history left unchanged",
+                            record.name, bay_name)
+                continue
             manufacturer = self._ensure_manufacturer(module.manufacturer or record.manufacturer)
             module_type = self._ensure_module_type(manufacturer, module.model)
             if module_type is None:
                 continue
-            bay_name = _fit(module.bay_name, MODULE_BAY_NAME_LENGTH)
             payload = {"device": device["id"], "name": bay_name}
             if bay_name != module.bay_name:
                 # The full name is worth keeping — it is what the device
@@ -1158,8 +1112,8 @@ class Syncer:
                 continue
             existing = self.netbox.first("/dcim/modules/", {"module_bay_id": bay["id"]})
             desired = {"module_type": module_type["id"]}
-            if module.serial:
-                desired["serial"] = module.serial
+            if clean_serial(module.serial):
+                desired["serial"] = clean_serial(module.serial)
             if existing is not None:
                 self._note_module_replacement(device, existing, module, record)
                 self.netbox.ensure_fields(
@@ -1182,10 +1136,10 @@ class Syncer:
         So the audit row is written first and is the only place the removed
         serial survives — which is exactly why it is written at all.
         """
-        if not self.options.retain_replaced_hardware:
+        if not self._record_hardware_changes:
             return
-        old_serial = (existing.get("serial") or "").strip()
-        new_serial = (module.serial or "").strip()
+        old_serial = clean_serial(existing.get("serial") or "")
+        new_serial = clean_serial(module.serial or "")
         # Case-insensitive for the same reason as the chassis path.
         if not old_serial or not new_serial or old_serial.lower() == new_serial.lower():
             return
@@ -1201,7 +1155,7 @@ class Syncer:
         self._record_replacement(
             kind="module", device_id=device["id"], replaced_device_id=None,
             old_serial=old_serial, new_serial=new_serial, model=module.model,
-            module_bay=module.bay_name,
+            module_bay=_fit(module.bay_name.strip(), MODULE_BAY_NAME_LENGTH),
         )
 
     # --- interfaces and addresses -------------------------------------------

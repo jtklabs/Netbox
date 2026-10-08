@@ -9,6 +9,7 @@ from netbox_compliance.models import ConfigCompliance, ConfigStandard
 # fails at reverse() time rather than at import time. Same rule applies to the
 # detail template filenames: configstandard.html, configcompliance.html.
 urlpatterns = [
+    path('standards/<int:pk>/revisions/<int:number>/', views.StandardRevisionView.as_view(), name='standard_revision'),
     path('standards/', views.ConfigStandardListView.as_view(), name='configstandard_list'),
     path('standards/add/', views.ConfigStandardEditView.as_view(), name='configstandard_add'),
     path('standards/edit/', views.ConfigStandardBulkEditView.as_view(),

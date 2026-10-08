@@ -65,6 +65,44 @@ def test_parses_eos_servers_including_a_hostname():
     ]
 
 
+@pytest.mark.parametrize('output', ['ntp server', 'ntp server vrf', 'ntp server vrf MGMT'])
+def test_incomplete_server_output_is_not_treated_as_empty(output):
+    with pytest.raises(ValueError, match='Incomplete'):
+        parse_ntp(output)
+
+
+@pytest.mark.parametrize('platform,global_line,vrf', [
+    ('cisco_ios', 'ntp source GigabitEthernet0/0', None),
+    ('arista_eos', 'ntp local-interface vrf MGMT Management1', 'MGMT'),
+])
+def test_inherited_source_is_compliant_without_rewriting_servers(platform, global_line, vrf):
+    source = global_line.split()[-1]
+    desired = FEATURE.build_desired(parse_args(document={'ntp': {
+        'servers': ['192.0.2.1'], 'source': source, 'vrf': vrf, 'iburst': False}}))
+    server = 'ntp server ' + (f'vrf {vrf} ' if vrf else '') + '192.0.2.1'
+    current = parse_ntp(global_line + '\n' + server)
+    assert plan_ntp(current, desired.keys, MODE_REPLACE,
+                    {'variables': dict(desired.variables), 'platform': platform}) == ([], [])
+    assert len(current) == 1  # global source is never a removable entry
+
+
+def test_explicit_source_overrides_global_source_for_comparison():
+    desired = FEATURE.build_desired(parse_args(['-s', '192.0.2.1', '--source', 'Loopback0']))
+    current = parse_ntp('ntp source Loopback0\nntp server 192.0.2.1 source Loopback1')
+    add, remove = plan_ntp(current, desired.keys, MODE_REPLACE,
+                           {'variables': dict(desired.variables), 'platform': 'cisco_ios'})
+    assert add and remove
+
+
+def test_spaced_interface_type_and_number_are_parsed_together():
+    desired = FEATURE.build_desired(parse_args(['-s', '192.0.2.1', '--source', 'Vlan25', '--no-iburst']))
+    current = parse_ntp('ntp server 192.0.2.1 source Vlan 25 version 4')
+    assert current[0].data['source'] == 'Vlan25'
+    assert current[0].data['extra'] == ['version', '4']
+    assert plan_ntp(current, desired.keys, MODE_REPLACE,
+                    {'variables': dict(desired.variables), 'platform': 'arista_eos'}) == ([], [])
+
+
 def test_the_source_interface_is_part_of_a_servers_identity():
     plain = parse_ntp("ntp server 10.1.1.1")[0]
     sourced = parse_ntp("ntp server 10.1.1.1 source Loopback0")[0]
@@ -120,9 +158,9 @@ def test_parser_ignores_other_ntp_config():
     assert [e.key for e in parse_ntp(output)] == ["server:10.1.1.1"]
 
 
-def test_parser_tolerates_junk_and_empty_output():
+def test_parser_tolerates_whitespace_and_empty_output():
     assert parse_ntp("") == []
-    assert [e.key for e in parse_ntp("  ntp server 10.1.1.1  \nntp server\n\n")] == [
+    assert [e.key for e in parse_ntp("  ntp server 10.1.1.1  \n\n")] == [
         "server:10.1.1.1"
     ]
 
@@ -155,14 +193,84 @@ def test_an_already_correct_fleet_is_a_no_op(key):
     assert plan_ntp(current, desired.keys, MODE_ADD, ctx) == ([], [])
 
 
-def test_a_server_missing_its_key_is_reissued_not_removed(key):
-    """Re-issuing the line replaces it. Negating it afterwards would delete the
-    server that was just corrected."""
+def test_a_server_missing_its_key_is_reset_before_replacement(key):
     desired, ctx = context(AUTH_DOCUMENT)
     current = parse_ntp("ntp server 10.50.0.10\nntp server 10.50.0.11\n")
     add, remove = plan_ntp(current, desired.keys, MODE_REPLACE, ctx)
     assert "server:10.50.0.10:key:1" in add
-    assert remove == []
+    commands = render('ntp', 'cisco_ios', add, remove, desired.variables)
+    assert commands.index('no ntp server 10.50.0.10') < commands.index('ntp server 10.50.0.10 key 1')
+    assert all(entry.data['before_add'] for entry in remove)
+
+
+@pytest.mark.parametrize('platform,settings,current', [
+    ('cisco_ios', {'vrf': 'MGMT'}, 'ntp server vrf OTHER 10.1.1.1'),
+    ('cisco_ios', {'prefer': '10.1.1.1'}, 'ntp server 10.1.1.1'),
+    ('cisco_ios', {}, 'ntp server 10.1.1.1 prefer'),
+    ('arista_eos', {'iburst': True}, 'ntp server 10.1.1.1'),
+    ('arista_eos', {'iburst': False}, 'ntp server 10.1.1.1 iburst'),
+])
+def test_server_options_are_compared_and_converge(platform, settings, current):
+    desired, ctx = context({'ntp': {'servers': ['10.1.1.1'], **settings}})
+    ctx['platform'] = platform
+    add, remove = plan_ntp(parse_ntp(current), desired.keys, MODE_REPLACE, ctx)
+    assert add
+    commands = render('ntp', platform, add, remove, desired.variables)
+    corrected = '\n'.join(command for command in commands if not command.startswith('no '))
+    assert plan_ntp(parse_ntp(corrected), desired.keys, MODE_REPLACE, ctx) == ([], [])
+    if 'OTHER' in current:
+        assert 'no ntp server vrf OTHER 10.1.1.1' in commands
+    else:
+        assert commands[0] == 'no ' + current
+
+
+def test_same_address_in_wrong_vrf_is_not_preserved_by_replace():
+    desired, ctx = context({'ntp': {'servers': ['10.1.1.1'], 'vrf': 'MGMT'}})
+    current = parse_ntp('ntp server vrf MGMT 10.1.1.1\nntp server vrf OLD 10.1.1.1')
+    add, remove = plan_ntp(current, desired.keys, MODE_REPLACE, ctx)
+    assert add == []
+    assert [entry.line for entry in remove] == ['ntp server vrf OLD 10.1.1.1']
+    assert plan_ntp(current, desired.keys, MODE_ADD, ctx) == ([], [])
+
+
+def test_algorithm_change_does_not_delete_replacement_key(key):
+    document = {'ntp': {'servers': ['10.1.1.1'], 'authentication': {'key_id': 1, 'type': 'sha1'}}}
+    desired, ctx = context(document)
+    add, remove = plan_ntp(parse_ntp('ntp authentication-key 1 md5 encrypted 7'), desired.keys, MODE_REPLACE, ctx)
+    commands = render('ntp', 'cisco_ios', add, remove, desired.variables)
+    assert f'ntp authentication-key 1 sha1 {KEY}' in commands
+    assert 'no ntp authentication-key 1' not in commands
+
+
+def test_rewrite_key_does_not_fail_post_change_verification(key):
+    desired, ctx = context(AUTH_DOCUMENT, args=['--rewrite-keys'])
+    current = parse_ntp('\n'.join(render('ntp', 'cisco_ios', desired.keys, [], desired.variables)))
+    assert plan_ntp(current, desired.keys, MODE_REPLACE, {**ctx, 'verification': True}) == ([], [])
+
+
+def test_yaml_iburst_false_and_cli_override():
+    desired, _ = context({'ntp': {'servers': ['10.1.1.1'], 'iburst': False}})
+    assert render('ntp', 'arista_eos', desired.keys, [], desired.variables) == ['ntp server 10.1.1.1']
+    desired, _ = context({'ntp': {'servers': ['10.1.1.1'], 'iburst': True}}, args=['--no-iburst'])
+    assert desired.variables['iburst'] is False
+    with pytest.raises(StandardsError, match='must be true or false'):
+        context({'ntp': {'servers': ['10.1.1.1'], 'iburst': 'false'}})
+
+
+def test_option_correction_preserves_unmanaged_server_options():
+    desired, ctx = context({'ntp': {'servers': ['10.1.1.1']}})
+    current = parse_ntp('ntp server 10.1.1.1 prefer version 3 minpoll 6')
+    add, remove = plan_ntp(current, desired.keys, MODE_REPLACE, ctx)
+    commands = render('ntp', 'cisco_ios', add, remove, desired.variables)
+    assert commands[-1] == 'ntp server 10.1.1.1 version 3 minpoll 6'
+
+
+def test_eos_vrf_change_clears_old_vrf_before_adding_servers():
+    desired, ctx = context({'ntp': {'servers': ['10.1.1.1'], 'vrf': 'NEW'}})
+    ctx['platform'] = 'arista_eos'
+    add, remove = plan_ntp(parse_ntp('ntp server vrf OLD 10.2.2.2 iburst'), desired.keys, MODE_REPLACE, ctx)
+    assert render('ntp', 'arista_eos', add, remove, desired.variables) == [
+        'no ntp server vrf OLD 10.2.2.2 iburst', 'ntp server vrf NEW 10.1.1.1 iburst']
 
 
 def test_replace_still_removes_a_server_that_is_not_wanted(key):

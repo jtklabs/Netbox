@@ -16,7 +16,7 @@ from datetime import date, timedelta
 
 import django_filters
 from dcim.models import Device, DeviceRole, Platform, Site
-from django.db.models import Q
+from django.db.models import Q, F
 from django.utils import timezone
 from extras.models import Tag
 from netbox.filtersets import NetBoxModelFilterSet
@@ -160,13 +160,21 @@ class ConfigComplianceFilterSet(NetBoxModelFilterSet):
         current_exemption = Q(exempt=True) & ~expired
 
         clause = Q()
+        outdated = Q(standard__revision__gt=0) & (Q(standard_revision__isnull=True) | ~Q(standard_revision__number=F('standard__revision')))
+        from django.conf import settings
+        days = settings.PLUGINS_CONFIG.get('netbox_compliance', {}).get('stale_after_days', 30)
+        stale = Q(last_checked__lt=timezone.now() - timedelta(days=days)) | Q(last_checked__isnull=True)
         for status in value:
             if status == ConfigComplianceStatusChoices.STATUS_EXEMPT:
                 clause |= current_exemption
             elif status == ConfigComplianceStatusChoices.STATUS_EXEMPT_EXPIRED:
                 clause |= expired
+            elif status == ConfigComplianceStatusChoices.STATUS_OUTDATED:
+                clause |= Q(exempt=False) & ~Q(result='unknown') & outdated
+            elif status == ConfigComplianceStatusChoices.STATUS_STALE:
+                clause |= Q(exempt=False) & ~Q(result='unknown') & ~outdated & stale
             else:
-                clause |= Q(exempt=False, result=status)
+                clause |= Q(exempt=False, result=status) & (~outdated & ~stale if status != 'unknown' else Q())
         return queryset.filter(clause) if clause else queryset
 
     def filter_stale(self, queryset, name, value):

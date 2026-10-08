@@ -1,8 +1,8 @@
 """NTP servers, and the authentication keys that go with them.
 
-The parser is deliberately tolerant: it keeps the device's own line verbatim so
-that removal negates exactly what is configured, including options this tool
-does not model (``prefer``, ``source Vlan10``, ``key 1``, a vrf).
+The parser keeps the device's own line for removal and rollback. Comparison
+includes the server, VRF, key, source, preference and (on EOS) iburst. Correcting
+an endpoint resets its old line first while preserving unmanaged options.
 
 Authentication is three lines plus a binding: the key itself, a trusted-key
 entry, `ntp authenticate`, and `key <id>` on each server. They are ordered so
@@ -19,6 +19,7 @@ re-issues it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -36,11 +37,14 @@ from ..core import (
     validate_word,
 )
 from ..netbox import source_for
+from ..ntp_discovery import global_sources, interface_name
+from .. import aruba_ntp, clearpass_ntp, f5_ntp, ntp_nxos
+from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
 
 # Wide enough to see the authentication lines, narrow enough that `ntp master`,
-# `ntp access-group` and `ntp source` are never parsed -- and so can never be
-# removed by --replace.
+# `ntp access-group` and global source settings are never managed entries, so
+# cannot be removed by --replace. Global sources are read for comparison only.
 SHOW_COMMAND = "show running-config | include ^ntp"
 
 #: Shortest key this tool will set.
@@ -91,6 +95,7 @@ def parse_ntp(output: str) -> List[Entry]:
     arguments differently.
     """
     entries: List[Entry] = []
+    sources = global_sources(output)
     for raw in output.splitlines():
         line = raw.strip()
         if not line.startswith("ntp "):
@@ -102,17 +107,32 @@ def parse_ntp(output: str) -> List[Entry]:
 
         if kind == "server":
             index = 2
+            vrf = None
             if len(tokens) > index and tokens[index] == "vrf":
+                vrf = tokens[index + 1] if len(tokens) > index + 1 else None
                 index += 2  # skip 'vrf' '<name>'
             if index >= len(tokens):
-                continue  # malformed / truncated line; nothing safe to key on
+                raise ValueError('Incomplete NTP server configuration')
             host = tokens[index]
             options = {}
-            for keyword in ("key", "source"):
-                if keyword in tokens[index:]:
-                    position = tokens.index(keyword, index)
-                    if position + 1 < len(tokens):
-                        options[keyword] = tokens[position + 1]
+            extra = []
+            position = index + 1
+            while position < len(tokens):
+                keyword = tokens[position]
+                if keyword in ('key', 'source'):
+                    if position + 1 >= len(tokens):
+                        raise ValueError(f'Incomplete NTP server {keyword} option')
+                    value = tokens[position + 1]
+                    position += 2
+                    if keyword == 'source' and value.isalpha() and position < len(tokens) and tokens[position].isdigit():
+                        value += tokens[position]
+                        position += 1
+                    options[keyword] = value
+                elif keyword in ('prefer', 'iburst'):
+                    position += 1
+                else:
+                    extra.append(keyword)
+                    position += 1
             entries.append(
                 Entry(
                     key=_server_key(host, options.get("key"), options.get("source")),
@@ -122,6 +142,11 @@ def parse_ntp(output: str) -> List[Entry]:
                         "host": normalize(host),
                         "key": options.get("key"),
                         "source": options.get("source"),
+                        "inherited_source": sources.get(vrf or 'default') or sources.get('*'),
+                        "vrf": vrf,
+                        "prefer": "prefer" in tokens[index + 1:],
+                        "iburst": "iburst" in tokens[index + 1:],
+                        "extra": extra,
                     },
                 )
             )
@@ -168,15 +193,43 @@ def plan_ntp(
     context: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[str], List[Entry]]:
     context = context or {}
+    if context.get('platform') == 'cisco_nxos' and not context.get('nxos_servers'):
+        return ntp_nxos.plan(current, desired, mode, {**context, 'nxos_servers': True})
     variables = context.get("variables") or {}
     configured = {entry.key for entry in current}
+    entries = variables.get("entries") or {}
+    eos = context.get("platform") == "arista_eos"
+
+    def matches(entry, wanted):
+        source = entry.data.get('source')
+        if wanted.get('source'):
+            source = source or entry.data.get('inherited_source')
+            try:
+                source_matches = interface_name(source or '').lower() == interface_name(wanted['source']).lower()
+            except ValueError:
+                source_matches = source == wanted['source']
+        else:
+            source_matches = not source
+        return (entry.data.get('kind') == 'server' and entry.data.get('host') == wanted['host']
+                and entry.data.get('key') == wanted.get('key') and source_matches
+                and entry.data.get("vrf") == variables.get("vrf")
+                and bool(entry.data.get("prefer")) == (wanted["host"] == variables.get("prefer"))
+                and (not eos or bool(entry.data.get("iburst")) == bool(variables.get("iburst"))))
     if variables.get("regions") and isinstance(context.get("notes"), list):
         # Say which set this device was measured against; with regions it differs per device.
         region = variables.get("region")
         context["notes"].append(f"NTP servers for region {region}" if region else "NTP servers: default set (no region matched)")
 
     to_add = [key for key in desired if key not in configured]
-    if variables.get("rewrite_keys"):
+    for key in desired:
+        wanted = entries.get(key, {})
+        if wanted.get("kind") == "server":
+            if any(matches(entry, wanted) for entry in current):
+                if key in to_add:
+                    to_add.remove(key)
+            elif key not in to_add:
+                to_add.append(key)
+    if variables.get("rewrite_keys") and not context.get("verification"):
         # The material is stored encrypted and cannot be compared, so this is
         # the only way to push a changed one.
         to_add.extend(
@@ -185,28 +238,48 @@ def plan_ntp(
             if key.startswith("key:") and key not in to_add
         )
 
+    to_add = [key for key in desired if key in to_add]
+    # Reset an existing endpoint before re-adding it: omitting a CLI option
+    # does not reliably clear a previously configured source/prefer/key.
     to_remove: List[Entry] = []
+    for entry in current:
+        if entry.data.get("kind") != "server":
+            continue
+        for key in to_add:
+            wanted = entries.get(key, {})
+            if (wanted.get("kind") == "server" and entry.data.get("host") == wanted["host"]
+                    and entry.data.get("vrf") == variables.get("vrf")):
+                to_remove.append(Entry(key=entry.key, line=entry.line,
+                                       data={**entry.data, "before_add": True}))
+                # Retain options outside this standard, such as version/minpoll.
+                extra = list(entry.data.get('extra', []))
+                if not eos and entry.data.get('iburst'):
+                    extra.append('iburst')
+                variables.setdefault('server_options', {})[key] = extra
+                break
     if mode == MODE_REPLACE:
         wanted = set(desired)
         # Silence is not a statement. A standards file that says nothing about
         # authentication is not asking for it to be torn off devices that have
         # it -- only a file that declares `authentication:` manages those lines.
         manages_auth = bool(variables.get("manages_auth"))
-        wanted_hosts = {
-            entry["host"]
-            for entry in (variables.get("entries") or {}).values()
-            if entry.get("kind") == "server"
-        }
+        wanted_hosts = {(entry["host"], variables.get("vrf")) for entry in entries.values()
+                        if entry.get("kind") == "server"}
+        wanted_key_ids = {entry["id"] for entry in entries.values() if entry.get("kind") == "key"}
         for entry in current:
-            if entry.key in wanted:
+            if entry.data.get("kind") == "server":
+                if (entry.data.get("host"), entry.data.get("vrf")) in wanted_hosts:
+                    continue
+            elif entry.key in wanted:
                 continue
             if not manages_auth and entry.data.get("kind") != "server":
                 continue
-            if entry.data.get("kind") == "server" and entry.data.get("host") in wanted_hosts:
-                # Same server, different key binding. Re-issuing the line
-                # replaces it; negating it afterwards would delete the server
-                # we just corrected.
+            if entry.data.get("kind") == "key" and entry.data.get("id") in wanted_key_ids:
+                # Replacing the algorithm at the same ID must not delete the new key.
                 continue
+            if eos and entry.data.get('kind') == 'server' and entry.data.get('vrf') != variables.get('vrf'):
+                # EOS permits NTP in only one VRF; clear old-VRF servers first.
+                entry = Entry(key=entry.key, line=entry.line, data={**entry.data, 'before_add': True})
             to_remove.append(entry)
     return to_add, to_remove
 
@@ -255,6 +328,11 @@ def _word(value):
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    add_connection_arguments(parser)
+    parser.add_argument('--allow-clearpass-cluster-changes', action='store_true',
+                        help='explicitly authorize NTP changes to the global NetBox-tagged ClearPass cluster')
+    parser.add_argument('--clearpass-cluster-snapshot', help=argparse.SUPPRESS)
+    parser.add_argument('--mobility-conductor-snapshot', help=argparse.SUPPRESS)
     parser.add_argument(
         "-s",
         "--servers",
@@ -282,7 +360,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-iburst",
         dest="iburst",
         action="store_false",
-        default=True,
+        default=None,
         help="omit iburst on platforms whose template uses it (Arista)",
     )
     parser.add_argument(
@@ -302,6 +380,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def build_desired(args: argparse.Namespace) -> Desired:
     standards = standards_of(args)
+    conductor_snapshot = None
+    if getattr(args, 'mobility_conductor_snapshot', None):
+        from ..mobility_conductor import validate
+        with open(args.mobility_conductor_snapshot, encoding='utf-8') as stream:
+            conductor_snapshot = validate(json.load(stream))
+    cluster_snapshot = None
+    if getattr(args, 'clearpass_cluster_snapshot', None):
+        from ..clearpass_cluster import validate
+        with open(args.clearpass_cluster_snapshot, encoding='utf-8') as stream:
+            cluster_snapshot = validate(json.load(stream))
 
     # A flag beats the file, so a one-off run never needs the file edited --
     # and it beats the regional sets too: --servers means these, everywhere.
@@ -351,7 +439,11 @@ def build_desired(args: argparse.Namespace) -> Desired:
             keys.append(trusted)
             entries[trusted] = {"kind": "trusted-key", "id": key_id}
 
-    source = _word(args.source or standards.value("ntp.source"))
+    source = args.source or standards.value("ntp.source")
+    source = interface_name(str(source)) if source else None
+    iburst = standards.value("ntp.iburst", True) if args.iburst is None else args.iburst
+    if type(iburst) is not bool:
+        raise StandardsError("ntp.iburst must be true or false")
     for host in servers:
         key = _server_key(host, key_id, source)
         keys.append(key)
@@ -372,9 +464,15 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "vrf": _word(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
             "source": source,
-            "iburst": args.iburst,
+            "iburst": iburst,
             "manages_auth": bool(auth),
             "rewrite_keys": bool(getattr(args, "rewrite_keys", False)),
+            "f5": connection_settings(args),
+            "aruba": aruba_ntp.settings(standards.value("ntp.aruba")),
+            "clearpass": clearpass_ntp.settings(standards.value("ntp.clearpass")),
+            "allow_clearpass_cluster_changes": bool(getattr(args, 'allow_clearpass_cluster_changes', False)),
+            "clearpass_cluster_snapshot": cluster_snapshot,
+            "mobility_conductor_snapshot": conductor_snapshot,
         },
         secrets=secrets,
     )
@@ -469,10 +567,15 @@ def per_device(keys, variables, host):
 
     source, authoritative = source_for(host, "ntp")
     if authoritative:
-        source = validate_word(str(source), "interface") if source else None
+        source = interface_name(str(source)) if source else None
     else:
         source = variables.get("source")  # a CSV has no opinion; the file's value stands
-    if servers == variables.get("servers") and source == variables.get("source"):
+    vrf = variables.get('vrf')
+    selected_vrf = (getattr(host, 'data', {}) or {}).get('ntp_vrf')
+    if selected_vrf:
+        vrf = None if selected_vrf == 'default' else validate_word(str(selected_vrf), 'NTP VRF')
+    if (servers == variables.get("servers") and source == variables.get("source") and vrf == variables.get('vrf')
+            and prefer == variables.get("prefer") and not regional):
         return keys, variables
 
     entries = {key: record for key, record in variables["entries"].items() if record["kind"] != "server"}
@@ -485,7 +588,7 @@ def per_device(keys, variables, host):
     others = [key for key in keys if variables["entries"][key]["kind"] != "server"]
     cut = others.index("authenticate") if "authenticate" in others else len(others)
     rebuilt = others[:cut] + server_keys + others[cut:]
-    changed = {"entries": entries, "source": source, "servers": servers, "prefer": prefer}
+    changed = {"entries": entries, "source": source, "servers": servers, "prefer": prefer, "vrf": vrf}
     if regional:
         changed["region"] = regional["region"]
     return rebuilt, {**variables, **changed}
@@ -493,14 +596,18 @@ def per_device(keys, variables, host):
 
 FEATURE = Feature(
     name="ntp",
+    platform_runs={'f5_tmsh': f5_ntp.run, 'aruba_os': aruba_ntp.run,
+                   'aruba_clearpass': clearpass_ntp.run},
     help="converge the NTP servers and their authentication key",
     platforms={
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_ntp, IOS_SAMPLE),
         "arista_eos": PlatformSupport(SHOW_COMMAND, parse_ntp, EOS_SAMPLE),
+        "cisco_nxos": PlatformSupport('show running-config ntp', ntp_nxos.parse, ntp_nxos.SAMPLE),
     },
     add_arguments=add_arguments,
     build_desired=build_desired,
     plan=plan_ntp,
+    verify_with_plan=True,
     per_device=per_device,
     rollback_note=(
         "an authentication key's material is stored encrypted, so a changed key "

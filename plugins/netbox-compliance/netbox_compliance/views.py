@@ -11,7 +11,7 @@ from dcim.models import Device, Region, Site
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.db.models import Count
 from django.http import HttpResponse
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from django.views import View
 from netbox.views.generic import (
     BulkDeleteView,
@@ -63,7 +63,8 @@ class ConfigStandardView(ObjectView):
     )
 
     def get_extra_context(self, request, instance):
-        results = instance.results.select_related('device', 'device__site').order_by(
+        results = instance.results.restrict(request.user, 'view').filter(
+            device__in=Device.objects.restrict(request.user, 'view')).select_related('device', 'device__site', 'standard_revision').order_by(
             'device__name'
         )
         rows = [
@@ -78,14 +79,17 @@ class ConfigStandardView(ObjectView):
                 'last_checked': record.last_checked,
                 'is_stale': record.is_stale,
                 'needs_manual_fix': record.needs_manual_fix,
+                'checked_revision': record.checked_revision,
+                'current_revision': instance.revision,
             }
             for record in results[:100]
         ]
         return {
-            'result_table': tables.ComplianceReportTable(rows),
+            'result_table': tables.ComplianceReportTable(rows, empty_text='No recorded checks yet.'),
             'result_total': results.count(),
             'summary': scoping.summarise(rows),
             'runtime_variables': instance.runtime_variables,
+            'revisions': instance.revisions.all(),
         }
 
 
@@ -93,6 +97,42 @@ class ConfigStandardView(ObjectView):
 class ConfigStandardEditView(ObjectEditView):
     queryset = ConfigStandard.objects.all()
     form = forms.ConfigStandardForm
+    template_name = 'netbox_compliance/configstandard_edit.html'
+
+    def post(self, request, *args, **kwargs):
+        from .revisions import revision_batch
+        with revision_batch():
+            return super().post(request, *args, **kwargs)
+
+
+class StandardRevisionView(PermissionRequiredMixin, View):
+    permission_required = 'netbox_compliance.view_configstandard'
+
+    def get(self, request, pk, number):
+        import difflib
+        import json
+        standard = get_object_or_404(ConfigStandard.objects.restrict(request.user, 'view'), pk=pk)
+        revision = get_object_or_404(standard.revisions, number=number)
+        previous = standard.revisions.filter(number__lt=number).first()
+        before_definition = dict(previous.definition) if previous else {}
+        after_definition = dict(revision.definition)
+        if revision.definition_yaml and previous and previous.definition_yaml:
+            before_definition.pop('settings', None)
+            after_definition.pop('settings', None)
+        before = json.dumps(before_definition, indent=2, sort_keys=True).splitlines() if previous else []
+        after = json.dumps(after_definition, indent=2, sort_keys=True).splitlines()
+        changes = '\n'.join(difflib.unified_diff(before, after,
+            fromfile=f'v{previous.number if previous else 0}', tofile=f'v{number}', lineterm=''))
+        if revision.definition_yaml or (previous and previous.definition_yaml):
+            yaml_changes = '\n'.join(difflib.unified_diff(
+                previous.definition_yaml.splitlines() if previous else [], revision.definition_yaml.splitlines(),
+                fromfile=f'v{previous.number if previous else 0}.yaml', tofile=f'v{number}.yaml', lineterm=''))
+            changes = '\n\n'.join(part for part in (yaml_changes, changes) if part)
+        return render(request, 'netbox_compliance/standard_revision.html', {
+            'standard': standard, 'revision': revision,
+            'definition': revision.definition_yaml or '\n'.join(after),
+            'diff': changes,
+        })
 
 
 @register_model_view(ConfigStandard, 'delete')
@@ -106,6 +146,11 @@ class ConfigStandardBulkEditView(BulkEditView):
     filterset = filtersets.ConfigStandardFilterSet
     table = tables.ConfigStandardTable
     form = forms.ConfigStandardBulkEditForm
+
+    def post(self, request, *args, **kwargs):
+        from .revisions import revision_batch
+        with revision_batch():
+            return super().post(request, *args, **kwargs)
 
 
 @register_model_view(ConfigStandard, 'bulk_delete')
@@ -196,7 +241,9 @@ class ComplianceReportView(PermissionRequiredMixin, View):
         form.is_valid()
         data = form.cleaned_data if form.is_bound else {}
 
-        devices = Device.objects.select_related('site', 'platform', 'role')
+        devices = Device.objects.restrict(request.user, 'view').select_related('site', 'platform', 'role')
+        if data.get('tenant'):
+            devices = devices.filter(tenant__in=data['tenant'])
         sites = _sites_in_scope(data.get('region'), data.get('site'))
         if sites is not None:
             devices = devices.filter(site__in=sites)
@@ -206,11 +253,11 @@ class ComplianceReportView(PermissionRequiredMixin, View):
             devices = devices.filter(role__in=data['role'])
 
         chosen_standards = data.get('standard')
-        standards = None
+        standards = scoping.active_standards(queryset=ConfigStandard.objects.restrict(request.user, 'view'))
         if chosen_standards:
             standards = list(
                 scoping.active_standards(
-                    queryset=ConfigStandard.objects.filter(
+                    queryset=ConfigStandard.objects.restrict(request.user, 'view').filter(
                         pk__in=[s.pk for s in chosen_standards]
                     )
                 ).prefetch_related('platforms', 'roles', 'sites', 'device_tags')
@@ -222,7 +269,7 @@ class ComplianceReportView(PermissionRequiredMixin, View):
         if resolver.uses_device_tags:
             devices = devices.prefetch_related('tags')
 
-        rows = scoping.device_standard_rows(devices, standards=resolver.standards)
+        rows = scoping.device_standard_rows(devices, standards=resolver.standards, user=request.user)
         summary = scoping.summarise(rows)
         rollup = scoping.standard_rollup(rows)
 
@@ -268,15 +315,15 @@ class DeviceGridView(PermissionRequiredMixin, View):
         if data.get('role'):
             devices = devices.filter(role__in=data['role'])
 
-        standards = None
+        standards = scoping.active_standards(queryset=ConfigStandard.objects.restrict(request.user, 'view'))
         if data.get('standard'):
             standards = list(scoping.active_standards(
-                queryset=ConfigStandard.objects.filter(pk__in=[s.pk for s in data['standard']])
+                queryset=ConfigStandard.objects.restrict(request.user, 'view').filter(pk__in=[s.pk for s in data['standard']])
             ).prefetch_related('platforms', 'roles', 'sites', 'device_tags'))
         # Device tags scope some standards; prefetching them is cheaper than a query per device.
         devices = devices.prefetch_related('tags')
 
-        columns, rows = grid.build(devices, standards=standards)
+        columns, rows = grid.build(devices, standards=standards, user=request.user)
         total = len(rows)
         if data.get('problems_only'):
             rows = [row for row in rows if row['problems']]

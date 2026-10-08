@@ -25,6 +25,7 @@ from dcim.models import Device, DeviceRole, Platform, Region, Site
 from django import forms
 from django.core.exceptions import ValidationError
 from extras.models import Tag
+from tenancy.models import Tenant
 from netbox.forms import (
     NetBoxModelBulkEditForm,
     NetBoxModelFilterSetForm,
@@ -131,7 +132,7 @@ class ConfigStandardForm(NetBoxModelForm):
 
     fieldsets = (
         FieldSet('name', 'check_type', 'description', name='Standard'),
-        FieldSet('match_pattern', 'expected_entries', name='What it governs'),
+        FieldSet('definition_yaml', 'match_pattern', 'expected_entries', name='Definition'),
         FieldSet(
             'auto_remediable', 'allow_enforce', 'add_template', 'remove_template',
             'remediation_notes', name='Remediation',
@@ -144,12 +145,14 @@ class ConfigStandardForm(NetBoxModelForm):
     class Meta:
         model = ConfigStandard
         fields = (
-            'name', 'check_type', 'match_pattern', 'expected_entries',
+            'name', 'check_type', 'definition_yaml', 'match_pattern', 'expected_entries',
             'add_template', 'remove_template', 'auto_remediable', 'allow_enforce',
             'remediation_notes', 'platforms', 'roles', 'sites', 'device_tags',
             'valid_from', 'valid_to', 'description', 'comments', 'tags',
         )
         widgets = {
+            'definition_yaml': forms.Textarea(attrs={'rows': 12, 'class': 'font-monospace',
+                                                     'spellcheck': 'false'}),
             'valid_from': DatePicker(),
             'valid_to': DatePicker(),
             'match_pattern': forms.TextInput(attrs={'class': 'font-monospace'}),
@@ -159,6 +162,7 @@ class ConfigStandardForm(NetBoxModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields['definition_yaml'].label = 'YAML definition'
         instance = kwargs.get('instance') or getattr(self, 'instance', None)
         if instance is not None and instance.pk and not self.is_bound:
             self.initial['expected_entries'] = entries_to_text(
@@ -306,6 +310,7 @@ class ConfigComplianceBulkEditForm(NetBoxModelBulkEditForm):
 class ComplianceReportForm(forms.Form):
     """Scope for the fleet report. Plain Form — nothing here is saved."""
 
+    tenant = DynamicModelMultipleChoiceField(queryset=Tenant.objects.all(), required=False)
     region = DynamicModelMultipleChoiceField(
         queryset=Region.objects.all(), required=False,
     )
@@ -321,7 +326,6 @@ class ComplianceReportForm(forms.Form):
     )
     status = forms.MultipleChoiceField(
         choices=ConfigComplianceStatusChoices, required=False,
-        help_text='Leave empty to show every state',
     )
 
 

@@ -1,0 +1,39 @@
+{% extends 'generic/object_edit.html' %}
+{% load form_helpers %}
+{% block form %}
+<div class="row"><div class="col-lg-8">
+  {% render_field form.name %}
+  {% render_field form.check_type %}
+  {% render_field form.description %}
+  <div id="yaml-definition">{% render_field form.definition_yaml %}</div>
+  <div id="line-definition">
+    {% render_field form.match_pattern %}
+    {% render_field form.expected_entries %}
+    {% render_field form.add_template %}
+    {% render_field form.remove_template %}
+  </div>
+  {% render_field form.auto_remediable %}
+  {% render_field form.allow_enforce %}
+  {% render_field form.remediation_notes %}
+  <h3>Scope</h3>
+  {% render_field form.platforms %}
+  {% render_field form.roles %}
+  {% render_field form.sites %}
+  {% render_field form.device_tags %}
+  {% render_field form.valid_from %}
+  {% render_field form.valid_to %}
+  {% render_field form.tags %}
+</div></div>
+<script>
+(function () {
+  const select = document.getElementById('id_check_type');
+  function update() {
+    const yaml = select.value === 'netops';
+    document.getElementById('yaml-definition').hidden = !yaml;
+    document.getElementById('line-definition').hidden = yaml;
+  }
+  select.addEventListener('change', update);
+  update();
+})();
+</script>
+{% endblock %}

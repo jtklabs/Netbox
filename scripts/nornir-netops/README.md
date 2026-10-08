@@ -35,7 +35,7 @@ re-run with --apply to push the commands above
 
 | Subcommand | What it does | Platforms |
 | --- | --- | --- |
-| [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `arista_eos` |
+| [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `cisco_nxos`, `arista_eos`, `f5_tmsh`, `aruba_os` (Conductor), `aruba_clearpass` |
 | [`syslog`](#syslog) | Collectors, supported severity/source settings, NetBox policy and check dates | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`waf`](#waf-remote-syslog) | Existing WAF remote logging destinations, NetBox policy and check dates | `f5_tmsh` |
 | [`banner`](#banner) | Login and MOTD banners; F5 SSH and web login notices | `cisco_ios`, `arista_eos`, `f5_tmsh` |
@@ -47,6 +47,7 @@ re-run with --apply to push the commands above
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
+| `discover-ntp` | Read NTP source/VRF over SSH; optionally bootstrap NetBox selections | IOS/IOS-XE, NX-OS, EOS |
 | [`collect`](#collect-show-commands-into-netbox) | Run each platform's show commands read-only and file the outputs on the NetBox device page | every platform in `commands.yaml` |
 | [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, EOS boot-image reload or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `arista_eos`, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
@@ -379,14 +380,59 @@ NetBox is asked **once per tag for the whole fleet**, not once per device -- a
 single query the server is built to answer, rather than a round trip per device
 per standard.
 
+### Discover NTP sources over SSH
+
+For IOS/IOS-XE, NX-OS and EOS devices with a platform already set in NetBox, preview
+the configured source interface and VRF without changing the devices or NetBox:
+
+```bash
+./configure.py discover-ntp --netbox --limit sw1
+```
+
+After reviewing the results, bootstrap missing NetBox selections:
+
+```bash
+./configure.py discover-ntp --netbox --limit sw1 --sync-netbox
+```
+
+This runs only SSH `show` commands. It understands IOS `ntp source`, NX-OS
+`ntp source-interface` with per-server `use-vrf`, EOS
+`ntp local-interface [vrf NAME]`, and per-server `source` settings, and checks
+the source interface's configured VRF. It never infers an interface from the
+SSH destination or a route lookup. Missing explicit sources, different sources
+or VRFs across servers, and interface/VRF mismatches require manual review.
+
+`--sync-netbox` records the observation and timestamp in the device JSON custom
+field `ntp_discovery`. If exactly one existing NetBox interface matches, it can
+add `ntp-source` (or the configured NTP source tag) and fill the device text
+custom field `ntp_vrf`. `default` explicitly selects the global routing table;
+a blank field falls back to the standard's VRF. NTP audits and remediation
+consume this per-device selection together with the interface tag.
+
+Existing conflicting tags or VRF selections are preserved and reported, not
+replaced. Discovery does not create interfaces, change their IPAM VRF assignment,
+learn approved NTP servers, or mark a standard compliant. Unrelated tags/custom
+fields are preserved. JSON run archives include observations, ambiguity and
+writeback outcomes. Exit codes: 0 for resolved devices, 2 for manual-review
+outcomes, 1 for SSH/API failures.
+
+The NetBox token needs device/interface read and change permissions and access
+to the custom fields. On first use it also needs permission to create the two
+custom fields and the source tag; an administrator can provision these first.
+The fields must be assigned to devices, with types JSON and text respectively.
+Writes use the normal NetBox API/change log. This command does not install a
+schedule or enable a poller; test a limited preview before scheduling it.
+
 ### What this means for the templates
 
 A source interface is now part of what makes a line correct, so it is part of
 the comparison: `ntp server 10.50.0.10 source Loopback0` and
 `ntp server 10.50.0.10` are different states. Without that, a stale
 `source Loopback0` on a device that should no longer have one would read as
-compliant forever. Re-issuing the line replaces it; it is never negated first,
-for the same reason as the auth key.
+compliant forever. A matching global NTP source also satisfies a selected
+source; global source commands themselves are not removed by this standard.
+When server options differ, the existing endpoint is reset before the corrected
+line is added, preserving unmanaged options.
 
 ## The standards file
 
@@ -648,9 +694,181 @@ Ctrl-C during a run stops without a traceback and exits 130.
 
 `--vrf MGMT`, `--prefer 10.50.0.10`, `--source Loopback0`, `--no-iburst` (Arista).
 
+Compliance compares VRF, source, authentication-key binding, preferred-server
+status and, on EOS, `iburst`, not just the server address. `ntp.iburst: false`
+in YAML disables EOS iburst; `--no-iburst` overrides YAML. Post-change
+verification repeats these comparisons. IOS iburst is not managed by this task.
+
 Removal negates the device's own line, so a server configured with options this
-tool does not model still goes away cleanly. `ntp source`, `ntp master` and
-`ntp access-group` are never parsed, so `--replace` can never remove them.
+tool does not model still goes away cleanly. IOS/EOS global source commands,
+`ntp master` and `ntp access-group` are not managed removal entries.
+
+### Platform coverage
+
+| Platform | Configuration audit/remediation | Source discovery |
+| --- | --- | --- |
+| Cisco IOS/IOS-XE | SSH; server, VRF, source, preference and authentication | Explicit global/per-server source and interface VRF |
+| Cisco NX-OS | SSH; native `use-vrf`, global `ntp source-interface`, preference and authentication | Explicit source interface and server VRF |
+| Arista EOS | SSH; server, VRF, source, preference, iburst and authentication | Explicit global/per-server source and interface VRF |
+| F5 BIG-IP | iControl REST; server list only | Not implemented; no inferred interface tag |
+| ArubaOS 8 managed WLC | Mobility Conductor REST; IPv4 servers, iburst, tagged VLAN/loopback source; device-node scope only | Not implemented; select the source tag manually |
+| FortiGate | Deferred | Not implemented |
+| Palo Alto (Panorama-managed) | Deferred; template ownership is inconsistent across the fleet | Not implemented |
+| Aruba ClearPass | SSH appadmin; IPv4 server-list audit, explicitly scoped publisher remediation | Not supported by the NTP configuration command |
+
+NX-OS uses `copy running-config startup-config` only after successful
+verification. A selected source updates the global source-interface without
+rebuilding unchanged servers; with no selection the current global source is
+preserved. Its CLI grammar follows the
+[NX-OS 10.3 NTP guide](https://www.cisco.com/c/en/us/td/docs/dcn/nx-os/nexus9000/103x/configuration/system-management/cisco-nexus-9000-series-nx-os-system-management-configuration-guide-103x/m-configuring-ntp-10x.html).
+Firmware-dependent authentication key lengths and algorithms require a device
+pilot before fleet rollout.
+
+F5 uses the existing `--f5-*` HTTPS connection settings and inventory credentials.
+It patches only `servers` on
+[`/mgmt/tm/sys/ntp`](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_ntp.html),
+leaving timezone, restrict rules, routing and HA config-sync untouched. Add mode
+preserves extra servers; replace mode reconciles the entire server list. Read-back
+verification precedes saving. The archive includes a REST restore payload.
+Authentication, preferred-server, source-tag and VRF overrides are rejected on
+F5 rather than ignored. Custom NTP include directives also require manual review.
+
+This matrix covers configuration compliance, not operational synchronization.
+`check-ntp` health checks remain IOS/IOS-XE and EOS only. New adapters are tested
+against fixtures and simulated transport, not live hardware.
+
+### Aruba Mobility Conductor
+
+Use platform `arubaos` in NetBox and each managed WLC's IPv4 management address
+as its primary IP. Tag exactly one device `mobility-conductor`: the global
+Conductor, active and with its primary management IPv4 set. No matching tag on
+WLCs, per-WLC Conductor field or manually maintained configuration path is needed.
+The lookup ignores job site, tenant, device and poller filters; the worker's NetBox
+token must be able to see the tagged Conductor.
+
+Each selected WLC gets its own result. The worker connects to Conductor, finds a
+unique management-IP/MAC match in `show switches debug`, derives its individual
+device path from `Nodepath`, and verifies the node's hardware identity. It rejects
+missing or ambiguous mappings and checks for moves during the job. It never
+edits a group node or `/mm`. The inventory username/password must be a Conductor
+service account; credentials must not be stored in the standard.
+
+Queued jobs pin the tagged Conductor's device ID and address. A changed tag or IP
+blocks remediation until the job is edited or rescheduled. Select the managed WLCs
+as job targets, not the Conductor itself. Audits still run separately for every
+selected WLC through Conductor, not through direct WLC logins.
+
+```yaml
+ntp:
+  servers: [10.50.0.10, 10.50.0.11]
+  iburst: true
+  aruba:
+    port: 4343
+    verify_tls: true
+    timeout: 30
+    exclusive_change: false
+```
+
+In NetBox inventory mode, the tag and live path discovery are authoritative:
+legacy `aruba_conductor`, `aruba_config_path` custom fields and
+`ntp.aruba.conductor` do not override them. For legacy CSV-only runs, use platform
+`aruba_os`, provide `aruba_config_path` (for example
+`/md/campus/00:11:22:33:44:55`), and set `aruba_conductor` or
+`ntp.aruba.conductor` explicitly. Use IPv4 literals for NTP servers, including regional lists;
+DNS names and IPv6 are deliberately rejected by this adapter. Tag one `VlanN`
+interface or `Loopback0` with `ntp-source`. Without a selection, the existing
+source is preserved. Nondefault VRFs, preference and managed authentication are
+not supported. Existing authentication bindings survive iburst-only corrections.
+
+Audit reads committed effective configuration, including inherited settings,
+and requires the controller to be online and synchronized. Inherited/protected
+drift is reported for manual correction at its owning node; jobs never edit a
+parent group. Configuration compliance is not proof that the NTP clock is synced.
+
+Apply requires `exclusive_change: true`, saving and verification. Enable that
+setting only for an approved window in which no other job or administrator edits
+that device node or its parents. Conductor's `write_memory` commits all pending
+changes at a node and this API workflow has no exclusive configuration lock.
+Jobs refuse pre-existing pending changes and recheck configuration before writes,
+but those checks cannot eliminate a concurrent editor race. Do not run overlapping
+jobs against the same controller. After commit, the worker requires a newer
+controller Config ID, `UPDATE SUCCESSFUL`, and a matching committed NTP readback.
+Failed attempts require manual review of the archived before-state and any pending
+edits; the worker does not discard changes or roll back automatically.
+
+Discovery uses the documented [show switches debug mapping](https://arubanetworking.hpe.com/techdocs/Archived/AOS-8/ArubaOS_8.9.0_Web_Help/Content/faqs.htm).
+The adapter follows the [AOS8 NTP API](https://developer.arubanetworks.com/aos8/reference/get_object-ntp-server-info),
+[configuration commit API](https://developer.arubanetworks.com/aos8/docs/post), and
+[deployment monitoring API](https://developer.arubanetworks.com/aos8/docs/monitoring).
+It is fixture-tested; validate API response shapes and inheritance behavior on your
+ArubaOS release with a read-only audit, then a single-controller pilot before rollout.
+
+### Aruba ClearPass
+
+Use NetBox platform `aruba-clearpass` or CSV platform `aruba_clearpass`. The
+worker uses the appadmin SSH CLI with inventory credentials and a generic shell,
+without changing console paging, entering configuration mode, or using a Linux
+shell. Verify the appliance SSH host key and provision it in the worker account's
+known_hosts before running; unknown or changed host keys fail closed.
+
+Audit uses `show ntp` on each targeted node. Remediation uses `configure date`
+on the publisher, which changes cluster NTP settings. A subscriber with drift
+is reported for attention and is never used as a write target. Define the desired
+servers in a ClearPass-specific NetBox standard:
+
+```yaml
+ntp:
+  servers: [10.50.0.10, 10.50.0.11]
+```
+
+Cluster membership is reusable device inventory, not NTP YAML. For the single
+global cluster, tag exactly one device `clearpass-publisher` and every other member
+`clearpass-subscriber`. Each device must have platform `aruba-clearpass`, active
+status and a unique primary management IPv4 address. Do not give a device both
+tags. Tag discovery deliberately ignores job device, site, tenant and poller
+filters. Use one shared NTP standard across all members.
+
+On the remediation job profile (or custom job settings), enable **Allow ClearPass
+cluster-wide changes**. Schedule remediation against the publisher only. The
+scheduler requires view and change access to every member, pins their device IDs,
+roles and addresses into the job, and rechecks them at the start gate. Workers
+also compare the pinned scope against fresh NetBox tags and the live `cluster list`
+before writing. Changes to membership require a new or explicitly edited schedule.
+Audit jobs need the tags but not the change-approval checkbox; target all nodes to
+report compliance individually. Provision the same tag visibility for the worker.
+
+For direct CLI use, apply requires `--netbox --allow-clearpass-cluster-changes`;
+CSV inventory supports read-only auditing only. The old
+`ntp.clearpass.cluster_members` setting is accepted for compatibility but ignored
+and does not authorize changes. A standalone publisher still needs its tag and
+explicit approval. Prevent overlapping administrative changes: membership checks
+are not a remote lock. Normal change approval is still required; the checkbox is
+not a ServiceNow approval check.
+
+Add mode preserves existing servers; replace mode requests the exact desired
+list. There is a five-server limit. Order alone is not drift: ClearPass's primary
+label is not an NTP preference. Only IPv4 literal server addresses are supported.
+Timezone is left unchanged. Source-interface tags, VRF overrides, preferred
+servers and managed authentication are rejected; iburst and source routing are
+not managed by this adapter. Existing authenticated configurations can be audited
+for their server list but are never rewritten without the unreadable key material.
+
+Apply persists immediately and requires verification (`--no-save` and
+`--no-verify` are refused). The job re-reads the publisher configuration and cluster
+membership, and archives the previous server list and restore command. An error
+or partial attempt never triggers automatic rollback. Verification is explicitly
+local to the publisher: audit every subscriber afterward to establish its own
+compliance, and do not treat a publisher pass as proof of cluster propagation or
+clock synchronization.
+
+Parsing follows the documented
+[`show ntp`](https://arubanetworking.hpe.com/techdocs/ClearPass/6.9/PolicyManager/Content/CPPM_UserGuide/CLI/Show_Commands.htm),
+[`configure date`](https://arubanetworking.hpe.com/techdocs/ClearPass/6.11/PolicyManager/Content/cmds/con-dat.htm),
+and [6.11 cluster table](https://arubanetworking.hpe.com/techdocs/ClearPass/6.11/PolicyManager/Content/cmds/clust-lis.htm)
+formats, with the legacy 6.10 cluster list also supported. Unknown/truncated
+output fails closed. These are fixture-tested integrations, not a certification
+of every ClearPass release. Pilot read-only output and then one approved publisher
+change on the deployed release before scheduling fleet remediation.
 
 ### Servers per region
 
@@ -705,9 +923,11 @@ the servers that reference it, and `ntp authenticate` last -- so a device is
 never told to demand authentication it cannot yet satisfy.
 
 The key binding is part of a server's identity: a server configured without its
-key is not the same as one with it, so the line is re-issued. It is *not*
-negated first -- re-issuing replaces it, and negating afterwards would delete
-the server that had just been corrected.
+key is not the same as one with it. Incorrect server options are reset before
+the corrected line is issued, preserving unmanaged options such as version and
+poll intervals. Obsolete endpoints are removed after additions, except when
+changing EOS VRFs: EOS requires clearing servers in the old VRF first. Changing
+an authentication algorithm at the same key ID never negates the replacement key.
 
 The key material never goes in the standards file. It comes from
 `$NETOPS_NTP_KEY_<id>` or a `--key-secret` AWS secret shaped `{"1": "..."}`,
@@ -2313,7 +2533,7 @@ after every sweep with `run_after_sweep` in its `[commands]` section.
 
 ### NetBox-scheduled upgrades
 
-Use **Discovery → Software → Upgrade Jobs** to schedule audits, image staging,
+Use **Device Operations → Software → Upgrade Jobs** to schedule audits, image staging,
 or upgrades by site/role/platform. Run `./configure.py upgrade-poll --apply`
 from cron each minute on the remotes. The worker shares this directory's `.env`
 and AWS settings, processes a bounded Nornir batch, and reports progress to

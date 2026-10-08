@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "netbox-discovery"
 version = "0.1.0"
-description = "Onboard devices by IP address, discovered by remote SNMP pollers"
+description = "Device onboarding, software upgrades, and configuration remediation"
 authors = [{ name = "Nova Team" }]
 requires-python = ">=3.10"
 

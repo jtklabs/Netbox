@@ -6,7 +6,73 @@ NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing i
 
 Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in. Only [prestage policies](#prestage-images-by-model) run on NetBox's own worker, the one that already runs its housekeeping.
 
-Open **Discovery → Software → Upgrade Jobs → Add** on the list page (the sidebar **+** also works). Choose a site and role, optionally a platform or explicit devices. Paste the same validated YAML profile used by `configure.py upgrade --profile`; specify the scheduled start and **start before**, including a UTC offset. Preview shows the matching devices and pollers. Scheduling captures those devices, management addresses, poller assignments, and a separate copy of the profile. Later inventory changes cannot add devices to a batch.
+Open **Device Operations → Software → Job Profiles** to save named upgrade or remediation
+profiles. Upgrade profiles contain the validated YAML used by
+`configure.py upgrade --profile`. Remediation profiles contain checked features
+and an add/replace mode; their configuration values come from versioned YAML
+standards in **Config Compliance -> Standards**.
+
+Upgrade profiles have a **Skip running-config matching** checkbox, off by
+default. The API/YAML equivalent is `skip_running_config_check: true`. This
+skips only the before/after running-config equality check when an upgrade is
+expected to rewrite configuration syntax. Both configurations and their diff
+remain in the report, and the skipped check produces a warning. Startup-config
+matching, configuration reads/saves, running/startup consistency, boot settings,
+image checksums and all operational checks remain enabled. The option is frozen
+with the queued job; changing a profile does not change already scheduled jobs.
+Deploy the matching worker update before scheduling profiles with this field.
+
+Select existing NetBox device types in **Assigned models** on a job profile.
+This edits the same defaults shown in **Model Profiles**: each model has one
+upgrade default and one remediation default, and a profile can serve multiple
+models. Changes from either screen appear in the other. The device type detail
+page also links to its assignment.
+
+Saved upgrade profiles generate their `models` list from these assignments;
+there is no model list to maintain in the settings YAML. Existing assignments
+are preserved, and legacy `plan.models` values are ignored. An unassigned profile
+can be saved as a draft, but cannot schedule a saved-profile upgrade. Custom
+one-off plans and standalone worker YAML still specify their own `models` list.
+Removing a model clears only this profile's default, preserving the other kind.
+Replacing another profile's default requires explicit confirmation. The profile
+form identifies the affected defaults and asks for **Replace existing assignments**
+before saving again. Assigned profiles cannot be deleted until their assignments
+are removed, and their type cannot change while assigned.
+
+Open **Device Operations → Software → Upgrade Jobs → Add** on the list page (the sidebar
+**+** also works). Choose a site, role, platform, model or explicit devices, and
+the scheduled start and **start before**, including a UTC offset. **Device model
+defaults** resolves the appropriate profile for each selected device: upgrade
+profiles for audits, staging and upgrades, remediation profiles for remediation.
+Mixed-model batches can therefore use different plans. Alternatively choose a
+**Saved profile** for the selection, or **Custom settings** for a one-off plan.
+Remediation checkboxes appear for custom remediation settings.
+
+Choose **Audit configuration standards (read-only)** to check the same saved
+remediation profiles or custom feature selection without changing devices.
+This is separate from **Pre-upgrade audit**, which checks software upgrade
+readiness. Standards audits pin the applicable YAML revisions and write their
+verdicts into Config Compliance. They do not require apply permission or
+auto-remediation/enforcement permission on the standards; even replace mode
+only compares configuration. A read-only worker can claim these jobs, and the
+server rejects any attempt to authorize changes. Noncompliance finishes with
+warnings; connection or parsing failures are errors, never passes.
+
+These are configuration verdicts. The separate `configure.py check-ntp` command
+checks synchronization, reachability and offset; it uses each device's regional
+servers, with global servers as the fallback. Neither operation proves the
+other: correct configuration can still have unreachable NTP peers.
+The schedule form creates one-time jobs; recurring daily scheduling is not
+automatically enabled by choosing an audit operation.
+
+Preview shows matching devices, models, resolved profiles and pollers. A missing,
+inaccessible or incompatible default rejects the entire selection. Scheduling
+captures the devices, management addresses, poller assignments and a separate
+copy of each plan. Editing a saved profile or model assignment affects future
+schedules only; existing jobs retain their snapshots. Later inventory changes
+cannot add devices to a batch. Users resolving model defaults need view access
+to both the assignments (`devicetypeprofile`) and saved profiles (`jobprofile`),
+in addition to existing device and scheduling permissions.
 
 Open a pending job and click **Edit** to change its operation, profile, scheduled window or description. This updates only that device's job; its device and poller stay fixed, and other jobs in the batch are unchanged. Editing requires `change` permission, plus `apply` permission when the existing or new operation stages an image or installs an upgrade. The worker receives the updated profile when it claims the job. Claimed, running and closed jobs cannot be edited. A stale browser form is rejected if another edit or worker claim happened in the meantime.
 
@@ -14,12 +80,19 @@ A closed job (completed, failed, start window missed or cancelled) offers **Re-q
 
 Operations:
 
+WS-C3650 devices use the same audit, staging and upgrade operations with their
+own assigned upgrade profile and `cat3k_caa` image. Deploy a worker with C3650
+support before scheduling these jobs; no new profile fields or database
+migrations are required. Exact licensed model assignments are checked against
+each stack member's inventory PID. See [C3650 support and release gates](UPGRADES.md)
+before choosing the starting/target releases.
+
 | Operation | What the remote does | Worker needs `--apply` |
 | --- | --- | --- |
 | Pre-upgrade audit | Full baseline, version/mode/path checks and image readiness; no device writes | No |
 | Stage image only | Check flash; download a missing image and verify its checksum; no install/reload | Yes |
 | Install upgrade | Saves the running configuration, full prechecks, image staging if needed, install-mode upgrade, reload, postchecks | Yes |
-| Remediate configuration | Runs the chosen `configure.py` features (NTP, syslog, banner, ACLs, local users, SNMP, SNMP packet size) against this poller's `standards.yaml`: a dry run, then the change once NetBox authorizes the start | Yes |
+| Remediate configuration | Runs the chosen `configure.py` features against pinned NetBox standards: a dry run, then the change once NetBox authorizes the start, then verification | Yes |
 
 A profile whose `image` is a BIG-IP `.iso` schedules BIG-IP units the same way, and one whose `image` is an `EOS-<release>.swi` schedules Arista EOS switches; see [BIG-IP upgrades](UPGRADES.md#big-ip-upgrades) and [Arista EOS upgrades](UPGRADES.md#arista-eos-upgrades). The YAML must represent a path you have validated. The remote runs the full model/version/image validator again; neither an API payload nor an inventory platform bypasses it. See [UPGRADES.md](UPGRADES.md) for supported hardware, checks, and bundle conversion behavior. Do not use the example checksum as a real checksum.
 
@@ -29,9 +102,9 @@ Select only the virtual chassis **master** for a stack. Device `poller-*` tags t
 
 ## Prestage images by model
 
-A **prestage policy** keeps the software standard's preferred image on flash
+An **image staging policy** keeps the software standard's preferred image on flash
 ahead of the upgrade window, so the upgrade itself does not wait for a copy.
-Open **Discovery → Software → Prestage Policies → Add**, choose a **Model**
+Open **Device Operations → Software → Automatic Image Staging → Add**, choose a **Model**
 (device type) and save. That is all the configuration a model needs: the
 image, its MD5 checksum and its download link come from the Lifecycle
 plugin's software standard, and change when the standard does.
@@ -91,11 +164,73 @@ features, and choose a mode:
 - **Replace** also removes entries the standard does not list, such as an old
   NTP server (`--replace`). Dry-run it by hand on one device first.
 
-No profile is needed. NetBox sends only the feature names and the mode; what
-to apply comes from each poller's own `standards.yaml`, the same file its
-hand-run `configure.py` uses. To start from the fleet view, tick devices on
+Use a saved/model profile or custom feature selection. NetBox pins the applicable
+standard revisions and their settings when the job is scheduled. To start from the fleet view, tick devices on
 **Config Compliance → Device Compliance** and click **Remediate selected
 devices**, which opens this form with those devices chosen.
+
+For ClearPass NTP, tag the global cluster's devices `clearpass-publisher` (exactly
+one) and `clearpass-subscriber` (all other members). Enable **Allow ClearPass
+cluster-wide changes** on the remediation profile or custom job, then target only
+the publisher. API plans use `"allow_clearpass_cluster_changes": true` alongside
+`features` and `mode`; omission defaults to false. The scheduler pins all tagged
+members, not just selected devices, and requires view/change permission on the
+whole cluster. Tag, role or management-address changes invalidate the approval
+until the job is edited or rescheduled. Audits can target all nodes without this
+checkbox. See [ClearPass configuration and safeguards](README.md#aruba-clearpass).
+
+For Aruba WLC NTP, tag the single global Conductor device `mobility-conductor`
+and target the managed WLCs (platform `arubaos`) in the job. Each WLC retains its
+own audit/compliance result; workers discover its device configuration path from
+Conductor. No per-WLC Conductor or path custom fields are needed. Jobs pin the
+Conductor's NetBox ID and management IPv4 and block remediation if that assignment
+changes. Both the scheduling user and worker must be able to view the Conductor,
+even when it is outside the selected site or tenant. Existing exclusive-window,
+node-identity and inherited-configuration safeguards still apply. See
+[Mobility Conductor setup](README.md#aruba-mobility-conductor).
+
+### Versioned standards
+
+Create a standard with type **Feature settings (YAML)**. Keep one top-level
+section per standard, using the existing YAML structure:
+
+```yaml
+ntp:
+  servers:
+    - 192.0.2.10
+    - 192.0.2.11
+```
+
+Supported sections are `ntp`, `syslog`, `snmp`, `banner`, `acls`, and
+`local_accounts`. Scope them by platform, role, site, or device tag. Two active
+definitions of the same section for one device are rejected, not merged by
+implicit precedence. Dotted references such as `snmp.allow` retain their
+referenced standard in the snapshot. Device credentials and runtime secrets
+remain on the poller; do not put them in NetBox. Platform templates still live
+with the worker, so a revision identifies the settings, not the worker software.
+
+Each saved definition or scope change retains a numbered revision, timestamp,
+author (when saved through the UI/API), and a viewable diff. Revisions are
+read-only and protect the standard from deletion; retire a standard using its
+end date. Form/API saves include their scope changes in the same revision.
+Existing standards receive a baseline revision during migration. Old results
+are not assigned a guessed revision: they show **Revision not checked** until
+the updated checker reports a revision. The IOS checker now includes it too.
+
+Deploy both plugin migrations and the updated worker together. Old queued
+remediation jobs without snapshots must be re-created. The worker will not
+fall back to local YAML, and NetBox refuses the start if a pinned standard
+changed or left scope after scheduling. Workers must acknowledge the pinned
+revision list at the start gate, so older workers cannot silently use their
+local configuration. Local hand-run CLI commands continue
+to use their file or explicit arguments.
+
+Feature dry-run and post-change verification results update Config Compliance
+with the exact checked revision and job ID. A newer standard invalidates the
+current compliance claim without rewriting its stored result. Overdue checks
+are separate from passes. This does not yet add recurring configuration-audit
+schedules or verify external change approvals; no ServiceNow connection is
+required or assumed.
 
 For each device, the poller runs every chosen feature as
 
@@ -127,7 +262,7 @@ active with a primary IP in NetBox.
 
 Two switches in an HSRP pair, the A and B closets on one floor, or the F5
 units behind one load balancer must not be upgraded at the same time, and a
-core should not go until the closets it serves are done. **Discovery →
+core should not go until the closets it serves are done. **Device Operations →
 Software → Redundancy Groups** and **Upgrade Dependencies** hold that
 knowledge, and the queue enforces it:
 
@@ -178,7 +313,7 @@ queue for anything that needs ordering.
 Start from what discovery already found, then add what it cannot see.
 
 1. **Let discovery make the first pass.** Run an `snmp-inventory` sweep, or
-   open **Discovery → Software → Redundancy Groups** and click **Refresh
+   open **Device Operations → Software → Redundancy Groups** and click **Refresh
    discovered groups**. Every HSRP or VRRP group with two or more devices
    appears as a group with a limit of 1 and the source *FHRP group*; every
    cable between two tiers appears under **Upgrade Dependencies** with the
@@ -402,7 +537,7 @@ If progress remains undeliverable, the poller reports an error and claims no add
 
 All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the normal NetBox API token. The optional UI webhook has its own bearer token and URL; it is not used for queue authentication.
 
-- `POST schedule/`: `{filters, profile, operation, scheduled_at, start_before, poller?, description?, preview?}`. For `"operation": "remediate"`, `profile` is `{"features": ["ntp", "syslog"], "mode": "add"}`; features are `ntp`, `syslog`, `banner`, `acl`, `users`, `snmp` and `snmp_packetsize`, and mode is `add` or `replace`. `filters` accepts the same fields as `/api/dcim/devices/`, such as `{"site": ["atl"], "role": ["access"]}`. `profile` is the YAML profile represented as a JSON object. `preview: true` returns targets without creating jobs. Default operation is `audit`. Successful creation returns `batch_id` and `jobs`. Do not blindly retry schedule creation after a lost response; check the queue first.
+- `POST schedule/`: `{filters, operation, scheduled_at, start_before, profile_source?, saved_profile?, profile?, poller?, description?, preview?}`. `profile_source: "model"` resolves device-type defaults; `"saved"` requires a `saved_profile` ID; `"custom"` requires a `profile` JSON object. Omitting the source preserves older callers: a supplied `profile` means custom, otherwise model defaults. Do not send an inline profile with model/saved sources. For `"operation": "remediate"`, a custom `profile` is `{"features": ["ntp", "syslog"], "mode": "add"}`; features are `ntp`, `syslog`, `banner`, `acl`, `users`, `snmp` and `snmp_packetsize`, and mode is `add` or `replace`. `filters` accepts the same fields as `/api/dcim/devices/`, such as `{"site": ["atl"], "role": ["access"]}`. `preview: true` returns targets and resolved plans without creating jobs. Default operation is `audit`. Successful creation returns `batch_id` and `jobs`. Do not blindly retry schedule creation after a lost response; check the queue first.
 - `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true}`. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
 - `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state.
 - `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
@@ -432,4 +567,33 @@ curl -sS -X POST "$NETBOX_URL/api/plugins/discovery/upgrade-dependencies/" \
   -d '{"upstream": 731, "downstream": 655}'
 ```
 
-Deployment requires plugin migrations through `0013_prestagepolicy` and the matching remote worker release. Lab validation of the exact switch/profile path is still required before scheduling production upgrades. Unit and isolated NetBox tests exercise coordination and failure handling; they do not substitute for a physical C9350 upgrade test.
+Saved profiles and model assignments have REST endpoints at
+`/api/plugins/discovery/job-profiles/` and `/api/plugins/discovery/model-profiles/`.
+Profile fields are `name`, `kind` (`upgrade` or `remediate`) and `plan` (JSON).
+Optional `device_types` is a list of NetBox device-type IDs and replaces this
+profile's entire model selection. Omit it to preserve assignments; send `[]` to
+clear them. The returned upgrade `plan.models` is generated from assignments;
+supplied `plan.models` is ignored. Replacing existing defaults returns a 400
+response naming conflicts and an `assignment_confirmation` error list. Resubmit
+its first string as `assignment_confirmation` with `replace_existing: true`.
+Confirmation expires after 15 minutes and is invalidated if the conflicting
+defaults change. Assignment changes require the corresponding model-assignment
+permissions in addition to profile permissions.
+Assignments have `device_type`, `upgrade_profile` and `remediation_profile` IDs.
+Updating an existing assignment to another nonempty default requires
+`replace_existing: true`. Both endpoints update the same relationships; queued
+jobs keep their frozen plans, including model names.
+
+The schedule API accepts `operation: "audit_config"` with the same `features`
+and `mode` profile as remediation. `apply: false` workers can claim both
+`audit` and `audit_config`; neither operation can pass the `ready` change gate.
+Configuration audit support requires plugin migration `0017_configuration_audit`
+and the matching worker release. Do not schedule it to older workers.
+
+Deployment requires Discovery migrations through `0017_configuration_audit`,
+Config Compliance migration `0002_configstandard_definition_yaml_and_more`, and
+the matching worker release. Workers receive frozen plans, standard revisions
+and any pinned management endpoint or cluster membership. Lab validation of the
+exact switch/profile path is still required before scheduling production upgrades.
+Unit and isolated NetBox tests exercise coordination and failure handling; they
+do not substitute for a physical device test.

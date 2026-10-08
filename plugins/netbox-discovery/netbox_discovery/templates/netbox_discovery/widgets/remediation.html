@@ -1,0 +1,8 @@
+<div id="{{ widget.attrs.id }}" class="d-flex flex-column gap-2">
+  {% for group, options, index in widget.optgroups %}{% for option in options %}
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" name="{{ option.name }}" value="{{ option.value }}" id="{{ option.attrs.id }}"{% if option.selected %} checked{% endif %}{% if widget.attrs.disabled %} disabled{% endif %}>
+    <label class="form-check-label" for="{{ option.attrs.id }}">{{ option.label }}</label>
+  </div>
+  {% endfor %}{% endfor %}
+</div>

@@ -166,7 +166,7 @@ def main(argv=None) -> int:
             try:
                 with _write_lock:
                     syncer.sync(result, target.site_id, scanned_address=target.address,
-                                vrf_id=target.vrf_id)
+                                vrf_id=target.vrf_id, device_id=target.device_id)
             except NetBoxError as exc:
                 log.error("%s: writing to NetBox failed: %s", target.address, exc)
                 failed += 1

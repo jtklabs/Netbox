@@ -111,6 +111,8 @@ def run_check(task: Task, check, expected, options) -> Result:
     """Read operational state and judge it. Changes nothing, ever."""
     platform = canonical_platform(task.host.platform)
     support = check.support_for(platform)  # raises UnsupportedPlatform
+    if check.per_device_expected:
+        expected = check.per_device_expected(expected, options, task.host)
 
     output = []
     for command in support.commands:
@@ -368,7 +370,7 @@ def _configure_feature(
                 # For a feature whose desired set is worked out from the device --
                 # every access port, say -- "is anything still outstanding?" is the
                 # only question worth asking, and its own planner is what answers it.
-                verification_context = {**context, "advisories": [], "notes": []}
+                verification_context = {**context, "advisories": [], "notes": [], "verification": True}
                 again, remaining = feature.plan(after, desired, mode, verification_context)
                 if "audit" in verification_context:
                     payload["audit_after"] = verification_context["audit"]

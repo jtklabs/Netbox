@@ -63,5 +63,10 @@ class ComplianceConfig(PluginConfig):
         'compliance_card_position': 'right_page',
     }
 
+    def ready(self):
+        super().ready()
+        from .revisions import register_signals
+        register_signals()
+
 
 config = ComplianceConfig

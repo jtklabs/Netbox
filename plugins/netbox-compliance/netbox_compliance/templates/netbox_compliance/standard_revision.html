@@ -1,0 +1,15 @@
+{% extends 'base/layout.html' %}
+{% block title %}{{ standard.name }}: revision {{ revision.number }}{% endblock %}
+{% block content %}
+<h1>{{ standard.name }} <span class="text-muted">v{{ revision.number }}</span></h1>
+<p><a href="{{ standard.get_absolute_url }}"><i class="mdi mdi-arrow-left"></i> {{ standard.name }}</a></p>
+<dl class="row">
+  <dt class="col-sm-2">Revision</dt><dd class="col-sm-10">{{ revision.number }}</dd>
+  <dt class="col-sm-2">Changed</dt><dd class="col-sm-10">{{ revision.created }}</dd>
+  <dt class="col-sm-2">Changed by</dt><dd class="col-sm-10">{{ revision.author|default:'System / migration' }}</dd>
+</dl>
+<h3>Definition</h3>
+<pre class="border p-3" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ definition }}</pre>
+<h3>Changes From Previous Revision</h3>
+<pre class="border p-3" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ diff }}</pre>
+{% endblock %}

@@ -1,7 +1,7 @@
 """Queued configuration remediation: configure.py features, run for one NetBox device.
 
 A remediation job names features (ntp, syslog, ...) and a mode; the desired
-state is this poller's own standards.yaml, never anything sent by NetBox.
+state is a pinned snapshot of versioned NetBox standards.
 Each feature runs as the ordinary command line would run it against NetBox
 inventory filtered to the job's device, so source-interface tags, syslog
 policy writeback, the rollback journal and the run archive all behave exactly
@@ -16,12 +16,19 @@ own process: the command line keeps process-wide state (loaded environment,
 secret redaction, the active archive) that concurrent jobs must not share.
 """
 
+import copy
+import json
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 
 FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize')
 MODES = ('add', 'replace')
+CONFIG_OPERATIONS = ('remediate', 'audit_config')
+READ_ONLY_OPERATIONS = ('audit', 'audit_config')
 TIMEOUT = 1800
 
 # configure.py exit codes.
@@ -30,14 +37,19 @@ EXIT_OK, EXIT_FAILED, EXIT_DIFF = 0, 1, 2
 
 def validate(profile):
     """The features and mode a remediation job asks for; nothing else is accepted."""
-    if not isinstance(profile, dict) or set(profile) != {'features', 'mode'}:
-        raise ValueError('Remediation job must name only features and mode')
+    if (not isinstance(profile, dict) or not {'features', 'mode'}.issubset(profile) or
+            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes'}):
+        raise ValueError('Remediation job must name features, mode and optional ClearPass cluster-change approval')
+    if type(profile.get('allow_clearpass_cluster_changes', False)) is not bool:
+        raise ValueError('ClearPass cluster-change approval must be true or false')
     features, mode = profile['features'], profile['mode']
     if (not isinstance(features, list) or not features or len(set(features)) != len(features)
             or any(feature not in FEATURES for feature in features)):
         raise ValueError(f'Remediation features must be a nonempty list from: {", ".join(FEATURES)}')
     if mode not in MODES:
         raise ValueError('Remediation mode must be add or replace')
+    if profile.get('allow_clearpass_cluster_changes') and 'ntp' not in features:
+        raise ValueError('ClearPass cluster-change approval requires NTP')
     return features, mode
 
 
@@ -46,6 +58,13 @@ def command(feature, device_id, mode, apply, args):
             '--netbox', '--netbox-filter', f'id={int(device_id)}', '--no-netbox-autofilter', f'--{mode}']
     # The dry run exits 2 when changes are pending, so "compliant" and "would change" differ.
     argv += ['--apply', '--yes'] if apply else ['--fail-on-diff']
+    if feature == 'ntp':
+        if getattr(args, 'mobility_conductor_snapshot', None):
+            argv += ['--mobility-conductor-snapshot', str(args.mobility_conductor_snapshot)]
+        if getattr(args, 'clearpass_cluster_snapshot', None):
+            argv += ['--clearpass-cluster-snapshot', str(args.clearpass_cluster_snapshot)]
+        if apply and getattr(args, 'allow_clearpass_cluster_changes', False):
+            argv += ['--allow-clearpass-cluster-changes']
     if getattr(args, 'env_file', None):
         argv += ['--env-file', args.env_file]
     if getattr(args, 'standards', None) is not None and getattr(args.standards, 'path', None):
@@ -81,28 +100,87 @@ def last_line(output, pattern=r'.'):
 
 
 def run_job(task, job, args, emit):
+    snapshot = job.get('standards_snapshot')
+    if not isinstance(snapshot, dict) or not snapshot.get('document') or not snapshot.get('revisions'):
+        raise ValueError('Job has no versioned NetBox standards; re-create it before execution')
+    options = copy.copy(args) if args is not None else SimpleNamespace()
+    # Both the dry run and apply read the same private snapshot, never a local fallback.
+    with tempfile.TemporaryDirectory(prefix='netops-standards-') as directory:
+        path = Path(directory) / 'standards.json'
+        path.write_text(json.dumps(snapshot['document']), encoding='utf-8')
+        options.standards = SimpleNamespace(path=path)
+        options.allow_clearpass_cluster_changes = (job.get('operation') == 'remediate' and
+                                                    job['profile'].get('allow_clearpass_cluster_changes') is True)
+        options.clearpass_cluster_snapshot = None
+        cluster = snapshot.get('clearpass_cluster')
+        options.allow_clearpass_cluster_changes = options.allow_clearpass_cluster_changes and cluster is not None
+        if cluster is not None:
+            from ..clearpass_cluster import validate as validate_cluster
+            cluster = validate_cluster(cluster)
+            cluster_path = Path(directory) / 'clearpass-cluster.json'
+            cluster_path.write_text(json.dumps(cluster), encoding='utf-8')
+            options.clearpass_cluster_snapshot = cluster_path
+        revisions = [{'standard_id': item['standard_id'], 'revision': item['revision']}
+                     for item in snapshot['revisions']]
+        conductor = snapshot.get('mobility_conductor')
+        options.mobility_conductor_snapshot = None
+        if conductor is not None:
+            from ..mobility_conductor import validate as validate_conductor
+            conductor = validate_conductor(conductor)
+            conductor_path = Path(directory) / 'mobility-conductor.json'
+            conductor_path.write_text(json.dumps(conductor), encoding='utf-8')
+            options.mobility_conductor_snapshot = conductor_path
+
+        def report(stage, message, payload=None):
+            payload = dict(payload or {})
+            summary = {**payload.get('progress_summary', {}), 'standards_revisions': revisions}
+            if cluster is not None:
+                summary['clearpass_cluster'] = cluster
+            if conductor is not None:
+                summary['mobility_conductor'] = conductor
+            if 'compliance_results' in payload:
+                summary['compliance_results'] = payload['compliance_results']
+            # Reporter sends progress_summary to NetBox and keeps the full
+            # payload in the local archive.
+            return emit(stage, message, {**payload, 'progress_summary': summary,
+                                         'standards_revisions': revisions})
+
+        return _run_job(task, job, options, report)
+
+
+def _run_job(task, job, args, emit):
     """Dry run, gate, apply. Returns (failed, changed, result) for the Nornir Result."""
     features, mode = validate(job['profile'])
+    if job.get('operation') not in CONFIG_OPERATIONS:
+        raise ValueError('Not a configuration audit or remediation job')
     device_id = job['device_id']
-    emit('connecting', f'Checking {", ".join(features)} ({mode}) against this poller\'s standards')
+    emit('connecting', f'Checking {", ".join(features)} ({mode}) against pinned NetBox standards')
 
-    results, pending = {}, []
+    results, pending, verdicts = {}, [], {feature: 'error' for feature in features}
     for feature in features:
         code, output = invoke(feature, device_id, mode, False, args)
         if code in (EXIT_OK, EXIT_DIFF) and not one_device(output):
             emit('failed', f'{feature}: NetBox inventory did not select this device; '
-                           'check it is active with a primary IP')
+                           'check it is active with a primary IP', {'compliance_results': dict(verdicts)})
             return True, False, results
         if code == EXIT_OK:
             results[feature] = 'compliant'
+            verdicts[feature] = 'compliant'
         elif code == EXIT_DIFF:
             results[feature] = 'pending'
             pending.append(feature)
+            verdicts[feature] = 'non-compliant'
         else:
-            emit('failed', f'{feature}: dry run failed: {last_line(output) or f"exit {code}"}')
+            emit('failed', f'{feature}: dry run failed: {last_line(output) or f"exit {code}"}',
+                 {'compliance_results': dict(verdicts)})
             return True, False, results
-    summary = {'progress_summary': {'mode': mode, 'features': dict(results)}}
+    summary = {'progress_summary': {'mode': mode, 'features': dict(results)}, 'compliance_results': dict(verdicts)}
     emit('precheck_complete', ', '.join(f'{f} {s}' for f, s in results.items()), summary)
+    if job['operation'] == 'audit_config':
+        emit('completed_with_warnings' if pending else 'completed',
+             ('Non-compliant: ' + ', '.join(pending) if pending else 'All selected standards compliant')
+             + '; read-only audit, no configuration changed', summary)
+        return False, False, results
     if not pending:
         emit('already_current', f'Already compliant: {", ".join(features)}', summary)
         return False, False, results
@@ -117,14 +195,25 @@ def run_job(task, job, args, emit):
         if journal:
             journals.append(journal.split('rollback recorded in ', 1)[1])
         if code == EXIT_OK:
-            results[feature], changed = 'changed', True
+            changed = True
+            verify_code, verify_output = invoke(feature, device_id, mode, False, args)
+            if verify_code == EXIT_OK and one_device(verify_output):
+                results[feature], verdicts[feature] = 'changed', 'compliant'
+            elif verify_code == EXIT_DIFF and one_device(verify_output):
+                results[feature], verdicts[feature] = 'attention', 'non-compliant'
+            else:
+                results[feature], verdicts[feature] = 'failed', 'error'
+                results[f'{feature}_error'] = 'Post-change verification failed'
         elif code == EXIT_DIFF:
             # Drift the feature declined to fix: out of compliance, not ours to change.
             results[feature] = 'attention'
+            verdicts[feature] = 'non-compliant'
         else:
             results[feature] = 'failed'
+            verdicts[feature] = 'error'
             results[f'{feature}_error'] = last_line(output) or f'exit {code}'
-    summary = {'progress_summary': {'mode': mode, 'features': dict(results), 'rollback': journals}}
+    summary = {'progress_summary': {'mode': mode, 'features': dict(results), 'rollback': journals},
+               'compliance_results': verdicts}
     failed = [f for f in pending if results[f] == 'failed']
     if failed:
         undo = f'; undo with configure.py rollback {journals[-1]}' if journals else ''

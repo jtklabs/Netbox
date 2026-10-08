@@ -1,0 +1,16 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col-lg-7">
+  <h2>{{ object.get_kind_display }} profile</h2>
+  <p>{{ object.description }}</p>
+  <pre class="p-3 bg-body-tertiary border rounded">{{ plan_yaml }}</pre>
+</div><div class="col-lg-5">
+  <h2>Assigned models</h2>
+  <table class="table"><thead><tr><th>Model</th><th>Assignment</th></tr></thead><tbody>
+  {% for assignment in assignments %}<tr><td>{{ assignment.device_type|linkify }}</td><td><a href="{{ assignment.get_absolute_url }}">View</a></td></tr>
+  {% empty %}<tr><td colspan="2">No models assigned.</td></tr>{% endfor %}
+  </tbody></table>
+  {% if perms.netbox_discovery.add_devicetypeprofile %}<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:devicetypeprofile_add' %}?{% if object.kind == 'remediate' %}remediation_profile{% else %}upgrade_profile{% endif %}={{ object.pk }}"><i class="mdi mdi-plus"></i> Assign to model</a>{% endif %}
+</div></div>
+{% endblock %}

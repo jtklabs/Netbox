@@ -21,6 +21,9 @@
 
   Blank lines are dropped by the renderer, so lay this out for readability.
 -#}
+{% for entry in remove if entry.data.get('before_add') %}
+no {{ entry.line }}
+{% endfor %}
 {% for key in add %}
 {% set item = entries[key] %}
 {% if item.kind == 'key' %}
@@ -30,11 +33,10 @@ ntp trusted-key {{ item.id }}
 {% elif item.kind == 'authenticate' %}
 ntp authenticate
 {% else %}
-ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if source %} source {{ source }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}
+ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if source %} source {{ source }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
 {% endif %}
 {% endfor %}
-{#- Negate the device's own line so options we do not model (key, version,
-    source, a vrf) are removed with it instead of being left behind. -#}
-{% for entry in remove %}
+{#- Remove obsolete endpoints after adding their replacements. -#}
+{% for entry in remove if not entry.data.get('before_add') %}
 no {{ entry.line }}
 {% endfor %}

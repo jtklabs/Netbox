@@ -447,7 +447,7 @@ def _build_stack_devices(facts: DeviceFacts, members: list[_Member], base_name: 
         name = base_name if member.is_master else f"{base_name}-{member.position}"
         devices.append(DeviceRecord(
             name=name,
-            serial=_serial_for(facts, member.entity) if member.entity else "",
+            serial=(vendors.clean_serial(member.entity.serial) if member.entity else ""),
             model=_model_for(facts, member.entity),
             # The vendor scalar describes the box that answered — the master.
             part_number=facts.vendor_part_number.strip() if member.is_master else "",

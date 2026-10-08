@@ -18,9 +18,10 @@ from utilities.forms.rendering import FieldSet
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
 from utilities.views import register_model_view
 
-from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
+from .models import JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
+from .profile_views import RemediationWidget
 from . import upgrade_groups, upgrade_prestage
-from .upgrade_choices import (REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
+from .upgrade_choices import (CONFIG_OPERATIONS, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
                               UpgradeStatusChoices)
 from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
                                  UpgradeJobFilterSet)
@@ -31,20 +32,31 @@ class UpgradePlanForm(forms.Form):
     operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
     scheduled_at = forms.DateTimeField(help_text='Include a UTC offset, for example 2026-09-20T22:00:00-04:00.')
     start_before = forms.DateTimeField(help_text='Latest start for device changes. Running jobs continue past this time.')
+    profile_source = forms.ChoiceField(
+        choices=(('model', 'Device model defaults'), ('saved', 'Saved profile'), ('custom', 'Custom settings')),
+        initial='model', required=False)
+    saved_profile = DynamicModelChoiceField(queryset=JobProfile.objects.all(), required=False,
+                                            help_text='Must match the selected operation.')
     profile = forms.CharField(widget=forms.Textarea(attrs={'rows': 15}), required=False,
                               help_text='Audit, staging and upgrades: paste the validated upgrade profile YAML. '
                                         'A copy is saved with every selected device.')
     features = forms.MultipleChoiceField(
-        choices=REMEDIATION_FEATURES, required=False, widget=forms.CheckboxSelectMultiple,
-        label='Remediate', help_text="Remediation only. Each poller applies its own standards.yaml for these.")
+        choices=REMEDIATION_FEATURES, required=False, widget=RemediationWidget,
+        label='Standards', help_text='Uses the applicable versioned YAML standards stored in NetBox.')
     remediation_mode = forms.ChoiceField(
-        choices=REMEDIATION_MODES, initial='add', required=False, label='Remediation mode',
-        help_text='Replace removes entries the standard does not list, such as an old NTP server.')
+        choices=REMEDIATION_MODES, initial='add', required=False, label='Comparison mode',
+        help_text='Replace also checks for extra entries. Only remediation jobs apply changes.')
     description = forms.CharField(max_length=200, required=False)
+    allow_clearpass_cluster_changes = forms.BooleanField(
+        label='Allow ClearPass cluster-wide changes', required=False)
+
+    def clean_profile_source(self):
+        # Older callers post the inline plan without a source selector.
+        return self.cleaned_data.get('profile_source') or 'custom'
 
     def clean_profile(self):
         import yaml
-        if self.cleaned_data.get('operation') == 'remediate':
+        if self.cleaned_data.get('profile_source') != 'custom' or self.cleaned_data.get('operation') in CONFIG_OPERATIONS:
             return None
         try:
             data = yaml.safe_load(self.cleaned_data['profile'])
@@ -55,10 +67,17 @@ class UpgradePlanForm(forms.Form):
 
     def clean(self):
         data = super().clean()
-        if data.get('operation') == 'remediate':
+        if data.get('profile_source') == 'saved':
+            profile = data.get('saved_profile')
+            kind = 'remediate' if data.get('operation') in CONFIG_OPERATIONS else 'upgrade'
+            if not profile or profile.kind != kind:
+                self.add_error('saved_profile', 'Select a saved profile matching this operation.')
+        if data.get('profile_source') == 'custom' and data.get('operation') in CONFIG_OPERATIONS:
             # Keep the checkbox order, so the same choice always makes the same job.
             chosen = [value for value, _ in REMEDIATION_FEATURES if value in (data.get('features') or [])]
             data['profile'] = {'features': chosen, 'mode': data.get('remediation_mode') or 'add'}
+            if data.get('operation') == 'remediate' and data.get('allow_clearpass_cluster_changes'):
+                data['profile']['allow_clearpass_cluster_changes'] = True
             try:
                 queue.validate_profile(data['profile'], 'remediate')
             except queue.QueueError as exc:
@@ -69,25 +88,29 @@ class UpgradePlanForm(forms.Form):
 def plan_initial(job):
     """A job's plan as form fields: YAML for an upgrade profile, checkboxes for a remediation."""
     import yaml
-    if job.operation == 'remediate':
-        return {'features': job.profile.get('features', []), 'remediation_mode': job.profile.get('mode', 'add')}
-    return {'profile': yaml.safe_dump(job.profile, sort_keys=False)}
+    if job.operation in CONFIG_OPERATIONS:
+        return {'profile_source': 'custom', 'features': job.profile.get('features', []),
+                'remediation_mode': job.profile.get('mode', 'add'),
+                'allow_clearpass_cluster_changes': job.profile.get('allow_clearpass_cluster_changes', False)}
+    return {'profile_source': 'custom', 'profile': yaml.safe_dump(job.profile, sort_keys=False)}
 
 
 class ScheduleForm(UpgradePlanForm):
     site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False)
     role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
     platform = DynamicModelChoiceField(queryset=Platform.objects.all(), required=False)
+    device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), required=False, label='Model')
     devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False,
                                               help_text='Optional explicit devices; combined with the filters above.')
     poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
                                     help_text='Normally automatic; choose one when devices have multiple poller tags.')
-    field_order = ('site', 'role', 'platform', 'devices', 'poller', 'operation',
-                   'scheduled_at', 'start_before', 'profile', 'features', 'remediation_mode', 'description')
+    field_order = ('site', 'role', 'platform', 'device_type', 'devices', 'poller', 'operation',
+                   'scheduled_at', 'start_before', 'profile_source', 'saved_profile', 'profile',
+                   'features', 'remediation_mode', 'allow_clearpass_cluster_changes', 'description')
 
     def schedule_data(self):
         data = dict(self.cleaned_data)
-        data['filters'] = {key + '_id': [data[key].pk] for key in ('site', 'role', 'platform') if data[key]}
+        data['filters'] = {key + '_id': [data[key].pk] for key in ('site', 'role', 'platform', 'device_type') if data[key]}
         if data['devices']:
             data['filters']['id'] = [obj.pk for obj in data['devices']]
         data['poller'] = data['poller'].name if data['poller'] else ''
@@ -146,6 +169,9 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
         if job is None:
             # Opened with a device selection, e.g. from the Device Compliance grid.
             initial = {}
+            model = request.GET.get('device_type', '')
+            if model.isdigit():
+                initial['device_type'] = int(model)
             devices = [int(pk) for pk in request.GET.getlist('devices') if pk.isdigit()]
             if devices:
                 initial['devices'] = devices
@@ -154,6 +180,7 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
             features = [value for value, _ in REMEDIATION_FEATURES if value in request.GET.getlist('features')]
             if features:
                 initial['features'] = features
+                initial['profile_source'] = 'custom'
             return initial
         scheduled_at, start_before = queue.requeue_window(job, timezone.now())
         return {'devices': [job.device_id], 'poller': job.poller_id, 'operation': job.operation,
@@ -417,7 +444,7 @@ class PrestagePolicyForm(NetBoxModelForm):
     device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), label='Model',
                                           help_text='Every active device of this model, one job per stack master')
     fieldsets = (FieldSet('device_type', 'enabled', 'interval_hours', 'window_hours', 'minimum_free_bytes', 'description',
-                          name='Prestage policy'),
+                          name='Image staging policy'),
                  FieldSet('tags', name='Tags'))
 
     class Meta:
@@ -444,7 +471,7 @@ class ApplyRequiredMixin:
 
     def dispatch(self, request, *args, **kwargs):
         if request.user.is_authenticated and not request.user.has_perm('netbox_discovery.apply_upgradejob'):
-            raise PermissionDenied('Prestage policies schedule image staging and need apply permission on upgrade jobs.')
+            raise PermissionDenied('Image staging policies need apply permission on upgrade jobs.')
         return super().dispatch(request, *args, **kwargs)
 
 

@@ -4,18 +4,18 @@
 {% block content %}
 <div class="row"><div class="col-lg-8">
   <h1>Schedule device work</h1>
-  <p>Choose a site and role, or explicit devices. Devices and the plan are captured when you schedule. Select only the master device for each switch stack. Audits, staging and upgrades take an upgrade profile; <strong>Remediate configuration</strong> takes the features to fix instead, and each poller applies its own <code>standards.yaml</code>.</p>
-  <form method="post" class="card card-body">{% csrf_token %}
-    {% render_form form %}
+  <form method="post">{% csrf_token %}
+    {% include 'netbox_discovery/inc/plan_fields.html' %}
     <div><button class="btn btn-secondary" type="submit">Preview devices</button>
     <button class="btn btn-primary" type="submit" name="schedule" value="yes">Schedule selected operation</button></div>
   </form>
 </div></div>
 {% if preview %}
 <h2 class="mt-4">{{ preview|length }} device(s) currently match</h2>
-<p class="text-muted">Waves show the order the queue will enforce: members of a redundancy group go one at a time, and a device waits for the downstream devices it depends on. Jobs in the same wave may run together.</p>
-<table class="table"><thead><tr><th>Wave</th><th>Device</th><th>Address</th><th>Poller</th><th>Redundancy groups</th></tr></thead><tbody>
-{% for row in preview %}<tr><td>{{ row.wave }}</td><td><a href="{{ row.device.get_absolute_url }}">{{ row.device }}</a></td><td>{{ row.address }}</td><td>{{ row.poller_name }}</td><td>{{ row.groups|join:", " }}</td></tr>{% endfor %}
+<div class="table-responsive">
+<table class="table"><thead><tr><th>Wave</th><th>Device</th><th>Model</th><th>Profile</th><th>Plan</th><th>Address</th><th>Poller</th><th>Redundancy groups</th></tr></thead><tbody>
+{% for row in preview %}<tr><td>{{ row.wave }}</td><td><a href="{{ row.device.get_absolute_url }}">{{ row.device }}</a></td><td>{{ row.device.device_type }}</td><td>{{ row.profile_name|default:'Custom settings' }}</td><td>{% if row.profile.target_version %}{{ row.profile.target_version }}{% else %}{{ row.profile.features|join:', ' }} ({{ row.profile.mode }}){% endif %}</td><td>{{ row.address }}</td><td>{{ row.poller_name }}</td><td>{{ row.groups|join:", " }}</td></tr>{% endfor %}
 </tbody></table>
+</div>
 {% endif %}
 {% endblock %}

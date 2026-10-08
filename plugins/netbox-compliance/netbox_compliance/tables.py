@@ -50,13 +50,13 @@ class ConfigStandardTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = ConfigStandard
         fields = (
-            'pk', 'id', 'name', 'check_type', 'remediation', 'match_pattern',
+            'pk', 'id', 'name', 'revision', 'check_type', 'remediation', 'match_pattern',
             'scope_summary', 'auto_remediable', 'allow_enforce',
             'valid_from', 'valid_to', 'is_active', 'result_count',
             'description', 'created', 'last_updated',
         )
         default_columns = (
-            'name', 'check_type', 'remediation', 'scope_summary',
+            'name', 'revision', 'check_type', 'remediation', 'scope_summary',
             'valid_from', 'is_active', 'result_count',
         )
 
@@ -78,17 +78,18 @@ class ConfigComplianceTable(NetBoxTable):
     finding_count = tables.Column(orderable=False, verbose_name='Findings')
     needs_manual_fix = columns.BooleanColumn(orderable=False, verbose_name='Manual fix')
     site = tables.Column(accessor='device__site', linkify=True)
+    checked_revision = tables.Column(orderable=False, verbose_name='Checked revision')
 
     class Meta(NetBoxTable.Meta):
         model = ConfigCompliance
         fields = (
-            'pk', 'id', 'device', 'site', 'standard', 'status', 'result',
+            'pk', 'id', 'device', 'site', 'standard', 'status', 'result', 'checked_revision',
             'finding_count', 'needs_manual_fix', 'source', 'last_checked',
             'last_remediated', 'exempt', 'exempt_review_by', 'error_message',
             'description', 'created', 'last_updated',
         )
         default_columns = (
-            'device', 'site', 'standard', 'status', 'finding_count',
+            'device', 'site', 'standard', 'status', 'checked_revision', 'finding_count',
             'source', 'last_checked',
         )
 
@@ -116,6 +117,8 @@ class ComplianceReportTable(tables.Table):
         orderable=False,
     )
     findings = tables.Column(verbose_name='Findings')
+    checked_revision = tables.Column(verbose_name='Checked revision')
+    current_revision = tables.Column(verbose_name='Current revision')
     needs_manual_fix = columns.BooleanColumn(verbose_name='Manual fix')
     last_checked = columns.DateTimeColumn(verbose_name='Last checked')
 
@@ -145,6 +148,8 @@ class StandardRollupTable(tables.Table):
     non_compliant = tables.Column(verbose_name='Non-compliant')
     unknown = tables.Column(verbose_name='Not checked')
     error = tables.Column(verbose_name='Failed')
+    outdated = tables.Column(verbose_name='Revision not checked')
+    stale = tables.Column(verbose_name='Overdue')
     exempt = tables.Column()
     compliance = columns.TemplateColumn(
         template_code='{% if record.compliance is not None %}{{ record.compliance }}%'

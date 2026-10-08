@@ -29,7 +29,7 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
     class Meta:
         model = UpgradeJob
         fields = ('id', 'url', 'display', 'batch_id', 'device', 'device_name', 'poller', 'address',
-                  'profile', 'operation', 'scheduled_at', 'start_before', 'status', 'stage', 'message',
+                  'profile', 'profile_name', 'standards_snapshot', 'operation', 'scheduled_at', 'start_before', 'status', 'stage', 'message',
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
                   'completed_at', 'last_seen_at', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
@@ -47,7 +47,9 @@ class UpgradeJobViewSet(NetBoxModelViewSet):
 
 class ScheduleSerializer(serializers.Serializer):
     filters = serializers.JSONField()
-    profile = serializers.JSONField()
+    profile = serializers.JSONField(required=False)
+    profile_source = serializers.ChoiceField(choices=('model', 'saved', 'custom'), required=False)
+    saved_profile = serializers.IntegerField(min_value=1, required=False)
     operation = serializers.ChoiceField(choices=UpgradeOperationChoices, default='audit')
     scheduled_at = serializers.DateTimeField()
     start_before = serializers.DateTimeField()
@@ -110,7 +112,8 @@ class ScheduleView(QueueView):
         if data['preview']:
             rows = queue.prepare(request.user, data)
             return Response({'devices': [{'id': row['device'].pk, 'name': row['device'].name,
-                                         'address': row['address'], 'poller': row['poller_name']} for row in rows]})
+                                         'address': row['address'], 'poller': row['poller_name'],
+                                         'profile_name': row['profile_name'], 'profile': row['profile']} for row in rows]})
         jobs = queue.schedule(request.user, data)
         return Response({'batch_id': str(jobs[0].batch_id),
                          'jobs': UpgradeJobSerializer(jobs, many=True, context={'request': request}).data}, status=201)
@@ -254,7 +257,7 @@ class PrestagePolicySerializer(NetBoxModelSerializer):
     def validate(self, data):
         # A policy schedules image copies, so it needs the same right as scheduling one.
         if not self.context['request'].user.has_perm('netbox_discovery.apply_upgradejob'):
-            raise PermissionDenied('Prestage policies schedule image staging and need apply permission on upgrade jobs.')
+            raise PermissionDenied('Image staging policies need apply permission on upgrade jobs.')
         return super().validate(data)
 
     class Meta:

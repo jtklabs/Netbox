@@ -1,0 +1,12 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<table class="table attr-table">
+  <tr><th>Model</th><td>{{ object.device_type|linkify }}</td></tr>
+  <tr><th>Upgrade profile</th><td>{{ object.upgrade_profile|linkify }}</td></tr>
+  <tr><th>Remediation profile</th><td>{{ object.remediation_profile|linkify }}</td></tr>
+</table>
+{% if perms.netbox_discovery.add_upgradejob %}
+<a class="btn btn-primary" href="{% url 'plugins:netbox_discovery:upgradejob_add' %}?device_type={{ object.device_type_id }}"><i class="mdi mdi-calendar-plus"></i> Schedule device work</a>
+{% endif %}
+{% endblock %}

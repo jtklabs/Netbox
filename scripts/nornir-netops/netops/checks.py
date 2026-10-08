@@ -58,6 +58,7 @@ class Check:
     evaluate: Callable[[Mapping[str, Any], Sequence[str], Mapping[str, Any]], Verdict]
     add_arguments: Callable[[argparse.ArgumentParser], None]
     expected: Callable[[argparse.Namespace], List[str]]
+    per_device_expected: Optional[Callable] = None
 
     def support_for(self, platform: str) -> CheckSupport:
         try:
@@ -264,6 +265,17 @@ def expected_ntp(args: argparse.Namespace) -> List[str]:
     return [normalize(str(value)) for value in raw if str(value).strip()]
 
 
+def expected_ntp_for_host(expected, options, host):
+    from .features.ntp import region_for
+    regions = options.get('ntp_regions') or {}
+    regional = region_for(host, regions)
+    if regional:
+        return regional['servers']
+    if regions and not expected:
+        raise ValueError('No NTP servers defined for this device region and no default servers.')
+    return expected
+
+
 NTP = Check(
     name="ntp",
     help="are the NTP servers associated, reachable and selected?",
@@ -274,6 +286,7 @@ NTP = Check(
     evaluate=evaluate_ntp,
     add_arguments=add_ntp_arguments,
     expected=expected_ntp,
+    per_device_expected=expected_ntp_for_host,
 )
 
 CHECKS: Dict[str, Check] = {NTP.name: NTP}

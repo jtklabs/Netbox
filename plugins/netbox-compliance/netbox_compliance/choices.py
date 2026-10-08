@@ -47,11 +47,13 @@ class ConfigCheckTypeChoices(ChoiceSet):
     TYPE_ABSENT = 'absent'
     TYPE_PRESENT = 'present'
     TYPE_EXACT_SET = 'exact-set'
+    TYPE_NETOPS = 'netops'
 
     CHOICES = [
         (TYPE_ABSENT, 'Must be absent', 'red'),
         (TYPE_PRESENT, 'Must be present', 'green'),
         (TYPE_EXACT_SET, 'Exact set', 'blue'),
+        (TYPE_NETOPS, 'Feature settings (YAML)', 'cyan'),
     ]
 
 
@@ -102,6 +104,8 @@ class ConfigComplianceStatusChoices(ChoiceSet):
     STATUS_ERROR = 'error'
     STATUS_EXEMPT = 'exempt'
     STATUS_EXEMPT_EXPIRED = 'exempt-expired'
+    STATUS_OUTDATED = 'outdated'
+    STATUS_STALE = 'stale'
 
     CHOICES = [
         (STATUS_COMPLIANT, 'Compliant', 'green'),
@@ -110,6 +114,8 @@ class ConfigComplianceStatusChoices(ChoiceSet):
         (STATUS_ERROR, 'Check failed', 'orange'),
         (STATUS_EXEMPT, 'Exempt', 'purple'),
         (STATUS_EXEMPT_EXPIRED, 'Exemption expired', 'yellow'),
+        (STATUS_OUTDATED, 'Revision not checked', 'orange'),
+        (STATUS_STALE, 'Check overdue', 'yellow'),
     ]
 
 

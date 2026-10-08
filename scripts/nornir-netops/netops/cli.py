@@ -493,6 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="detect again even for devices already remembered",
     )
 
+    ntp_sources = subs.add_parser('discover-ntp', parents=[_discover_arguments()],
+                                  help='discover NTP source interface and VRF over read-only SSH')
+    ntp_sources.add_argument('--standards', default=os.environ.get('NETOPS_STANDARDS'))
+    ntp_sources.add_argument('--no-standards', action='store_true', help=argparse.SUPPRESS)
+    ntp_sources.add_argument('--sync-netbox', action='store_true',
+                             help='record observations and initialize missing NTP tags/VRF in NetBox; never changes devices')
+
     gather = subs.add_parser(
         "collect",
         parents=[_discover_arguments()],
@@ -953,6 +960,9 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         return run(args, style)
     if args.command == "discover":
         return _discover(args, style, log)
+    if args.command == 'discover-ntp':
+        from .ntp_discovery import run as discover_ntp
+        return discover_ntp(args, style, log)
     if args.command == "collect":
         from .collect import run as collect_run
         return collect_run(args, style, log)
@@ -1322,7 +1332,9 @@ def _check(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
             Standards() if args.no_standards else load_standards(args.standards, PROJECT_ROOT)
         )
         expected = check.expected(args)
-    except StandardsError as exc:
+        from .features.ntp import regional_sets
+        regions = regional_sets(args.standards) if check.name == 'ntp' and not args.servers else {}
+    except (StandardsError, ValueError) as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
         return EXIT_USAGE
 
@@ -1356,7 +1368,7 @@ def _check(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     if expected:
         print(style.dim(f"expecting: {', '.join(expected)}"))
 
-    options = {"max_offset": getattr(args, "max_offset", None)}
+    options = {"max_offset": getattr(args, "max_offset", None), "ntp_regions": regions}
     results = targets.run(task=run_check, check=check, expected=expected, options=options)
 
     records: Dict[str, Dict[str, Any]] = {}

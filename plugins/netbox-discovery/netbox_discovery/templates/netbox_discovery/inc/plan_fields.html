@@ -1,0 +1,33 @@
+{% load form_helpers %}
+{% render_errors form %}
+{% for field in form.hidden_fields %}{{ field }}{% endfor %}
+{% for field in form.visible_fields %}
+  <div data-plan-field="{{ field.name }}">{% render_field field %}</div>
+{% endfor %}
+<script>
+(function () {
+  const script = document.currentScript;
+  const form = script.closest('form');
+  const update = () => {
+    const operation = form.querySelector('[name="operation"], [name="kind"]');
+    const source = form.querySelector('[name="profile_source"]');
+    const remediate = operation && ['remediate', 'audit_config'].includes(operation.value);
+    const custom = !source || !source.value || source.value === 'custom';
+    const visible = {
+      profile: custom && !remediate,
+      upgrade_yaml: !remediate,
+      skip_running_config_check: !remediate,
+      features: custom && remediate,
+      remediation_mode: custom && remediate,
+      allow_clearpass_cluster_changes: custom && operation && operation.value === 'remediate',
+      saved_profile: source && source.value === 'saved'
+    };
+    for (const [name, show] of Object.entries(visible)) {
+      const wrapper = form.querySelector('[data-plan-field="' + name + '"]');
+      if (wrapper) wrapper.hidden = !show;
+    }
+  };
+  form.addEventListener('change', update);
+  update();
+})();
+</script>

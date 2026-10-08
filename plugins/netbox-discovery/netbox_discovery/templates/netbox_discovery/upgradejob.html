@@ -8,6 +8,7 @@
       <tr><th>Poller</th><td>{{ object.poller|linkify }}</td></tr>
       <tr><th>Upgrade poller last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
       <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
+      <tr><th>Profile at scheduling</th><td>{{ object.profile_name|default:'Custom settings' }}</td></tr>
       <tr><th>Status</th><td>{{ object.get_status_display }}</td></tr>
       <tr><th>Scheduled start</th><td>{{ object.scheduled_at }}</td></tr>
       <tr><th>Start before</th><td>{{ object.start_before }}</td></tr>
@@ -56,7 +57,15 @@
       <p class="text-muted mt-2">A re-queue is a new job for this device with the same profile and operation, due now and keeping this job's window length. It is validated like a fresh schedule: ownership, redundancy groups and permissions apply again.</p>
     {% endif %}
   </div></div>
-  <div class="card"><h5 class="card-header">{% if object.operation == 'remediate' %}Remediation (applied from each poller's standards.yaml){% else %}Profile snapshot{% endif %}</h5><pre class="card-body">{{ profile_text }}</pre></div>
+  <div class="card"><h5 class="card-header">{% if object.operation == 'remediate' %}Remediation profile{% else %}Profile snapshot{% endif %}</h5><pre class="card-body">{{ profile_text }}</pre></div>
+  {% if object.standards_snapshot %}
+  <h3>Standards at Scheduling</h3>
+  <table class="table"><thead><tr><th>Standard</th><th>Revision</th></tr></thead><tbody>
+    {% for standard in object.standards_snapshot.revisions %}<tr>
+      <td>{{ standard.name }}</td><td><a href="{% url 'plugins:netbox_compliance:standard_revision' pk=standard.standard_id number=standard.revision %}">v{{ standard.revision }}</a></td>
+    </tr>{% endfor %}
+  </tbody></table>
+  {% endif %}
 </div><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Validation summary</h5><pre class="card-body">{{ summary_text }}</pre></div>
   <div class="card"><h5 class="card-header">Progress</h5><div class="card-body">

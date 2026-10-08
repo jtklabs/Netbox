@@ -109,7 +109,7 @@ def test_correcting_placeholder_does_not_retire_existing_hardware(old_serial):
     syncer = Syncer(netbox)
     assert syncer._handle_serial_change(
         {"id": 1, "serial": old_serial},
-        DeviceRecord(name="force10-test", serial="F10-REAL-123"), 1,
+        DeviceRecord(name="force10-test", serial="F10-REAL-123"),
     ) is None
     netbox.update.assert_not_called()
     netbox.create.assert_not_called()

@@ -10,6 +10,9 @@
   on (--no-iburst turns it off). EOS is flexible about the order of a server
   line's keywords -- verify against your release if you change it.
 -#}
+{% for entry in remove if entry.data.get('before_add') %}
+no {{ entry.line }}
+{% endfor %}
 {% for key in add %}
 {% set item = entries[key] %}
 {% if item.kind == 'key' %}
@@ -19,9 +22,9 @@ ntp trusted-key {{ item.id }}
 {% elif item.kind == 'authenticate' %}
 ntp authenticate
 {% else %}
-ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if iburst %} iburst{% endif %}{% if source %} source {{ source }}{% endif %}
+ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if iburst %} iburst{% endif %}{% if source %} source {{ source }}{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
 {% endif %}
 {% endfor %}
-{% for entry in remove %}
+{% for entry in remove if not entry.data.get('before_add') %}
 no {{ entry.line }}
 {% endfor %}

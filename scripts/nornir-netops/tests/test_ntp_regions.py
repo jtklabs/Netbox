@@ -60,6 +60,26 @@ def test_region_prefer_is_used_for_that_region():
     assert variables["prefer"] == "10.2.0.11"
 
 
+def test_regional_prefer_is_not_lost_when_server_lists_match():
+    document = {'ntp': {'servers': ['10.1.1.1'],
+                        'regions': {'east': {'servers': ['10.1.1.1'], 'prefer': '10.1.1.1'}}}}
+    _, variables = servers_for(document, host(regions=['east']))
+    assert variables['prefer'] == '10.1.1.1'
+    assert variables['region'] == 'east'
+
+
+def test_health_check_uses_nearest_region_and_rejects_missing_default():
+    from netops.checks import NTP
+    from netops.features.ntp import regional_sets
+    from netops.standards import Standards
+    options = {'ntp_regions': regional_sets(Standards(document=DOCUMENT))}
+    assert NTP.per_device_expected(['10.50.0.10'], options, host(regions=['city', 'us-east'])) == ['10.1.0.10', '10.1.0.11']
+    assert NTP.per_device_expected(['10.50.0.10'], options, host(regions=['apac'])) == ['10.50.0.10']
+    with pytest.raises(ValueError, match='No NTP servers'):
+        NTP.per_device_expected([], options, host(regions=['apac']))
+    assert NTP.per_device_expected(['10.9.9.9'], {}, host(regions=['us-east'])) == ['10.9.9.9']
+
+
 def test_csv_region_column_works_too():
     assert servers_for(DOCUMENT, host(region="EMEA"))[0] == ["10.2.0.10", "10.2.0.11"]
 
@@ -80,6 +100,22 @@ def test_source_interface_still_applies_to_regional_servers():
     keys, variables = per_device(list(desired.keys), dict(desired.variables), host(regions=["us-east"], source="Loopback0"))
     records = [variables["entries"][k] for k in keys]
     assert {r["source"] for r in records if r["kind"] == "server"} == {"Loopback0"}
+
+
+@pytest.mark.parametrize('selected,expected', [('MGMT', 'MGMT'), ('default', None), ('', 'FLEET'), (None, 'FLEET')])
+def test_device_vrf_overrides_fleet_only_when_selected(selected, expected):
+    target = host(source='GigabitEthernet0/0')
+    target.data['ntp_vrf'] = selected
+    _, variables = servers_for({'ntp': {'servers': ['192.0.2.1'], 'vrf': 'FLEET'}}, target)
+    assert variables['vrf'] == expected
+    assert variables['source'] == 'GigabitEthernet0/0'
+
+
+def test_invalid_device_vrf_is_rejected():
+    target = host()
+    target.data['ntp_vrf'] = 'MGMT;reload'
+    with pytest.raises(ValueError):
+        servers_for(DOCUMENT, target)
 
 
 def test_authentication_order_is_kept(monkeypatch):

@@ -317,7 +317,7 @@ def _write_and_report(netbox: NetBox, syncer: Syncer, request_id: int, address: 
     # thread safe.
     with _write_lock:
         syncer.sync(result, site_id, scanned_address=address, tenant_id=tenant_id,
-                    vrf_id=vrf_id)
+                    vrf_id=vrf_id, record_hardware_changes=False)
         syncer.flush_software_reports()
         device = _find_created_device(netbox, result, site_id)
 
@@ -453,7 +453,8 @@ def _find_created_device(netbox: NetBox, result: ScanResult, site_id: int) -> di
     if primary.context is not None and primary.context.is_vdc:
         # The VDC lives on the chassis; that is the device the request produced.
         if primary.context.chassis_serial:
-            return netbox.first("/dcim/devices/", {"serial": primary.context.chassis_serial})
+            candidates = netbox.all("/dcim/devices/", {"serial": primary.context.chassis_serial})
+            return candidates[0] if len(candidates) == 1 else None
         return None
     # Name at the site first: it is unique there, where a serial may now sit
     # on more than one record and would point a duplicate's request at the
@@ -462,8 +463,6 @@ def _find_created_device(netbox: NetBox, result: ScanResult, site_id: int) -> di
         found = netbox.first("/dcim/devices/", {"name": primary.name, "site_id": site_id})
         if found:
             return found
-    if primary.serial:
-        return netbox.first("/dcim/devices/", {"serial": primary.serial})
     return None
 
 

@@ -455,6 +455,8 @@ class NetBoxInventory:
         autofilter: bool = False,
         poller: Optional[str] = None,
         regions: bool = False,
+        clearpass_clusters: bool = False,
+        mobility_conductors: bool = False,
     ) -> None:
         self.client = client or Client(
             url or os.environ.get("NETBOX_URL", ""),
@@ -464,6 +466,8 @@ class NetBoxInventory:
         self.autofilter = autofilter
         self.poller = poller
         self.regions = regions
+        self.clearpass_clusters = clearpass_clusters
+        self.mobility_conductors = mobility_conductors
         self.filters = dict(filters or {})
         self.source_tags = dict(
             DEFAULT_SOURCE_TAGS if source_tags is None else source_tags
@@ -526,7 +530,23 @@ class NetBoxInventory:
 
         regions = site_regions(self.client, devices) if self.regions else {}
 
+        cluster, cluster_error = None, None
+        if self.clearpass_clusters and any(platform_of(device) == 'aruba_clearpass' for device in devices):
+            from .clearpass_cluster import discover
+            try:
+                cluster = discover(self.client)
+            except (ValueError, NetBoxError) as exc:
+                cluster_error = str(exc)
+
         names = host_names([device for device in devices if _address(device)])
+
+        conductor, conductor_error = None, None
+        if self.mobility_conductors and any(platform_of(device) == 'aruba_os' for device in devices):
+            from .mobility_conductor import discover
+            try:
+                conductor = discover(self.client)
+            except (ValueError, NetBoxError) as exc:
+                conductor_error = str(exc)
 
         hosts = Hosts()
         skipped: List[str] = []
@@ -542,6 +562,12 @@ class NetBoxInventory:
                 # disambiguated name, e.g. "sw1@atl"; never guess between them.
                 raise NetBoxError(f"two NetBox devices would both be inventory host {name!r}; rename one")
             data = device_data(device)
+            if self.mobility_conductors and platform_of(device) == 'aruba_os':
+                data['mobility_conductor'] = conductor
+                data['mobility_conductor_error'] = conductor_error
+            if self.clearpass_clusters and platform_of(device) == 'aruba_clearpass':
+                data['clearpass_cluster'] = cluster
+                data['clearpass_cluster_error'] = cluster_error
             # The NetBox name as-is, which --limit also matches: the host name
             # differs from it only when another device shares it.
             data["device_name"] = str(label)
@@ -658,14 +684,19 @@ def init_nornir(args, credentials, standards, workers: int):
     if getattr(getattr(args, "feature", None), "name", None) in ("waf", "nac"):
         # WAF and NAC do not use NTP/syslog source-interface tags.
         settings["source_tags"] = {}
+    elif getattr(args, 'command', None) == 'discover-ntp':
+        settings['source_tags'] = {}
     elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
         tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")
         settings["source_tags"] = {"syslog": tag} if tag else {}
     # Region ancestry costs two extra queries, so only a regional NTP standard asks for it.
     settings["regions"] = bool(
-        getattr(getattr(args, "feature", None), "name", None) == "ntp" and not getattr(args, "servers", None)
+        (getattr(getattr(args, "feature", None), "name", None) == "ntp"
+         or getattr(getattr(args, "check", None), "name", None) == "ntp") and not getattr(args, "servers", None)
         and standards is not None and standards.defined("ntp.regions"))
     args._netbox_client = Client(settings["url"], settings["token"], settings["verify_tls"])
+    settings['clearpass_clusters'] = getattr(getattr(args, 'feature', None), 'name', None) == 'ntp'
+    settings['mobility_conductors'] = getattr(getattr(args, 'feature', None), 'name', None) == 'ntp'
 
     return InitNornir(
         runner={"plugin": "threaded", "options": {"num_workers": workers}},

@@ -161,13 +161,13 @@ def validate_assignment(job, apply):
         raise ValueError('Upgrade queue returned invalid job/device IDs')
     UUID(job['claim_token'])
     ipaddress.ip_address(job['hostname'])
-    if job.get('operation') not in {'audit', 'stage', 'upgrade', 'remediate'}:
+    if job.get('operation') not in {'audit', 'stage', 'upgrade', *remediation.CONFIG_OPERATIONS}:
         raise ValueError('Upgrade queue returned an unknown operation')
-    if job['operation'] != 'audit' and not apply:
+    if job['operation'] not in remediation.READ_ONLY_OPERATIONS and not apply:
         raise ValueError('Upgrade queue returned a mutating job without --apply')
     if not isinstance(job.get('device'), str) or not job['device'].strip():
         raise ValueError('Upgrade queue returned an invalid device name')
-    if job['operation'] == 'remediate':
+    if job['operation'] in remediation.CONFIG_OPERATIONS:
         return remediation.validate(job['profile'])
     return Profile.from_mapping(job['profile'], staging=job['operation'] == 'stage')
 
@@ -180,28 +180,29 @@ def execute_job(task, args, client, outbox):
     job = task.host.data['upgrade_job']
     options = copy.copy(args)
     options.command = 'upgrade'
-    options.apply, options.stage_only = job['operation'] != 'audit', job['operation'] == 'stage'
+    options.apply = job['operation'] not in remediation.READ_ONLY_OPERATIONS
+    options.stage_only = job['operation'] == 'stage'
     options.queue_operation = job['operation']
     options.lock_dir = PROJECT_ROOT / '.upgrade-locks'
     options.profile = None
     from ..features.waf import connection_settings
     options.f5 = connection_settings(args)
     # Independent archives prevent mixed audit/apply jobs from misreporting mode.
-    run = archive.Run([job['operation'] if job['operation'] == 'remediate' else 'upgrade', '--scheduled-job', str(job['id'])] +
+    run = archive.Run([job['operation'] if job['operation'] in remediation.CONFIG_OPERATIONS else 'upgrade', '--scheduled-job', str(job['id'])] +
                       (['--apply'] if options.apply else []) +
                       (['--report-dir', args.report_dir] if args.report_dir else []), PROJECT_ROOT)
     run.args = options
     code = 1
     with Heartbeat(client, job):
         run.prepare()
-        run.document.update(feature='remediate' if job['operation'] == 'remediate' else 'upgrade', dry_run=not options.apply,
+        run.document.update(feature=job['operation'] if job['operation'] in remediation.CONFIG_OPERATIONS else 'upgrade', dry_run=not options.apply,
                             schedule={'job_id': job['id'], 'batch_id': job.get('batch_id'),
                                       'poller': args.poller})
         reporter = Reporter(run, settings_from_env(), event_sink=outbox.sink(job))
         try:
             profile = validate_assignment(job, args.apply)
             reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox')
-            if job['operation'] == 'remediate':
+            if job['operation'] in remediation.CONFIG_OPERATIONS:
                 failed, changed, outcome = remediation.run_job(
                     task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))
                 code = 1 if failed or reporter.delivery_failed else 0

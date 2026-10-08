@@ -80,11 +80,27 @@ stripped_domains = PluginMenuItem(
 )
 
 menu = PluginMenu(
-    label='Discovery',
+    label='Device Operations',
     groups=(
         ('Onboarding', (onboarding, pollers, rules, stripped_domains)),
         ('Changes', (replacements, issues)),
         ('Software', (
+            PluginMenuItem(
+                link='plugins:netbox_discovery:jobprofile_list', link_text='Job Profiles',
+                permissions=['netbox_discovery.view_jobprofile'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:jobprofile_add', title='Add a profile',
+                    icon_class='mdi mdi-plus-thick', permissions=['netbox_discovery.add_jobprofile'],
+                ),),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_discovery:devicetypeprofile_list', link_text='Model Profiles',
+                permissions=['netbox_discovery.view_devicetypeprofile'],
+                buttons=(PluginMenuButton(
+                    link='plugins:netbox_discovery:devicetypeprofile_add', title='Assign profiles to a model',
+                    icon_class='mdi mdi-plus-thick', permissions=['netbox_discovery.add_devicetypeprofile'],
+                ),),
+            ),
             PluginMenuItem(
                 link='plugins:netbox_discovery:upgradejob_list', link_text='Upgrade Jobs',
                 permissions=['netbox_discovery.view_upgradejob'],
@@ -113,15 +129,15 @@ menu = PluginMenu(
                 ),),
             ),
             PluginMenuItem(
-                link='plugins:netbox_discovery:prestagepolicy_list', link_text='Prestage Policies',
+                link='plugins:netbox_discovery:prestagepolicy_list', link_text='Automatic Image Staging',
                 permissions=['netbox_discovery.view_prestagepolicy'],
                 buttons=(PluginMenuButton(
-                    link='plugins:netbox_discovery:prestagepolicy_add', title='Add a policy',
+                    link='plugins:netbox_discovery:prestagepolicy_add', title='Add an image staging policy',
                     icon_class='mdi mdi-plus-thick',
                     permissions=['netbox_discovery.add_prestagepolicy', 'netbox_discovery.apply_upgradejob'],
                 ),),
             ),
         )),
     ),
-    icon_class='mdi mdi-radar',
+    icon_class='mdi mdi-server-network',
 )

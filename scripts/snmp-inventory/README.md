@@ -372,7 +372,7 @@ token ever being on disk.
 
 ## Onboarding a single device from NetBox
 
-For adding one device rather than importing a list, the **Discovery** plugin
+For adding one device rather than importing a list, the **Device Operations** plugin
 (`plugins/netbox-discovery/`) puts a form in NetBox: someone types the
 management IP and nothing else.
 
@@ -804,16 +804,18 @@ poller is running a different copy than the one you replaced.
 Duplicate serials are **allowed**. A Nexus VDC and its chassis, a vCMP guest
 and its host, a vendor reusing a number, a serial typed on two records — all
 of these exist, and refusing to write until somebody sorted them out (which
-is what this did before) meant the devices never landed at all. Nothing is
-raised as an issue for a duplicate serial any more.
+is what this did before) meant the devices never landed at all. Duplicates
+are reported under **Device Operations > Issues** without blocking the write.
+Repeated scans refresh the existing open issue instead of adding another.
 
 What is refused instead is the **guess**. A scan claims an existing record
 only when the evidence says it is the same box:
 
 | The scan has… | It is the record that… |
 |---|---|
-| a serial | carries that serial **and** agrees on the name or the address. A rename keeps the address, a re-address keeps the name. The name may be one an earlier hostname rule gave the device, and for a stack member, sitting in the stack's own virtual chassis under that serial settles it |
-| no serial | has the polled address on one of its interfaces, else has the same name **at the site being scanned** |
+| an inventory scan target | has the device ID selected by the poller; a stack uses its virtual chassis and member position |
+| an address | owns that address in the scanned VRF |
+| a hostname | has that name **at the site being scanned**; a former naming-rule name also requires the same serial |
 
 Anything else is a different box and gets a record of its own, beside the
 existing one, with the log saying so. Two things this rules out that used to
@@ -836,31 +838,26 @@ device — a person should see it — and approving creates the second device.
 
 ### When a serial changes
 
-A rescan finding a different serial under a name we already knew means the
-metal was swapped — an RMA, a spare off the shelf, a replaced line card. The
-serial is **never overwritten in place**, because serials are what support
-contracts and quotes are matched on and losing one silently loses the thread on
-a box that may still be under contract.
+Onboarding establishes the hardware baseline. A later inventory rescan that
+finds a different nonempty serial updates the **same device**, preserving its
+ID, name, status, interfaces and other relationships. It first writes a
+**Hardware Replacement** record containing both serials, model, detection time,
+and module bay when applicable. It does not retire or clone the device.
 
-For a **chassis**, the old Device record is kept:
+Blank serials, missing-value markers and case-only changes do not count as
+replacements. Modules use the same rule. If multiple collected components map
+to the same bay name (including names shortened to NetBox's limit), that bay
+is skipped with a warning instead of repeatedly overwriting one component with
+another. Stack members never borrow the master's scalar serial.
 
-- renamed to `<name> [replaced <old-serial>]`, freeing the name
-- status set to `inventory` (configurable via `retired_device_status`)
-- tagged `replaced`, and its primary IP cleared so it is not rescanned
-- the new unit is created and takes the name and the address
+If history cannot be saved, the serial update fails instead of silently losing
+the old value. A retry after an inventory write failure reuses the latest
+matching history entry. The history entry records the observed transition;
+the inventory update may still need retrying if its API request fails.
 
-For a **module**, the old row cannot be kept — NetBox requires a module to sit
-in a bay, and the bay is being refilled — so the swap is recorded *before* the
-serial is overwritten.
-
-Either way a **Hardware Replacement** record is written, with both serials, the
-model, the bay for a module swap, and a link to the retained device for a
-chassis swap. That is the queryable history: *"every serial that changed in the
-last quarter"* is one filter, which is the form the question actually gets asked
-in when reconciling contracts. NetBox's changelog holds the old value too, but
-only as a diff on one object at one moment.
-
-Set `retain_replaced_hardware = false` to go back to overwriting in place.
+`retain_replaced_hardware` and `retired_device_status` are accepted for old
+configuration files but no longer alter this behavior. Existing retired device
+records and historical replacement entries are left untouched.
 
 ### One chassis, several management addresses
 
@@ -1138,7 +1135,7 @@ wrong wherever the hostname itself has dots in it: `sw1.floor2.google.com` and
 `sw1.floor3.google.com` both became `sw1`, and the second could never be
 created beside the first.
 
-So the domains are listed instead, in NetBox under **Discovery → Stripped
+So the domains are listed instead, in NetBox under **Device Operations → Onboarding → Stripped
 Domains** (one per entry, or pasted in through Import). With `google.com` on
 the list:
 
@@ -1185,7 +1182,7 @@ would give.
 The case above is one device. When the same gap turns up on every box of one
 kind — every Firepower publishes no model — typing it at each review is the
 wrong trade, and a **discovery rule** says it once. Rules live in NetBox under
-**Discovery → Rules**, and each one reads as a sentence:
+**Device Operations → Onboarding → Rules**, and each one reads as a sentence:
 
 > When the *device name* contains `fw-` and the *model* is empty, set the
 > *model* to `FPR-2120`.

@@ -7,10 +7,9 @@
                       a redacted account of what was seen, when it was checked,
                       and any exemption.
 
-Both inherit PrimaryModel, so NetBox writes an ObjectChange for every create,
-update and delete — including writes arriving over the REST API from the
-checker. That is the audit trail; there is deliberately no hand-rolled one
-alongside it.
+Both inherit PrimaryModel for NetBox's normal change log. Immutable standard
+revisions additionally retain the exact definition used by a worker, independent
+of changelog retention. Results reference the revision actually checked.
 
 Nothing here stores a running configuration. That is not an oversight but the
 central constraint: standards 4 and 5 match lines that contain password hashes,
@@ -37,7 +36,7 @@ from datetime import date, timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.urls import reverse
 from django.utils import timezone
 from netbox.models import PrimaryModel
@@ -52,6 +51,7 @@ from netbox_compliance.choices import (
 __all__ = (
     'ConfigStandard',
     'ConfigCompliance',
+    'ConfigStandardRevision',
 )
 
 # Substitution in a remediation template. Deliberately not str.format(): a
@@ -131,6 +131,8 @@ class ConfigStandard(PrimaryModel):
     """
 
     name = models.CharField(max_length=100, help_text='e.g. "No HTTP server"')
+    revision = models.PositiveIntegerField(default=0, editable=False)
+    definition_yaml = models.TextField(blank=True, help_text='One feature section in standards.yaml format. No secrets.')
 
     check_type = models.CharField(
         max_length=20,
@@ -141,6 +143,7 @@ class ConfigStandard(PrimaryModel):
 
     match_pattern = models.CharField(
         max_length=500,
+        blank=True,
         help_text=(
             'Regular expression matched against each configuration line. '
             'An exact-set standard must capture the entry identity in a group '
@@ -280,6 +283,20 @@ class ConfigStandard(PrimaryModel):
     # ------------------------------------------------------------------ #
     def clean(self):
         super().clean()
+
+        if self.check_type == ConfigCheckTypeChoices.TYPE_NETOPS:
+            from .definitions import parse_definition
+            parse_definition(self.definition_yaml)
+            if self.valid_to and self.valid_to < self.valid_from:
+                raise ValidationError({'valid_to': 'The end date cannot be before the start date.'})
+            if self.allow_enforce and not self.auto_remediable:
+                raise ValidationError({'allow_enforce': 'Audit-only standards cannot allow removals.'})
+            self._clean_overlap()
+            return
+        if self.definition_yaml:
+            raise ValidationError({'definition_yaml': 'Select Feature settings (YAML) for a YAML definition.'})
+        if not self.match_pattern:
+            raise ValidationError({'match_pattern': 'A configuration-line rule needs a pattern.'})
 
         compiled = None
         if self.match_pattern:
@@ -501,6 +518,15 @@ class ConfigStandard(PrimaryModel):
     def get_check_type_color(self):
         return ConfigCheckTypeChoices.colors.get(self.check_type)
 
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        # Lock before changing the definition so simultaneous edits serialize revisions.
+        if self.pk:
+            self.revision = type(self).objects.select_for_update().get(pk=self.pk).revision
+        super().save(*args, **kwargs)
+        from .revisions import capture_revision
+        capture_revision(self)
+
     def applies_to(self, device):
         """Is this device in scope? Every populated dimension must match.
 
@@ -524,6 +550,30 @@ class ConfigStandard(PrimaryModel):
         return True
 
 
+class ConfigStandardRevision(models.Model):
+    standard = models.ForeignKey(ConfigStandard, on_delete=models.PROTECT, related_name='revisions')
+    number = models.PositiveIntegerField()
+    definition = models.JSONField()
+    definition_yaml = models.TextField(blank=True)
+    created = models.DateTimeField(default=timezone.now, editable=False)
+    author = models.CharField(max_length=150, blank=True)
+
+    class Meta:
+        ordering = ('-number',)
+        constraints = [models.UniqueConstraint(fields=('standard', 'number'), name='config_standard_revision_unique')]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError('Standard revisions are immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Retain standard revisions; retire the standard instead.')
+
+    def __str__(self):
+        return f'{self.standard} v{self.number}'
+
+
 class ConfigCompliance(PrimaryModel):
     """One device measured against one standard.
 
@@ -543,6 +593,8 @@ class ConfigCompliance(PrimaryModel):
     standard = models.ForeignKey(
         to=ConfigStandard, on_delete=models.CASCADE, related_name='results'
     )
+    standard_revision = models.ForeignKey(
+        ConfigStandardRevision, on_delete=models.PROTECT, null=True, blank=True, related_name='results')
 
     result = models.CharField(
         max_length=20,
@@ -646,6 +698,8 @@ class ConfigCompliance(PrimaryModel):
             raise ValidationError(
                 {'error_message': 'Say what went wrong, or the row is unactionable.'}
             )
+        if self.standard_revision_id and self.standard_revision.standard_id != self.standard_id:
+            raise ValidationError({'standard_revision': 'Revision belongs to another standard.'})
 
     # ------------------------------------------------------------------ #
     @property
@@ -655,7 +709,21 @@ class ConfigCompliance(PrimaryModel):
             if self.exemption_expired:
                 return ConfigComplianceStatusChoices.STATUS_EXEMPT_EXPIRED
             return ConfigComplianceStatusChoices.STATUS_EXEMPT
+        if self.result != ConfigCheckResultChoices.RESULT_UNKNOWN:
+            if self.revision_outdated:
+                return ConfigComplianceStatusChoices.STATUS_OUTDATED
+            if self.is_stale:
+                return ConfigComplianceStatusChoices.STATUS_STALE
         return self.result
+
+    @property
+    def revision_outdated(self):
+        return bool(self.standard.revision and (not self.standard_revision_id
+                    or self.standard_revision.number != self.standard.revision))
+
+    @property
+    def checked_revision(self):
+        return self.standard_revision.number if self.standard_revision_id else None
 
     def get_status_display(self):
         labels = {entry[0]: entry[1] for entry in ConfigComplianceStatusChoices.CHOICES}
@@ -700,7 +768,7 @@ class ConfigCompliance(PrimaryModel):
 
     @property
     def is_compliant(self):
-        return self.result == ConfigCheckResultChoices.RESULT_COMPLIANT
+        return self.status == ConfigComplianceStatusChoices.STATUS_COMPLIANT
 
     @property
     def needs_manual_fix(self):
@@ -733,10 +801,9 @@ class ConfigCompliance(PrimaryModel):
         """
         if self.result == ConfigCheckResultChoices.RESULT_UNKNOWN:
             return False  # "Not checked" already says everything
-        days = self.age_days
-        if days is None:
+        if self.last_checked is None:
             return True
-        return days > _plugin_settings().get('stale_after_days', 30)
+        return self.last_checked < self.stale_threshold
 
     @property
     def stale_threshold(self):

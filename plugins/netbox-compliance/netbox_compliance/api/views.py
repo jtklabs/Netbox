@@ -21,6 +21,7 @@ changed one goes through save().
 
 from dcim.models import Device
 from django.db.models import Count
+from django.db import transaction
 from django.utils import timezone
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import status
@@ -51,6 +52,12 @@ class ConfigStandardViewSet(NetBoxModelViewSet):
     ).annotate(result_count=Count('results', distinct=True))
     serializer_class = ConfigStandardSerializer
     filterset_class = filtersets.ConfigStandardFilterSet
+
+    @action(detail=True, methods=['get'])
+    def revisions(self, request, pk=None):
+        standard = self.get_object()
+        return Response(list(standard.revisions.values(
+            'number', 'created', 'author', 'definition', 'definition_yaml')))
 
 
 class ConfigComplianceViewSet(NetBoxModelViewSet):
@@ -89,6 +96,7 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
         return Response({'summary': summary, 'results': results}, status=status.HTTP_200_OK)
 
     # ------------------------------------------------------------------ #
+    @transaction.atomic
     def _apply(self, item):
         device = self._resolve_device(item)
         if device is None:
@@ -114,7 +122,19 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
         observed = item.get('observed') or ''
         error_message = item.get('error_message') or ''
 
+        revision = None
+        if item.get('revision'):
+            revision = standard.revisions.filter(number=item['revision']).first()
+            if revision is None:
+                return {'device': device.pk, 'standard': standard.pk, 'result': 'error',
+                        'detail': 'No such revision for this standard.'}
+        # Serialize concurrent reports for a pairing, including its first result.
+        ConfigStandard.objects.select_for_update().get(pk=standard.pk)
         record = ConfigCompliance.objects.filter(device=device, standard=standard).first()
+        if record and not ConfigCompliance.objects.restrict(self.request.user, 'change').filter(pk=record.pk).exists():
+            return {'device': device.pk, 'standard': standard.pk, 'result': 'error', 'detail': 'Result is outside your permissions.'}
+        if record and record.last_checked and checked_at < record.last_checked:
+            return {'device': device.pk, 'standard': standard.pk, 'result': 'ignored', 'detail': 'A newer check is already recorded.'}
         created = record is None
         if created:
             record = ConfigCompliance(device=device, standard=standard)
@@ -123,6 +143,7 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
         unchanged = (
             not created
             and not remediated
+            and record.standard_revision_id == (revision.pk if revision else None)
             and record.result == item['result']
             and (record.findings or {}) == findings
             and record.observed == observed
@@ -145,6 +166,7 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
 
         previous = None if created else record.result
         record.result = item['result']
+        record.standard_revision = revision
         record.findings = findings
         record.observed = observed
         record.error_message = error_message
@@ -162,6 +184,9 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
             record.last_remediated = now
 
         record.save()
+        if created and not ConfigCompliance.objects.restrict(self.request.user, 'add').filter(pk=record.pk).exists():
+            transaction.set_rollback(True)
+            return {'device': device.pk, 'standard': standard.pk, 'result': 'error', 'detail': 'Result is outside your permissions.'}
 
         outcome = 'created' if created else 'updated'
         if previous is not None and previous != record.result:
@@ -177,24 +202,24 @@ class ConfigComplianceViewSet(NetBoxModelViewSet):
 
     def _resolve_device(self, item):
         if item.get('device_id'):
-            return Device.objects.filter(pk=item['device_id']).first()
+            return Device.objects.restrict(self.request.user, 'view').filter(pk=item['device_id']).first()
         name = (item.get('device') or '').strip()
         if not name:
             return None
         # Device names are not unique across sites in NetBox, so an ambiguous
         # name is unresolvable rather than a coin toss — recording a result
         # against the wrong switch is worse than recording none.
-        matches = list(Device.objects.filter(name__iexact=name)[:2])
+        matches = list(Device.objects.restrict(self.request.user, 'view').filter(name__iexact=name)[:2])
         return matches[0] if len(matches) == 1 else None
 
     def _resolve_standard(self, item):
         if item.get('standard_id'):
-            return ConfigStandard.objects.filter(pk=item['standard_id']).first()
+            return ConfigStandard.objects.restrict(self.request.user, 'view').filter(pk=item['standard_id']).first()
         name = (item.get('standard') or '').strip()
         if not name:
             return None
         # Standards are effective-dated and superseded by opening a new version
         # under the same name, so a name alone means "the one in force now".
         return active_standards(
-            queryset=ConfigStandard.objects.filter(name__iexact=name)
+            queryset=ConfigStandard.objects.restrict(self.request.user, 'view').filter(name__iexact=name)
         ).first()

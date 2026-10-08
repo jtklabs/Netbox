@@ -270,9 +270,13 @@ class FakeNetBox:
         return str(_id(current)) == str(value)
 
     def all(self, path, params=None):
-        params = params or {}
-        return [dict(i) for i in self.objects.get(path, [])
+        params = dict(params or {})
+        ordering = params.pop("ordering", None)
+        rows = [dict(i) for i in self.objects.get(path, [])
                 if all(self._matches(i, k, v) for k, v in params.items())]
+        if ordering:
+            rows.sort(key=lambda r: r[ordering.lstrip("-")], reverse=ordering.startswith("-"))
+        return rows
 
     def first(self, path, params=None):
         found = self.all(path, params)
@@ -460,7 +464,7 @@ class TestSyncingAVdc:
             syncer(netbox).sync(result, site_id=1, scanned_address="10.0.0.11")
         assert [d["name"] for d in netbox.devices()] == ["n7k-1-dmz", "n7k-1"]
         assert netbox.device("n7k-1-dmz")["primary_ip4"]  # untouched
-        assert "'n7k-1' is treated as a separate device with the same serial" in caplog.text
+        assert "separate device with the same serial" in caplog.text
 
 
 class TestSyncingAVcmpGuest:
@@ -506,8 +510,8 @@ class TestSyncingAVcmpGuest:
 class TestWhichRecordAScanIs:
     """A scan never lands on a record that might be a different box.
 
-    Duplicate serials are allowed and never refused or reported; what is
-    refused is the guess. The overwrite the user saw came from a serial alone
+    Duplicate serials are allowed and reported; what is refused is the guess.
+    The overwrite the user saw came from a serial alone
     claiming the first record carrying it, and from a name alone claiming a
     record at any site.
     """
@@ -542,8 +546,8 @@ class TestWhichRecordAScanIs:
         assert [d["name"] for d in netbox.devices()] == ["alpha", "beta", "gamma"]
         assert [d["serial"] for d in netbox.devices()] == [CHASSIS_SERIAL] * 3
         assert "separate device with the same serial" in caplog.text
-        # Never raised as an issue: duplicates are allowed, not reported.
-        assert "/plugins/discovery/issues/" not in netbox.objects
+        # Allowed without overwriting, but visible for inventory cleanup.
+        assert len(netbox.objects["/plugins/discovery/issues/"]) == 1
 
     def test_a_lone_record_with_the_serial_is_not_claimed_on_the_serial_alone(self):
         """A rename and a re-address at once looks exactly like a different

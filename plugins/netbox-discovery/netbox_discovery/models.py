@@ -552,11 +552,9 @@ class HardwareReplacement(PrimaryModel):
     object at one moment. This is the queryable version: every swap, with both
     serials, ready to be reported on.
 
-    For a chassis the old Device record is kept as well, retired rather than
-    deleted, and `replaced_device` points at it. For a module it cannot be —
-    Module.module_bay is not nullable, so the old row has nowhere to live once
-    the new part is in the bay — and this record is the only surviving trace.
-    That asymmetry is the reason this model exists at all.
+    Inventory rescans update the existing device or module in place. This row
+    retains the previous serial without losing device IDs or relationships.
+    `replaced_device` remains populated on legacy events that retired a device.
     """
 
     kind = models.CharField(
@@ -614,9 +612,8 @@ class HardwareReplacement(PrimaryModel):
 class DiscoveryIssue(PrimaryModel):
     """Something a scan found that a person has to settle.
 
-    The scanner's job is to record what devices say about themselves. When two
-    of them say something that cannot both be true, it must not pick a winner —
-    it stops, leaves the existing record alone, and says so here.
+    The scanner records what devices say about themselves. When two of them
+    report the same serial, it keeps them separate and reports it here.
 
     The case this was built for: a device reporting a serial that NetBox
     already holds against a different device. Matching on serial is what makes
@@ -625,12 +622,8 @@ class DiscoveryIssue(PrimaryModel):
     serial is duplicated or mistyped. That overwrite is silent and destroys the
     record it lands on, so it used to be refused and raised here.
 
-    Duplicate serials are allowed now (a Nexus VDC and its chassis, a vCMP
-    guest and its host, a vendor reusing a number), and the scanner writes a
-    scan that agrees with an existing record on neither name nor address as a
-    separate device instead of refusing it. Nothing raises this kind any more;
-    the model stays for the issues already filed and for whatever a scan may
-    next be unable to decide.
+    Duplicate serials are allowed. Scans retain separate devices and report
+    duplicates here for cleanup without blocking onboarding or merging them.
     """
 
     kind = models.CharField(
@@ -923,3 +916,4 @@ class StrippedDomain(PrimaryModel):
 # Imported here so Django discovers these models with the rest of the plugin.
 from .upgrade_models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob  # noqa: E402,F401
 from .command_models import CommandOutput  # noqa: E402,F401
+from .profile_models import DeviceTypeProfile, JobProfile  # noqa: E402,F401

@@ -121,7 +121,7 @@ def action(args, desired, host, record):
         operation = "stage_image" if getattr(args, "stage_only", False) else "upgrade"
         return {"action": operation if getattr(args, "apply", False) else "audit",
                 "action_source": "profile", "action_from_netbox": False, "netbox_policy_tag": None}
-    if feature in ("check-ntp", "discover", "selftest", "rollback", "collect"):
+    if feature in ("check-ntp", "discover", "discover-ntp", "selftest", "rollback", "collect"):
         return {"action": "rollback" if feature == "rollback" else "audit",
                 "action_source": "utility", "action_from_netbox": False, "netbox_policy_tag": None}
     selected = (desired.variables if desired else {}).get("logging_policy")
@@ -159,10 +159,20 @@ def device_document(name, record, args, desired, host):
         read_steps = [{"transport": "ssh", "command": c, "purpose": "read_config"} for c in support.commands]
     if row.get("platform") == "f5_tmsh":
         paths = {"waf": [p["endpoint"] for p in row.get("profiles", [])],
+                 "ntp": ["/mgmt/tm/sys/ntp"],
                  "syslog": ["/mgmt/tm/sys/syslog"],
                  "snmp": ["/mgmt/tm/sys/snmp", "/mgmt/tm/sys/snmp/users", "/mgmt/tm/sys/snmp/communities"],
                  "banner": ["/mgmt/tm/sys/sshd", "/mgmt/tm/sys/global-settings"]}.get(feature, [])
         read_steps = [{"transport": "rest", "method": "GET", "path": p, "purpose": "read_config"} for p in paths]
+    if row.get("platform") == "aruba_os" and feature == "ntp" and row.get("config_path"):
+        from urllib.parse import urlencode
+        query = urlencode({'config_path': row['config_path'], 'type': 'committed'})
+        read_steps = [{"transport": "rest", "method": "GET", "purpose": "read_config",
+                       "path": f"/v1/configuration/object/{name}?{query}"}
+                      for name in ("ntp_server_info", "ntp_source")]
+    if row.get("platform") == "aruba_clearpass" and feature == "ntp":
+        read_steps = [{"transport": "ssh", "command": command, "purpose": "read_config"}
+                      for command in ("show ntp", "cluster list")]
     before = row.get("config_before")
     after = row.get("config_after")
     rollback_steps = list(row.get("rollback_steps", []))
@@ -200,9 +210,12 @@ def device_document(name, record, args, desired, host):
         if save:
             rollback_steps.append(step(save, "persist_restored_config"))
     implementation = [step(c) for c in row.get("commands", [])]
+    commit_before_verify = row.get("platform") == "aruba_os" and feature == "ntp"
+    if row.get("save_command") and commit_before_verify:
+        implementation.append(step(row["save_command"], "persist_config"))
     if implementation and getattr(args, "verify", True):
         implementation.extend({**s, "purpose": "verify_config"} for s in read_steps)
-    if row.get("save_command"):
+    if row.get("save_command") and not commit_before_verify:
         implementation.append(step(row["save_command"], "persist_config"))
     if any(marker in json.dumps(rollback_steps) for marker in ("<redacted>", "<hidden>", "<previous-secret-required>")):
         limitations.append("Restoring previous credentials requires secrets that are not stored in this archive.")
@@ -216,7 +229,7 @@ def device_document(name, record, args, desired, host):
         after = before
     else:
         after_status = "unavailable"
-    if before is None and feature not in ("selftest", "discover", "check-ntp", "collect"):
+    if before is None and feature not in ("selftest", "discover", "discover-ntp", "check-ntp", "collect"):
         limitations.append("The original feature configuration was not read; a complete reversal cannot be established.")
     row.update(
         configuration_scope=scope,

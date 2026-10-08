@@ -1,12 +1,6 @@
-"""Hardware swaps: a serial that changed must never quietly overwrite the old one.
+"""Hardware history and duplicate serial reporting against a disposable NetBox.
 
-Serials are what support contracts and quotes are matched on, so a rescan that
-finds different metal has to keep the thread on the unit that came out. For a
-chassis that means retaining the old Device record; for a module it cannot,
-because NetBox requires a module to sit in a bay and the bay is being refilled,
-so the audit row is the only trace and has to be written before the overwrite.
-
-Needs a NetBox with the Discovery plugin. Scan results come from recorded walks.
+Scan results come from recorded walks; no real devices are polled.
 """
 
 from __future__ import annotations
@@ -75,9 +69,6 @@ def site(netbox):
             delete("/ipam/ip-addresses/", ip["id"])
     for device in netbox.all("/dcim/devices/", {"site_id": site["id"]}):
         delete("/dcim/devices/", device["id"])
-    for vc in netbox.all("/dcim/virtual-chassis/"):
-        if vc.get("member_count", 0) == 0:
-            delete("/dcim/virtual-chassis/", vc["id"])
     delete("/dcim/sites/", site["id"])
 
 
@@ -111,16 +102,14 @@ class TestChassisSwap:
         syncer(netbox).sync(scan_with("SWAP-AAAA-0001"), site["id"])
         assert netbox.count("/dcim/devices/", {"site_id": site["id"]}) == before
 
-    def test_a_changed_serial_retains_the_old_device(self, netbox, site):
-        """The requirement: update, but do not lose the unit that came out."""
+    def test_a_changed_serial_updates_the_same_device(self, netbox, site):
+        before = netbox.first("/dcim/devices/", {"serial": "SWAP-AAAA-0001"})
         syncer(netbox).sync(scan_with("SWAP-BBBB-0002"), site["id"])
-
-        old = netbox.first("/dcim/devices/", {"serial": "SWAP-AAAA-0001"})
-        assert old is not None, "the replaced unit must still exist in NetBox"
-        assert old["status"]["value"] == "inventory"
-        assert "replaced" in [t["slug"] for t in old["tags"]]
-        assert old["name"] != "swap-sw-01", "the old record must give up the name"
-        assert "SWAP-AAAA-0001" in old["name"]
+        after = netbox.get("/dcim/devices/%s/" % before["id"])
+        assert after["serial"] == "SWAP-BBBB-0002"
+        assert after["status"]["value"] == "active"
+        assert after["name"] == before["name"]
+        assert netbox.count("/dcim/devices/", {"site_id": site["id"]}) == 1
 
     def test_the_new_unit_took_the_name(self, netbox, site):
         new = netbox.first("/dcim/devices/", {"serial": "SWAP-BBBB-0002"})
@@ -136,16 +125,13 @@ class TestChassisSwap:
         # The nested device serializer is brief and carries no serial, so the
         # link is checked by id against the devices themselves.
         new = netbox.first("/dcim/devices/", {"serial": "SWAP-BBBB-0002"})
-        old = netbox.first("/dcim/devices/", {"serial": "SWAP-AAAA-0001"})
         assert row["device"]["id"] == new["id"]
-        assert row["replaced_device"] is not None, (
-            "a chassis swap should point at the retained record"
-        )
-        assert row["replaced_device"]["id"] == old["id"]
+        assert row["replaced_device"] is None
 
     def test_the_old_serial_is_still_findable(self, netbox, site):
-        """The whole point — a contract matched on the old serial still resolves."""
-        assert netbox.count("/dcim/devices/", {"serial": "SWAP-AAAA-0001"}) == 1
+        assert netbox.count(REPLACEMENTS, {"old_serial": "SWAP-AAAA-0001"}) == 1
+        syncer(netbox).sync(scan_with("SWAP-BBBB-0002"), site["id"])
+        assert netbox.count(REPLACEMENTS, {"old_serial": "SWAP-AAAA-0001"}) == 1
 
     def test_filling_a_blank_serial_is_not_a_swap(self, netbox, site):
         """First successful read of a device that had no serial is not a
@@ -208,13 +194,13 @@ class TestModuleSwap:
 ISSUES = "/plugins/discovery/issues/"
 
 
-class TestDuplicateSerialIsRefused:
+class TestDuplicateSerialIsAllowedAndReported:
     """One device's record must never be written over by a different box.
 
     Matching on serial is what makes a renamed or re-addressed device resolve
     to the record it already has. It is also what would let a duplicated or
     mistyped serial pull a scan onto the wrong record and overwrite it. The
-    scanner cannot tell which device is "right", so it refuses and says so.
+    scanner cannot tell which device is "right", so it keeps both and reports it.
     """
 
     def other_site(self, netbox):
@@ -236,8 +222,8 @@ class TestDuplicateSerialIsRefused:
         after = netbox.get("/dcim/devices/%s/" % original["id"])
         assert after["name"] == "dup-original", "the existing record was renamed"
         assert after["site"]["id"] == site["id"], "the existing record was moved"
-        assert netbox.count("/dcim/devices/", {"serial": "SWAP-EEEE-0005"}) == 1, (
-            "no second device should have been created either"
+        assert netbox.count("/dcim/devices/", {"serial": "SWAP-EEEE-0005"}) == 2, (
+            "the duplicate serial must not prevent creation of a separate device"
         )
 
     def test_it_is_raised_where_someone_will_see_it(self, netbox, site):

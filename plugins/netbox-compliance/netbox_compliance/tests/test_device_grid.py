@@ -34,6 +34,7 @@ class GridTest(TestCase):
         for name, standard, result in (('sw1', self.ntp, 'compliant'), ('sw1', self.syslog, 'compliant'),
                                        ('sw2', self.ntp, 'non-compliant'), ('sw2', self.syslog, 'error')):
             ConfigCompliance.objects.create(device=self.devices[name], standard=standard, result=result,
+                                            standard_revision=standard.revisions.first(),
                                             last_checked=now)
 
         old = SoftwareVersion.objects.create(platform=self.ios, version='17.9.4a')

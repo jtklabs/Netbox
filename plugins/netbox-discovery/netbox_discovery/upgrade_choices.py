@@ -3,6 +3,7 @@ from netbox.choices import ChoiceSet
 
 class UpgradeOperationChoices(ChoiceSet):
     CHOICES = [('audit', 'Pre-upgrade audit', 'cyan'),
+               ('audit_config', 'Audit configuration standards (read-only)', 'teal'),
                ('stage', 'Stage image only', 'blue'),
                ('upgrade', 'Install upgrade', 'orange'),
                ('remediate', 'Remediate configuration', 'purple')]
@@ -27,5 +28,7 @@ class UpgradeStatusChoices(ChoiceSet):
 
 
 ACTIVE = ('claimed', 'running', 'recovery_required')
+READ_ONLY_OPERATIONS = ('audit', 'audit_config')
+CONFIG_OPERATIONS = ('remediate', 'audit_config')
 WAITING = ('pending', 'held')
 TERMINAL = ('completed', 'completed_with_warnings', 'failed', 'expired', 'cancelled')

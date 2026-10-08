@@ -309,7 +309,7 @@ def _standards_for(netbox, target, args):
     if args.only:
         wanted = {name.lower() for name in args.only}
         standards = [s for s in standards if s['name'].lower() in wanted]
-    return standards
+    return [standard for standard in standards if standard.get('check_type') != 'netops']
 
 
 def _report_standard(target, standard, evaluation, plan):
@@ -394,6 +394,7 @@ def build_report(outcome):
             items.append({
                 'device': outcome.target.name,
                 'standard': standard['name'],
+                **({'standard_id': standard['id'], 'revision': standard['revision']} if standard.get('revision') else {}),
                 'result': 'error',
                 'error_message': outcome.error[:500],
                 'checked_at': checked_at,
@@ -404,6 +405,7 @@ def build_report(outcome):
         item = {
             'device': outcome.target.name,
             'standard': standard['name'],
+            **({'standard_id': standard['id'], 'revision': standard['revision']} if standard.get('revision') else {}),
             'result': evaluation.result,
             'observed': evaluation.observed_text,
             'findings': evaluation.findings(),

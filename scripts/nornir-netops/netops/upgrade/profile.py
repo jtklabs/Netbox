@@ -64,6 +64,8 @@ class Profile:
     allow_active: bool = False
     ucs_backup: bool = True
     license_check_date: str = ""
+    # Only the post-upgrade running-config baseline comparison.
+    skip_running_config_check: bool = False
 
     @property
     def family(self):
@@ -112,7 +114,7 @@ class Profile:
         floor = FREE_SPACE_FLOOR.get(result.family, DEFAULT_FREE_SPACE_FLOOR)
         if type(result.minimum_free_bytes) is not int or result.minimum_free_bytes < floor:
             raise ValueError(f"minimum_free_bytes must reserve at least {floor} bytes for expansion")
-        for key in ("bundle_conversion_validated", "allow_active", "ucs_backup"):
+        for key in ("bundle_conversion_validated", "allow_active", "ucs_backup", "skip_running_config_check"):
             if type(getattr(result, key)) is not bool:
                 raise ValueError(f"{key} must be a boolean")
         for key in ("image_source", "volume", "license_check_date"):

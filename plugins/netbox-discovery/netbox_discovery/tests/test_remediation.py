@@ -17,6 +17,8 @@ from .test_upgrades import PROFILE
 
 class RemediationTest(TestCase):
     def setUp(self):
+        from netbox_compliance.tests.factories import feature_standards
+        feature_standards()
         self.user = get_user_model().objects.create_superuser('fix-admin', 'f@example.test', 'test-only')
         self.site = Site.objects.create(name='Fix lab', slug='fix-lab')
         self.site.tags.add(Tag.objects.create(name='poller-lab', slug='poller-lab'))
@@ -71,7 +73,10 @@ class RemediationTest(TestCase):
         for sequence, stage in enumerate(('precheck_complete', 'ready', 'completed'), start=1):
             job = queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': sequence,
                                                    'stage': stage, 'message': stage,
-                                                   'summary': {'features': {'ntp': 'changed'}}})
+                                                   'summary': {'features': {'ntp': 'changed'},
+                                                               'standards_revisions': [
+                                                                   {'standard_id': p['standard_id'], 'revision': p['revision']}
+                                                                   for p in job.standards_snapshot['revisions']]}})
         self.assertEqual(job.status, 'completed')
         self.assertEqual(job.summary['features'], {'ntp': 'changed'})
 
@@ -114,3 +119,91 @@ class RemediationTest(TestCase):
         self.assertEqual(response.status_code, 302)
         job.refresh_from_db()
         self.assertEqual(job.profile, {'features': ['ntp'], 'mode': 'add'})
+
+    def test_standards_are_pinned_and_a_changed_standard_blocks_ready(self):
+        from netbox_compliance.models import ConfigStandard
+        job = queue.schedule(self.user, {**self.data, 'filters': {'id': [self.devices[0].pk]}})[0]
+        self.assertEqual(job.standards_snapshot['document']['ntp']['servers'], ['192.0.2.10'])
+        job = queue.claim(self.user, self.poller, 1, True)[0]
+        standard = ConfigStandard.objects.get(name='NTP')
+        standard.definition_yaml = 'ntp:\n  servers: [192.0.2.11]'
+        standard.save()
+        with self.assertRaisesRegex(queue.QueueError, 'standard changed'):
+            queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                            'stage': 'ready', 'message': 'Apply'})
+        job.refresh_from_db()
+        self.assertIsNone(job.started_at)
+
+    def test_feature_checks_write_revision_aware_compliance(self):
+        from netbox_compliance.models import ConfigCompliance
+        queue.schedule(self.user, {**self.data, 'filters': {'id': [self.devices[0].pk]}})
+        job = queue.claim(self.user, self.poller, 1, True)[0]
+        queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                        'stage': 'precheck_complete', 'message': 'Checked',
+                                        'summary': {'compliance_results': {'ntp': 'non-compliant', 'syslog': 'compliant'}}})
+        result = ConfigCompliance.objects.get(device=job.device, standard__name='NTP')
+        self.assertEqual(result.result, 'non-compliant')
+        self.assertEqual(result.checked_revision, 1)
+
+    def test_old_worker_cannot_apply_local_standards(self):
+        queue.schedule(self.user, {**self.data, 'filters': {'id': [self.devices[0].pk]}})
+        job = queue.claim(self.user, self.poller, 1, True)[0]
+        with self.assertRaisesRegex(queue.QueueError, 'acknowledge'):
+            queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                            'stage': 'ready', 'message': 'Applying'})
+
+    def test_read_only_audit_claims_without_apply_and_records_revision_results(self):
+        from netbox_compliance.models import ConfigCompliance, ConfigStandard
+        for standard in ConfigStandard.objects.all():
+            standard.auto_remediable = False
+            standard.allow_enforce = False
+            standard.save()
+        data = {**self.data, 'operation': 'audit_config', 'profile': {'features': ['ntp'], 'mode': 'replace'}}
+        jobs = queue.schedule(self.user, data)
+        self.assertTrue(all(not job.groups and not job.waits_for for job in jobs))
+        job = queue.claim(self.user, self.poller, 1, False)[0]
+        with self.assertRaisesRegex(queue.QueueError, 'cannot authorize changes'):
+            queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                            'stage': 'ready', 'message': 'Not allowed'})
+        queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'sequence': 1,
+                                        'stage': 'completed_with_warnings', 'message': 'Read-only: NTP drift',
+                                        'summary': {'compliance_results': {'ntp': 'non-compliant'}}})
+        job.refresh_from_db()
+        self.assertIsNone(job.started_at)
+        self.assertEqual(job.status, 'completed_with_warnings')
+        result = ConfigCompliance.objects.get(device=job.device, standard__name='NTP')
+        self.assertEqual(result.result, 'non-compliant')
+        self.assertEqual(result.checked_revision, job.standards_snapshot['revisions'][0]['revision'])
+
+    def test_audit_form_selects_standards_and_reuses_remediation_profiles(self):
+        from netbox_discovery.models import DeviceTypeProfile, JobProfile
+        from netbox_discovery.upgrade_views import UpgradePlanForm, plan_initial
+        profile = JobProfile.objects.create(name='Time audit', kind='remediate',
+                                             plan={'features': ['ntp'], 'mode': 'replace'})
+        DeviceTypeProfile.objects.create(device_type=self.devices[0].device_type, remediation_profile=profile)
+        job = queue.schedule(self.user, {**self.data, 'profile': None, 'profile_source': 'model',
+                                         'operation': 'audit_config'})[0]
+        self.assertEqual(job.profile_name, profile.name)
+        self.assertEqual(plan_initial(job)['features'], ['ntp'])
+        form = UpgradePlanForm(data={'operation': 'audit_config', 'profile_source': 'custom',
+                                      'features': ['ntp'], 'remediation_mode': 'replace',
+                                      'scheduled_at': self.data['scheduled_at'],
+                                      'start_before': self.data['start_before']})
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data['profile'], profile.plan)
+
+    def test_audit_permissions_do_not_allow_switching_to_remediation(self):
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
+        user = get_user_model().objects.create_user('audit-only')
+        from netbox_compliance.models import ConfigStandard
+        for model, actions in ((Device, ['view']), (ConfigStandard, ['view']),
+                               (UpgradeJob, ['add', 'view', 'change', 'run'])):
+            perm = ObjectPermission.objects.create(name=f'audit-{model.__name__}', actions=actions)
+            perm.object_types.add(ContentType.objects.get_for_model(model))
+            perm.users.add(user)
+        job = queue.schedule(user, {**self.data, 'operation': 'audit_config'})[0]
+        with self.assertRaisesRegex(queue.QueueError, 'apply permission'):
+            queue.edit_pending(user, job.pk, {**self.data, 'last_updated': job.last_updated})
+        job.refresh_from_db()
+        self.assertEqual(job.operation, 'audit_config')

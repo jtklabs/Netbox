@@ -110,8 +110,21 @@ urlpatterns = [
          name='strippeddomain_changelog', kwargs={'model': StrippedDomain}),
 ]
 
-from . import command_views, upgrade_views
-from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+from . import command_views, upgrade_views, profile_views
+from .models import DeviceTypeProfile, JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+
+for route, model in (('job-profiles', JobProfile), ('model-profiles', DeviceTypeProfile)):
+    name = model._meta.model_name
+    view = model.__name__
+    urlpatterns += [
+        path(f'{route}/', getattr(profile_views, f'{view}ListView').as_view(), name=f'{name}_list'),
+        path(f'{route}/add/', getattr(profile_views, f'{view}EditView').as_view(), name=f'{name}_add'),
+        path(f'{route}/<int:pk>/', getattr(profile_views, f'{view}View').as_view(), name=name),
+        path(f'{route}/<int:pk>/edit/', getattr(profile_views, f'{view}EditView').as_view(), name=f'{name}_edit'),
+        path(f'{route}/<int:pk>/delete/', getattr(profile_views, f'{view}DeleteView').as_view(), name=f'{name}_delete'),
+        path(f'{route}/<int:pk>/changelog/', ObjectChangeLogView.as_view(),
+             name=f'{name}_changelog', kwargs={'model': model}),
+    ]
 
 urlpatterns += [
     path('command-outputs/<int:pk>/', command_views.CommandOutputRawView.as_view(), name='commandoutput_raw'),

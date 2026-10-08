@@ -122,7 +122,7 @@ def standards_for_device(device, on_date=None):
     return StandardResolver(on_date).for_device(device)
 
 
-def device_standard_rows(devices, on_date=None, standards=None):
+def device_standard_rows(devices, on_date=None, standards=None, user=None):
     """One row per (device, standard-in-scope) pair, whether or not it was checked.
 
     Rows are plain dicts because the report table mixes recorded results with
@@ -135,7 +135,9 @@ def device_standard_rows(devices, on_date=None, standards=None):
 
     records = ConfigCompliance.objects.filter(
         device__in=[d.pk for d in devices]
-    ).select_related('standard')
+    ).select_related('standard', 'standard_revision')
+    if user is not None:
+        records = records.restrict(user, 'view')
     by_pair = {(record.device_id, record.standard_id): record for record in records}
 
     rows = []
@@ -161,6 +163,8 @@ def device_standard_rows(devices, on_date=None, standards=None):
                 'last_checked': record.last_checked if record else None,
                 'is_stale': record.is_stale if record else False,
                 'needs_manual_fix': record.needs_manual_fix if record else False,
+                'checked_revision': record.checked_revision if record else None,
+                'current_revision': standard.revision,
             })
     return rows
 
@@ -194,6 +198,8 @@ def standard_rollup(rows):
             'unknown': 0,
             'error': 0,
             'exempt': 0,
+            'outdated': 0,
+            'stale': 0,
         })
         bucket['in_scope'] += 1
         status = row['status']
@@ -203,6 +209,10 @@ def standard_rollup(rows):
             bucket['non_compliant'] += 1
         elif status == ConfigComplianceStatusChoices.STATUS_ERROR:
             bucket['error'] += 1
+        elif status == ConfigComplianceStatusChoices.STATUS_OUTDATED:
+            bucket['outdated'] += 1
+        elif status == ConfigComplianceStatusChoices.STATUS_STALE:
+            bucket['stale'] += 1
         elif status in (
             ConfigComplianceStatusChoices.STATUS_EXEMPT,
             ConfigComplianceStatusChoices.STATUS_EXEMPT_EXPIRED,

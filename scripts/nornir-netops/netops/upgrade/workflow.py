@@ -400,22 +400,27 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
     while True:
         attempt += 1
         after = collect_after()
-        findings = checks.compare(before, after) + extra_findings(after)
+        skip_running_config = plan.get("approved_profile", {}).get("skip_running_config_check", False)
+        findings = checks.compare(before, after, skip_running_config_check=skip_running_config) + extra_findings(after)
         errors = [f for f in findings if f["severity"] == "error"]
         consecutive = 0 if errors else consecutive + 1
         reasons = checks.describe_findings(errors)
         seconds_left = max(0, int(deadline - time.monotonic()))
-        emit("validating", f"Comparison {attempt}: " + ("no differences from baseline" if not errors
+        clean_message = "enabled checks match baseline; running-config matching skipped" if skip_running_config else "no differences from baseline"
+        emit("validating", f"Comparison {attempt}: " + (clean_message if not errors
                                                         else f"{len(errors)} check(s) differ from baseline"),
              {"post": after, "findings": findings,
               "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
                                    "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
                                    "seconds_remaining": seconds_left,
+                                   "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})
         if consecutive >= 2:
             status = "completed_with_warnings" if findings else "completed"
             fields, attachment = comparison_report(reporter, host, before, after, findings, plan, status)
-            emit(status, "Target installed and baseline restored", {"upgrade_plan": plan, **fields}, attachment)
+            message = ("Target installed; enabled checks passed; running-config matching skipped"
+                       if skip_running_config else "Target installed and baseline restored")
+            emit(status, message, {"upgrade_plan": plan, **fields}, attachment)
             return Result(host=host, result={"status": status, "findings": findings}, changed=True)
         if time.monotonic() >= deadline:
             fields, attachment = comparison_report(reporter, host, before, after, findings, plan, "validation_failed")

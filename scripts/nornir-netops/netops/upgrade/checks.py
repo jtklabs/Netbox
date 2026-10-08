@@ -414,7 +414,7 @@ def health(snapshot):
     return values
 
 
-def compare(before, after):
+def compare(before, after, skip_running_config_check=False):
     findings = []
     for key, error in after["errors"].items():
         findings.append({"check": key, "severity": "error", "message": error})
@@ -433,6 +433,11 @@ def compare(before, after):
     if before.get("stack") != after.get("stack"):
         findings.append({"check": "stack", "severity": "error", "message": "member identity or readiness changed"})
     for key in ("config", "startup_config"):
+        if key == "config" and skip_running_config_check:
+            if key in before or key in after:
+                findings.append({"check": "config", "severity": "warning",
+                                 "message": "Running-config matching skipped by the job profile; configurations retained in the archive."})
+            continue
         a = normalized_config(before.get(key, ""), boot=True)
         b = normalized_config(after.get(key, ""), boot=True)
         if a != b:

@@ -19,7 +19,9 @@ class UpgradeJob(PrimaryModel):
                                related_name='upgrade_jobs')
     address = models.GenericIPAddressField(editable=False)
     device_name = models.CharField(max_length=64, editable=False)
-    profile = models.JSONField(help_text='Snapshot of the validated IOS XE upgrade profile')
+    profile = models.JSONField(help_text='Snapshot of the validated upgrade or remediation plan')
+    profile_name = models.CharField(max_length=100, blank=True, editable=False)
+    standards_snapshot = models.JSONField(default=dict, blank=True, editable=False)
     operation = models.CharField(max_length=16, choices=UpgradeOperationChoices, default='audit')
     scheduled_at = models.DateTimeField()
     start_before = models.DateTimeField(help_text='Latest time device changes may begin; ongoing recovery continues')
@@ -145,11 +147,11 @@ class PrestagePolicy(PrimaryModel):
 
     class Meta:
         ordering = ('device_type__manufacturer__name', 'device_type__model')
-        verbose_name = 'prestage policy'
-        verbose_name_plural = 'prestage policies'
+        verbose_name = 'image staging policy'
+        verbose_name_plural = 'automatic image staging'
 
     def __str__(self):
-        return f'Prestage {self.device_type}'
+        return f'Stage images for {self.device_type}'
 
     def get_absolute_url(self):
         return reverse('plugins:netbox_discovery:prestagepolicy', args=[self.pk])

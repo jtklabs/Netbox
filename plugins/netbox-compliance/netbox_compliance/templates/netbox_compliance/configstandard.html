@@ -11,9 +11,13 @@
         <div class="card-body">
           <table class="table table-hover attr-table">
             <tr><th>Name</th><td>{{ object.name }}</td></tr>
+            <tr><th>Revision</th><td>{{ object.revision }}</td></tr>
             <tr><th>Type</th>
               <td>{% badge object.get_check_type_display bg_color=object.get_check_type_color %}</td></tr>
             <tr><th>Description</th><td>{{ object.description|placeholder }}</td></tr>
+            {% if object.check_type == 'netops' %}
+            <tr><th>YAML</th><td><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ object.definition_yaml }}</pre></td></tr>
+            {% else %}
             <tr><th>Pattern</th><td><code>{{ object.match_pattern }}</code></td></tr>
             <tr><th>Expected</th>
               <td>
@@ -31,6 +35,7 @@
                   <span class="text-muted">Nothing may match the pattern</span>
                 {% endif %}
               </td></tr>
+            {% endif %}
             <tr><th>In force</th>
               <td>{{ object.valid_from }}{% if object.valid_to %} to {{ object.valid_to }}
                   {% else %} &mdash; current{% endif %}
@@ -89,6 +94,7 @@
             </div>
           {% endif %}
           <table class="table table-hover attr-table">
+            {% if object.check_type != 'netops' %}
             <tr><th>Add</th>
               <td>{% if object.add_template %}<code>{{ object.add_template }}</code>
                   {% else %}<span class="text-muted">&mdash;</span>{% endif %}</td></tr>
@@ -108,6 +114,7 @@
                   <span class="text-muted">Nothing</span>
                 {% endif %}
               </td></tr>
+            {% endif %}
             <tr><th>Notes</th><td>{{ object.remediation_notes|linebreaksbr|placeholder }}</td></tr>
           </table>
         </div>
@@ -152,4 +159,14 @@
     </div>
   </div>
   {% plugin_full_width_page object %}
+  <h3>Revision History</h3>
+  <div class="table-responsive">
+    <table class="table table-hover">
+      <thead><tr><th>Revision</th><th>Changed</th><th>Changed by</th></tr></thead>
+      <tbody>{% for revision in revisions %}<tr>
+        <td><a href="{% url 'plugins:netbox_compliance:standard_revision' pk=object.pk number=revision.number %}">v{{ revision.number }}</a></td>
+        <td>{{ revision.created }}</td><td>{{ revision.author|default:'System / migration' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table>
+  </div>
 {% endblock %}

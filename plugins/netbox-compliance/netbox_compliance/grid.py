@@ -34,6 +34,8 @@ CONFIG_OK = {
     ConfigStatus.STATUS_NON_COMPLIANT: False,
     ConfigStatus.STATUS_ERROR: False,
     ConfigStatus.STATUS_EXEMPT_EXPIRED: False,
+    ConfigStatus.STATUS_OUTDATED: False,
+    ConfigStatus.STATUS_STALE: False,
 }
 SOFTWARE_OK = {'compliant': True, 'non-compliant': False, 'exempt-expired': False}
 
@@ -105,11 +107,11 @@ def staged_cells(devices, preferred, running):
     return cells
 
 
-def config_cells(devices, standards=None):
+def config_cells(devices, standards=None, user=None):
     """Per device, the verdict for every configuration standard in scope, keyed by standard."""
     resolver = StandardResolver(standards=standards)
     cells, used = {}, {}
-    for row in device_standard_rows(devices, standards=resolver.standards):
+    for row in device_standard_rows(devices, standards=resolver.standards, user=user):
         standard, record = row['standard'], row['record']
         used[standard.pk] = standard
         title = f'{row["findings"]} finding(s)' if row['findings'] else ''
@@ -117,13 +119,14 @@ def config_cells(devices, standards=None):
             title = (title + '; ' if title else '') + f'checked {row["last_checked"]:%Y-%m-%d}'
         if row['is_stale']:
             title += ' (stale)'
+        title += f'; checked v{row["checked_revision"] or "?"}, current v{row["current_revision"]}'
         url = record.get_absolute_url() if record is not None else standard.get_absolute_url()
         cells[(row['device'].pk, standard.pk)] = cell(row['status_label'], row['status_color'],
                                                       CONFIG_OK.get(row['status']), url, title)
     return cells, sorted(used.values(), key=lambda standard: standard.name)
 
 
-def build(devices, standards=None, code_columns=True):
+def build(devices, standards=None, code_columns=True, user=None):
     """Columns and one row per device. Rows are dicts: device, cells (in column order), problems."""
     devices = list(devices)
     columns, lookups = [], []
@@ -135,7 +138,7 @@ def build(devices, standards=None, code_columns=True):
             staged = staged_cells(devices, preferred, running)
             columns.append({'key': STAGED, 'label': 'Code staged'})
             lookups.append(lambda device, cells=staged: cells.get(device.pk))
-    config, used = config_cells(devices, standards)
+    config, used = config_cells(devices, standards, user=user)
     for standard in used:
         columns.append({'key': f'standard-{standard.pk}', 'label': standard.name, 'standard': standard})
         lookups.append(lambda device, pk=standard.pk: config.get((device.pk, pk)))

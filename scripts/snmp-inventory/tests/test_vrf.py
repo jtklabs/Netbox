@@ -219,7 +219,9 @@ class RecordingSyncer:
     def __init__(self):
         self.calls = []
 
-    def sync(self, result, site_id, scanned_address="", tenant_id=None, vrf_id=None):
+    def sync(self, result, site_id, scanned_address="", tenant_id=None, vrf_id=None,
+             record_hardware_changes=True):
+        assert record_hardware_changes is False
         self.calls.append({"site": site_id, "tenant": tenant_id, "vrf": vrf_id})
 
     def flush_software_reports(self):

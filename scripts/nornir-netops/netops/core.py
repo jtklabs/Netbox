@@ -99,6 +99,9 @@ PLATFORM_ALIASES = {
     "f5-tmos": "f5_tmsh",
     "bigip": "f5_tmsh",
     "f5_ltm": "f5_tmsh",
+    "nxos": "cisco_nxos",
+    "nx-os": "cisco_nxos",
+    "cisco-nxos": "cisco_nxos",
 }
 
 # How each platform is told to persist the running config. Kept explicit rather
@@ -107,6 +110,7 @@ PLATFORM_ALIASES = {
 SAVE_COMMANDS = {
     "cisco_ios": "write memory",
     "arista_eos": "write memory",
+    "cisco_nxos": "copy running-config startup-config",
 }
 
 MODE_ADD = "add"

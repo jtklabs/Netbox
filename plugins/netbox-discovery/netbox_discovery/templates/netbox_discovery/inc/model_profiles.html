@@ -1,0 +1,15 @@
+{% load helpers %}
+<div class="card">
+  <h2 class="card-header">Job profiles</h2>
+  <div class="card-body">
+    {% if assignment %}
+    <table class="table attr-table">
+      <tr><th>Upgrade</th><td>{{ assignment.upgrade_profile|linkify }}</td></tr>
+      <tr><th>Remediation</th><td>{{ assignment.remediation_profile|linkify }}</td></tr>
+    </table>
+    <a href="{{ assignment.get_absolute_url }}">View assignment</a>
+    {% elif perms.netbox_discovery.add_devicetypeprofile %}
+    <a href="{% url 'plugins:netbox_discovery:devicetypeprofile_add' %}?device_type={{ object.pk }}"><i class="mdi mdi-plus"></i> Assign profiles</a>
+    {% else %}<p>No profiles assigned.</p>{% endif %}
+  </div>
+</div>

@@ -2,6 +2,7 @@
 import ipaddress
 import json
 import uuid
+from copy import deepcopy
 from datetime import timedelta
 
 from dcim.filtersets import DeviceFilterSet
@@ -12,8 +13,9 @@ from django.utils import timezone
 
 from django.db.models import Q
 
-from .models import DiscoveryPoller, UpgradeGroup, UpgradeJob
-from .upgrade_choices import ACTIVE, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, WAITING
+from .models import DeviceTypeProfile, DiscoveryPoller, JobProfile, UpgradeGroup, UpgradeJob
+from .upgrade_choices import (ACTIVE, CONFIG_OPERATIONS, READ_ONLY_OPERATIONS,
+                              REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, WAITING)
 from .upgrade_groups import GroupError, downstream_of, memberships, plan_waves
 from .utils import plugin_setting
 
@@ -23,7 +25,7 @@ class QueueError(ValueError):
 
 
 # Operations that take nothing out of service, so one failure does not hold the site.
-SITE_HOLD_EXEMPT = ('stage', 'remediate')
+SITE_HOLD_EXEMPT = ('stage', *CONFIG_OPERATIONS)
 
 
 def owners(device):
@@ -57,17 +59,20 @@ def validate_profile(profile, operation=None):
     # Reject scripts, credential fields and malformed structures at intake too.
     # Staging does not depend on the running release, so a staging profile may
     # leave starting_versions empty.
-    if operation == 'remediate':
+    if operation in CONFIG_OPERATIONS:
         return validate_remediation(profile)
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
-            'minimum_free_bytes', 'bundle_conversion_validated', 'image_source',
+            'minimum_free_bytes', 'bundle_conversion_validated', 'image_source', 'skip_running_config_check',
             # BIG-IP profiles; the worker's validator applies the family rules.
             'volume', 'allow_active', 'ucs_backup', 'license_check_date'}
-    required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup', 'license_check_date'}
+    required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup',
+                       'license_check_date', 'skip_running_config_check'}
     if not isinstance(profile, dict) or set(profile) - keys or required - set(profile):
         raise QueueError('Provide a complete upgrade profile with only supported profile fields.')
     if len(json.dumps(profile)) > 16000:
         raise QueueError('Upgrade profile is too large.')
+    if type(profile.get('skip_running_config_check', False)) is not bool:
+        raise QueueError('Profile skip_running_config_check must be a boolean.')
     for key in ('models', 'starting_versions'):
         optional = key == 'starting_versions' and operation == 'stage'
         if not isinstance(profile[key], list) or not (profile[key] or optional) or not all(isinstance(x, str) for x in profile[key]):
@@ -78,16 +83,22 @@ def validate_profile(profile, operation=None):
 
 
 def validate_remediation(profile):
-    """Features and a mode only: what to apply comes from each poller's standards.yaml."""
+    """Features and a mode; the queue pins the applicable NetBox standards separately."""
     features = {value for value, _ in REMEDIATION_FEATURES}
-    if not isinstance(profile, dict) or set(profile) != {'features', 'mode'}:
-        raise QueueError('A remediation names only its features and mode.')
+    if (not isinstance(profile, dict) or not {'features', 'mode'}.issubset(profile) or
+            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes'}):
+        raise QueueError('A remediation names its features, mode and optional ClearPass cluster-change approval.')
+    if type(profile.get('allow_clearpass_cluster_changes', False)) is not bool:
+        raise QueueError('ClearPass cluster-change approval must be true or false.')
     chosen = profile['features']
-    if (not isinstance(chosen, list) or not chosen or len(set(chosen)) != len(chosen)
+    if (not isinstance(chosen, list) or not chosen or not all(isinstance(item, str) for item in chosen)
+            or len(set(chosen)) != len(chosen)
             or any(feature not in features for feature in chosen)):
         raise QueueError('Choose at least one remediation feature.')
-    if profile['mode'] not in {value for value, _ in REMEDIATION_MODES}:
+    if not isinstance(profile['mode'], str) or profile['mode'] not in {value for value, _ in REMEDIATION_MODES}:
         raise QueueError('Remediation mode must be add or replace.')
+    if profile.get('allow_clearpass_cluster_changes') and 'ntp' not in chosen:
+        raise QueueError('ClearPass cluster-change approval requires the NTP standard.')
 
 
 def select_devices(user, filters):
@@ -105,17 +116,53 @@ def select_devices(user, filters):
     if not selected.is_valid():
         raise QueueError(str(selected.errors))
     devices = list(selected.qs.select_related('site__region', 'primary_ip4', 'primary_ip6',
-                                              'virtual_chassis').prefetch_related('tags')[:1001])
+                                              'virtual_chassis', 'device_type').prefetch_related('tags')[:1001])
     if not devices or len(devices) > 1000:
         raise QueueError('Selection must contain between 1 and 1000 devices.')
     return devices
 
 
+def resolve_profiles(user, data, devices):
+    """Resolve only visible defaults; freeze a separate plan for every device."""
+    source = data.get('profile_source') or ('custom' if data.get('profile') is not None else 'model')
+    kind = 'remediate' if data['operation'] in CONFIG_OPERATIONS else 'upgrade'
+    if source == 'custom':
+        validate_profile(data.get('profile'), data['operation'])
+        return {device.pk: (deepcopy(data['profile']), '') for device in devices}
+    if source not in ('model', 'saved'):
+        raise QueueError('Select model defaults, a saved profile, or custom settings.')
+    if data.get('profile') is not None:
+        raise QueueError('Custom settings cannot be combined with a saved profile or model defaults.')
+    profiles = JobProfile.objects.restrict(user, 'view').filter(kind=kind)
+    if source == 'saved':
+        selected = data.get('saved_profile')
+        profile = profiles.filter(pk=getattr(selected, 'pk', selected)).first()
+        if profile is None:
+            raise QueueError('Choose an accessible saved profile matching this operation.')
+        defaults = {device.device_type_id: profile.pk for device in devices}
+    else:
+        field = 'remediation_profile_id' if kind == 'remediate' else 'upgrade_profile_id'
+        defaults = dict(DeviceTypeProfile.objects.restrict(user, 'view').filter(
+            device_type_id__in={device.device_type_id for device in devices}).values_list('device_type_id', field))
+    available = {profile.pk: profile for profile in profiles.filter(pk__in=set(defaults.values()))}
+    resolved = {}
+    for device in devices:
+        profile = available.get(defaults.get(device.device_type_id))
+        if profile is None:
+            raise QueueError(f'{device}: no accessible {kind} profile assigned to model {device.device_type}.')
+        plan = profile.resolved_plan()
+        if kind == 'upgrade' and not DeviceTypeProfile.objects.restrict(user, 'view').filter(
+                device_type_id=device.device_type_id, upgrade_profile=profile).exists():
+            raise QueueError(f'{device}: profile {profile.name} is not assigned to model {device.device_type}.')
+        validate_profile(plan, data['operation'])
+        resolved[device.pk] = (plan, profile.name)
+    return resolved
+
+
 def prepare(user, data):
-    validate_profile(data['profile'], data['operation'])
-    if data['operation'] not in {'audit', 'stage', 'upgrade', 'remediate'}:
+    if data['operation'] not in {'audit', 'stage', 'upgrade', *CONFIG_OPERATIONS}:
         raise QueueError('Unsupported upgrade operation.')
-    if data['operation'] != 'audit' and not user.has_perm('netbox_discovery.apply_upgradejob'):
+    if data['operation'] not in READ_ONLY_OPERATIONS and not user.has_perm('netbox_discovery.apply_upgradejob'):
         raise QueueError('Scheduling changes requires apply permission on upgrade jobs.')
     if not timezone.is_aware(data['scheduled_at']) or not timezone.is_aware(data['start_before']):
         raise QueueError('Schedule timestamps must include a time zone.')
@@ -123,7 +170,9 @@ def prepare(user, data):
         raise QueueError('Start-before must be in the future and after the scheduled start.')
     preferred = (data.get('poller') or '').lower().removeprefix(plugin_setting('poller_tag_prefix'))
     rows = []
-    for device in select_devices(user, data['filters']):
+    devices = select_devices(user, data['filters'])
+    profiles = resolve_profiles(user, data, devices)
+    for device in devices:
         if device.virtual_chassis_id and device.virtual_chassis.master_id != device.pk:
             raise QueueError(f'{device}: select only the virtual chassis master (one job per stack).')
         candidates = owners(device)
@@ -133,11 +182,34 @@ def prepare(user, data):
         poller = DiscoveryPoller.objects.filter(name=chosen).first()
         if poller and poller.tenant_id and poller.tenant_id != device.tenant_id:
             raise QueueError(f'{device}: poller tenant does not match the device.')
-        rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device)})
+        plan, profile_name = profiles[device.pk]
+        standards_snapshot = {}
+        if data['operation'] in CONFIG_OPERATIONS:
+            from django.apps import apps
+            if not apps.is_installed('netbox_compliance'):
+                raise QueueError('Scheduled remediation requires the Config Compliance plugin and versioned standards.')
+            from netbox_compliance.definitions import snapshot_for_device
+            from django.core.exceptions import ValidationError
+            try:
+                standards_snapshot = snapshot_for_device(user, device, plan['features'], plan['mode'],
+                                                         audit=data['operation'] == 'audit_config')
+            except ValidationError as exc:
+                raise QueueError('; '.join(exc.messages)) from None
+            if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:
+                from .clearpass_cluster import snapshot
+                applying = data['operation'] == 'remediate'
+                if applying and not plan.get('allow_clearpass_cluster_changes'):
+                    raise QueueError('Enable Allow ClearPass cluster-wide changes on the job/profile before scheduling remediation.')
+                standards_snapshot['clearpass_cluster'] = snapshot(user, device, apply=applying)
+            if device.platform and device.platform.slug == 'arubaos' and 'ntp' in plan['features']:
+                from .mobility_conductor import snapshot
+                standards_snapshot['mobility_conductor'] = snapshot(user, device)
+        rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device),
+                     'profile': plan, 'profile_name': profile_name, 'standards_snapshot': standards_snapshot})
     devices = [row['device'] for row in rows]
     # A configuration push takes nothing out of service, so redundancy groups
     # and dependencies do not order it.
-    ordered = data['operation'] != 'remediate'
+    ordered = data['operation'] not in CONFIG_OPERATIONS
     groups = memberships(devices) if ordered else {}
     downstream = downstream_of(devices) if ordered else {}
     for row in rows:
@@ -159,7 +231,8 @@ def schedule(user, data):
         poller, _ = DiscoveryPoller.objects.get_or_create(name=row['poller_name'])
         job = UpgradeJob(device=row['device'], device_name=row['device'].name,
                          address=row['address'], poller=poller, batch_id=batch,
-                         profile=data['profile'], operation=data['operation'],
+                         profile=row['profile'], profile_name=row['profile_name'], operation=data['operation'],
+                         standards_snapshot=row['standards_snapshot'],
                          scheduled_at=data['scheduled_at'], start_before=data['start_before'],
                          requested_by=user, description=data.get('description', ''),
                          groups=row['groups'], waits_for=row['waits_for'], planned_wave=row['wave'])
@@ -167,7 +240,7 @@ def schedule(user, data):
         job.save()
         if not UpgradeJob.objects.restrict(user, 'add').filter(pk=job.pk).exists():
             raise QueueError('A selected device is outside your schedule permissions.')
-        if job.operation != 'audit' and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=job.pk).exists():
+        if job.operation not in READ_ONLY_OPERATIONS and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=job.pk).exists():
             raise QueueError('A selected device is outside your apply permissions.')
         jobs.append(job)
     return jobs
@@ -217,19 +290,22 @@ def edit_pending(user, pk, data):
         raise QueueError('Only pending jobs can be edited. This job has already been claimed or closed.')
     if data['last_updated'] != job.last_updated:
         raise QueueError('This job changed while the form was open. Reload the page before editing again.')
-    if job.operation != 'audit' and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
+    if job.operation not in READ_ONLY_OPERATIONS and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
         raise QueueError('Editing staged-image or upgrade jobs requires apply permission.')
     check_target(job)
     # Reuse scheduling validation and device visibility without retargeting the job.
-    prepare(user, {**data, 'filters': {'id': [job.device_id]}, 'poller': job.poller.name})
+    rows = prepare(user, {**data, 'filters': {'id': [job.device_id]}, 'poller': job.poller.name})
     job.snapshot()
-    for field in ('operation', 'scheduled_at', 'start_before', 'profile', 'description'):
+    job.profile = rows[0]['profile']
+    job.profile_name = rows[0]['profile_name']
+    job.standards_snapshot = rows[0]['standards_snapshot']
+    for field in ('operation', 'scheduled_at', 'start_before', 'description'):
         setattr(job, field, data[field])
     job.full_clean()
     job.save()
     if not UpgradeJob.objects.restrict(user, 'change').filter(pk=pk).exists():
         raise QueueError('The updated job is outside your change permissions.')
-    if job.operation != 'audit' and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
+    if job.operation not in READ_ONLY_OPERATIONS and not UpgradeJob.objects.restrict(user, 'apply').filter(pk=pk).exists():
         raise QueueError('The updated job is outside your apply permissions.')
     return job
 
@@ -345,7 +421,7 @@ def claim(user, poller, limit, apply):
     jobs = []
     candidates = qs.filter(status='pending', scheduled_at__lte=now, start_before__gt=now)
     if not apply:
-        candidates = candidates.filter(operation='audit')
+        candidates = candidates.filter(operation__in=READ_ONLY_OPERATIONS)
     # Per-device locks also serialize separate schedules for the same switch.
     # skip_locked keeps an overlapping minute check-in cheap.
     for job in candidates.select_for_update(of=('self',), skip_locked=True).order_by('scheduled_at', 'pk')[:1000]:
@@ -377,6 +453,7 @@ def claim(user, poller, limit, apply):
 def assignment(job):
     return {'id': job.pk, 'device_id': job.device_id, 'device': job.device_name,
             'hostname': job.address, 'profile': job.profile, 'operation': job.operation,
+            'standards_snapshot': job.standards_snapshot,
             'claim_token': str(job.claim_token), 'batch_id': str(job.batch_id),
             'scheduled_at': job.scheduled_at.isoformat(), 'start_before': job.start_before.isoformat()}
 
@@ -403,11 +480,44 @@ def report(user, pk, data):
         return job
     stage = data['stage']
     if stage == 'ready' and job.started_at is None:
-        if job.operation == 'audit':
+        if job.operation in READ_ONLY_OPERATIONS:
             raise QueueError('An audit cannot authorize changes.')
         if job.status != 'claimed' or not job.scheduled_at <= now < job.start_before:
             raise QueueError('Start window closed or claim is no longer active.')
         check_target(job)
+        if job.operation == 'remediate':
+            from netbox_compliance.models import ConfigStandard
+            if not job.standards_snapshot:
+                raise QueueError('Re-create this job with versioned NetBox standards before applying changes.')
+            if (job.standards_snapshot.get('clearpass_cluster') or
+                    (job.device.platform and job.device.platform.slug == 'aruba-clearpass' and
+                     'ntp' in job.profile.get('features', []))):
+                from .clearpass_cluster import snapshot
+                pinned_cluster = job.standards_snapshot.get('clearpass_cluster')
+                if (not job.profile.get('allow_clearpass_cluster_changes') or not job.requested_by or
+                        not pinned_cluster or snapshot(job.requested_by, job.device, apply=True) != pinned_cluster):
+                    raise QueueError('ClearPass cluster scope or approval changed; create a new schedule.')
+                if data.get('summary', {}).get('clearpass_cluster') != pinned_cluster:
+                    raise QueueError('Worker did not acknowledge the approved ClearPass cluster; update the worker.')
+            if (job.standards_snapshot.get('mobility_conductor') or
+                    (job.device.platform and job.device.platform.slug == 'arubaos' and
+                     'ntp' in job.profile.get('features', []))):
+                from .mobility_conductor import snapshot
+                pinned_conductor = job.standards_snapshot.get('mobility_conductor')
+                if (not pinned_conductor or not job.requested_by or
+                        not job.device.platform or job.device.platform.slug != 'arubaos' or
+                        snapshot(job.requested_by, job.device) != pinned_conductor):
+                    raise QueueError('Mobility Conductor assignment changed; create a new schedule.')
+                if data.get('summary', {}).get('mobility_conductor') != pinned_conductor:
+                    raise QueueError('Worker did not acknowledge the pinned Mobility Conductor; update the worker.')
+            for pinned in job.standards_snapshot['revisions']:
+                standard = ConfigStandard.objects.filter(pk=pinned['standard_id'], revision=pinned['revision']).first()
+                if standard is None or not standard.is_active or not standard.applies_to(job.device):
+                    raise QueueError('A standard changed or left scope after scheduling; create a new schedule.')
+            expected = [{'standard_id': pinned['standard_id'], 'revision': pinned['revision']}
+                        for pinned in job.standards_snapshot['revisions']]
+            if data.get('summary', {}).get('standards_revisions') != expected:
+                raise QueueError('Worker did not acknowledge the pinned standards; update the worker before applying changes.')
         job.status, job.started_at = 'running', now
     outcome = {
         'already_current': 'completed', 'dry_run_complete': 'completed', 'staged': 'completed',
@@ -433,6 +543,9 @@ def report(user, pk, data):
     # Bounded event history; every event is retained in the remote archive.
     job.events = (job.events + [event])[-500:]
     job.save()
+    if job.operation in CONFIG_OPERATIONS and job.standards_snapshot:
+        from netbox_compliance.job_results import record_job_results
+        record_job_results(job, data.get('summary', {}), now)
     if outcome in ('failed', 'recovery_required'):
         hold_related(job)
     return job

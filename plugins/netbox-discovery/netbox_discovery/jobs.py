@@ -7,7 +7,7 @@ class PrestageJob(JobRunner):
     """Recurring image prestage from the enabled prestage policies — Operations > Jobs."""
 
     class Meta:
-        name = 'Upgrade image prestage'
+        name = 'Automatic image staging'
 
     def run(self, *args, **kwargs):
         return upgrade_prestage.run(logger=self.logger.info)

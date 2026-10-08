@@ -103,8 +103,10 @@ def software_section(before, after):
     return lines + [""]
 
 
-def config_section(before, after):
+def config_section(before, after, skip_running_config_check=False):
     lines = ["## Running configuration", ""]
+    if skip_running_config_check:
+        lines += ["Running-config matching was skipped by the job profile. Differences below are informational; other checks remain enabled.", ""]
     old = checks.normalized_config(before.get("config", ""), boot=True)
     new = checks.normalized_config(after.get("config", ""), boot=True)
     diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(), fromfile="before", tofile="after", lineterm="", n=2))
@@ -190,7 +192,7 @@ def build(host, before, after, findings, plan, status):
              f"Errors ({len(errors)}):"] + [f"- {checks.describe_finding(f)}" for f in errors] + ["", f"Warnings ({len(warnings)}):"] + [
              f"- {f['check']}: {f.get('message', f.get('interface', ''))}" for f in warnings] + [""]
     lines += software_section(before, after)
-    lines += config_section(before, after)
+    lines += config_section(before, after, plan.get('approved_profile', {}).get('skip_running_config_check', False))
     lines += delta_section("Tables", before.get("tables", {}), after.get("tables", {}))
     lines += delta_section("Routing neighbors", before.get("routing", {}), after.get("routing", {}))
     lines += health_section(before, after)

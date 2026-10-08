@@ -135,8 +135,8 @@ def test_a_display_name_resolves_the_same_as_its_slug():
 
 def test_a_platform_netmiko_cannot_drive_is_still_named():
     """Named rather than blank: blank means autodetect, which spends a login
-    finding out what NetBox already told us. Named, the feature stops first
-    with 'has no ntp support' and never dials."""
+    finding out what NetBox already told us. ClearPass NTP uses its own generic
+    SSH shell adapter; other features can reject the named unsupported platform."""
     assert platform_of({"platform": {"slug": "aruba-clearpass"}}) == "aruba_clearpass"
 
 

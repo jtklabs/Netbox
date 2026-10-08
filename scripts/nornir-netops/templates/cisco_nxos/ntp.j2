@@ -1,0 +1,20 @@
+{% for entry in remove if entry.data.get('before_add') %}
+no {{ entry.line }}
+{% endfor %}
+{% for key in add %}
+{% set item = entries[key] %}
+{% if item.kind == 'source' %}
+ntp source-interface {{ item.source }}
+{% elif item.kind == 'key' %}
+ntp authentication-key {{ item.id }} {{ item.type }} {{ item.material }}
+{% elif item.kind == 'trusted-key' %}
+ntp trusted-key {{ item.id }}
+{% elif item.kind == 'authenticate' %}
+ntp authenticate
+{% else %}
+ntp server {{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if vrf %} use-vrf {{ vrf }}{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
+{% endif %}
+{% endfor %}
+{% for entry in remove if not entry.data.get('before_add') %}
+no {{ entry.line }}
+{% endfor %}

@@ -4,6 +4,7 @@ from ipam.api.serializers import PrefixSerializer, VRFSerializer
 from tenancy.api.serializers import TenantSerializer
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
+from .profiles import DeviceTypeProfileSerializer, JobProfileSerializer
 
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
@@ -16,6 +17,8 @@ from netbox_discovery.models import (
 )
 
 __all__ = (
+    'DeviceTypeProfileSerializer',
+    'JobProfileSerializer',
     'StrippedDomainSerializer',
     'DiscoveryPollerSerializer',
     'DiscoveryRuleSerializer',
