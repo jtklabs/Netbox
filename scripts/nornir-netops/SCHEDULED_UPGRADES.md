@@ -80,11 +80,11 @@ A closed job (completed, failed, start window missed or cancelled) offers **Re-q
 
 Operations:
 
-WS-C3650 devices use the same audit, staging and upgrade operations with their
-own assigned upgrade profile and `cat3k_caa` image. Deploy a worker with C3650
+WS-C3650 and WS-C3850 devices use the same audit, staging and upgrade operations
+with a separate profile for each hardware family and a `cat3k_caa` image. Deploy a worker with C3650/C3850
 support before scheduling these jobs; no new profile fields or database
 migrations are required. Exact licensed model assignments are checked against
-each stack member's inventory PID. See [C3650 support and release gates](UPGRADES.md)
+each stack member's inventory PID. See [C3650/C3850 support and release gates](UPGRADES.md)
 before choosing the starting/target releases.
 
 | Operation | What the remote does | Worker needs `--apply` |

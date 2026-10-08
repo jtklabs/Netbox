@@ -76,11 +76,14 @@ def normalized_config(text, boot=False):
 
 
 def software(text):
-    rows = re.findall(r"(?m)^\s*\*?\s*(\d+)\s+\d+\s+(C\S+)\s+(\d+\.\d+\.\d+[a-z]?)\s+\S+\s+(INSTALL|BUNDLE)\s*$", text)
+    rows = re.findall(r"(?m)^[ \t]*\*?[ \t]*(\d+)[ \t]+\d+[ \t]+((?:WS-)?C\S+)[ \t]+(\d+\.\d+\.\d+[a-z]?)[ \t]+\S+[ \t]+(INSTALL|BUNDLE)[ \t]*\r?$", text)
     if not rows:
         raise ValueError("show version: no complete per-member model/version/mode table")
     if len({r[0] for r in rows}) != len(rows):
         raise ValueError("show version: duplicate member IDs")
+    candidates = re.findall(r"(?m)^[ \t]*\*?[ \t]*(\d+)[ \t]+\d+[ \t]+\S+", text)
+    if Counter(candidates) != Counter(r[0] for r in rows):
+        raise ValueError("show version: incomplete or unrecognized member rows")
     return {number: {"model": model, "version": release, "mode": mode}
             for number, model, release, mode in rows}
 
@@ -304,6 +307,17 @@ def collect_staging(read, progress):
             snapshot[key] = parser(understood(command, output))
         except Exception as exc:
             snapshot["errors"][key] = str(exc)
+    # 3650/3850 show-version models omit the license suffix in inventory PIDs.
+    # Read the exact chassis identity for saved NetBox model assignments.
+    if any(row["model"].startswith(("WS-C3650-", "WS-C3850-")) for row in snapshot.get("software", {}).values()):
+        command, template, fields, header, _ = TABLES["inventory"]
+        progress(command)
+        try:
+            output = read(command)
+            snapshot["raw"][command] = output
+            snapshot["tables"] = {"inventory": table(command, template, fields, header, output)}
+        except Exception as exc:
+            snapshot["errors"]["inventory"] = str(exc)
     snapshot["metrics"] = {"counts": {"stack_members": len(snapshot.get("stack", {}))}}
     return snapshot
 

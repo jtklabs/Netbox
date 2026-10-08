@@ -31,6 +31,38 @@ def test_profile_snapshot_is_validated_without_mutating_api_data(job):
     assert job == original
 
 
+@pytest.mark.parametrize('operation', ['audit', 'stage', 'upgrade'])
+@pytest.mark.parametrize('model,family', [('WS-C3650-48PS-S', 'C3650'), ('WS-C3850-48P-S', 'C3850')])
+def test_cat3k_netbox_profile_assignment(job, operation, model, family):
+    job['operation'] = operation
+    job['profile'].update(models=[model], starting_versions=['16.12.13'],
+                          target_version='16.12.14', image='cat3k_caa-universalk9.16.12.14.SPA.bin')
+    if operation == 'stage':
+        job['profile']['starting_versions'] = []
+    original = copy.deepcopy(job)
+    profile = scheduler.validate_assignment(job, operation != 'audit')
+    assert profile.family == family
+    assert scheduler.platform_for(job['profile']) == 'cisco_ios'
+    assert job == original
+
+
+@pytest.mark.parametrize('operation', ['audit', 'stage', 'upgrade'])
+@pytest.mark.parametrize('release', ['17.12.06', '17.12.6'])
+def test_c9300_171206_netbox_profile_assignment(job, operation, release):
+    job['operation'] = operation
+    job['profile'].update(models=['C9300-48P'], starting_versions=[release],
+                          target_version='17.12.7', image='cat9k_iosxe.17.12.07.SPA.bin')
+    if operation == 'stage':
+        job['profile'].update(starting_versions=[], target_version=release,
+                              image='cat9k_iosxe.17.12.06.SPA.bin')
+    original = copy.deepcopy(job)
+    profile = scheduler.validate_assignment(job, operation != 'audit')
+    assert profile.family == 'C9300'
+    assert profile.release(release) == profile.release('17.12.6')
+    assert scheduler.platform_for(job['profile']) == 'cisco_ios'
+    assert job == original
+
+
 @pytest.mark.parametrize('field,value', [('operation', 'shell'), ('hostname', '192.0.2.4;reload'),
                                         ('id', True), ('claim_token', 'invalid')])
 def test_malformed_assignment_is_rejected(job, field, value):

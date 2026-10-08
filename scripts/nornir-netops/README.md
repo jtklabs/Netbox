@@ -49,7 +49,7 @@ re-run with --apply to push the commands above
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
 | `discover-ntp` | Read NTP source/VRF over SSH; optionally bootstrap NetBox selections | IOS/IOS-XE, NX-OS, EOS |
 | [`collect`](#collect-show-commands-into-netbox) | Run each platform's show commands read-only and file the outputs on the NetBox device page | every platform in `commands.yaml` |
-| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, EOS boot-image reload or BIG-IP volume install, reboot and operational comparison | C9350 and C9300 family, `arista_eos`, `f5_tmsh` |
+| [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, EOS boot-image reload or BIG-IP volume install, reboot and operational comparison | C9350, C9300 family, WS-C3650 and WS-C3850, `arista_eos`, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
 
 What each of them should converge on comes from

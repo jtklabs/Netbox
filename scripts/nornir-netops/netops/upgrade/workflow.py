@@ -35,6 +35,19 @@ def device_lock(directory, address):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def approved_member(number, model, snapshot, profile):
+    if model in profile.models:
+        return True
+    if not model.startswith(("WS-C3650-", "WS-C3850-")):
+        return False
+    # A licensed NetBox PID must match this member's exact inventory PID;
+    # never strip suffixes from the approved list and broaden its scope.
+    pids = [row["pid"] for row in snapshot.get("tables", {}).get("inventory", [])
+            if row["name"] == f"Switch {number}"]
+    return (len(pids) == 1 and pids[0] in profile.models
+            and re.sub(r"-[LSE]$", "", pids[0]) == model)
+
+
 def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=False):
     blockers = [f"{key}: {value}" for key, value in snapshot["errors"].items()]
     members = snapshot.get("software", {})
@@ -47,7 +60,7 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
     modes = {row["mode"] for row in members.values()}
     if len(versions) != 1 or len(modes) != 1:
         blockers.append("mixed or missing stack versions/boot modes")
-    if any(row["model"] not in profile.models for row in members.values()):
+    if any(not approved_member(number, row["model"], snapshot, profile) for number, row in members.items()):
         blockers.append("hardware PID is not approved by this profile")
     target = version(profile.target_version)
     at_target = versions == {target}
@@ -138,6 +151,13 @@ class Device:
 
     def answer(self, tail, reload):
         """The reply to a recognized prompt at the end of the dialogue, or None."""
+        if reload and re.search(
+            r"System configuration has been modified\.\s*"
+            r"Press Yes\(y\) to save the configuration and proceed\.\s*"
+            r"Press No\(n\) for proceeding without saving the configuration\.\s*"
+            r"Press Quit\(q\) to exit, you may save configuration and re-enter the command\.\s*"
+            r"\[y/n/q\]\s*$", tail, re.I):
+            return "y\n"
         if reload and re.search(r"(?:Do you want to proceed|proceed with reload|reload of the system).*?\[y/n\]\s*[:?]?\s*$", tail, re.I | re.S):
             return "y\n"
         if reload and re.search(r"Please confirm you have changed boot config to flash:packages\.conf\s*\[y/n\]\s*$", tail, re.I):
@@ -171,7 +191,7 @@ class Device:
                 if reply is not None:
                     conn.write_channel(reply)
                     answered = len(transcript)
-                elif re.search(r"(?:\[y/n\]|\[confirm\]|\[yes/no[^\]]*\]|[Pp]assword:|[Uu]sername:)\s*[:?]?\s*$", tail):
+                elif re.search(r"(?:\[y/n(?:/q)?\]|\[confirm\]|\[yes/no[^\]]*\]|[Pp]assword:|[Uu]sername:)\s*[:?]?\s*$", tail):
                     raise ValueError("unrecognized interactive prompt; manual inspection required")
                 if re.search(r"(?:^|\n)" + re.escape(prompt) + r"\s*$", transcript):
                     if reload and not self.reload_success.search(transcript):

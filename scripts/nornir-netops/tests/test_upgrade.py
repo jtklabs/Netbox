@@ -333,6 +333,68 @@ def test_apply_success_and_repeat_baseline(profile, options, fake_device):
     assert stages[-1] == "completed_with_warnings"
 
 
+@pytest.mark.parametrize("model", ["C9300-48P", "C9300L-48P-4X", "C9300X-48HX"])
+@pytest.mark.parametrize("release", ["17.12.06", "17.12.6"])
+@pytest.mark.parametrize("operation", ["dry_run", "upgrade", "stage_only", "already_current"])
+def test_c9300_171206_workflows(profile, options, fake_device, monkeypatch, tmp_path, model, release, operation):
+    from dataclasses import replace
+    # 17.12.7 is an offline test target, not a selected production release.
+    current = operation == "already_current"
+    target, image_version = ("17.12.6", "17.12.06") if current else ("17.12.7", "17.12.07")
+    image = f"cat9k_iosxe.{image_version}.SPA.bin"
+    profile = replace(profile, models=(model,), starting_versions=("17.12.5" if current else "17.12.06",),
+                      target_version=target, image=image, image_source=f"http://images.example.com/{image}")
+    profile = Profile.load(write_profile_file(profile, tmp_path))
+    assert profile.family == "C9300"
+    options.apply = operation != "dry_run"
+    options.stage_only = operation == "stage_only"
+
+    def output(version):
+        return {cmd: value.replace("C9300-48P", model) for cmd, value in transcript(version).items()}
+
+    class C9300Device(fake_device):
+        raw = output(release)
+        image_exists = operation != "stage_only"
+
+        def read(self, command):
+            if command == f"dir flash:{image}":
+                return (f"1 -rw- 1000 Oct 8 2026 {image}" if self.image_exists else
+                        "%Error opening flash:image (No such file or directory)")
+            return super().read(command)
+
+        def interactive(self, command, timeout, reload=False):
+            super().interactive(command, timeout, reload)
+            if command.startswith("copy "):
+                self.image_exists = True
+
+        def wait_for_target(self, profile):
+            # Cisco can zero-pad both the running and committed version.
+            self.raw = output(image_version)
+
+    monkeypatch.setattr(workflow, "Device", C9300Device)
+    result, reporter = run_device(profile, options)
+    device = C9300Device.instances[-1]
+    stages = [call.args[1] for call in reporter.emit.call_args_list]
+    assert not result.failed
+    if operation == "upgrade":
+        assert device.mutations == ["write memory", "write memory",
+                                    f"install add file flash:{image} activate commit"]
+        assert stages.count("validating") == 2
+    else:
+        expected = {"dry_run": ([], "dry_run_complete"),
+                    "stage_only": ([f"copy {profile.image_source} flash:{image}"], "staged"),
+                    "already_current": (["write memory"], "already_current")}
+        mutations, stage = expected[operation]
+        assert device.mutations == mutations and stages[-1] == stage
+        device.connection.send_config_set.assert_not_called()
+
+
+def test_c9300_171206_still_requires_profile_approval(profile):
+    # Version normalization must not admit an unapproved starting release.
+    plan = workflow.preflight(baseline(transcript("17.12.06")), profile)
+    assert any("starting version" in b for b in plan["blockers"])
+
+
 def test_bad_checksum_blocks_all_writes(profile, options, fake_device):
     options.apply = True
     fake_device.digest = "b" * 32
@@ -1027,6 +1089,245 @@ def test_c9350_26x_profile(c9350_profile, tmp_path):
                        starting_versions=("26.1.1a",), target_version="26.1.2",
                        image="cisco9k_iosxe.26.1.02.SPA.bin")
     assert Profile.load(write_profile_file(approved, tmp_path)) == approved
+
+
+@pytest.fixture(params=["WS-C3650-48PS-S", "WS-C3850-48P-S"])
+def cat3k_profile(profile, request):
+    from dataclasses import replace
+    # Existing published releases exercise the procedure; this is not approval
+    # of a production upgrade path or a claim that a newer release exists.
+    return replace(profile, models=(request.param,), starting_versions=("16.12.13",),
+                   target_version="16.12.14", image="cat3k_caa-universalk9.16.12.14.SPA.bin")
+
+
+def _cat3k_transcript(model, release="16.12.13", mode="INSTALL", members=2):
+    """Synthetic 3650/3850 stack, including distinct software models/inventory PIDs."""
+    raw = transcript(release, mode)
+    raw["show version"] = f"Cisco IOS XE Software, Version {release}\nSwitch Ports Model SW Version SW Image Mode\n"
+    raw["show switch"] = "Switch/Stack Mac Address : 0011.2233.4455\nSwitch# Role Mac Address Priority Version State\n"
+    raw["show inventory"] = ""
+    raw["show install summary"] = ""
+    for member in range(1, members + 1):
+        raw["show version"] += f"{'*' if member == 1 else ' '} {member} 52 {model} {release} CAT3K_CAA-UNIVERSALK9 {mode}\n"
+        raw["show switch"] += f"{'*' if member == 1 else ' '} {member} {'Active' if member == 1 else 'Standby'} 0011.2233.445{member} 15 V04 Ready\n"
+        raw["show inventory"] += f'NAME: "Switch {member}", DESCR: "{model}-S"\nPID: {model}-S , VID: V04 , SN: FOC1234567{member}\n'
+        raw["show install summary"] += f"[ Switch {member} ] Installed Package(s) Information:\nType St Filename/Version\nIMG C {release}.0.1\nAuto abort timer: inactive\n"
+    for command in ("show running-config", "show startup-config"):
+        raw[command] = raw[command].replace("version 17.9", "version 16.12")
+        if mode == "BUNDLE":
+            raw[command] = raw[command].replace("flash:packages.conf", f"flash:cat3k_caa-universalk9.{release}.SPA.bin")
+    return raw
+
+
+@pytest.fixture
+def cat3k_transcript(cat3k_profile):
+    from functools import partial
+    return partial(_cat3k_transcript, cat3k_profile.models[0].rsplit("-", 1)[0])
+
+
+@pytest.mark.parametrize("model", ["WS-C3650-48PS", "WS-C3650-48PS-L", "WS-C3650-48PS-S", "WS-C3650-48PS-E", "WS-C3650-12X48UQ-S", "WS-C3850-48P", "WS-C3850-48P-L", "WS-C3850-48P-S", "WS-C3850-48P-E", "WS-C3850-24XS-S"])
+@pytest.mark.parametrize("variant", ["universalk9", "universalk9ldpe"])
+def test_cat3k_profile_and_image_packages(cat3k_profile, tmp_path, model, variant):
+    from dataclasses import replace
+    profile = replace(cat3k_profile, models=(model,), image=f"cat3k_caa-{variant}.16.12.14.SPA.bin")
+    loaded = Profile.load(write_profile_file(profile, tmp_path))
+    assert loaded == profile and loaded.family == model.split("-")[1]
+
+
+@pytest.mark.parametrize("changes", [
+    {"models": ("WS-C3750-48P",)},
+    {"models": ("WS-C3650-48PS-S", "WS-C3850-48P-S")},
+    {"models": ("WS-C3850-*",)},
+    {"models": ("WS-C3850-48P-S", "C9300-48P")},
+    {"models": ("WS-C3850-48P-S", "C9350-48P")},
+    {"models": ("WS-C3650-*",)},
+    {"models": ("WS-C3650-48PS-S", "C9300-48P")},
+    {"models": ("WS-C3650-48PS-S", "C9350-48P")},
+    {"image": "cat9k_iosxe.16.12.14.SPA.bin"},
+    {"image": "cisco9k_iosxe.16.12.14.SPA.bin"},
+    {"image": "cat3k_caa-universalk9.16.12.13.SPA.bin"},
+    {"image": "cat3k_caa-universalk9_npe.16.12.14.SPA.bin"},
+    {"starting_versions": ("16.6.8",)},
+    {"starting_versions": ("16.8.1",)},
+    {"starting_versions": ("03.06.07E",)},
+    {"starting_versions": ("16.12.14",)},
+    {"starting_versions": ("16.12.14",), "target_version": "16.12.13", "image": "cat3k_caa-universalk9.16.12.13.SPA.bin"},
+    {"target_version": "17.3.1", "image": "cat3k_caa-universalk9.17.03.01.SPA.bin"},
+])
+def test_cat3k_rejects_unsupported_profiles(cat3k_profile, tmp_path, changes):
+    from dataclasses import replace
+    with pytest.raises(ValueError):
+        Profile.load(write_profile_file(replace(cat3k_profile, **changes), tmp_path))
+
+
+def test_cat3k_minimum_install_release(cat3k_profile, tmp_path):
+    from dataclasses import replace
+    profile = replace(cat3k_profile, starting_versions=("16.8.1a",))
+    assert Profile.load(write_profile_file(profile, tmp_path)) == profile
+
+
+@pytest.mark.parametrize("staging", [False, True])
+def test_cat3k_stack_identity_and_exact_inventory_approval(cat3k_profile, staging, cat3k_transcript):
+    raw = cat3k_transcript()
+    collect = checks.collect_staging if staging else checks.collect
+    snapshot = collect(lambda cmd: raw.get(cmd, "% Invalid input"), lambda _: None)
+    assert snapshot["errors"] == {}
+    assert set(snapshot["software"]) == {"1", "2"}
+    assert not workflow.preflight(snapshot, cat3k_profile, stage_only=staging)["blockers"]
+    # The base model must not silently authorize a different licensed PID.
+    snapshot["tables"]["inventory"][1]["pid"] = cat3k_profile.models[0][:-1] + "E"
+    assert any("PID" in b for b in workflow.preflight(snapshot, cat3k_profile, stage_only=staging)["blockers"])
+
+
+@pytest.mark.parametrize("row", [
+    "2 52 WS-C3650-48PS 16.12.14 CAT3K_CAA-UNIVERSALK9",
+    "2 52 WS-C3650-48PS",
+    "2 52 WS-C3650-48PS 16.12.14 CAT3K_CAA-UNIVERSALK9 UNKNOWN",
+    "2 52 WS-C3650-48PS 03.06.07E CAT3K_CAA-UNIVERSALK9 INSTALL",
+    "2 52 OTHER-MODEL 16.12.14 OTHER_IMAGE INSTALL",
+    "1 52 WS-C3650-48PS 16.12.14 CAT3K_CAA-UNIVERSALK9 INSTALL",
+])
+def test_software_does_not_silently_drop_unrecognized_or_duplicate_members(row, cat3k_transcript):
+    with pytest.raises(ValueError, match="member"):
+        checks.software(cat3k_transcript(members=1)["show version"] + row + "\n")
+
+
+@pytest.mark.parametrize("failure", ["missing", "duplicate", "wrong_member", "wrong_hardware"])
+def test_cat3k_licensed_pid_requires_unambiguous_member_inventory(cat3k_profile, failure, cat3k_transcript):
+    snapshot = baseline(cat3k_transcript())
+    inventory = snapshot["tables"]["inventory"]
+    if failure == "missing":
+        inventory.pop()
+    elif failure == "duplicate":
+        inventory.append(dict(inventory[1]))
+    elif failure == "wrong_member":
+        inventory[1]["name"] = "Switch 3"
+    else:
+        snapshot["software"]["2"]["model"] = cat3k_profile.models[0].rsplit("-", 1)[0].replace("48", "24")
+    assert any("PID" in b for b in workflow.preflight(snapshot, cat3k_profile)["blockers"])
+
+
+def test_cat3k_staging_inventory_read_failure_blocks(cat3k_profile, cat3k_transcript):
+    raw = cat3k_transcript()
+    del raw["show inventory"]
+    snapshot = checks.collect_staging(lambda cmd: raw.get(cmd, "% Invalid input"), lambda _: None)
+    assert "inventory" in snapshot["errors"]
+    assert workflow.preflight(snapshot, cat3k_profile, stage_only=True)["blockers"]
+
+
+def test_cat3k_bundle_conversion_requires_explicit_approval(cat3k_profile, cat3k_transcript):
+    snapshot = baseline(cat3k_transcript(mode="BUNDLE"))
+    assert any("conversion is not validated" in b for b in workflow.preflight(snapshot, cat3k_profile)["blockers"])
+    assert not workflow.preflight(snapshot, cat3k_profile, stage_only=True)["blockers"]
+
+
+@pytest.mark.parametrize("failure,check", [
+    ("missing_member", "software"), ("old_version", "software"),
+    ("bundle", "software"), ("uncommitted", "install_commit"),
+    ("missing_commit", "install_commit"), ("boot", "config_boot"),
+    ("serial", "inventory"), ("nac", "nac"),
+])
+def test_cat3k_post_upgrade_validation(cat3k_profile, failure, check, cat3k_transcript):
+    before = baseline(cat3k_transcript())
+    after = baseline(cat3k_transcript("16.12.14"))
+    if failure == "missing_member":
+        del after["software"]["2"]
+    elif failure == "old_version":
+        after["software"]["2"]["version"] = "16.12.13"
+    elif failure == "bundle":
+        after["software"]["2"]["mode"] = "BUNDLE"
+    elif failure == "uncommitted":
+        after["raw"]["show install summary"] = after["raw"]["show install summary"].replace("IMG C", "IMG U")
+    elif failure == "missing_commit":
+        after["raw"]["show install summary"] = cat3k_transcript("16.12.14", members=1)["show install summary"]
+    elif failure == "boot":
+        after["config"] = after["config"].replace("packages.conf", "old.bin")
+    elif failure == "serial":
+        after["tables"]["inventory"][1]["sn"] = "REPLACED"
+    elif failure == "nac":
+        after["tables"]["nac"][0]["status"] = "Unauth"
+    findings = checks.compare(before, after) + workflow.target_findings(after, cat3k_profile, before)
+    assert any(f["check"] == check and f["severity"] == "error" for f in findings)
+
+
+@pytest.mark.parametrize("operation", ["dry_run", "upgrade", "bundle_conversion", "stage_only", "already_current", "bad_checksum"])
+def test_cat3k_workflows(cat3k_profile, options, fake_device, monkeypatch, operation, cat3k_transcript):
+    from dataclasses import replace
+    options.apply = operation not in {"dry_run", "already_current"}
+    options.stage_only = operation == "stage_only"
+    profile = replace(cat3k_profile, image_source="http://images.example.com/" + cat3k_profile.image,
+                      bundle_conversion_validated=operation == "bundle_conversion")
+
+    class Cat3kDevice(fake_device):
+        raw = cat3k_transcript("16.12.14" if operation == "already_current" else "16.12.13",
+                               mode="BUNDLE" if operation == "bundle_conversion" else "INSTALL")
+        image_exists = operation != "stage_only"
+        digest = "b" * 32 if operation == "bad_checksum" else "a" * 32
+
+        def read(self, command):
+            if command == f"dir flash:{profile.image}":
+                return (f"1 -rw- 1000 Oct 8 2026 {profile.image}" if self.image_exists else
+                        "%Error opening flash:image (No such file or directory)")
+            return super().read(command)
+
+        def interactive(self, command, timeout, reload=False):
+            super().interactive(command, timeout, reload)
+            if command.startswith("copy "):
+                self.image_exists = True
+
+        def wait_for_target(self, profile):
+            self.raw = cat3k_transcript(profile.target_version)
+
+    monkeypatch.setattr(workflow, "Device", Cat3kDevice)
+    result, reporter = run_device(profile, options)
+    device = Cat3kDevice.instances[-1]
+    stages = [call.args[1] for call in reporter.emit.call_args_list]
+    if operation == "bad_checksum":
+        assert result.failed and stages[-1] == "blocked"
+        assert device.mutations == ["write memory"]
+        device.connection.send_config_set.assert_not_called()
+    else:
+        assert not result.failed
+        if operation in {"upgrade", "bundle_conversion"}:
+            assert device.mutations.count(f"install add file flash:{profile.image} activate commit") == 1
+            assert stages.count("validating") == 2
+        elif operation == "stage_only":
+            assert device.mutations == [f"copy {profile.image_source} flash:{profile.image}"]
+            device.connection.send_config_set.assert_not_called()
+        else:
+            assert not device.mutations
+            assert stages[-1] == ("already_current" if operation == "already_current" else "dry_run_complete")
+
+
+def test_cat3k_install_dialogue(monkeypatch, options):
+    conn = Mock()
+    conn.find_prompt.return_value = "sw1#"
+    conn.is_alive.return_value = True
+    conn.read_channel.side_effect = [
+        "System configuration has been modified.\nPress Yes(y) to save the configuration and proceed.\n",
+        "Press No(n) for proceeding without saving the configuration.\n"
+        "Press Quit(q) to exit, you may save configuration and re-enter the command. [y/n/q]",
+        "\n[OK]Modified configuration has been saved\nPlease confirm you have changed boot config to flash:packages.conf [y/n]",
+        "\nThis operation requires a reload of the system. Do you want to proceed? [y/n]",
+        "\nSUCCESS: install_add_activate_commit\nsw1#",
+    ]
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+    device = workflow.Device(None, options, Mock())
+    device.connection = conn
+    command = "install add file flash:cat3k_caa-universalk9.16.12.14.SPA.bin activate commit"
+    device.interactive(command, 30, reload=True)
+    assert [c.args[0] for c in conn.write_channel.call_args_list] == [command + "\n", "y\n", "y\n", "y\n"]
+
+
+def test_unknown_three_choice_prompt_is_rejected(options):
+    device = workflow.Device(None, options, Mock())
+    device.connection = Mock()
+    device.connection.find_prompt.return_value = "sw1#"
+    device.connection.read_channel.return_value = "Delete files? [y/n/q]"
+    with pytest.raises(ValueError, match="unrecognized interactive"):
+        device.interactive("install add file flash:x.bin activate commit", 30, reload=True)
+    assert device.connection.write_channel.call_count == 1
+
 
 
 def c9350_transcript(release="17.18.1", mode="INSTALL"):

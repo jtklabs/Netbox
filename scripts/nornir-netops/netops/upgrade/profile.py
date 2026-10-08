@@ -1,6 +1,6 @@
 """An explicit, locally validated upgrade path; no implicit version selection.
 
-Three families share one profile shape: Catalyst 9000 IOS XE images, Arista
+Three drivers share one profile shape: Catalyst IOS XE images, Arista
 EOS `.swi` images and BIG-IP `.iso` images. The image filename decides the
 family, and each family applies its own rules for models, releases and image
 sources.
@@ -48,6 +48,19 @@ FREE_SPACE_FLOOR = {"eos": 100_000_000}
 DEFAULT_FREE_SPACE_FLOOR = 1_500_000_000
 
 
+def ios_xe_family(model):
+    if isinstance(model, str):
+        if re.fullmatch(r"WS-C3650-[A-Z0-9]+(?:-[LSE])?", model):
+            return "C3650"
+        if re.fullmatch(r"WS-C3850-[A-Z0-9]+(?:-[LSE])?", model):
+            return "C3850"
+        if re.fullmatch(r"C9350-[A-Z0-9-]+", model):
+            return "C9350"
+        if re.fullmatch(r"C9300[LX]?-[A-Z0-9-]+", model):
+            return "C9300"
+    raise ValueError("models must be exact WS-C3650, WS-C3850, C9300-family or C9350 PIDs")
+
+
 @dataclass(frozen=True)
 class Profile:
     name: str
@@ -74,7 +87,7 @@ class Profile:
             return "f5"
         if image.endswith(".swi"):
             return "eos"
-        return "C9350" if self.models and str(self.models[0]).startswith("C9350-") else "C9300"
+        return ios_xe_family(self.models[0]) if self.models else "C9300"
 
     def release(self, value):
         if self.family == "f5":
@@ -162,26 +175,32 @@ class Profile:
     def _validate_ios_xe(cls, result):
         if result.volume or result.allow_active or result.license_check_date:
             raise ValueError("volume, allow_active and license_check_date apply to BIG-IP profiles only")
-        # Both families use IOS XE, but their image packages are different.
-        # A NetBox cisco_ios platform alone cannot authorize either image.
-        if not all(isinstance(m, str) and re.fullmatch(r"C93(?:00|50)-[A-Z0-9-]+|C9300[LX]-[A-Z0-9-]+", m) for m in result.models):
-            raise ValueError("models must be exact C9300-family or C9350 PIDs")
-        families = {"C9350" if m.startswith("C9350-") else "C9300" for m in result.models}
+        # These families share install commands; 3650/3850 also share images.
+        # Keep each hardware family's approved path in its own profile.
+        # A NetBox cisco_ios platform alone cannot authorize an image.
+        families = {ios_xe_family(m) for m in result.models}
         if len(families) != 1:
-            raise ValueError("C9300 and C9350 require separate profiles and image packages")
+            raise ValueError("C3650, C3850, C9300 and C9350 require separate profiles with matching image packages")
         family = next(iter(families))
-        minimum = (17, 18, 1, "") if family == "C9350" else (16, 6, 2, "")
+        minimum = {"C3650": (16, 8, 1, "a"), "C3850": (16, 8, 1, "a"),
+                   "C9300": (16, 6, 2, ""), "C9350": (17, 18, 1, "")}[family]
         # These two PIDs were introduced after the original C9350 models.
         if set(result.models) & {"C9350-24HX", "C9350-48HXN"}:
             minimum = (26, 1, 1, "a")
         target = version(result.target_version)
+        if family in {"C3650", "C3850"} and not minimum <= target < (16, 13, 0, ""):
+            raise ValueError(f"{family} target must use the supported IOS XE 16.8.1a through 16.12.x install procedure")
         for start in result.starting_versions:
             if version(start) < minimum or version(start) >= target:
                 floor = ".".join(str(x) for x in minimum[:3]) + minimum[3]
                 raise ValueError(f"{family} starting versions must be >={floor} and older than the target")
-        prefix = r"cisco9k_iosxe(?:_npe)?" if family == "C9350" else "cat9k_iosxe"
+        prefix = {"C3650": r"cat3k_caa-universalk9(?:ldpe)?", "C3850": r"cat3k_caa-universalk9(?:ldpe)?", "C9300": "cat9k_iosxe",
+                  "C9350": r"cisco9k_iosxe(?:_npe)?"}[family]
         if not re.fullmatch(prefix + r"\.[A-Za-z0-9_.-]+\.bin", result.image):
-            raise ValueError(f"{family} image must use the {'cisco9k_iosxe (or cisco9k_iosxe_npe)' if family == 'C9350' else 'cat9k_iosxe'} .bin package")
+            package = {"C3650": "cat3k_caa-universalk9 (or cat3k_caa-universalk9ldpe)",
+                       "C3850": "cat3k_caa-universalk9 (or cat3k_caa-universalk9ldpe)",
+                       "C9300": "cat9k_iosxe", "C9350": "cisco9k_iosxe (or cisco9k_iosxe_npe)"}[family]
+            raise ValueError(f"{family} image must use the {package} .bin package")
         image_release = re.match(prefix + r"\.(\d+\.\d+\.\d+[a-z]?)\.", result.image)
         if not image_release or version(image_release[1]) != target:
             raise ValueError("image filename release must match target_version")

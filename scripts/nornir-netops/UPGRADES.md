@@ -9,16 +9,44 @@ filename selects the driver: a `.bin` package is Catalyst IOS XE (this section),
 an `EOS-<release>.swi` is [Arista EOS](#arista-eos-upgrades) over SSH and a
 `BIGIP-<version>.iso` is [BIG-IP](#big-ip-upgrades) over iControl REST.
 
-The IOS XE driver supports **Cisco C9350 IOS XE** profiles and the existing C9300-family
+The IOS XE driver supports **Cisco C9350**, **C9300-family**, **WS-C3650** and **WS-C3850**
 profiles through the IOS XE install workflow. C9350 uses `cisco9k_iosxe` images
-(or explicitly selected `cisco9k_iosxe_npe` images); C9300 uses `cat9k_iosxe`.
-Wrong-family images and profiles mixing these two families are rejected.
+(or explicitly selected `cisco9k_iosxe_npe` images); C9300 uses `cat9k_iosxe`;
+C3650 and C3850 use `cat3k_caa-universalk9` (or explicitly selected `cat3k_caa-universalk9ldpe`).
+Wrong-family images are rejected. Each hardware family uses a separate profile,
+including C3650 and C3850 even though they share the same image package.
 C9350 starting releases must be at least 17.18.1; C9350-24HX and C9350-48HXN
 require at least their introductory release, 26.1.1a. C9300 starting releases
-must be at least 16.6.2. These minimums do not approve an upgrade path: the exact
+must be at least 16.6.2. C3650/C3850 starting releases must be at least 16.8.1a,
+when the one-shot install command became available; targets are limited to
+16.8.1a through 16.12.x. Older 3650/3850 procedures are not implemented.
+These minimums do not approve an upgrade path: the exact
 PIDs and tested starting/target releases still come from your profile. Other
 families, legacy `request platform software` upgrades, ISSU and xFSU are not
 implemented. No production release path is approved by the example or tests.
+
+C9300-family devices running 17.12.06 use the existing IOS XE driver and
+`cat9k_iosxe` image validation. Release comparisons treat `17.12.06` and
+`17.12.6` as equal, including profile starting versions, target versions and
+committed-image checks. A device at the target in INSTALL mode is reported as
+`already_current`; apply still saves its running configuration as described
+below. Tests cover this release for C9300, C9300L and C9300X model names through
+audit, staging, installation and post-upgrade validation. The profile continues
+to define the exact approved models and upgrade path.
+
+C3650/C3850 profiles accept exact `WS-C3650-...` or `WS-C3850-...` hardware models
+or licensed PIDs such as `WS-C3650-48PS-S` or `WS-C3850-48P-S`, including model assignments from NetBox. When
+`show version` omits the license suffix, each member's `show inventory` PID
+must match the profile exactly and agree with that member's hardware model.
+Staging also reads inventory for these switches. The parser requires complete
+per-member software rows; an unsupported version or missing mode cannot silently
+disappear from the stack baseline. Committed image state, original member
+identity, configuration, NAC and operational comparisons remain required.
+
+An INSTALL-mode 3650 or 3850 already on the profile's target (including 16.12.14) is
+reported as `already_current`; it is not reinstalled. The target and approved
+starting releases still come from the profile. Platform support does not imply
+that a release newer than 16.12.14 exists or that a downgrade is allowed.
 
 ## Run a preview
 
@@ -186,7 +214,8 @@ install add file flash:<approved-image>.bin activate commit
 ```
 
 The install command distributes software to stack members. Only the recognized
-reload and verified `packages.conf` boot confirmations are answered. Unexpected prompts, explicit installer errors,
+reload, verified `packages.conf` boot confirmations and the documented IOS XE
+save-configuration `[y/n/q]` prompt are answered. Unexpected prompts, explicit installer errors,
 failed saves and bad checksums stop the device workflow. Installation is sent
 once; an ambiguous disconnect/timeout is checked by reconnecting, never by
 resending the install command. Fresh observations must confirm the target release
@@ -401,6 +430,20 @@ for install states and conversion details. The C9350 tests use synthetic
 transcripts with its PIDs and image names; they are not a live C9350 lab
 qualification. A profile records your team's tested path; the script does not
 infer approval from release ordering or a shared IOS XE command alone.
+
+The [C3650 IOS XE 16.12.x release notes](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst3650/software/release/16-12/release_notes/ol-16-12-3650.html)
+document the `cat3k_caa` image variants, installation commands and prompts,
+and bootloader/microcode upgrade behavior. The
+[C3650 software maintenance guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst3650/software/release/16-12/configuration_guide/sys_mgmt/b_1612_sys_mgmt_3650_cg/software_maintenance_upgrade.html)
+documents the per-member committed-image output. C3650/C3850 tests use synthetic
+standalone/stack transcripts, including 16.12.14, and cover profile validation,
+staging, installation, conversion gates and post-upgrade failures. They do not
+replace a hardware test of the selected path and actual device transcripts.
+
+The [C3850 IOS XE 16.12.x release notes](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst3850/software/release/16-12/release_notes/ol-16-12-3850.html)
+document the same `cat3k_caa` image variants and one-shot install procedure,
+including 16.12.14. This worker performs a disruptive install/reload; it does
+not implement the separate StackWise Virtual ISSU procedure.
 
 ## Arista EOS upgrades
 
