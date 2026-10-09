@@ -59,7 +59,7 @@ files in NetBox and lists them on the device page. See the nornir-netops
 README, "Collect show commands into NetBox".
 
 That SSH step also discovers NTP and syslog source interfaces and VRFs on IOS/IOS-XE,
-NX-OS and Arista EOS. It adds `service-source` to exactly one matching existing
+NX-OS and Arista EOS, and NTP sources on Junos SRX/MX. It adds `service-source` to exactly one matching existing
 NetBox interface and fills the device's `ntp_vrf` custom field only when no
 conflicting selection exists. No additional device tag is required. Conflicts,
 missing interfaces and ambiguous sources are reported rather than guessed;

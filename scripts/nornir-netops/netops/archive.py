@@ -173,6 +173,9 @@ def device_document(name, record, args, desired, host):
     if row.get("platform") == "aruba_clearpass" and feature == "ntp":
         read_steps = [{"transport": "ssh", "command": command, "purpose": "read_config"}
                       for command in ("show ntp", "cluster list")]
+    if row.get("platform") == "juniper_junos" and feature == "ntp":
+        from .junos_ntp import SHOW
+        read_steps = [{"transport": "ssh", "command": SHOW, "purpose": "read_config"}]
     before = row.get("config_before")
     after = row.get("config_after")
     rollback_steps = list(row.get("rollback_steps", []))
@@ -210,6 +213,10 @@ def device_document(name, record, args, desired, host):
         if save:
             rollback_steps.append(step(save, "persist_restored_config"))
     implementation = [step(c) for c in row.get("commands", [])]
+    if implementation and row.get("platform") == "juniper_junos" and feature == "ntp":
+        implementation.insert(0, step('configure private', 'enter_config'))
+        implementation.extend([step('commit check', 'validate_config'),
+                               step('commit confirmed 5', 'activate_config')])
     commit_before_verify = row.get("platform") == "aruba_os" and feature == "ntp"
     if row.get("save_command") and commit_before_verify:
         implementation.append(step(row["save_command"], "persist_config"))

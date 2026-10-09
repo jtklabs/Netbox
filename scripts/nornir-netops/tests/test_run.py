@@ -304,7 +304,7 @@ def test_missing_credentials_is_a_usage_error(device, csv_file, capsys):
 
 def test_unsupported_platform_fails_that_device_only(device, tmp_path, login, capsys):
     path = tmp_path / "mixed.csv"
-    path.write_text(CSV + "10.1.1.3,fw1,juniper_junos,atl\n", encoding="utf-8")
+    path.write_text(CSV + "10.1.1.3,fw1,paloalto_panos,atl\n", encoding="utf-8")
     assert run(str(path), "-s", "10.99.99.1") == cli.EXIT_FAILED
     out = capsys.readouterr().out
     assert "FAILED" in out

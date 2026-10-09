@@ -35,7 +35,7 @@ re-run with --apply to push the commands above
 
 | Subcommand | What it does | Platforms |
 | --- | --- | --- |
-| [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `cisco_nxos`, `arista_eos`, `f5_tmsh`, `aruba_os` (Conductor), `aruba_clearpass` |
+| [`ntp`](#ntp) | Converge the NTP servers | `cisco_ios`, `cisco_nxos`, `arista_eos`, `juniper_junos` (SRX/MX), `f5_tmsh`, `aruba_os` (Conductor), `aruba_clearpass` |
 | [`syslog`](#syslog) | Collectors, supported severity/source settings, NetBox policy and check dates | `cisco_ios`, `arista_eos`, `f5_tmsh` |
 | [`waf`](#waf-remote-syslog) | Existing WAF remote logging destinations, NetBox policy and check dates | `f5_tmsh` |
 | [`banner`](#banner) | Login and MOTD banners; F5 SSH and web login notices | `cisco_ios`, `arista_eos`, `f5_tmsh` |
@@ -47,7 +47,7 @@ re-run with --apply to push the commands above
 | [`check-ntp`](#is-it-actually-working) | Are the NTP servers associated, reachable and selected? Read-only | `cisco_ios`, `arista_eos` |
 | `rollback` | Undo a change recorded by an earlier `--apply` | -- |
 | `discover` | Detect each device's platform and remember it; changes nothing | -- |
-| `discover-ntp` | Read NTP source/VRF over SSH; optionally bootstrap NetBox selections | IOS/IOS-XE, NX-OS, EOS |
+| `discover-ntp` | Read NTP source/VRF over SSH; optionally bootstrap NetBox selections | IOS/IOS-XE, NX-OS, EOS, Junos SRX/MX |
 | [`collect`](#collect-show-commands-into-netbox) | Run each platform's show commands read-only and file the outputs on the NetBox device page | every platform in `commands.yaml` |
 | [`upgrade`](UPGRADES.md) | Baseline, approved IOS XE install/conversion, EOS boot-image reload or BIG-IP volume install, reboot and operational comparison | C9350, C9300 family, WS-C3650 and WS-C3850, `arista_eos`, `f5_tmsh` |
 | `selftest` | Render every template offline, and check the standards file | -- |
@@ -391,7 +391,7 @@ per-service tag overrides remain supported; remove them to use the shared defaul
 
 ### Discover NTP sources over SSH
 
-For IOS/IOS-XE, NX-OS and EOS devices with a platform already set in NetBox, preview
+For IOS/IOS-XE, NX-OS, EOS and Junos SRX/MX devices with a platform already set in NetBox, preview
 the configured source interface and VRF without changing the devices or NetBox:
 
 ```bash
@@ -410,6 +410,9 @@ This runs only SSH `show` commands. It understands IOS `ntp source`, NX-OS
 the source interface's configured VRF. It never infers an interface from the
 SSH destination or a route lookup. Missing explicit sources, different sources
 or VRFs across servers, and interface/VRF mismatches require manual review.
+Junos reads the effective NTP configuration as XML and maps its explicit IPv4
+source address to exactly one logical interface. It reports the configured
+NTP routing instance, not an inferred egress route.
 
 `--sync-netbox` records the observation and timestamp in the device JSON custom
 field `ntp_discovery`. If exactly one existing NetBox interface matches, it can
@@ -433,7 +436,7 @@ Writes use the normal NetBox API/change log. This command does not install a
 schedule or enable a poller; test a limited preview before scheduling it.
 
 The inventory SSH collector (`configure.py collect --netbox`) now performs
-the same discovery automatically on IOS/IOS-XE, NX-OS and EOS, using its
+the same discovery automatically on IOS/IOS-XE, NX-OS, EOS and Junos SRX/MX, using its
 existing SSH session. It initializes missing selections after collecting the
 device outputs, so the next NTP audit/remediation can consume them. Other
 platforms still collect their normal command outputs but do not auto-tag NTP
@@ -753,6 +756,7 @@ tool does not model still goes away cleanly. IOS/EOS global source commands,
 | Cisco IOS/IOS-XE | SSH; server, VRF, source, preference and authentication | Explicit global/per-server source and interface VRF |
 | Cisco NX-OS | SSH; native `use-vrf`, global `ntp source-interface`, preference and authentication | Explicit source interface and server VRF |
 | Arista EOS | SSH; server, VRF, source, preference, iburst and authentication | Explicit global/per-server source and interface VRF |
+| Juniper SRX/MX (Junos) | SSH; IPv4 servers, routing instance, source address, preference and authentication; private candidate and confirmed commit | Explicit source IPv4 mapped to one logical interface |
 | F5 BIG-IP | iControl REST; server list only | Not implemented; no inferred interface tag |
 | ArubaOS 8 managed WLC | Mobility Conductor REST; IPv4 servers, iburst, tagged VLAN/loopback source; device-node scope only | Not implemented; select the source tag manually |
 | FortiGate | Deferred | Not implemented |
@@ -766,6 +770,49 @@ preserved. Its CLI grammar follows the
 [NX-OS 10.3 NTP guide](https://www.cisco.com/c/en/us/td/docs/dcn/nx-os/nexus9000/103x/configuration/system-management/cisco-nexus-9000-series-nx-os-system-management-configuration-guide-103x/m-configuring-ntp-10x.html).
 Firmware-dependent authentication key lengths and algorithms require a device
 pilot before fleet rollout.
+
+### Juniper SRX and MX
+
+Assign the NTP standard/profile to the devices' **Junos platform** (`junos` or
+`juniper_junos`); the same regional server lists and audit schedules apply.
+CSV aliases `juniper_srx`, `juniper_mx`, `srx` and `mx` are also accepted.
+
+Tag one logical interface, such as **lo0.0**, **fxp0.0** or **irb.100**, with
+`service-source`. Junos requires a source address: SSH resolves that interface
+to exactly one IPv4 address. Missing or multiple IPv4 addresses block the job
+rather than picking one. Set the device's `ntp_vrf` to `default`, `mgmt_junos`
+or the intended routing-instance name. Discovery can bootstrap both selections
+when the existing explicit NTP source identifies a single interface. An
+unselected source is left unchanged, including in replace mode.
+
+Audit is read-only. Remediation uses `configure private`, refuses a dirty
+private candidate or a pending confirmed commit, rechecks the observed state,
+and runs `commit check` followed by `commit confirmed 5`. It verifies the active
+NTP configuration before the final `commit`; a failed verification leaves the
+temporary commit unconfirmed for automatic rollback. Saving and verification
+cannot be disabled for Junos remediation. Other operators' shared candidate
+changes are not discarded. After a successful run, manual backout requires a
+reviewed Junos change; the report does not provide an automatically replayable
+rollback or archive encrypted authentication material.
+
+The adapter manages server key bindings, preference and routing instances while
+preserving options such as NTP version. Replace mode removes extra servers, but
+does not prune unrelated authentication keys/trust used by peers or broadcasts.
+Key IDs 1-65535 and MD5/SHA1/SHA256 are accepted, subject to device release
+support. Key rotation uses the existing secret source and `--rewrite-keys`.
+Inherited, inactive, protected or NTS configuration can be audited but any drift
+requires manual remediation at its owning configuration. DNS and IPv6 servers
+are not supported by this adapter. `iburst` is not managed on Junos.
+
+This is configuration compliance, not proof of live synchronization, chassis
+cluster failover health or dual-RE synchronization. Target the normal managed
+SRX cluster/MX address rather than scheduling both routing engines separately.
+No security zones, host-inbound NTP permissions, routes, routing instances or
+HA settings are created. Pilot an audit and one approved remediation on each
+deployed Junos release before fleet rollout.
+
+Syntax and transaction references: [Junos NTP configuration](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html)
+and [Junos commit and confirmed-commit behavior](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html).
 
 F5 uses the existing `--f5-*` HTTPS connection settings and inventory credentials.
 It patches only `servers` on
@@ -2621,7 +2668,7 @@ listed in NetBox with that note. Known credentials are redacted before the
 text is written or sent. The poller token needs add, change and view
 permission on the plugin's command outputs. `snmp-inventory` can run this
 after every sweep with `run_after_sweep` in its `[commands]` section.
-On IOS/IOS-XE, NX-OS and EOS it also discovers the configured NTP source and
+On IOS/IOS-XE, NX-OS, EOS and Junos SRX/MX it also discovers the configured NTP source and
 initializes missing NetBox interface tags/VRF selections. See
 [Discover NTP sources over SSH](#discover-ntp-sources-over-ssh) for permissions,
 conflict handling and the `--no-ntp-discovery` opt-out.

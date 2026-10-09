@@ -38,7 +38,7 @@ from ..core import (
 )
 from ..netbox import source_for
 from ..ntp_discovery import global_sources, interface_name
-from .. import aruba_ntp, clearpass_ntp, f5_ntp, ntp_nxos
+from .. import aruba_ntp, clearpass_ntp, f5_ntp, junos_ntp, ntp_nxos
 from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
 
@@ -597,7 +597,7 @@ def per_device(keys, variables, host):
 FEATURE = Feature(
     name="ntp",
     platform_runs={'f5_tmsh': f5_ntp.run, 'aruba_os': aruba_ntp.run,
-                   'aruba_clearpass': clearpass_ntp.run},
+                   'aruba_clearpass': clearpass_ntp.run, 'juniper_junos': junos_ntp.run},
     help="converge the NTP servers and their authentication key",
     platforms={
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_ntp, IOS_SAMPLE),

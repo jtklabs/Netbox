@@ -6,7 +6,7 @@ from . import archive
 from .core import canonical_platform, validate_word
 from .netbox import NetBoxError, SERVICE_SOURCE_TAG, LEGACY_SOURCE_TAGS
 
-PLATFORMS = ('cisco_ios', 'arista_eos', 'cisco_nxos')
+PLATFORMS = ('cisco_ios', 'arista_eos', 'cisco_nxos', 'juniper_junos')
 SOURCE_TAG = SERVICE_SOURCE_TAG
 FIELDS = {
     'ntp_discovery': ('json', 'NTP source discovery', 'Latest SSH observation; not an approved standard.'),
@@ -19,6 +19,8 @@ SHOW_COMMANDS = ('show running-config | include ^ntp.server',
 
 def interface_name(value):
     value = re.sub(r'\s+', '', value)
+    if re.fullmatch(r'(?:lo\d+|irb|fxp\d+|em\d+|ae\d+|reth\d+|vlan|vme|(?:ge|xe|et)-\d+/\d+/\d+(?::\d+)?)\.\d+', value):
+        return value
     if value.lower() == 'mgmt0':
         return 'mgmt0'
     aliases = {'lo': 'Loopback', 'loopback': 'Loopback', 'vl': 'Vlan', 'vlan': 'Vlan',
@@ -114,6 +116,11 @@ def interface_vrf(output, expected):
 def observe(platform, read):
     """Read one source/VRF observation using the caller's existing SSH session."""
     platform = canonical_platform(platform)
+    if platform == 'juniper_junos':
+        from .junos_ntp import observe as observe_junos
+        observation = observe_junos(read)
+        observation.update(platform=platform, checked_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+        return observation
     if platform not in PLATFORMS:
         raise ValueError(f'NTP source discovery is not supported for {platform}')
     observation = source_config('\n'.join(read(command) for command in SHOW_COMMANDS), platform)

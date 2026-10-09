@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from . import ntp_discovery
 from .core import canonical_platform, validate_word
 
-PLATFORMS = ntp_discovery.PLATFORMS
+PLATFORMS = ('cisco_ios', 'arista_eos', 'cisco_nxos')
 SOURCE_TAG = ntp_discovery.SOURCE_TAG
 SHOW_COMMAND = 'show running-config | include ^logging'
 FIELDS = {

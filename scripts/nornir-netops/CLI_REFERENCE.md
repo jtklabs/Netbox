@@ -63,6 +63,15 @@ below identify the differences.
 Converge NTP servers and the authentication settings defined in
 `ntp.authentication`.
 
+Junos SRX/MX use platform `junos`/`juniper_junos` with IPv4 server literals.
+The shared `service-source` tag selects a logical interface (for example
+`lo0.0`, `fxp0.0`, `irb.100`); its single IPv4 address is resolved over SSH.
+`ntp_vrf` selects the routing instance. Regional server overrides work unchanged.
+Remediation requires saving and verification and uses a private candidate,
+commit check, confirmed commit, read-back verification, then final confirmation.
+Inherited/protected/inactive or NTS configuration with drift requires manual
+remediation. This is configuration auditing, not the `check-ntp` operational test.
+
 | Flag | Meaning and default |
 | --- | --- |
 | `-s`, `--servers ADDR[,ADDR...]` | Desired server list. Repeatable; replaces `ntp.servers` from the standards file. |

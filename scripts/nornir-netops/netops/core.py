@@ -84,6 +84,12 @@ def netmask(network: str) -> str:
 # Spellings we accept in the CSV / autodetect, mapped to the netmiko platform
 # name used for both the connection and the template directory.
 PLATFORM_ALIASES = {
+    "junos": "juniper_junos",
+    "juniper": "juniper_junos",
+    "juniper_srx": "juniper_junos",
+    "juniper_mx": "juniper_junos",
+    "srx": "juniper_junos",
+    "mx": "juniper_junos",
     "ios": "cisco_ios",
     "iosxe": "cisco_ios",
     "ios-xe": "cisco_ios",

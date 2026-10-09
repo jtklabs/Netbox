@@ -26,6 +26,10 @@ ntp:
   # prefer: 10.50.0.10
   # vrf: MGMT
   # source: Loopback0
+  # Junos SRX/MX use this same standard with IPv4 server addresses. Prefer a
+  # service-source tag on one logical interface (lo0.0, fxp0.0, irb.100); SSH
+  # resolves its single IPv4 address. For CSV inventory, source: lo0.0 works.
+  # Junos vrf is its routing-instance name, for example mgmt_junos.
 
   # Servers per NetBox region. A device uses the nearest region in its chain
   # (its site's region, then that region's parents) that has a set here, and

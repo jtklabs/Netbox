@@ -86,7 +86,7 @@ def test_ssh_only_reads_show_commands_and_confirms_vrf():
 
 
 def test_unsupported_platform_never_connects():
-    task = Task(platform='juniper_junos')
+    task = Task(platform='paloalto_panos')
     with pytest.raises(ValueError, match='not supported'):
         discover(task)
     assert task.commands == []
