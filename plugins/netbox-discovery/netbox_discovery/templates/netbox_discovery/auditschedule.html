@@ -1,5 +1,8 @@
 {% extends 'generic/object.html' %}
 {% load helpers %}
+{% block extra_controls %}
+{% include 'netbox_discovery/inc/auditschedule_copy.html' with schedule=object %}
+{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-6">
   <h2>Audit schedule</h2>

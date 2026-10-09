@@ -1,0 +1,3 @@
+{% if perms.netbox_discovery.add_auditschedule and perms.netbox_discovery.add_upgradejob %}
+<a class="btn {% if compact %}btn-sm {% endif %}btn-outline-primary" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}?from_schedule={{ schedule.pk }}" title="Copy schedule" aria-label="Copy schedule"><i class="mdi mdi-content-copy" aria-hidden="true"></i>{% if not compact %} Copy{% endif %}</a>
+{% endif %}

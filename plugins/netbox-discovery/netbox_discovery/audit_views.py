@@ -6,7 +6,7 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q, Count
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from dcim.models import Device, DeviceType, Platform, Region, Site
 from tenancy.models import Tenant
@@ -82,6 +82,8 @@ class AuditScheduleForm(NetBoxModelForm):
         self.initial['all_active'] = self.instance.filters == {'status': ['active']}
         for field, key in SCOPE_FIELDS.items():
             self.initial[field] = self.instance.filters.get(key, [])
+        if hasattr(self.instance, '_copied_tags'):
+            self.initial['tags'] = self.instance._copied_tags
 
     def clean(self):
         super().clean()
@@ -147,6 +149,8 @@ class AuditRunFilterSet(NetBoxModelFilterSet):
 
 
 class AuditScheduleTable(NetBoxTable):
+    actions = columns.ActionsColumn(extra_buttons=(
+        '{% include "netbox_discovery/inc/auditschedule_copy.html" with schedule=record compact=True %}'))
     name = tables.Column(linkify=True)
     enabled = columns.BooleanColumn()
     remediate = columns.BooleanColumn(verbose_name='Remediate')
@@ -211,6 +215,18 @@ class AuditScheduleEditView(ObjectEditView):
             raise PermissionDenied('Scheduling audits requires permission to add device jobs.')
         obj.run_as = request.user
         if not obj.pk and request.method == 'GET':
+            if 'from_schedule' in request.GET:
+                source = get_object_or_404(
+                    AuditSchedule.objects.restrict(request.user, 'view'),
+                    pk=request.GET['from_schedule'] if request.GET['from_schedule'].isdigit() else None)
+                for field in ('remediate', 'frequency', 'weekday', 'local_time', 'time_zone', 'window_hours',
+                              'filters', 'profile_source', 'saved_profile_id', 'profile', 'description',
+                              'comments', 'custom_field_data'):
+                    setattr(obj, field, deepcopy(getattr(source, field)))
+                obj.name = f'{source.name[:93]} (copy)'
+                obj.enabled = True
+                obj._copied_tags = list(source.tags.values_list('pk', flat=True))
+                return obj
             if request.GET.get('frequency') == 'now':
                 obj.frequency = 'now'
             obj.remediate = request.GET.get('operation') == 'remediate'
