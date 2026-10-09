@@ -582,6 +582,11 @@ entirely.
 
 ### AWS Secrets Manager
 
+All Secrets Manager reads use a 5-second connection timeout, a 10-second read
+timeout, and standard retries capped at three total attempts (the initial request
+plus up to two retries). If those attempts fail, the run reports a credential
+error so an unattended invocation can exit and release its process lock.
+
 Point at a JSON secret and name the fields inside it. Auth uses the default
 boto3 chain, so an EC2 instance profile or ECS task role needs no keys on disk:
 

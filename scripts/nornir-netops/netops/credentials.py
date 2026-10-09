@@ -109,6 +109,7 @@ def fetch_json_secret(name: str, region: Optional[str] = None) -> Dict[str, str]
     (instance/task role, SSO session, profile -- whatever boto3 finds)."""
     try:
         import boto3
+        from botocore.config import Config
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as exc:  # pragma: no cover - depends on install extras
         raise CredentialError(
@@ -117,7 +118,17 @@ def fetch_json_secret(name: str, region: Optional[str] = None) -> Dict[str, str]
         ) from exc
 
     try:
-        client = boto3.client("secretsmanager", region_name=region)
+        # Cron jobs may hold a process lock while resolving credentials. Bound
+        # each network attempt and retry transient failures before giving up.
+        client = boto3.client(
+            "secretsmanager",
+            region_name=region,
+            config=Config(
+                connect_timeout=5,
+                read_timeout=10,
+                retries={"mode": "standard", "total_max_attempts": 3},
+            ),
+        )
         response = client.get_secret_value(SecretId=name)
     except (BotoCoreError, ClientError) as exc:
         raise CredentialError(f"could not read secret {name!r}: {exc}") from exc

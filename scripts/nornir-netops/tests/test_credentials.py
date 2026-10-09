@@ -90,9 +90,10 @@ def fake_boto3(monkeypatch):
     """Stand in for boto3 so no AWS call (or credential chain) is involved."""
     holder = {}
 
-    def client(service, region_name=None):
+    def client(service, region_name=None, config=None):
         assert service == "secretsmanager"
         holder["region"] = region_name
+        holder["config"] = config
         return holder["client"]
 
     import boto3
@@ -117,6 +118,62 @@ def test_fetch_aws_secret_uses_the_configured_keys(fake_boto3):
     assert values == {"username": "netauto", "password": "sekrit", "secret": "enabler"}
     assert fake_boto3["region"] == "us-east-1"
     assert fake_boto3["client"].requested == "prod/network/readwrite"
+    config = fake_boto3["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 10
+    assert config.retries == {"mode": "standard", "total_max_attempts": 3}
+
+
+@pytest.mark.parametrize("error_name", ["ConnectTimeoutError", "ReadTimeoutError", "EndpointConnectionError"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_secret_network_failures_retry_then_recover_or_stop(monkeypatch, error_name, recover):
+    import io
+
+    import boto3
+    import botocore.endpoint
+    import botocore.exceptions
+    from botocore.awsrequest import AWSResponse
+    from botocore.httpsession import URLLib3Session
+
+    # Exercise botocore's actual retry loop without AWS access or real sleeps.
+    real_client = boto3.client
+
+    def client(service, **kwargs):
+        return real_client(
+            service,
+            aws_access_key_id="testing",
+            aws_secret_access_key="testing",
+            **kwargs,
+        )
+
+    error_type = getattr(botocore.exceptions, error_name)
+    attempts = []
+
+    class ResponseBody(io.BytesIO):
+        def stream(self, amt=None, decode_content=False):
+            yield self.read()
+
+    def send(self, request):
+        attempts.append(request)
+        if not recover or len(attempts) == 1:
+            raise error_type(endpoint_url=request.url)
+        payload = json.dumps({"SecretString": '{"username": "a", "password": "b"}'})
+        return AWSResponse(request.url, 200, {}, ResponseBody(payload.encode()))
+
+    monkeypatch.setattr(boto3, "client", client)
+    monkeypatch.setattr(URLLib3Session, "send", send)
+    monkeypatch.setattr(botocore.endpoint.time, "sleep", lambda seconds: None)
+    # Explicit client settings must bound retries even if the host asks for more.
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "20")
+    spec = AwsSecretSpec(name="s", region="us-east-1")
+    if recover:
+        assert fetch_aws_secret(spec) == {"username": "a", "password": "b"}
+        assert len(attempts) == 2
+    else:
+        with pytest.raises(CredentialError, match="could not read secret 's'") as exc:
+            fetch_aws_secret(spec)
+        assert isinstance(exc.value.__cause__, error_type)
+        assert len(attempts) == 3
 
 
 def test_fetch_aws_secret_defaults_to_username_password(fake_boto3):
