@@ -88,7 +88,7 @@ def setup(waf_setup, monkeypatch):
             if path == 'dcim/devices/' and params and params.get('tag') in (
                     'clearpass-publisher', 'clearpass-subscriber'):
                 return [d for d in members if params['tag'] in {t['slug'] for t in d['tags']}]
-            if path == 'dcim/interfaces/':
+            if path in ('dcim/interfaces/', 'extras/tags/'):
                 return []
             return original_get(path, params)
         obj.get = get

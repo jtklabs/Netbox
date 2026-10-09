@@ -29,12 +29,15 @@ class InventorySession(NetBoxSession):
 
     def request(self, method, url, json=None, params=None, **kwargs):
         path = urlsplit(url).path.removeprefix("/api/")
-        if path not in ("dcim/devices/", "dcim/interfaces/") and not path.startswith("dcim/devices/"):
+        if path not in ("dcim/devices/", "dcim/interfaces/", "extras/tags/") and not path.startswith("dcim/devices/"):
             return super().request(method, url, json=json, params=params, **kwargs)
         self.calls.append((method, path, copy.deepcopy(json or params)))
         status = 200
         if path == "dcim/devices/":
             body = {"results": list(self.devices.values()), "next": None}
+        elif path == "extras/tags/":
+            slug = params["slug"]
+            body = {"results": [{"slug": slug}] if slug in self.interfaces else [], "next": None}
         elif path == "dcim/interfaces/":
             body = {"results": self.interfaces.get(params["tag"], []), "next": None}
         else:
@@ -160,7 +163,7 @@ def test_dry_run_loads_tagged_sources_without_any_writes(setup):
         assert setup.boxes[name].writes == [] and setup.boxes[name].saves == 0
     assert setup.nb.writes == []
     assert [args["tag"] for method, path, args in setup.nb.calls if path == "dcim/interfaces/"] == [
-        "service-source", "ntp-source", "syslog-source"]
+        "syslog-source"]
 
 
 @pytest.mark.parametrize('policy,ignore_source', [('audit', False), ('manage', False), ('manage', True)])

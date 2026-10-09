@@ -1612,6 +1612,9 @@ def netbox(monkeypatch, tmp_path):
         def get(self, path, params=None):
             if path.startswith("dcim/devices"):
                 return state["devices"]
+            if path == "extras/tags/":
+                slug = params["slug"]
+                return [{"slug": slug}] if slug in state["interfaces"] else []
             return state["interfaces"].get((params or {}).get("tag"), [])
 
     monkeypatch.setattr("netops.netbox.Client", FakeClient)

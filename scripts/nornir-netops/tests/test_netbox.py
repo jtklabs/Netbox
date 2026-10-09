@@ -44,7 +44,7 @@ def test_client_tls_default_can_be_overridden():
 
 
 class FakeClient:
-    """Answers the two endpoints the inventory reads."""
+    """Answers the inventory endpoints, including tag existence checks."""
 
     def __init__(self, devices=None, interfaces=None):
         self.devices = devices or []
@@ -55,6 +55,9 @@ class FakeClient:
         self.calls.append((path, dict(params or {})))
         if path.startswith("dcim/devices"):
             return self.devices
+        if path == "extras/tags/":
+            slug = params["slug"]
+            return [{"slug": slug}] if slug in self.interfaces else []
         return self.interfaces.get((params or {}).get("tag"), [])
 
 
@@ -196,9 +199,10 @@ def test_device_filters_do_not_change_interface_tag_queries():
     ).load()
     assert inventory.hosts["sw1"].data["source_interface"]["ntp"] == "Loopback0"
     assert client.calls[1:] == [
-        ("dcim/interfaces/", {"tag": "service-source"}),
+        ("extras/tags/", {"slug": "service-source"}),
+        ("extras/tags/", {"slug": "ntp-source"}),
         ("dcim/interfaces/", {"tag": "ntp-source"}),
-        ("dcim/interfaces/", {"tag": "syslog-source"}),
+        ("extras/tags/", {"slug": "syslog-source"}),
     ]
 
 
@@ -303,8 +307,8 @@ def test_one_query_per_tag_not_per_device():
     devices = [device(id=i, name=f"sw{i}") for i in range(1, 51)]
     client = FakeClient(devices, {"ntp-source": [interface("Loopback0", 3)]})
     NetBoxInventory(client=client, source_tags={"ntp": "ntp-source"}).load()
-    assert len(client.calls) == 2  # one for devices, one for the tag
-    assert client.calls[1][1]["tag"] == "ntp-source"
+    assert len(client.calls) == 3  # devices, tag existence, tagged interfaces
+    assert client.calls[2][1]["tag"] == "ntp-source"
 
 
 def test_each_device_gets_its_own_answer():

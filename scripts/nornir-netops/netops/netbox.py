@@ -359,7 +359,7 @@ def resolve_sources(
 def source_interfaces(
     client: Client, tags: Mapping[str, str]
 ) -> Dict[int, Dict[str, Any]]:
-    """One query per tag, for the whole fleet at once.
+    """Resolve existing tags, then query their interfaces fleet-wide.
 
     Asking per device would be one round trip per device per standard; asking
     NetBox for every interface carrying the tag is a single query that the
@@ -370,7 +370,12 @@ def source_interfaces(
 
     def tagged(slug):
         if slug not in cache:
-            cache[slug] = client.get("dcim/interfaces/", {"tag": slug})
+            # Interface tag filters reject missing slugs with HTTP 400. The
+            # tag endpoint safely returns no rows, including after a rename.
+            exists = client.get("extras/tags/", {"slug": slug})
+            if not exists and slug not in (SERVICE_SOURCE_TAG, *LEGACY_SOURCE_TAGS):
+                raise NetBoxError(f"source interface tag {slug!r} does not exist in NetBox")
+            cache[slug] = client.get("dcim/interfaces/", {"tag": slug}) if exists else []
         return cache[slug]
 
     for feature, tag in tags.items():

@@ -6,9 +6,44 @@ import pytest
 from nornir.core.task import MultiResult, Result
 
 from netops import cli, collect, ntp_discovery, syslog_discovery
-from netops.netbox import DEFAULT_SOURCE_TAGS, NetBoxInventory, source_tags
+from netops.netbox import Client as NetBoxClient, DEFAULT_SOURCE_TAGS, NetBoxError, NetBoxInventory, source_interfaces, source_tags
 from test_netbox import FakeClient, device, interface
 from test_ntp_discovery import Client
+
+
+@pytest.mark.parametrize('existing', [[], ['service-source'], ['ntp-source'], ['syslog-source']])
+def test_missing_source_tags_never_reach_validated_interface_filter(existing):
+    calls = []
+
+    def get(url, params, **kwargs):
+        calls.append((url, params))
+        if url.endswith('/extras/tags/'):
+            rows = [{'slug': params['slug']}] if params['slug'] in existing else []
+        else:
+            assert params['tag'] in existing, 'NetBox rejects nonexistent interface tag filters'
+            rows = [interface('Loopback0')]
+        return SimpleNamespace(status_code=200, json=lambda: {'results': rows, 'next': None})
+
+    client = NetBoxClient('https://nb', 'test-token')
+    client._session = SimpleNamespace(get=get)
+    result = source_interfaces(client, DEFAULT_SOURCE_TAGS)
+    assert result == ({1: {'source_interface': {'ntp': 'Loopback0', 'syslog': 'Loopback0'}}} if existing else {})
+    assert len([url for url, _ in calls if url.endswith('/dcim/interfaces/')]) == len(existing)
+
+
+@pytest.mark.parametrize('status', [403, 500])
+@pytest.mark.parametrize('endpoint', ['extras/tags/', 'dcim/interfaces/'])
+def test_source_lookup_errors_are_not_treated_as_missing_tags(status, endpoint):
+    def get(url, **kwargs):
+        if url.endswith('/' + endpoint):
+            return SimpleNamespace(status_code=status, text='lookup failed')
+        return SimpleNamespace(status_code=200, json=lambda: {
+            'results': [{'slug': 'service-source'}], 'next': None})
+
+    client = NetBoxClient('https://nb', 'test-token')
+    client._session = SimpleNamespace(get=get)
+    with pytest.raises(NetBoxError, match=f'failed \\({status}\\)'):
+        source_interfaces(client, DEFAULT_SOURCE_TAGS)
 
 
 def test_shared_tag_drives_both_features_and_is_queried_only_once():
@@ -17,6 +52,11 @@ def test_shared_tag_drives_both_features_and_is_queried_only_once():
     assert host.data['source_interface'] == {'ntp': 'Loopback0', 'syslog': 'Loopback0'}
     assert len([call for call in client.calls if call == ('dcim/interfaces/', {'tag': 'service-source'})]) == 1
     assert source_tags(['service-source']) == DEFAULT_SOURCE_TAGS
+
+
+def test_missing_custom_source_tag_fails_instead_of_ignoring_override():
+    with pytest.raises(NetBoxError, match='does not exist'):
+        source_interfaces(FakeClient(), {'ntp': 'clock-source'})
 
 
 def test_legacy_same_interface_is_deduplicated_for_both_services():

@@ -110,7 +110,7 @@ def tagged(setup, waf_setup, monkeypatch):
                 return tagged_devices
             if path == 'dcim/devices/':
                 return selected_devices
-            if path == 'dcim/interfaces/':
+            if path in ('dcim/interfaces/', 'extras/tags/'):
                 return []
             return original_get(path, params)
         obj.get = get

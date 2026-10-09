@@ -376,9 +376,11 @@ services. For other tags the part before `-source` names the
 feature -- so `snmp-source` wires itself to `snmp` once that feature learns to
 use one.
 
-NetBox is asked **once per tag for the whole fleet**, not once per device -- a
-single query the server is built to answer, rather than a round trip per device
-per standard.
+Tag existence is checked through `extras/tags/`, then interfaces are fetched
+**once per existing tag for the whole fleet**, not once per device. The API
+account needs read access to tags and interfaces. Absent built-in source tags
+are skipped, so renaming `ntp-source` to `service-source` does not cause an
+invalid interface-filter error. Missing custom tag overrides still fail.
 
 Older `ntp-source` and `syslog-source` assignments remain readable when a
 device has no `service-source` selection. Matching legacy selections are
