@@ -1,0 +1,20 @@
+{% load form_helpers %}
+<form action="{{ form_url }}" method="post">
+  {% csrf_token %}
+  {% for field in form.hidden_fields %}{{ field }}{% endfor %}
+  <div class="modal-header"><h5 class="modal-title">Delete audit schedule?</h5></div>
+  <div class="modal-body">
+    {{ form.non_field_errors }}
+    <p>Delete <strong>{{ object }}</strong> and stop future occurrences?</p>
+    <p>Run history, device jobs, and compliance results will be kept.</p>
+    <div class="alert alert-warning">
+      Already-queued or running jobs are not cancelled by deleting this schedule.
+      <a href="{% url 'plugins:netbox_discovery:standardsjob_list' %}?audit_schedule_id={{ object.pk }}">Review or cancel its device jobs</a> first if needed.
+    </div>
+    {% if form.changelog_message %}{% render_field form.changelog_message %}{% endif %}
+  </div>
+  <div class="modal-footer">
+    <a href="{{ return_url }}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-danger">Delete schedule</button>
+  </div>
+</form>

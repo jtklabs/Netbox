@@ -1,0 +1,9 @@
+{% extends 'generic/_base.html' %}
+{% block title %}Delete audit schedule?{% endblock %}
+{% block content %}
+<div class="modal modal-lg" tabindex="-1" style="display: block; position: static">
+  <div class="modal-dialog"><div class="modal-content border-1 border-danger">
+    {% include 'netbox_discovery/inc/auditschedule_delete_form.html' %}
+  </div></div>
+</div>
+{% endblock %}

@@ -222,6 +222,23 @@ class PermissionTest(PrestageFixture):
 
 
 class ViewTest(PrestageFixture):
+    def test_delete_existing_policy_through_browser(self):
+        client = Client()
+        client.force_login(self.user)
+        url = reverse('plugins:netbox_discovery:prestagepolicy_delete', args=[self.policy.pk])
+        self.assertEqual(client.get(url).status_code, 200)
+        response = client.post(url, {'confirm': True})
+        self.assertEqual(response.status_code, 302, response.content)
+        self.assertFalse(PrestagePolicy.objects.filter(pk=self.policy.pk).exists())
+
+    def test_delete_existing_policy_through_api(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        response = client.delete(reverse('plugins-api:netbox_discovery-api:prestagepolicy-detail',
+                                         args=[self.policy.pk]))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(PrestagePolicy.objects.filter(pk=self.policy.pk).exists())
+
     def test_detail_page_shows_the_next_run(self):
         client = Client()
         client.force_login(self.user)

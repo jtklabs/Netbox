@@ -58,7 +58,7 @@ class AuditRunSerializer(NetBoxModelSerializer):
 
     class Meta:
         model = AuditRun
-        fields = ('id', 'url', 'display', 'schedule', 'scheduled_for', 'dispatched_at', 'outcome', 'message',
+        fields = ('id', 'url', 'display', 'schedule', 'schedule_name', 'scheduled_for', 'dispatched_at', 'outcome', 'message',
                   'job_count', 'job_status_counts', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'outcome')
         read_only_fields = fields

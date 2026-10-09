@@ -4,8 +4,11 @@ from ipam.api.serializers import PrefixSerializer, VRFSerializer
 from tenancy.api.serializers import TenantSerializer
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
+from .audits import AuditRunSerializer, AuditScheduleSerializer
 from .profiles import DeviceTypeProfileSerializer, JobProfileSerializer, PlatformProfileSerializer
-from .upgrades import UpgradeJobSerializer
+from .upgrades import (
+    PrestagePolicySerializer, UpgradeDependencySerializer, UpgradeGroupSerializer, UpgradeJobSerializer,
+)
 
 from netbox_discovery.choices import OnboardingStatusChoices
 from netbox_discovery.models import (
@@ -18,6 +21,11 @@ from netbox_discovery.models import (
 )
 
 __all__ = (
+    'AuditRunSerializer',
+    'AuditScheduleSerializer',
+    'PrestagePolicySerializer',
+    'UpgradeDependencySerializer',
+    'UpgradeGroupSerializer',
     'PlatformProfileSerializer',
     'UpgradeJobSerializer',
     'DeviceTypeProfileSerializer',

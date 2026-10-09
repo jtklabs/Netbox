@@ -101,7 +101,8 @@ class AuditSchedule(PrimaryModel):
 
 
 class AuditRun(PrimaryModel):
-    schedule = models.ForeignKey(AuditSchedule, on_delete=models.PROTECT, related_name='runs')
+    schedule = models.ForeignKey(AuditSchedule, on_delete=models.SET_NULL, related_name='runs', null=True, blank=True)
+    schedule_name = models.CharField(max_length=100, blank=True, editable=False)
     scheduled_for = models.DateTimeField()
     dispatched_at = models.DateTimeField(default=timezone.now)
     outcome = models.CharField(max_length=10, choices=(('queued', 'Queued'), ('skipped', 'Skipped'), ('failed', 'Failed')))
@@ -113,7 +114,16 @@ class AuditRun(PrimaryModel):
         constraints = [models.UniqueConstraint(fields=('schedule', 'scheduled_for'), name='unique_audit_occurrence')]
 
     def __str__(self):
-        return f'{self.schedule}: {self.scheduled_for.isoformat()}'
+        return f'{self.schedule_label}: {self.scheduled_for.isoformat()}'
+
+    @property
+    def schedule_label(self):
+        return str(self.schedule) if self.schedule_id else f'{self.schedule_name or "Schedule"} (deleted)'
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.schedule_id and not self.schedule_name:
+            self.schedule_name = self.schedule.name
+        super().save(*args, **kwargs)
 
     def get_absolute_url(self):
         return reverse('plugins:netbox_discovery:auditrun', args=[self.pk])

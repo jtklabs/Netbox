@@ -716,7 +716,13 @@ An unfinished occurrence blocks the next one, which is recorded as skipped.
 Unclaimed jobs past their start window expire, including when their poller is
 offline. Active/recovery jobs continue to block until a worker or operator
 resolves them. Pausing a schedule stops future occurrences, not already queued
-jobs. Schedule deletion is protected once it has run history; pause it instead.
+jobs. Deleting a schedule also stops future occurrences, but retains its run
+history, device jobs and compliance results. Migration `0022` saves the name
+on existing runs and makes their schedule link nullable. Retained runs display
+the saved name with `(deleted)` and remain available in run history and the API.
+Deleting a schedule does **not** cancel pending or running jobs: review/cancel
+them in Standards Jobs before deletion when needed. Execution-history protection
+remains unchanged; deleting a schedule does not require deleting its jobs first.
 
 The creator, or the last person to edit a schedule, becomes its `run_as` user.
 That user needs permission to view the schedule, devices, profiles and standards,
@@ -744,7 +750,9 @@ REST endpoints:
   Use `frequency: "now"` for immediate one-time dispatch; otherwise `daily` or
   `weekly`. Existing schedules stay audit-only after migration `0021`.
 - `/api/plugins/discovery/audit-runs/`: read-only history, filter by `schedule_id`
-  or `outcome`; includes `job_status_counts` for visible jobs.
+  or `outcome`; includes `job_status_counts` for visible jobs and `schedule_name`
+  saved at dispatch. After deletion, `schedule` is null; `q` also searches the
+  retained name. Existing runs are backfilled with their schedule's current name.
 - `/api/plugins/discovery/upgrade-jobs/?audit_run_id=ID` or
   `?audit_schedule_id=ID`: device job history, snapshots and results.
 

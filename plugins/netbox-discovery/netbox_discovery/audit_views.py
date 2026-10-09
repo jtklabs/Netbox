@@ -6,6 +6,8 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q, Count
+from django.shortcuts import render
+from django.urls import reverse
 from dcim.models import Device, DeviceType, Platform, Region, Site
 from tenancy.models import Tenant
 from extras.models import Tag
@@ -18,6 +20,8 @@ from netbox.views.generic import ObjectListView, ObjectView, ObjectEditView, Obj
 from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultipleChoiceField
 from utilities.forms.rendering import FieldSet
 from utilities.views import register_model_view
+from utilities.forms import DeleteForm
+from utilities.htmx import htmx_partial
 
 from .models import AuditSchedule, AuditRun, JobProfile, UpgradeJob
 from .profile_views import RemediationWidget
@@ -137,7 +141,7 @@ class AuditRunFilterSet(NetBoxModelFilterSet):
         fields = ('id', 'schedule_id', 'outcome')
 
     def search(self, queryset, name, value):
-        return queryset.filter(Q(schedule__name__icontains=value) | Q(message__icontains=value))
+        return queryset.filter(Q(schedule__name__icontains=value) | Q(schedule_name__icontains=value) | Q(message__icontains=value))
 
 
 class AuditScheduleTable(NetBoxTable):
@@ -157,7 +161,9 @@ class AuditScheduleTable(NetBoxTable):
 class AuditRunTable(NetBoxTable):
     actions = columns.ActionsColumn(actions=('changelog',))
     scheduled_for = columns.DateTimeColumn(linkify=True)
-    schedule = tables.Column(linkify=True)
+    schedule = tables.TemplateColumn(
+        '{% if record.schedule_id %}<a href="{{ record.schedule.get_absolute_url }}">{{ record.schedule }}</a>'
+        '{% else %}{{ record.schedule_label }}{% endif %}', order_by=('schedule_name',))
 
     class Meta(NetBoxTable.Meta):
         model = AuditRun
@@ -231,6 +237,17 @@ class AuditScheduleEditView(ObjectEditView):
 @register_model_view(AuditSchedule, 'delete')
 class AuditScheduleDeleteView(ObjectDeleteView):
     queryset = AuditSchedule.objects.all()
+    template_name = 'netbox_discovery/auditschedule_delete.html'
+
+    def get(self, request, *args, **kwargs):
+        obj = self.get_object(**kwargs)
+        template = ('netbox_discovery/inc/auditschedule_delete_form.html'
+                    if htmx_partial(request) else self.template_name)
+        return render(request, template, {
+            'object': obj, 'form': DeleteForm(instance=obj, initial=request.GET),
+            'form_url': reverse('plugins:netbox_discovery:auditschedule_delete', args=[obj.pk]),
+            'return_url': self.get_return_url(request, obj),
+        })
 
 
 @register_model_view(AuditRun, name='list')

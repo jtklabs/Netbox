@@ -89,8 +89,8 @@ def check_run_as(schedule):
 @transaction.atomic
 def dispatch(schedule_id, now=None):
     now = now or timezone.now()
-    schedule = AuditSchedule.objects.select_for_update(of=('self',)).select_related('run_as').get(pk=schedule_id)
-    if not schedule.enabled or not schedule.next_run_at or schedule.next_run_at > now:
+    schedule = AuditSchedule.objects.select_for_update(of=('self',)).select_related('run_as').filter(pk=schedule_id).first()
+    if not schedule or not schedule.enabled or not schedule.next_run_at or schedule.next_run_at > now:
         return None
     occurrence = schedule.next_run_at
     run, created = AuditRun.objects.get_or_create(schedule=schedule, scheduled_for=occurrence,
