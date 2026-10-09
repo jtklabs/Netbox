@@ -284,6 +284,51 @@ class AuditScheduleTest(TestCase):
         self.assertEqual(run.outcome, 'queued', run.message)
         self.assertEqual(list(run.jobs.values_list('device_id', flat=True)), [self.devices[0].pk])
 
+    def test_missing_ip_does_not_block_other_targets(self):
+        self.devices[0].primary_ip4 = None
+        self.devices[0].primary_ip6 = None
+        self.devices[0].save()
+        run = self.dispatch()
+        self.assertEqual((run.outcome, run.job_count), ('queued', 1), run.message)
+        self.assertEqual(list(run.jobs.values_list('device_id', flat=True)), [self.devices[1].pk])
+        self.assertIn('1 execution devices without a primary management IP excluded', run.message)
+
+    def test_all_unaddressed_targets_are_skipped_without_jobs(self):
+        from dcim.models import Device
+        Device.objects.filter(pk__in=[device.pk for device in self.devices]).update(primary_ip4=None, primary_ip6=None)
+        run = self.dispatch()
+        self.assertEqual((run.outcome, run.job_count), ('skipped', 0), run.message)
+        self.assertIn('2 execution devices without a primary management IP excluded', run.message)
+        self.assertFalse(run.jobs.exists())
+
+    def test_unaddressed_stack_master_is_skipped_without_blocking_standalone(self):
+        from dcim.models import Device, VirtualChassis
+        master = self.devices[0]
+        stack = VirtualChassis.objects.create(name='Unaddressed stack', master=master)
+        master.virtual_chassis = stack
+        master.vc_position = 1
+        master.primary_ip4 = master.primary_ip6 = None
+        master.save()
+        Device.objects.create(name='Unaddressed member', site=master.site, role=master.role,
+                              device_type=master.device_type, virtual_chassis=stack, vc_position=2)
+        run = self.dispatch()
+        self.assertEqual(list(run.jobs.values_list('device_id', flat=True)), [self.devices[1].pk])
+        self.assertIn('1 execution devices without a primary management IP excluded', run.message)
+
+    def test_primary_ip_added_is_included_on_next_occurrence(self):
+        device = self.devices[0]
+        original = device.primary_ip4
+        device.primary_ip4 = None
+        device.save()
+        first = self.dispatch()
+        self.assertEqual(first.job_count, 1)
+        first.jobs.update(status='completed')
+        device.primary_ip4 = original
+        device.save()
+        self.make_due(self.now)
+        second = self.dispatch()
+        self.assertEqual((second.outcome, second.job_count), ('queued', 2), second.message)
+
     def test_audit_only_operator_needs_no_apply_permission(self):
         from dcim.models import Device
         from django.contrib.contenttypes.models import ContentType
@@ -405,7 +450,7 @@ class RegionalAuditTest(TestCase):
         run = self.dispatch()
         self.assertEqual(run.outcome, 'queued', run.message)
         self.assertEqual(run.job_count, 1)
-        self.assertIn('1 devices without a matching accessible model profile excluded', run.message)
+        self.assertIn('1 devices without a matching accessible model or platform profile excluded', run.message)
 
     def test_empty_match_skips_then_picks_up_new_assignments(self):
         run = self.dispatch()
@@ -499,9 +544,13 @@ class RegionalAuditTest(TestCase):
 
     def add_large_inventory(self):
         from dcim.models import Device
+        from ipam.models import IPAddress
+        addresses = [IPAddress.objects.create(address=f'198.18.{i // 254}.{i % 254 + 1}/24')
+                     for i in range(999)]
         Device.objects.bulk_create([
             Device(name=f'region-device-{i}', site=self.site, role=self.devices[0].role,
-                   device_type=self.devices[0].device_type) for i in range(999)])
+                   device_type=self.devices[0].device_type, primary_ip4=address)
+            for i, address in enumerate(addresses)])
         self.assign_profile()
 
     def test_large_region_uses_multiple_queue_batches_in_one_run(self):

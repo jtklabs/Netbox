@@ -45,7 +45,9 @@ class AuditScheduleForm(NetBoxModelForm):
     platforms = DynamicModelMultipleChoiceField(queryset=Platform.objects.all(), required=False)
     models = DynamicModelMultipleChoiceField(queryset=DeviceType.objects.all(), required=False)
     device_tags = DynamicModelMultipleChoiceField(queryset=Tag.objects.all(), required=False)
-    devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False)
+    devices = DynamicModelMultipleChoiceField(
+        queryset=Device.objects.filter(Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)),
+        query_params={'has_primary_ip': True}, required=False)
     saved_profile = DynamicModelChoiceField(queryset=JobProfile.objects.filter(kind='remediate'), required=False,
                                             query_params={'kind': 'remediate'})
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, widget=RemediationWidget,

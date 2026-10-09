@@ -17,7 +17,7 @@ from extras.models import Tag
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from netbox.forms import NetBoxModelFilterSetForm
-from django.db.models import Count
+from django.db.models import Count, Q
 from netbox.views.generic import ObjectDeleteView, ObjectEditView, ObjectListView, ObjectView
 from netbox.object_actions import AddObject, DeleteObject, EditObject, ObjectAction
 from netbox.forms import NetBoxModelForm
@@ -156,8 +156,10 @@ class ScheduleForm(UpgradePlanForm):
     platforms = DynamicModelMultipleChoiceField(queryset=Platform.objects.all(), required=False)
     models = DynamicModelMultipleChoiceField(queryset=DeviceType.objects.all(), required=False)
     device_tags = DynamicModelMultipleChoiceField(queryset=Tag.objects.all(), required=False)
-    devices = DynamicModelMultipleChoiceField(queryset=Device.objects.all(), required=False,
-                                              help_text='Optional explicit devices; combined with the filters above.')
+    devices = DynamicModelMultipleChoiceField(
+        queryset=Device.objects.filter(Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)),
+        query_params={'has_primary_ip': True}, required=False,
+        help_text='Optional explicit devices; combined with the filters above.')
     poller = DynamicModelChoiceField(queryset=DiscoveryPoller.objects.all(), required=False,
                                     help_text='Normally automatic; choose one when devices have multiple poller tags.')
     field_order = ('all_active', 'regions', 'tenants', 'sites', 'roles', 'platforms', 'models', 'device_tags',

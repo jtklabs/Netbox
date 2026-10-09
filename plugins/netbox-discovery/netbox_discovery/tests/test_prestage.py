@@ -52,6 +52,15 @@ class PrestageFixture(TestCase):
 
 
 class PlanTest(PrestageFixture):
+    def test_unaddressed_device_is_never_automatically_staged(self):
+        device = self.devices['sw1']
+        device.primary_ip4 = device.primary_ip6 = None
+        device.save()
+        self.assertEqual(self.actions()['sw1'], ('skip', 'sw1: no primary management IP'))
+        jobs, summary = prestage.run_policy(self.policy)
+        self.assertNotIn(device.pk, [job.device_id for job in jobs])
+        self.assertEqual(summary['reasons']['no primary management IP'], 1)
+
     def test_stages_preferred_image_on_devices_not_running_it(self):
         actions = self.actions()
         self.assertEqual(actions['sw1'], ('schedule', 'Stage cisco9k_iosxe.17.18.4.SPA.bin'))

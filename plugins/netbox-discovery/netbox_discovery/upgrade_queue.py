@@ -170,6 +170,8 @@ def select_devices(user, filters):
     devices = execution_devices(user, selected.qs, limit=1000)
     if not devices or len(devices) > 1000:
         raise QueueError('Selection must contain between 1 and 1000 devices.')
+    for device in devices:
+        address_of(device)
     return devices
 
 
@@ -480,6 +482,7 @@ def claim(user, poller, limit, apply):
         locked = Device.objects.select_for_update(skip_locked=True).filter(pk=job.device_id).first()
         if locked is None or UpgradeJob.objects.filter(device_id=job.device_id, status__in=ACTIVE).exists():
             continue
+        job.device = locked
         try:
             check_target(job)
         except QueueError as exc:
@@ -527,6 +530,12 @@ def report(user, pk, data):
     if data.get('heartbeat'):
         UpgradeJob.objects.filter(pk=pk).update(last_seen_at=now)
         return job
+    # The worker must receive this acknowledgment before opening a device
+    # connection. Revalidate retries too, in case the IP changed after pickup.
+    if data['stage'] == 'queued' and job.started_at is None:
+        if job.status != 'claimed' or not job.scheduled_at <= now < job.start_before:
+            raise QueueError('Start window closed or claim is no longer active.')
+        check_target(job)
     sequence = data['sequence']
     if sequence <= job.sequence:
         return job

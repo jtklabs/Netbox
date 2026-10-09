@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 from users.models import ObjectPermission
 
 from netbox_discovery import audit_scheduling, upgrade_queue as queue
-from netbox_discovery.models import AuditSchedule, DeviceTypeProfile, JobProfile, PlatformProfile
+from netbox_discovery.models import AuditSchedule, DeviceTypeProfile, JobProfile, PlatformProfile, UpgradeJob
 from netbox_discovery.profile_assignments import default_profile_ids
 from netbox_discovery.profile_views import PlatformProfileForm
 from .test_upgrades import PROFILE
@@ -111,6 +111,60 @@ class PlatformProfileTest(TestCase):
         self.assertEqual((run.outcome, run.job_count), ('queued', 2), run.message)
         self.assertEqual(set(run.jobs.values_list('profile_name', flat=True)), {self.profile.name})
         self.assertEqual(set(run.jobs.values_list('operation', flat=True)), {'audit_config'})
+
+    def test_platform_scope_queues_all_addressed_devices_and_excludes_unaddressed(self):
+        unaddressed = Device.objects.create(name='Unaddressed IOS', site=self.site, role=self.devices[0].role,
+                                           device_type=self.devices[0].device_type, platform=self.platform)
+        other = Platform.objects.create(name='Unselected platform', slug='unselected-platform')
+        Device.objects.create(name='Outside scope', site=self.site, role=unaddressed.role,
+                              device_type=unaddressed.device_type, platform=other)
+        for source in ('model', 'saved', 'custom'):
+            for remediate in (False, True):
+                with self.subTest(source=source, remediate=remediate):
+                    schedule = AuditSchedule.objects.create(
+                        name=f'Platform {source} {remediate}', run_as=self.user, remediate=remediate,
+                        filters={'platform_id': [self.platform.pk]}, profile_source=source,
+                        saved_profile=self.profile if source == 'saved' else None,
+                        profile=self.profile.plan if source == 'custom' else {})
+                    now = timezone.now()
+                    AuditSchedule.objects.filter(pk=schedule.pk).update(next_run_at=now - timedelta(minutes=1))
+                    run = audit_scheduling.dispatch(schedule.pk, now)
+                    self.assertEqual((run.outcome, run.job_count), ('queued', 2), run.message)
+                    self.assertEqual(set(run.jobs.values_list('device_id', flat=True)), {d.pk for d in self.devices})
+                    self.assertIn('1 execution devices without a primary management IP excluded', run.message)
+                    self.assertFalse(run.jobs.filter(address='').exists())
+        self.assertFalse(UpgradeJob.objects.filter(device=unaddressed).exists())
+
+    def test_ui_now_platform_scope_does_not_collapse_to_one_device(self):
+        Device.objects.create(name='No IP', site=self.site, role=self.devices[0].role,
+                              device_type=self.devices[0].device_type, platform=self.platform)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.browser.post(reverse('plugins:netbox_discovery:auditschedule_add'), {
+                'name': 'Platform now', 'enabled': True, 'frequency': 'now', 'window_hours': 4,
+                'platforms': [self.platform.pk], 'profile_source': 'model',
+            })
+        self.assertEqual(response.status_code, 302, getattr(response, 'context', None) and response.context['form'].errors)
+        schedule = AuditSchedule.objects.get(name='Platform now')
+        self.assertEqual(schedule.filters, {'status': ['active'], 'platform_id': [self.platform.pk]})
+        run = schedule.runs.get()
+        self.assertEqual((run.outcome, run.job_count), ('queued', 2), run.message)
+        self.assertEqual(set(run.jobs.values_list('device_id', flat=True)), {d.pk for d in self.devices})
+
+    def test_missing_profile_and_missing_ip_have_distinct_counts(self):
+        Device.objects.create(name='No IP or profile', site=self.site, role=self.devices[0].role,
+                              device_type=self.devices[0].device_type)
+        Device.objects.filter(pk=self.devices[1].pk).update(platform=None)
+        schedule = self.schedule()
+        reasons = {}
+        self.assertEqual(audit_scheduling.eligible_devices(schedule, self.user, exclusions=reasons),
+                         ([self.devices[0].pk], 2))
+        self.assertEqual(reasons, {'missing_ip': 1, 'missing_profile': 1})
+
+    def test_direct_queue_still_rejects_an_unaddressed_device(self):
+        Device.objects.filter(pk=self.devices[0].pk).update(primary_ip4=None, primary_ip6=None)
+        with self.assertRaisesMessage(queue.QueueError, 'no primary management IP'):
+            queue.schedule(self.user, self.data)
+        self.assertFalse(UpgradeJob.objects.exists())
 
     def test_saved_schedule_respects_effective_model_override(self):
         schedule = self.schedule('saved')

@@ -88,6 +88,8 @@ class Outbox:
                     raise NetBoxError('NetBox did not acknowledge the progress sequence')
                 if body['stage'] == 'ready' and result.get('status') != 'running':
                     raise NetBoxError('NetBox did not authorize device changes')
+                if body['stage'] == 'queued' and result.get('status') != 'claimed':
+                    raise NetBoxError('NetBox did not authorize the device connection')
                 return True
             except NetBoxError:
                 if retry and attempt < 2:
@@ -112,8 +114,8 @@ class Outbox:
             body['message'] = body['message'][:1000]
             body['claim_token'] = job['claim_token']
             # Persist before HTTP, so a crash after device success is recoverable.
-            # A ready event is a gate, never a deferred action.
-            path = None if body['stage'] == 'ready' else self.persist(job['id'], body)
+            # Connection and change authorization are live gates, not deferred actions.
+            path = None if body['stage'] in ('queued', 'ready') else self.persist(job['id'], body)
             delivered = self.send(job['id'], body)
             if delivered and path:
                 path.unlink()
@@ -201,7 +203,8 @@ def execute_job(task, args, client, outbox):
         reporter = Reporter(run, settings_from_env(), event_sink=outbox.sink(job))
         try:
             profile = validate_assignment(job, args.apply)
-            reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox')
+            if not reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox'):
+                raise ValueError('NetBox did not authorize the device connection; no device work started')
             if job['operation'] in remediation.CONFIG_OPERATIONS:
                 failed, changed, outcome = remediation.run_job(
                     task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))

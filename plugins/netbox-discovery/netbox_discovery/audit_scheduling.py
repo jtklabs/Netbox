@@ -57,7 +57,7 @@ def validate_profile_access(schedule, user):
         raise queue.QueueError('Choose an accessible saved remediation profile.')
 
 
-def eligible_devices(schedule, user):
+def eligible_devices(schedule, user, *, exclusions=None):
     """Resolve a recurring scope before applying the one-off queue's batch limit."""
     validate_profile_access(schedule, user)
     selection = DeviceFilterSet({'status': ['active'], **schedule.filters},
@@ -67,15 +67,24 @@ def eligible_devices(schedule, user):
     devices = queue.execution_devices(user, selection.qs)
     if any(device.status != 'active' for device in devices):
         raise queue.QueueError('A selected stack master is not active. Correct its status before scheduling.')
-    excluded = 0
+    # Resolve stacks first: an unaddressed member can still be covered by its
+    # master, but an unaddressed execution target must never get a device job.
+    addressed = [device for device in devices if device.primary_ip4_id or device.primary_ip6_id]
+    missing_ip = len(devices) - len(addressed)
+    devices = addressed
+    missing_profile = 0
     if schedule.profile_source in ('model', 'saved'):
         from .profile_assignments import default_profile_ids
         scoped = devices
         defaults = default_profile_ids(user, scoped, 'remediate')
         matching = [device.pk for device in scoped if device.pk in defaults and (
             schedule.profile_source != 'saved' or defaults[device.pk] == schedule.saved_profile_id)]
-        return matching, len(scoped) - len(matching)
-    return [device.pk for device in devices], excluded
+        missing_profile = len(scoped) - len(matching)
+    else:
+        matching = [device.pk for device in devices]
+    if exclusions is not None:
+        exclusions.update(missing_ip=missing_ip, missing_profile=missing_profile)
+    return matching, missing_ip + missing_profile
 
 
 def check_run_as(schedule):
@@ -108,7 +117,8 @@ def dispatch(schedule_id, now=None):
             try:
                 check_run_as(schedule)
                 schedule.full_clean()
-                device_ids, excluded = eligible_devices(schedule, schedule.run_as)
+                exclusions = {}
+                device_ids, _ = eligible_devices(schedule, schedule.run_as, exclusions=exclusions)
                 # Savepoint rolls back the entire batch if any device is invalid or unauthorized.
                 with transaction.atomic():
                     count = 0
@@ -124,8 +134,10 @@ def dispatch(schedule_id, now=None):
                 kind = 'audit and remediation' if schedule.remediate else 'read-only audit'
                 run.message = (f'{count} {kind} jobs queued.' if count else
                                'No eligible active devices match this schedule.')
-                if excluded:
-                    run.message += f' {excluded} devices without a matching accessible model profile excluded.'
+                if exclusions['missing_ip']:
+                    run.message += f' {exclusions["missing_ip"]} execution devices without a primary management IP excluded.'
+                if exclusions['missing_profile']:
+                    run.message += f' {exclusions["missing_profile"]} devices without a matching accessible model or platform profile excluded.'
             except (queue.QueueError, ValidationError) as exc:
                 run.outcome = 'failed'
                 run.message = str(exc)[:1000]

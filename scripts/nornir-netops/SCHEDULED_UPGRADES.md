@@ -655,6 +655,21 @@ virtual chassis master. Larger scopes are queued in batches of up to 1,000 devic
 within the same audit run; there is no 1,000-device limit on the recurring scope.
 Schedules can be saved before devices or profile assignments exist. An occurrence
 with no eligible devices is recorded as skipped and checked again next time.
+Execution targets without a primary management IP are excluded without blocking
+the addressed devices in the same scope. Stack members are resolved to their
+master before this check, so members without an IP remain covered by a reachable
+master. Each run reports missing-IP and missing-profile exclusions separately;
+assigning a platform profile alone does not make an unaddressed device executable.
+The explicit device pickers only list devices with a primary management IP, and
+form validation rejects unaddressed IDs even if submitted directly. Region and
+platform scopes still resolve stack members to their master before checking IPs.
+Manual queue selection rejects missing-IP execution targets; automatic standards
+schedules skip them. Worker pickup rechecks the current device address, and the
+worker requires a live `queued` acknowledgment before any device connection.
+This connection gate also applies to read-only audits and is never deferred in
+the worker outbox. Before changes, the separate `ready` gate checks the address
+again. Update both NetBox and pollers to enable the full set of checks. These
+guards do not interrupt recovery or discard history for work already underway.
 
 Choose individual standards, a saved remediation profile, or **Device defaults
 (model, then platform)**. Device defaults use a model's assigned remediation

@@ -64,6 +64,7 @@ def test_c9300_171206_netbox_profile_assignment(job, operation, release):
 
 
 @pytest.mark.parametrize('field,value', [('operation', 'shell'), ('hostname', '192.0.2.4;reload'),
+                                        ('hostname', ''), ('hostname', None),
                                         ('id', True), ('claim_token', 'invalid')])
 def test_malformed_assignment_is_rejected(job, field, value):
     job[field] = value
@@ -210,7 +211,8 @@ def test_each_job_uses_its_operation_and_a_separate_archive(tmp_path, job, monke
     args = build_parser().parse_args(['upgrade-poll', '--apply', '--poller', 'lab', '--report-dir', str(tmp_path)])
     monkeypatch.setattr(scheduler, 'settings_from_env', lambda: None)
     client = Mock()
-    client.post.side_effect = lambda path, body: {'id': 12, 'sequence': body.get('sequence', 0), 'status': 'running' if body.get('stage') == 'ready' else 'completed'}
+    client.post.side_effect = lambda path, body: {'id': 12, 'sequence': body.get('sequence', 0), 'status':
+        'claimed' if body.get('stage') == 'queued' else 'running' if body.get('stage') == 'ready' else 'completed'}
     host = SimpleNamespace(name='sw1', hostname=job['hostname'], platform='cisco_ios',
                            data={'upgrade_job': job, 'netbox_id': job['device_id']})
     task = SimpleNamespace(host=host)
@@ -226,3 +228,33 @@ def test_each_job_uses_its_operation_and_a_separate_archive(tmp_path, job, monke
     assert documents[0]['dry_run'] is not apply
     assert documents[0]['schedule']['job_id'] == 12
     assert job['claim_token'] not in json.dumps(documents)
+
+
+@pytest.mark.parametrize('operation', ['audit', 'stage', 'upgrade', 'audit_config', 'remediate'])
+@pytest.mark.parametrize('denial', ['failed', 'completed', 'pending', 'offline'])
+def test_connection_requires_live_authorization_for_every_operation(tmp_path, job, monkeypatch, operation, denial):
+    from netops.cli import build_parser
+    job['operation'] = operation
+    if operation in ('audit_config', 'remediate'):
+        job['profile'] = {'features': ['ntp'], 'mode': 'replace'}
+    args = build_parser().parse_args(['upgrade-poll', '--apply', '--poller', 'lab', '--report-dir', str(tmp_path)])
+    monkeypatch.setattr(scheduler, 'settings_from_env', lambda: None)
+    monkeypatch.setattr(scheduler.time, 'sleep', lambda seconds: None)
+    client = Mock()
+    def response(path, body):
+        if body.get('stage') == 'queued' and denial == 'offline':
+            raise NetBoxError('unreachable')
+        return {'id': job['id'], 'sequence': body.get('sequence', 0), 'status': denial}
+    client.post.side_effect = response
+    host = SimpleNamespace(name='sw1', hostname=job['hostname'], platform='cisco_ios',
+                           data={'upgrade_job': job, 'netbox_id': job['device_id']})
+    upgrade = Mock(side_effect=AssertionError('Device work must not start'))
+    remediate = Mock(side_effect=AssertionError('Device work must not start'))
+    monkeypatch.setattr(scheduler, 'upgrade_device', upgrade)
+    monkeypatch.setattr(scheduler.remediation, 'run_job', remediate)
+    spool = tmp_path / 'spool'
+    result = scheduler.execute_job(SimpleNamespace(host=host), args, client, scheduler.Outbox(spool, client))
+    assert result.failed
+    upgrade.assert_not_called()
+    remediate.assert_not_called()
+    assert not any(json.loads(path.read_text())['body']['stage'] == 'queued' for path in spool.glob('*.json'))
