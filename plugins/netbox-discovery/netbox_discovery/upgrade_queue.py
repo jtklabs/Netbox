@@ -147,7 +147,7 @@ def execution_devices(user, queryset, limit=None):
         raise QueueError(f'Selection must contain between 1 and {limit} execution devices (one per stack).')
     devices = list(Device.objects.restrict(user, 'view').filter(pk__in=ids).select_related(
         'site__region', 'primary_ip4', 'primary_ip6', 'virtual_chassis', 'device_type', 'platform'
-    ).prefetch_related('tags').order_by('pk'))
+    ).prefetch_related('tags', 'site__tags', 'site__region__tags').order_by('pk'))
     if len(devices) != len(ids):
         raise QueueError('A selected stack master is outside your device permissions.')
     return devices
@@ -224,6 +224,13 @@ def prepare(user, data):
     rows = []
     devices = select_devices(user, data['filters'])
     profiles = resolve_profiles(user, data, devices)
+    pollers = {}
+    if data['operation'] in CONFIG_OPERATIONS:
+        from django.apps import apps
+        if not apps.is_installed('netbox_compliance'):
+            raise QueueError('Scheduled remediation requires the Config Compliance plugin and versioned standards.')
+        from netbox_compliance.definitions import SnapshotResolver, snapshot_for_device
+        snapshot_resolver = SnapshotResolver(user)
     for device in devices:
         if device.virtual_chassis_id and device.virtual_chassis.master_id != device.pk:
             raise QueueError(f'{device}: select only the virtual chassis master (one job per stack).')
@@ -231,20 +238,18 @@ def prepare(user, data):
         chosen = preferred if preferred in candidates else next(iter(candidates)) if len(candidates) == 1 and not preferred else None
         if not chosen:
             raise QueueError(f'{device}: no unambiguous poller; check device/site/region tags or choose a matching poller.')
-        poller = DiscoveryPoller.objects.filter(name=chosen).first()
+        if chosen not in pollers:
+            pollers[chosen] = DiscoveryPoller.objects.filter(name=chosen).first()
+        poller = pollers[chosen]
         if poller and poller.tenant_id and poller.tenant_id != device.tenant_id:
             raise QueueError(f'{device}: poller tenant does not match the device.')
         plan, profile_name = profiles[device.pk]
         standards_snapshot = {}
         if data['operation'] in CONFIG_OPERATIONS:
-            from django.apps import apps
-            if not apps.is_installed('netbox_compliance'):
-                raise QueueError('Scheduled remediation requires the Config Compliance plugin and versioned standards.')
-            from netbox_compliance.definitions import snapshot_for_device
-            from django.core.exceptions import ValidationError
             try:
                 standards_snapshot = snapshot_for_device(user, device, plan['features'], plan['mode'],
-                                                         audit=data['operation'] == 'audit_config')
+                                                         audit=data['operation'] == 'audit_config',
+                                                         resolver=snapshot_resolver)
             except ValidationError as exc:
                 raise QueueError('; '.join(exc.messages)) from None
             if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:
@@ -279,8 +284,11 @@ def schedule(user, data):
     rows = prepare(user, data)
     batch = uuid.uuid4()
     jobs = []
+    pollers = {}
     for row in rows:
-        poller, _ = DiscoveryPoller.objects.get_or_create(name=row['poller_name'])
+        if row['poller_name'] not in pollers:
+            pollers[row['poller_name']], _ = DiscoveryPoller.objects.get_or_create(name=row['poller_name'])
+        poller = pollers[row['poller_name']]
         job = UpgradeJob(device=row['device'], device_name=row['device'].name,
                          address=row['address'], poller=poller, batch_id=batch,
                          profile=row['profile'], profile_name=row['profile_name'], operation=data['operation'],

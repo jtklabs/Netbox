@@ -1,6 +1,7 @@
 """Versioned, platform-neutral settings consumed by the existing feature workers."""
 import ipaddress
 import json
+from copy import deepcopy
 
 import yaml
 from django.core.exceptions import ValidationError
@@ -92,19 +93,41 @@ def parse_definition(text):
         raise ValidationError({'definition_yaml': str(exc)}) from None
 
 
-def snapshot_for_device(user, device, features, mode, *, audit=False):
-    from .models import ConfigStandard
-    from .scoping import StandardResolver, active_standards
+class SnapshotResolver:
+    """Load visible standards and current revisions once per scheduling batch."""
 
-    standards = active_standards(queryset=ConfigStandard.objects.restrict(user, 'view')).filter(
-        check_type='netops').prefetch_related('platforms', 'roles', 'sites', 'device_tags')
+    def __init__(self, user):
+        from django.db.models import F
+        from .models import ConfigStandard, ConfigStandardRevision
+        from .scoping import StandardResolver, active_standards
+
+        standards = list(active_standards(queryset=ConfigStandard.objects.restrict(user, 'view')).filter(
+            check_type='netops').prefetch_related('platforms', 'roles', 'sites', 'device_tags'))
+        self.scopes = StandardResolver(standards=standards)
+        self.revisions = {
+            (revision.standard_id, revision.number): revision
+            for revision in ConfigStandardRevision.objects.filter(
+                standard_id__in=[standard.pk for standard in standards], number=F('standard__revision'))
+        }
+
+    def for_device(self, device):
+        from .models import ConfigStandardRevision
+
+        for standard in self.scopes.for_device(device):
+            revision = self.revisions.get((standard.pk, standard.revision))
+            if revision is None:
+                raise ConfigStandardRevision.DoesNotExist('Current standard revision is missing or changed; retry scheduling.')
+            yield standard, revision
+
+
+def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None):
+    resolver = resolver if resolver is not None else SnapshotResolver(user)
     document, revisions = {}, []
-    for standard in StandardResolver(standards=list(standards)).for_device(device):
-        revision = standard.revisions.get(number=standard.revision)
+    for standard, revision in resolver.for_device(device):
         section, settings = next(iter(revision.definition['settings'].items()))
         if section in document:
             raise ValidationError(f'{device}: multiple YAML standards define {section}; narrow their scopes.')
-        document[section] = settings
+        document[section] = deepcopy(settings)
         revisions.append({'standard_id': standard.pk, 'revision': revision.number,
                           'name': standard.name, 'section': section,
                           'auto_remediable': standard.auto_remediable,

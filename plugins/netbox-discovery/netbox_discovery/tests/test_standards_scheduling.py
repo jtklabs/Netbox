@@ -22,11 +22,13 @@ class StandardsSchedulingTest(TestCase):
         return AuditSchedule.objects.create(name='Standards', filters={'site_id': [self.site.pk]},
             profile={'features': ['ntp'], 'mode': 'replace'}, run_as=self.user, **values)
 
-    def test_now_dispatches_once_after_commit_and_never_replays_on_edit(self):
+    def test_now_waits_for_worker_and_never_replays_on_edit(self):
         with self.captureOnCommitCallbacks(execute=True) as callbacks:
             schedule = self.schedule(frequency='now')
             self.assertFalse(UpgradeJob.objects.exists())
-        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(len(callbacks), 0)
+        self.assertFalse(UpgradeJob.objects.exists())
+        self.assertEqual(audit_scheduling.run_due(), 1)
         self.assertEqual(set(UpgradeJob.objects.values_list('operation', flat=True)), {'audit_config'})
         schedule.refresh_from_db()
         self.assertFalse(schedule.enabled)
@@ -43,6 +45,7 @@ class StandardsSchedulingTest(TestCase):
     def test_remediation_mode_uses_apply_worker_and_can_be_edited_without_changing_mode(self):
         with self.captureOnCommitCallbacks(execute=True):
             schedule = self.schedule(frequency='now', remediate=True)
+        audit_scheduling.run_due()
         job = schedule.runs.get().jobs.first()
         self.assertEqual(job.operation, 'remediate')
         self.assertEqual(queue.claim(self.user, self.poller, 1, False), [])
@@ -69,6 +72,7 @@ class StandardsSchedulingTest(TestCase):
         schedule.filters = {'id': [9999999]}
         with self.captureOnCommitCallbacks(execute=True):
             schedule.save()
+        audit_scheduling.run_due()
         schedule.refresh_from_db()
         self.assertEqual(schedule.runs.get().outcome, 'skipped')
         self.assertFalse(schedule.enabled)
@@ -100,6 +104,8 @@ class StandardsSchedulingTest(TestCase):
                 'profile': {'features': ['ntp'], 'mode': 'replace'}}, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertFalse(response.data['remediate'])
+        self.assertFalse(UpgradeJob.objects.exists())
+        audit_scheduling.run_due()
         schedule = AuditSchedule.objects.get(pk=response.data['id'])
         self.assertFalse(schedule.enabled)
         self.assertEqual(schedule.runs.get().jobs.get().operation, 'audit_config')
@@ -111,6 +117,7 @@ class StandardsSchedulingTest(TestCase):
         self.assertNotIn('features', form.fields)
         with self.captureOnCommitCallbacks(execute=True):
             schedule = self.schedule(frequency='now')
+        audit_scheduling.run_due()
         job = schedule.runs.get().jobs.first()
         response = self.browser.get(reverse('plugins:netbox_discovery:upgradejob_list'))
         self.assertEqual(len(response.context['table'].data), 0)
@@ -132,6 +139,7 @@ class StandardsSchedulingTest(TestCase):
         upgrade_jobs = queue.schedule(self.user, {**self.data, 'operation': 'audit', 'profile': PROFILE})
         with self.captureOnCommitCallbacks(execute=True):
             schedule = self.schedule(frequency='now')
+        audit_scheduling.run_due()
         url = reverse('plugins:netbox_discovery:upgradejob_bulk_cancel') + '?job_scope=standards'
         response = self.browser.post(url, {'_all': 'on'})
         selection = response.context['form'].initial['selection']

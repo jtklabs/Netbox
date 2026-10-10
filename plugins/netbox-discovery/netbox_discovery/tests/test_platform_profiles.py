@@ -144,6 +144,8 @@ class PlatformProfileTest(TestCase):
                 'platforms': [self.platform.pk], 'profile_source': 'model',
             })
         self.assertEqual(response.status_code, 302, getattr(response, 'context', None) and response.context['form'].errors)
+        self.assertFalse(UpgradeJob.objects.exists())
+        audit_scheduling.run_due()
         schedule = AuditSchedule.objects.get(name='Platform now')
         self.assertEqual(schedule.filters, {'status': ['active'], 'platform_id': [self.platform.pk]})
         run = schedule.runs.get()

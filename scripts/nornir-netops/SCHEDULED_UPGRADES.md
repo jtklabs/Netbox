@@ -4,7 +4,7 @@ NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing i
 
 ## In NetBox
 
-Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. No separate NetBox background scheduler is needed: due times are evaluated at check-in. Only [prestage policies](#prestage-images-by-model) run on NetBox's own worker, the one that already runs its housekeeping.
+Deploy the updated **netbox-discovery** plugin and run its migrations before enabling the worker. Device jobs are claimed when their poller checks in. Audit schedules and [prestage policies](#prestage-images-by-model) also require NetBox's own RQ worker, the one that already runs its housekeeping, to create those device jobs.
 
 Open **Device Operations → Software and Standards → Job Profiles** to save named upgrade or remediation
 profiles. Upgrade profiles contain the validated YAML used by
@@ -686,9 +686,13 @@ Each occurrence pins the latest accessible profile and applicable standard
 revisions into a new batch of jobs. ClearPass cluster-wide remediation retains
 its separate approval flag in a saved profile or the selected-standards form.
 
-**Now (one time)** dispatches immediately after the schedule transaction commits;
-it does not wait for the recurring dispatcher. Jobs execute when the assigned
-poller next checks in. The schedule is disabled and its next-run time cleared
+**Now (one time)** saves a due schedule and returns immediately. The NetBox
+RQ worker checks for due schedules every minute and creates the device jobs in
+the background, so submitting a large scope does not hold the page open. The
+schedule page shows a waiting message until dispatch completes; refresh it to
+see the run and job counts. Jobs execute when the assigned poller next checks in.
+The NetBox worker must be running for both one-time and recurring schedules.
+The schedule is disabled and its next-run time cleared
 after that single dispatch, even if no devices match or validation fails.
 Editing or re-enabling a consumed one-time schedule does not replay it: create
 a new schedule for another run. Unexpected dispatcher failures leave it due

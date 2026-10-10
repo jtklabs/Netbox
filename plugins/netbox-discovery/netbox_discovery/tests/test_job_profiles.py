@@ -259,6 +259,9 @@ class JobProfileTest(UpgradeFixture, TestCase):
                                     'frequency': 'now', 'window_hours': 1, 'models': [self.device.device_type_id],
                                     'profile_source': 'model'})
         self.assertEqual(response.status_code, 302, response.context['form'].errors if response.context else None)
+        self.assertFalse(UpgradeJob.objects.exists())
+        from netbox_discovery.audit_scheduling import run_due
+        run_due()
         self.assertEqual(UpgradeJob.objects.get().profile, self.remediation.plan)
 
     def test_profile_model_picker_updates_existing_assignment_without_changing_remediation(self):

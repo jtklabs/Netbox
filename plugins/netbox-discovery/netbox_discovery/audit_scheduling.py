@@ -150,14 +150,6 @@ def dispatch(schedule_id, now=None):
     return run
 
 
-def dispatch_now(schedule_id):
-    """Dispatch after commit; unexpected failures remain due for the scheduler's retry."""
-    try:
-        dispatch(schedule_id)
-    except Exception:
-        logger.exception('Unable to dispatch immediate standards schedule %s', schedule_id)
-
-
 def run_due():
     now = timezone.now()
     UpgradeJob.objects.filter(audit_run__isnull=False, status__in=WAITING, start_before__lte=now).update(

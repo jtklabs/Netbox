@@ -58,6 +58,8 @@ class AuditScheduleCopyTest(TestCase):
                 'profile_source': 'custom', 'features': ['ntp'], 'comparison': 'replace',
             })
         self.assertEqual(response.status_code, 302)
+        self.assertFalse(UpgradeJob.objects.exists())
+        audit_scheduling.run_due()
         copied = AuditSchedule.objects.get(name='One-time NTP remediation')
         self.assertEqual(copied.filters, self.source.filters)
         self.assertEqual(copied.run_as, operator)

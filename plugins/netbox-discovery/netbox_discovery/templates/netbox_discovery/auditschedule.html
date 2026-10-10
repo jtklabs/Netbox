@@ -4,6 +4,9 @@
 {% include 'netbox_discovery/inc/auditschedule_copy.html' with schedule=object %}
 {% endblock %}
 {% block content %}
+{% if object.frequency == 'now' and object.enabled and object.next_run_at %}
+<div class="alert alert-info">Waiting for background dispatch. The scheduler checks for due work every minute. Device jobs will appear in Recent runs after dispatch completes. Refresh this page to check progress.</div>
+{% endif %}
 <div class="row"><div class="col-lg-6">
   <h2>Audit schedule</h2>
   <table class="table attr-table">

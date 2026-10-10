@@ -95,9 +95,9 @@ class AuditSchedule(PrimaryModel):
             self.next_run_at = previous.next_run_at
             self.last_run_at = previous.last_run_at
         super().save(*args, **kwargs)
-        if self.enabled and self.frequency == 'now' and self.next_run_at:
-            from .audit_scheduling import dispatch_now
-            transaction.on_commit(lambda pk=self.pk: dispatch_now(pk))
+        # The recurring worker picks up due one-shot schedules too. on_commit
+        # callbacks still run in the request thread: dispatching here makes
+        # Submit wait for validation and job creation across the entire fleet.
 
 
 class AuditRun(PrimaryModel):

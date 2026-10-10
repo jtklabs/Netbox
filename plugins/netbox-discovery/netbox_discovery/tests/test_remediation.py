@@ -90,6 +90,9 @@ class RemediationTest(TestCase):
         with self.captureOnCommitCallbacks(execute=True):
             response = client.post(url, data)
         self.assertEqual(response.status_code, 302, response.content[:2000])
+        self.assertFalse(UpgradeJob.objects.exists())
+        from netbox_discovery.audit_scheduling import run_due
+        run_due()
         job = UpgradeJob.objects.get()
         self.assertEqual(job.profile, {'features': ['ntp', 'syslog'], 'mode': 'replace'})
 

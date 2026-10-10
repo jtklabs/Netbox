@@ -11,7 +11,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from users.models import ObjectPermission
 
-from netbox_compliance.definitions import parse_definition, snapshot_for_device
+from netbox_compliance.definitions import SnapshotResolver, parse_definition, snapshot_for_device
 from netbox_compliance.filtersets import ConfigComplianceFilterSet
 from netbox_compliance.models import ConfigCompliance, ConfigStandard
 from .test_device_grid import GridTest
@@ -19,6 +19,24 @@ from .factories import feature_standards
 
 
 class RevisionTest(GridTest):
+    def test_batch_snapshots_are_isolated_and_next_batch_reads_new_revisions(self):
+        standard = feature_standards()[0]
+        device = self.devices['sw1']
+        resolver = SnapshotResolver(self.user)
+        with self.assertNumQueries(0):
+            first = snapshot_for_device(self.user, device, ['ntp'], 'add', resolver=resolver)
+            first['document']['ntp']['servers'].append('192.0.2.99')
+            second = snapshot_for_device(self.user, device, ['ntp'], 'add', resolver=resolver)
+        self.assertEqual(second['document']['ntp']['servers'], ['192.0.2.10'])
+        standard.definition_yaml = 'ntp:\n  servers: [192.0.2.11]\n'
+        standard.save()
+        fresh = snapshot_for_device(self.user, device, ['ntp'], 'add')
+        self.assertEqual(fresh['document']['ntp']['servers'], ['192.0.2.11'])
+        self.assertEqual(fresh['revisions'][0]['revision'], standard.revision)
+        hidden = SnapshotResolver(get_user_model().objects.create_user('hidden-batch-standards'))
+        with self.assertRaises(ValidationError):
+            snapshot_for_device(self.user, device, ['ntp'], 'add', resolver=hidden)
+
     def test_revisions_preserve_definition_and_actor_and_ignore_noop(self):
         standard = feature_standards()[0]
         original = standard.revisions.first()
