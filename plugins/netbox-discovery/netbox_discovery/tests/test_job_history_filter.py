@@ -42,6 +42,16 @@ class JobHistoryFilterTest(UpgradeFixture, TestCase):
             with self.subTest(status=status):
                 self.assertEqual(self.rows(self.browser.get(url)), {self.pending.pk})
 
+    def test_cleared_filter_shows_all_jobs_on_both_lists(self):
+        for operation, name in (('upgrade', 'upgradejob_list'), ('audit_config', 'standardsjob_list')):
+            with self.subTest(operation=operation):
+                UpgradeJob.objects.all().update(operation=operation)
+                response = self.browser.get(reverse(f'plugins:netbox_discovery:{name}'),
+                                            {'hide_finished': ''})
+                self.assertEqual(self.rows(response), {self.pending.pk, self.finished.pk})
+                self.assertContains(response, '<option value="" selected>All jobs</option>', html=True)
+                self.assertContains(response, 'Hide finished jobs: Off')
+
     def test_toggle_preserves_filters_and_resets_pagination(self):
         response = self.browser.get(reverse('plugins:netbox_discovery:upgradejob_list'),
                                     {'poller_id': self.poller.pk, 'sort': 'scheduled_at', 'page': 1})

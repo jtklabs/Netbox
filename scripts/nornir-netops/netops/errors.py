@@ -16,14 +16,11 @@ MAX_LENGTH = 160
 #: stays importable without netmiko/paramiko installed.
 KNOWN = {
     "NetmikoTimeoutException": "timed out connecting -- unreachable, filtered, or wrong port",
-    "NetmikoAuthenticationException": "authentication failed -- check username, password or enable secret",
-    "NetmikoAuthError": "authentication failed -- check username, password or enable secret",
     "ConfigInvalidException": "the device rejected the configuration",
     "ReadTimeout": "the device stopped responding partway through a command",
     "ReadException": "lost the session while reading from the device",
     "WriteException": "lost the session while sending to the device",
     "SSHException": "SSH negotiation failed",
-    "AuthenticationException": "authentication failed -- check username, password or enable secret",
     "NoValidConnectionsError": "nothing accepted an SSH connection on that address and port",
     "ConnectionRefusedError": "connection refused -- SSH is not listening on that port",
     "ConnectionResetError": "the device reset the connection",
@@ -36,6 +33,31 @@ KNOWN = {
     "SSLError": "TLS connection failed -- check the device certificate and TLS settings",
     "ConnectionError": "connection failed -- check the management address, port and service",
 }
+
+
+def authentication_summary(exc: BaseException) -> str:
+    """Netmiko wraps Paramiko timeouts and lost transports as auth failures too.
+
+    Inspect the wrapped detail and exception chain, but only return fixed text:
+    raw connection errors can contain usernames and other sensitive details.
+    """
+    chain = []
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    detail = '\n'.join(str(error).lower() for error in chain)
+    if (any(type(error).__name__ in ('TimeoutError', 'timeout') for error in chain)
+            or any(marker in detail for marker in (
+                'authentication timeout', 'authentication timed out', 'authentication timed-out'))):
+        return 'SSH authentication timed out -- no login response before the deadline; credentials were not confirmed rejected'
+    if (any(isinstance(error, (EOFError, ConnectionError)) for error in chain)
+            or any(marker in detail for marker in (
+                'transport shut down', 'saw eof', 'connection reset', 'connection closed', 'connection refused'))):
+        return 'SSH connection lost during authentication -- credentials were not confirmed rejected; check the network and SSH service'
+    return 'SSH authentication failed -- check login credentials and the device authentication policy'
 
 
 class DeviceHTTPError(RuntimeError):
@@ -66,6 +88,11 @@ def summarize(exc: BaseException) -> str:
         return 'authentication failed (HTTP 401) -- check the configured credentials or token'
     if status == 403:
         return 'access denied (HTTP 403) -- check the account role and API permissions'
+    if name in ('NetmikoAuthenticationException', 'NetmikoAuthError', 'AuthenticationException'):
+        return authentication_summary(exc)
+    # Requests and Netmiko both use the name ReadTimeout for different stages.
+    if name == 'ReadTimeout' and type(exc).__module__.startswith('requests.'):
+        return 'HTTP response timed out -- the management service did not respond before the deadline'
     friendly = KNOWN.get(name)
     if friendly:
         return friendly

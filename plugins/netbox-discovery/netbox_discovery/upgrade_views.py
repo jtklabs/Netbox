@@ -334,7 +334,7 @@ class UpgradeJobTable(NetBoxTable):
 
 class UpgradeFilterForm(NetBoxModelFilterSetForm):
     model = UpgradeJob
-    hide_finished = forms.ChoiceField(choices=(('true', 'Yes'), ('false', 'No')), required=False,
+    hide_finished = forms.ChoiceField(choices=(('', 'All jobs'), ('true', 'Yes'), ('false', 'No')), required=False,
                                      label='Hide finished jobs',
                                      help_text='Includes completed, warning, failed, expired and cancelled jobs.')
     status = forms.ChoiceField(choices=[('', '---------')] + list(UpgradeStatusChoices), required=False)

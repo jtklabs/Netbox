@@ -699,8 +699,12 @@ actually happening, capped at the number of devices in the run:
 DRY RUN -- no configuration will be changed  |  ntp, mode=add, 240 device(s), 50 at a time
 ```
 
-An unreachable device holds its worker for `--conn-timeout` seconds and then
-frees it, so a handful of dead addresses slows a run by seconds, not minutes.
+The TCP connection deadline defaults to 10 seconds (`--conn-timeout` or
+`NET_CONN_TIMEOUT`). SSH banner and authentication waits are separate: the
+current Netmiko/Paramiko defaults are 15 and 30 seconds respectively. Raising
+the TCP timeout does not extend either wait. Ordinary show commands allow
+60 seconds and saving configuration allows 120 seconds. F5 REST requests use
+a separate 30-second timeout (`--f5-timeout` or `NETOPS_F5_TIMEOUT`).
 
 ### When a device fails
 
@@ -715,7 +719,7 @@ atl-core-sw1 (10.1.10.11) [cisco_ios] would run (2 commands)
 
 atl-core-sw2 (10.1.10.12) [cisco_ios] FAILED -- timed out connecting -- unreachable, filtered, or wrong port
 
-rdu-edge-rtr1 (10.2.10.11) [cisco_ios] FAILED -- authentication failed -- check username, password or enable secret
+rdu-edge-rtr1 (10.2.10.11) [cisco_ios] FAILED -- SSH authentication failed -- check login credentials and the device authentication policy
 
 summary: 4 device(s), 1 compliant, 1 with pending changes, 2 failed
 full detail in netops-debug.log
@@ -723,6 +727,11 @@ full detail in netops-debug.log
 
 Devices are ordered quiet-first, so the ones needing attention sit next to the
 summary rather than scrolled off the top.
+
+An SSH authentication timeout or a connection closing during authentication
+is reported separately from a failed login. Neither proves that credentials
+were rejected. HTTP response timeouts are also distinguished from an API
+authentication rejection (HTTP 401) or permission failure (HTTP 403).
 
 The full exception and traceback -- netmiko's nine-line "common causes"
 explanation, nornir's per-task traceback, all of it -- goes to

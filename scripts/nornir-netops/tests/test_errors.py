@@ -49,6 +49,54 @@ def test_authentication_failure():
     assert "authentication failed" in summarize(NetmikoAuthenticationException("nope"))
 
 
+@pytest.mark.parametrize('chained', [False, True])
+@pytest.mark.parametrize('detail,expected', [
+    ('Authentication timeout.', 'SSH authentication timed out'),
+    ('Authentication failed: transport shut down or saw EOF', 'SSH connection lost during authentication'),
+])
+def test_netmiko_auth_wrapper_does_not_blame_credentials_for_transport_failures(chained, detail, expected):
+    from netmiko.exceptions import NetmikoAuthenticationException as AuthError
+    from paramiko.ssh_exception import AuthenticationException
+
+    cause = AuthenticationException(detail)
+    error = AuthError('Authentication to device failed.' if chained else
+                      f'Authentication to device failed.\nDevice settings: private-host\n{detail}')
+    if chained:
+        error.__context__ = cause
+    for failure in (error, cause):
+        summary = summarize(failure)
+        assert summary.startswith(expected)
+        assert 'credentials were not confirmed rejected' in summary
+        assert 'private-host' not in summary
+        assert len(summary) <= MAX_LENGTH
+
+
+def test_explicit_ssh_rejection_remains_an_authentication_failure():
+    from netmiko.exceptions import NetmikoAuthenticationException as AuthError
+    from paramiko.ssh_exception import AuthenticationException
+
+    error = AuthError('Authentication to device failed.')
+    error.__cause__ = AuthenticationException('Authentication failed.')
+    assert 'authentication failed' in summarize(error)
+    assert 'timed out' not in summarize(error)
+
+
+def test_host_name_containing_timeout_does_not_change_auth_failure_classification():
+    error = NetmikoAuthenticationException('Authentication to device failed.\nDevice settings: timeout-host')
+    assert 'authentication failed' in summarize(error)
+
+
+@pytest.mark.parametrize('cause,expected', [
+    (TimeoutError(), 'SSH authentication timed out'),
+    (ConnectionResetError(), 'SSH connection lost during authentication'),
+    (EOFError(), 'SSH connection lost during authentication'),
+])
+def test_auth_wrapper_uses_transport_cause_without_a_message(cause, expected):
+    error = NetmikoAuthenticationException('Authentication to device failed.')
+    error.__cause__ = cause
+    assert summarize(error).startswith(expected)
+
+
 def test_config_rejected():
     assert summarize(ConfigInvalidException("% Invalid input")) == (
         "the device rejected the configuration"
@@ -109,6 +157,7 @@ def test_http_credentials_and_permissions_are_distinguished(status, expected):
 
 
 def test_https_connection_timeout_and_tls_errors_are_actionable():
-    from requests.exceptions import ConnectTimeout, SSLError
+    from requests.exceptions import ConnectTimeout, ReadTimeout, SSLError
     assert 'connection timed out' in summarize(ConnectTimeout('raw transport detail'))
+    assert 'HTTP response timed out' in summarize(ReadTimeout('raw transport detail'))
     assert 'certificate' in summarize(SSLError('raw TLS detail'))
