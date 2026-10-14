@@ -31,7 +31,7 @@ from . import upgrade_groups, upgrade_prestage
 from .upgrade_choices import (CONFIG_OPERATIONS, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
                               UpgradeStatusChoices)
 from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
-                                 UpgradeJobFilterSet)
+                                 UpgradeJobFilterSet, job_list_params)
 from . import upgrade_queue as queue
 
 
@@ -328,12 +328,15 @@ class UpgradeJobTable(NetBoxTable):
         model = UpgradeJob
         fields = ('pk', 'id', 'device_name', 'poller', 'operation', 'status', 'scheduled_at', 'planned_wave', 'groups',
                   'held_reason', 'start_before', 'stage', 'message', 'poller_last_seen_at', 'last_seen_at', 'description', 'batch_id')
-        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'planned_wave', 'status', 'stage',
+        default_columns = ('device_name', 'poller', 'operation', 'scheduled_at', 'planned_wave', 'status', 'stage', 'message',
                            'poller_last_seen_at', 'last_seen_at')
 
 
 class UpgradeFilterForm(NetBoxModelFilterSetForm):
     model = UpgradeJob
+    hide_finished = forms.ChoiceField(choices=(('true', 'Yes'), ('false', 'No')), required=False,
+                                     label='Hide finished jobs',
+                                     help_text='Includes completed, warning, failed, expired and cancelled jobs.')
     status = forms.ChoiceField(choices=[('', '---------')] + list(UpgradeStatusChoices), required=False)
     operation = forms.ChoiceField(choices=[('', '---------')] + [
         (value, label) for value, label in UpgradeOperationChoices if value not in CONFIG_OPERATIONS], required=False)
@@ -375,6 +378,22 @@ class UpgradeJobListView(ObjectListView):
     filterset_form = UpgradeFilterForm
     actions = (AddObject, BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
 
+    def get(self, request):
+        # Include the default in pagination, filtering and bulk-action URLs.
+        # API consumers and direct job detail/history views retain all jobs.
+        request.GET = job_list_params(request.GET)
+        return super().get(request)
+
+    def get_extra_context(self, request):
+        filtered = UpgradeJobFilterSet(request.GET)
+        filtered.is_valid()
+        hidden = filtered.form.cleaned_data.get('hide_finished') is True
+        params = request.GET.copy()
+        params['hide_finished'] = 'false' if hidden else 'true'
+        params.pop('page', None)
+        return {**super().get_extra_context(request), 'hide_finished': hidden,
+                'toggle_finished_url': '?' + params.urlencode()}
+
 
 class StandardsJobListView(UpgradeJobListView):
     queryset = UpgradeJob.objects.filter(operation__in=CONFIG_OPERATIONS).select_related('device', 'poller')
@@ -414,7 +433,7 @@ class UpgradeBulkActionView(PermissionRequiredMixin, View):
         form = BulkJobForm(request.POST) if request.POST.get('confirm') == 'yes' else None
         if form is None:
             if request.POST.get('_all'):
-                filtered = UpgradeJobFilterSet(request.GET, queryset=queryset, request=request)
+                filtered = UpgradeJobFilterSet(job_list_params(request.GET), queryset=queryset, request=request)
                 if not filtered.is_valid():
                     messages.error(request, 'Invalid filters. No jobs were changed.')
                     return redirect(list_url)

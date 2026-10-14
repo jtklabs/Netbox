@@ -168,17 +168,24 @@ def test_authenticated_existing_config_is_not_overwritten(setup):
     assert not setup.box.writes
 
 
-@pytest.mark.parametrize('flags', [('--vrf', 'MGMT'),
-                                  ('--prefer', '192.0.2.10'), ('--no-save',), ('--no-verify',),
+@pytest.mark.parametrize('flags', [('--no-save',), ('--no-verify',),
                                   ('--servers', '2001:db8::1'), ('--servers', 'ntp.example.net')])
 def test_unsupported_options_fail_without_writes(setup, flags):
     assert setup.run('--apply', *flags)[0] == cli.EXIT_FAILED
     assert not setup.box.writes
 
 
-def test_csv_source_override_is_rejected(setup):
-    assert setup.run('--source', 'Loopback0', inventory=False)[0] == cli.EXIT_FAILED
-    assert not setup.box.reads
+def test_csv_source_override_is_ignored(setup):
+    assert setup.run('--source', 'Loopback0', inventory=False)[0] == cli.EXIT_OK
+    assert setup.box.reads
+
+
+def test_shared_preference_and_vrf_do_not_block_server_list(setup):
+    code, report = setup.run('--apply', '--prefer', '192.0.2.10', '--vrf', 'management', '--source', 'Loopback0')
+    assert code == cli.EXIT_OK
+    assert setup.box.writes
+    assert all('Loopback0' not in command and 'management' not in command and 'prefer' not in command
+               for command in setup.box.writes)
 
 
 @pytest.mark.parametrize('failure', ['ignore', 'reject'])

@@ -3,9 +3,19 @@ from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 from dcim.models import Device
 from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+from .upgrade_choices import TERMINAL
+
+
+def job_list_params(data):
+    """Default UI lists to unfinished work; explicit status links show that status."""
+    params = data.copy()
+    if 'hide_finished' not in params:
+        params['hide_finished'] = 'false' if params.get('status') else 'true'
+    return params
 
 
 class UpgradeJobFilterSet(NetBoxModelFilterSet):
+    hide_finished = django_filters.BooleanFilter(method='filter_hide_finished', label='Hide finished jobs')
     site_id = django_filters.NumberFilter(field_name='device__site_id')
     role_id = django_filters.NumberFilter(field_name='device__role_id')
     device_type_id = django_filters.NumberFilter(field_name='device__device_type_id')
@@ -18,6 +28,9 @@ class UpgradeJobFilterSet(NetBoxModelFilterSet):
 
     def search(self, queryset, name, value):
         return queryset.filter(Q(device_name__icontains=value) | Q(description__icontains=value))
+
+    def filter_hide_finished(self, queryset, name, value):
+        return queryset.exclude(status__in=TERMINAL) if value else queryset
 
 
 class UpgradeGroupFilterSet(NetBoxModelFilterSet):

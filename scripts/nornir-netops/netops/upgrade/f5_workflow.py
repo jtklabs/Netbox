@@ -318,7 +318,9 @@ def upgrade_device(task, profile, options, reporter):
                 close(client)
     except Exception as exc:
         from ..debuglog import redact
-        message = redact(str(exc)) if isinstance(exc, (ValueError, TimeoutError, RuntimeError)) else type(exc).__name__
+        from ..errors import DeviceHTTPError, summarize
+        message = (redact(str(exc)) if isinstance(exc, (ValueError, TimeoutError, RuntimeError))
+                   and not isinstance(exc, DeviceHTTPError) else redact(summarize(exc)))
         status = ("staging_failed" if stage_only else "recovery_required") if changed else "failed"
         emit(status, message, {"error": message, "upgrade_plan": plan})
         return Result(host=host, result={"error": message}, failed=True, changed=changed)

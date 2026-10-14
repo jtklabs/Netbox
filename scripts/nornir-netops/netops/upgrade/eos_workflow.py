@@ -268,7 +268,8 @@ def upgrade_device(task, profile, options, reporter):
                             lambda after: target_findings(after, profile, before, saved=not allow_mismatch))
     except Exception as exc:
         from ..debuglog import redact
-        message = redact(str(exc)) if isinstance(exc, (ValueError, TimeoutError)) else type(exc).__name__
+        from ..errors import summarize
+        message = redact(str(exc)) if isinstance(exc, (ValueError, TimeoutError)) else redact(summarize(exc))
         status = ("staging_failed" if stage_only else "recovery_required") if changed else "failed"
         emit(status, message, {"error": message, "upgrade_plan": plan})
         return Result(host=host, result={"error": message}, failed=True, changed=changed)

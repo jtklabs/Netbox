@@ -93,3 +93,22 @@ def test_an_exception_with_no_message_still_says_something():
 def test_every_summary_is_a_single_short_line(exc):
     summary = summarize(exc)
     assert "\n" not in summary and 0 < len(summary) <= MAX_LENGTH
+
+
+@pytest.mark.parametrize('status,expected', [(401, 'authentication failed'), (403, 'access denied')])
+def test_http_credentials_and_permissions_are_distinguished(status, expected):
+    from netops.errors import DeviceHTTPError
+    from requests import Response
+    from requests.exceptions import HTTPError
+    response = Response()
+    response.status_code = status
+    for error in (DeviceHTTPError('F5', 'POST', '/login', status), HTTPError('sensitive body', response=response)):
+        assert expected in summarize(error)
+        assert str(status) in summarize(error)
+        assert 'sensitive body' not in summarize(error)
+
+
+def test_https_connection_timeout_and_tls_errors_are_actionable():
+    from requests.exceptions import ConnectTimeout, SSLError
+    assert 'connection timed out' in summarize(ConnectTimeout('raw transport detail'))
+    assert 'certificate' in summarize(SSLError('raw TLS detail'))

@@ -31,6 +31,7 @@ from ..core import (
     Entry,
     Feature,
     PlatformSupport,
+    canonical_platform,
     normalize,
     validate_address,
     validate_secret_value,
@@ -49,6 +50,11 @@ SHOW_COMMAND = "show running-config | include ^ntp"
 
 #: Shortest key this tool will set.
 MIN_KEY_LENGTH = 8
+
+# These adapters manage server addresses without NTP authentication, preferred
+# servers or VRF overrides. ArubaOS additionally supports a tagged source.
+BASIC_SERVER_PLATFORMS = {'f5_tmsh', 'aruba_clearpass', 'aruba_os'}
+SERVER_LIST_PLATFORMS = {'f5_tmsh', 'aruba_clearpass'}
 
 IOS_SAMPLE = """\
 ntp authentication-key 1 md5 072C285F4D06 7
@@ -380,6 +386,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def build_desired(args: argparse.Namespace) -> Desired:
     standards = standards_of(args)
+    platforms = getattr(args, 'ntp_platforms', ())
+    basic_servers = bool(platforms) and all(canonical_platform(p) in BASIC_SERVER_PLATFORMS for p in platforms)
+    server_list_only = bool(platforms) and all(canonical_platform(p) in SERVER_LIST_PLATFORMS for p in platforms)
     conductor_snapshot = None
     if getattr(args, 'mobility_conductor_snapshot', None):
         from ..mobility_conductor import validate
@@ -396,19 +405,19 @@ def build_desired(args: argparse.Namespace) -> Desired:
     regions: Dict[str, Dict[str, Any]] = {}
     if args.servers:
         wanted = [chunk for value in args.servers for chunk in value.split(",")]
-        servers, prefer = server_set(wanted, args.prefer, "--servers")
+        servers, prefer = server_set(wanted, None if basic_servers else args.prefer, "--servers")
     else:
         wanted, flagged = _listed(standards.entries("ntp.servers"), None)
-        servers, prefer = server_set(wanted, args.prefer or flagged or standards.value("ntp.prefer"),
+        servers, prefer = server_set(wanted, None if basic_servers else args.prefer or flagged or standards.value("ntp.prefer"),
                                      "ntp.servers", allow_empty=True)
-        regions = regional_sets(standards)
+        regions = regional_sets(standards, server_list_only=basic_servers)
     if not servers and not regions:
         raise ValueError(
             "no NTP servers given: pass --servers or set ntp.servers (or ntp.regions) in the standards file"
         )
 
     # --- authentication -----------------------------------------------------
-    auth = standards.section("ntp").get("authentication") or {}
+    auth = {} if basic_servers else standards.section("ntp").get("authentication") or {}
     if auth and not isinstance(auth, Mapping):
         raise StandardsError("ntp.authentication must be a mapping")
 
@@ -439,7 +448,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
             keys.append(trusted)
             entries[trusted] = {"kind": "trusted-key", "id": key_id}
 
-    source = args.source or standards.value("ntp.source")
+    source = None if server_list_only else args.source or standards.value("ntp.source")
     source = interface_name(str(source)) if source else None
     iburst = standards.value("ntp.iburst", True) if args.iburst is None else args.iburst
     if type(iburst) is not bool:
@@ -461,7 +470,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "servers": servers,
             "regions": regions,
             "key_id": key_id,
-            "vrf": _word(args.vrf or standards.value("ntp.vrf")),
+            "vrf": None if basic_servers else _word(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
             "source": source,
             "iburst": iburst,
@@ -506,7 +515,7 @@ def server_set(wanted, preferred, where, allow_empty=False):
     return servers, prefer
 
 
-def regional_sets(standards) -> Dict[str, Dict[str, Any]]:
+def regional_sets(standards, *, server_list_only=False) -> Dict[str, Dict[str, Any]]:
     """`ntp.regions`: NetBox region slug -> its own servers, checked before any device is dialled.
 
         ntp:
@@ -534,7 +543,8 @@ def regional_sets(standards) -> Dict[str, Dict[str, Any]]:
             items, preferred = value, None
         if isinstance(items, (str, bytes)) or not isinstance(items, Sequence):
             raise StandardsError(f"{where} must be a list of servers")
-        servers, prefer = server_set(*_listed([standards.resolve(item) for item in items], preferred), where)
+        wanted, prefer = _listed([standards.resolve(item) for item in items], preferred)
+        servers, prefer = server_set(wanted, None if server_list_only else prefer, where)
         regions[str(slug).strip().lower()] = {"servers": servers, "prefer": prefer, "region": str(slug)}
     return regions
 
@@ -553,8 +563,8 @@ def region_for(host, regions):
     return None
 
 
-def per_device(keys, variables, host):
-    """This device's servers (its region's, if it has one) and source interface."""
+def server_settings(variables, host):
+    """Resolve global/regional servers without consulting interface or VRF tags."""
     servers, prefer = variables.get("servers", []), variables.get("prefer")
     regions = variables.get("regions") or {}
     regional = region_for(host, regions) if regions else None
@@ -564,14 +574,20 @@ def per_device(keys, variables, host):
         where = (getattr(host, "data", {}) or {}).get("region") or "no region"
         raise ValueError(f"no NTP servers for this device ({where}): add its region under ntp.regions "
                          "or set ntp.servers as the default")
+    return servers, prefer, regional
+
+
+def per_device(keys, variables, host, *, manage_vrf=True):
+    """This device's servers (its region's, if it has one) and source interface."""
+    servers, prefer, regional = server_settings(variables, host)
 
     source, authoritative = source_for(host, "ntp")
     if authoritative:
         source = interface_name(str(source)) if source else None
     else:
         source = variables.get("source")  # a CSV has no opinion; the file's value stands
-    vrf = variables.get('vrf')
-    selected_vrf = (getattr(host, 'data', {}) or {}).get('ntp_vrf')
+    vrf = variables.get('vrf') if manage_vrf else None
+    selected_vrf = (getattr(host, 'data', {}) or {}).get('ntp_vrf') if manage_vrf else None
     if selected_vrf:
         vrf = None if selected_vrf == 'default' else validate_word(str(selected_vrf), 'NTP VRF')
     if (servers == variables.get("servers") and source == variables.get("source") and vrf == variables.get('vrf')

@@ -293,11 +293,22 @@ def test_safety_guards_prevent_writes(setup, failure):
 
 
 @pytest.mark.parametrize('flags', [('--no-save',), ('--no-verify',), ('--servers', '2001:db8::1'),
-                                  ('--servers', 'ntp.example.com'), ('--source', 'GigabitEthernet0/0'),
-                                  ('--vrf', 'MGMT'), ('--prefer', '192.0.2.10')])
+                                  ('--servers', 'ntp.example.com'), ('--source', 'GigabitEthernet0/0')])
 def test_unsupported_options_prevent_writes(setup, flags):
     assert setup.run('--apply', *flags)[0] == cli.EXIT_FAILED
     assert not setup.box.writes
+
+
+def test_shared_unsupported_options_do_not_block_supported_source(setup, monkeypatch):
+    def unexpected_key(*args, **kwargs):
+        raise AssertionError('Aruba must not fetch unsupported NTP keys')
+    monkeypatch.setattr('netops.features.ntp.resolve_key', unexpected_key)
+    setup.standard['ntp'].update(authentication={'key_id': '1'}, prefer='192.0.2.10', vrf='management')
+    setup.file.write_text(json.dumps(setup.standard))
+    code, report = setup.run('--apply', '--source', 'Loopback0')
+    assert code == cli.EXIT_OK
+    assert setup.box.config[aruba.SOURCE] is not None
+    assert all('key' not in body and 'prefer' not in body and 'vrf' not in body for _, body in setup.box.writes)
 
 
 def test_inherited_drift_reported_and_never_modified(setup):

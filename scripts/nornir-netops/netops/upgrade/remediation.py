@@ -89,7 +89,9 @@ def invoke(feature, device_id, mode, apply, args):
         done = subprocess.run(command(feature, device_id, mode, apply, args) + ['--report', str(report)], capture_output=True, text=True,
                               timeout=TIMEOUT, cwd=project_root(), stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return EXIT_FAILED, f'{feature} did not finish within {TIMEOUT // 60} minutes'
+        message = f'{feature} did not finish within {TIMEOUT // 60} minutes'
+        args.compliance_details[feature] = {'error': message}
+        return EXIT_FAILED, message
     try:
         details = report_details(json.loads(report.read_text(encoding='utf-8')))
         if apply:
@@ -108,13 +110,16 @@ def report_details(document):
     from ..archive import clean
     if not isinstance(document, dict):
         return {}
+    run_error = document.get('error')
+    fallback = ({'error': str(clean(run_error))[:500]} if run_error and not str(run_error).startswith(
+        'Run did not reach device processing;') else {})
     devices = document.get('devices', {})
     if not isinstance(devices, dict) or len(devices) != 1:
-        return {}
+        return fallback
     row = next(iter(devices.values()))
     if not isinstance(row, dict):
-        return {}
-    details = {}
+        return fallback
+    details = fallback
     for key in ('add', 'remove', 'commands', 'advisories', 'notes', 'current', 'desired'):
         values = row.get(key, [])
         if isinstance(values, list):
@@ -142,6 +147,21 @@ def last_line(output, pattern=r'.'):
     from ..debuglog import redact
     lines = [line.strip() for line in output.splitlines() if re.search(pattern, line)]
     return redact(lines[-1])[:400] if lines else ''
+
+
+def failure_reason(feature, args, output, code):
+    """Keep the diagnostic in both the job message and feature findings.
+
+    CLI output ends with log/report paths, so its last line is usually not
+    the failure. Prefer the redacted device error, then explicit CLI errors.
+    """
+    from ..debuglog import redact
+    details = args.compliance_details.setdefault(feature, {})
+    message = (details.get('error') or
+               last_line(output, r'(?i)(\berror:|\bFAILED\s*--)') or
+               f'Feature process exited with code {code}; see the worker run archive.')
+    details['error'] = redact(message)[:500]
+    return details['error']
 
 
 def run_job(task, job, args, emit):
@@ -218,7 +238,8 @@ def _run_job(task, job, args, emit):
             pending.append(feature)
             verdicts[feature] = 'non-compliant'
         else:
-            emit('failed', f'{feature}: dry run failed: {last_line(output) or f"exit {code}"}',
+            reason = failure_reason(feature, args, output, code)
+            emit('failed', f'{feature}: dry run failed: {reason}',
                  {'compliance_results': dict(verdicts)})
             return True, False, results
     summary = {'progress_summary': {'mode': mode, 'features': dict(results)}, 'compliance_results': dict(verdicts)}
@@ -250,7 +271,8 @@ def _run_job(task, job, args, emit):
                 results[feature], verdicts[feature] = 'attention', 'non-compliant'
             else:
                 results[feature], verdicts[feature] = 'failed', 'error'
-                results[f'{feature}_error'] = 'Post-change verification failed'
+                reason = failure_reason(feature, args, verify_output, verify_code)
+                results[f'{feature}_error'] = f'Post-change verification failed: {reason}'
         elif code == EXIT_DIFF:
             # Drift the feature declined to fix: out of compliance, not ours to change.
             results[feature] = 'attention'
@@ -258,7 +280,7 @@ def _run_job(task, job, args, emit):
         else:
             results[feature] = 'failed'
             verdicts[feature] = 'error'
-            results[f'{feature}_error'] = last_line(output) or f'exit {code}'
+            results[f'{feature}_error'] = failure_reason(feature, args, output, code)
     summary = {'progress_summary': {'mode': mode, 'features': dict(results), 'rollback': journals},
                'compliance_results': verdicts}
     failed = [f for f in pending if results[f] == 'failed']

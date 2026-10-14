@@ -3,7 +3,6 @@ import json
 
 from . import archive, f5_waf
 from .core import MODE_REPLACE, normalize, validate_address
-from .netbox import source_for
 
 ENDPOINT = '/mgmt/tm/sys/ntp'
 
@@ -20,7 +19,7 @@ def servers(document):
 
 def run(task, desired, variables, mode, dry_run, save, verify):
     from nornir.core.task import Result
-    from .features.ntp import per_device
+    from .features.ntp import server_settings
     payload = {'platform': 'f5_tmsh', 'mode': mode, 'current': [], 'desired': [],
                'add': [], 'remove': [], 'commands': [], 'compliant': False,
                'advisories': [], 'notes': [], 'rollback': [], 'rollback_unsupported': [],
@@ -28,14 +27,12 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                'save_command': None, 'skipped': False, 'skip_reason': None}
     attempted = False
     try:
-        source, authoritative = source_for(task.host, 'ntp')
-        if source or (not authoritative and variables.get('source')):
-            raise ValueError('F5 NTP source routing is not configured by an interface tag; remove the NTP source selection for this job')
-        desired, variables = per_device(list(desired), dict(variables), task.host)
-        if variables.get('manages_auth') or variables.get('prefer') or variables.get('vrf'):
-            raise ValueError('F5 NTP adapter supports server lists, not authentication, prefer, or VRF overrides')
-        wanted = variables['servers']
+        # BIG-IP manages only server addresses. Shared authentication/preference
+        # settings and source/VRF tags belong to adapters that support them.
+        wanted, _, regional = server_settings(variables, task.host)
         payload['desired'] = wanted
+        if regional:
+            payload['region'] = regional['region']
         if not task.host.username or not task.host.password:
             raise ValueError('F5 REST requires a username and password')
         with f5_waf.Client(task.host, **variables['f5']) as client:

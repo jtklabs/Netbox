@@ -214,7 +214,8 @@ def execute_job(task, args, client, outbox):
             code = 1 if result.failed or reporter.delivery_failed else 0
             return Result(host=task.host, result=result.result, failed=bool(code), changed=result.changed)
         except Exception as exc:
-            reporter.emit(task.host, 'failed', redact(str(exc)) if isinstance(exc, ValueError) else type(exc).__name__)
+            from ..errors import summarize
+            reporter.emit(task.host, 'failed', redact(summarize(exc)))
             return Result(host=task.host, result='Scheduled job could not run', failed=True)
         finally:
             run.finish(code)

@@ -989,6 +989,15 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     for warning in args.standards.warnings:
         print(style.warn(f"warning: {warning}"), file=sys.stderr)
 
+    targets = None
+    if feature.name == 'ntp':
+        # Resolve inventory before NTP keys: server-list adapters use shared
+        # standards but must not require unsupported authentication.
+        targets, credentials, code = _connect(args, style)
+        if targets is None:
+            return code
+        args.ntp_platforms = [host.platform for host in targets.inventory.hosts.values()]
+
     try:
         desired: Desired = feature.build_desired(args)
     except StandardsError as exc:
@@ -1029,7 +1038,8 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
         except (NetBoxError, CredentialError) as exc:
             print(style.bad(f"error: NAC NetBox reporting: {redact(str(exc))}"), file=sys.stderr)
             return EXIT_USAGE
-    targets, credentials, code = _connect(args, style)
+    if targets is None:
+        targets, credentials, code = _connect(args, style)
     if targets is None:
         return code
 

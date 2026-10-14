@@ -31,7 +31,18 @@ KNOWN = {
     "socket.timeout": "timed out",
     "gaierror": "name lookup failed -- check the address in the CSV",
     "PermissionError": "permission denied",
+    "ConnectTimeout": "connection timed out -- check reachability, management port and firewall rules",
+    "Timeout": "request timed out -- check device reachability and management service",
+    "SSLError": "TLS connection failed -- check the device certificate and TLS settings",
+    "ConnectionError": "connection failed -- check the management address, port and service",
 }
+
+
+class DeviceHTTPError(RuntimeError):
+    """An HTTP failure with status metadata, without credentials or response bodies."""
+    def __init__(self, service, method, path, status_code):
+        self.status_code = status_code
+        super().__init__(f'{service} {method} {path} failed (HTTP {status_code})')
 
 
 def first_line(text: str) -> str:
@@ -47,6 +58,14 @@ def first_line(text: str) -> str:
 def summarize(exc: BaseException) -> str:
     """One line: what went wrong, and enough of the detail to act on it."""
     name = type(exc).__name__
+    status = getattr(exc, 'status_code', None)
+    response = getattr(exc, 'response', None)
+    if response is not None:
+        status = getattr(response, 'status_code', status)
+    if status == 401:
+        return 'authentication failed (HTTP 401) -- check the configured credentials or token'
+    if status == 403:
+        return 'access denied (HTTP 403) -- check the account role and API permissions'
     friendly = KNOWN.get(name)
     if friendly:
         return friendly

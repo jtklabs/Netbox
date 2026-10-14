@@ -114,6 +114,7 @@ from . import command_views, upgrade_views, profile_views
 from . import audit_views
 from .models import AuditSchedule, AuditRun
 from .models import DeviceTypeProfile, PlatformProfile, JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
+from .quick_run import DeviceRunNowView
 
 urlpatterns += [
     path('audit-schedules/', audit_views.AuditScheduleListView.as_view(), name='auditschedule_list'),
@@ -151,6 +152,7 @@ urlpatterns += [
 urlpatterns += [
     path('upgrades/', upgrade_views.UpgradeJobListView.as_view(), name='upgradejob_list'),
     path('standards-jobs/', upgrade_views.StandardsJobListView.as_view(), name='standardsjob_list'),
+    path('devices/<int:pk>/run-standards/', DeviceRunNowView.as_view(), name='device_run_standards'),
     path('upgrades/add/', upgrade_views.UpgradeScheduleView.as_view(), name='upgradejob_add'),
     path('upgrades/bulk-hold/', upgrade_views.UpgradeBulkActionView.as_view(action='hold'), name='upgradejob_bulk_hold'),
     path('upgrades/bulk-cancel/', upgrade_views.UpgradeBulkActionView.as_view(action='cancel'), name='upgradejob_bulk_cancel'),

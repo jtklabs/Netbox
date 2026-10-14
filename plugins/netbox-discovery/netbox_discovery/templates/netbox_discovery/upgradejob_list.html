@@ -1,2 +1,5 @@
 {% extends 'generic/object_list.html' %}
 {% block title %}Upgrade Jobs{% endblock %}
+{% block extra_controls %}
+{% include 'netbox_discovery/inc/job_history_toggle.html' %}
+{% endblock %}

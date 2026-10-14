@@ -72,6 +72,69 @@ def test_missing_archive_does_not_reuse_earlier_findings(monkeypatch, tmp_path):
     assert args.compliance_details['ntp']['notes']
 
 
+@pytest.mark.parametrize('phase', ['preview', 'apply', 'verify'])
+def test_f5_error_reaches_job_message_and_findings(monkeypatch, tmp_path, phase):
+    from netops.debuglog import protect
+    protect(['test-f5-password'])
+    monkeypatch.setenv('NETOPS_REPORT_DIR', str(tmp_path))
+    calls = []
+
+    def execute(argv, **kwargs):
+        calls.append(argv)
+        failed = len(calls) == {'preview': 1, 'apply': 2, 'verify': 3}[phase]
+        row = ({'error': 'F5 REST authentication failed: test-f5-password'} if failed else
+               {'commands': ['PATCH /mgmt/tm/sys/ntp']})
+        Path(argv[argv.index('--report') + 1]).write_text(json.dumps({'devices': {'f5': row}}))
+        return SimpleNamespace(returncode=1 if failed else 2 if len(calls) == 1 else 0,
+                               stdout=ONE + 'full detail in /tmp/debug.log\nreport written to /tmp/run.json\n',
+                               stderr='')
+
+    monkeypatch.setattr(remediation.subprocess, 'run', execute)
+    emit = Recorder()
+    assert remediation.run_job(None, job(['ntp']), None, emit)[0]
+    stage, message, payload = emit.events[-1]
+    assert stage == 'failed'
+    assert 'F5 REST authentication failed' in message
+    assert '/tmp/run.json' not in message
+    assert 'test-f5-password' not in json.dumps(emit.events)
+    assert 'F5 REST authentication failed' in payload['progress_summary']['compliance_details']['ntp']['error']
+
+
+@pytest.mark.parametrize('archive', [None, {'devices': {}}])
+def test_early_cli_error_is_visible_without_device_findings(monkeypatch, tmp_path, archive):
+    monkeypatch.setenv('NETOPS_REPORT_DIR', str(tmp_path))
+
+    def execute(argv, **kwargs):
+        if archive is not None:
+            Path(argv[argv.index('--report') + 1]).write_text(json.dumps(archive))
+        return SimpleNamespace(returncode=1, stderr='', stdout=(
+            'error: no NTP servers given\nfull detail in /tmp/debug.log\nreport written to /tmp/run.json\n'))
+
+    monkeypatch.setattr(remediation.subprocess, 'run', execute)
+    emit = Recorder()
+    assert remediation.run_job(None, job(['ntp']), None, emit)[0]
+    _, message, payload = emit.events[-1]
+    assert 'no NTP servers given' in message
+    assert 'no NTP servers given' in payload['progress_summary']['compliance_details']['ntp']['error']
+
+
+def test_timeout_is_visible_in_feature_findings(monkeypatch):
+    def execute(*args, **kwargs):
+        raise remediation.subprocess.TimeoutExpired('configure.py', remediation.TIMEOUT)
+
+    monkeypatch.setattr(remediation.subprocess, 'run', execute)
+    emit = Recorder()
+    assert remediation.run_job(None, job(['ntp']), None, emit)[0]
+    _, message, payload = emit.events[-1]
+    assert 'did not finish within 30 minutes' in message
+    assert 'did not finish within 30 minutes' in payload['progress_summary']['compliance_details']['ntp']['error']
+
+
+def test_run_level_credential_error_is_not_lost():
+    details = remediation.report_details({'devices': {}, 'error': 'authentication failed -- check credentials'})
+    assert details['error'] == 'authentication failed -- check credentials'
+
+
 def job(features=('ntp', 'syslog'), mode='add'):
     return {'id': 5, 'device_id': 42, 'hostname': '192.0.2.4', 'device': 'sw1', 'claim_token': str(uuid4()),
             'standards_snapshot': {'document': {'ntp': {'servers': ['192.0.2.10']}},

@@ -4,6 +4,33 @@ from netbox.plugins import PluginTemplateExtension
 from .models import CommandOutput, DeviceTypeProfile, PlatformProfile
 
 
+class DeviceRunStandards(PluginTemplateExtension):
+    models = ['dcim.device']
+
+    def right_page(self):
+        from django.apps import apps
+        from django.core.exceptions import ValidationError
+        from . import upgrade_queue as queue
+        if not apps.is_installed('netbox_compliance'):
+            return ''
+        user = self.context['request'].user
+        if not user.has_perm('netbox_discovery.add_upgradejob'):
+            return ''
+        from dcim.models import Device
+        from .quick_run import choices_for
+        device = self.context['object']
+        try:
+            targets = queue.execution_devices(user, Device.objects.restrict(user, 'view').filter(pk=device.pk))
+            choices = choices_for(user, targets[0]) if targets else []
+            error = ''
+        except (queue.QueueError, ValidationError) as exc:
+            choices, error = [], str(exc)
+        return self.render('netbox_discovery/inc/device_run_standards.html', extra_context={
+            'run_choices': choices, 'run_error': error,
+            'can_apply_standards': user.has_perm('netbox_discovery.apply_upgradejob'),
+        })
+
+
 class DeviceCommandOutputs(PluginTemplateExtension):
     models = ['dcim.device']
 
@@ -40,4 +67,4 @@ class PlatformJobProfiles(PluginTemplateExtension):
         return self.render('netbox_discovery/inc/platform_profiles.html', extra_context={'assignment': assignment})
 
 
-template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles]
+template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles, DeviceRunStandards]

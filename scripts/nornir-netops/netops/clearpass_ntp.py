@@ -6,7 +6,6 @@ from collections.abc import Mapping
 
 from . import archive
 from .core import MODE_REPLACE
-from .netbox import source_for
 
 SHOW = 'show ntp'
 CLUSTER = 'cluster list'
@@ -185,7 +184,7 @@ def plan(before, wanted, mode):
 
 def run(task, desired, variables, mode, dry_run, save, verify):
     from nornir.core.task import Result
-    from .features.ntp import per_device
+    from .features.ntp import server_settings
 
     payload = dict(platform='aruba_clearpass', mode=mode, current=[], desired=[], add=[], remove=[],
                    commands=[], compliant=False, advisories=[], notes=[], rollback=[],
@@ -193,12 +192,10 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                    missing_after=[], save_command=None, skipped=False, skip_reason=None)
     attempted = False
     try:
-        selected, authoritative = source_for(task.host, 'ntp')
-        if selected or (not authoritative and variables.get('source')):
-            raise ValueError('ClearPass configure date cannot select an NTP source interface; remove the source selection for this standard')
-        _, variables = per_device(list(desired), dict(variables), task.host)
-        if variables.get('manages_auth') or variables.get('prefer') or variables.get('vrf'):
-            raise ValueError('ClearPass NTP authentication, preference and VRF overrides are not supported')
+        selected_servers, _, regional = server_settings(variables, task.host)
+        variables = {**variables, 'servers': selected_servers}
+        if regional:
+            payload['region'] = regional['region']
         options = settings(variables.get('clearpass'))
         from .clearpass_cluster import validate as validate_cluster
         if task.host.data.get('clearpass_cluster_error'):

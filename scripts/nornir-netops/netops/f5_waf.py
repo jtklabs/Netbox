@@ -44,6 +44,9 @@ class Client:
             timeout=timeout or self.timeout,
         )
         if response.status_code >= 400:
+            if response.status_code in (401, 403):
+                from .errors import DeviceHTTPError
+                raise DeviceHTTPError('F5', method, path, response.status_code)
             raise RuntimeError(f"F5 {method} {path} failed ({response.status_code}): "
                                f"{' '.join(response.text.split())[:300]}")
         if method == "DELETE" and (response.status_code == 204 or not response.text):

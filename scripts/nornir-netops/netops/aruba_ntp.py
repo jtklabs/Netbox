@@ -304,9 +304,9 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                    missing_after=[], save_command=None, skipped=False, skip_reason=None)
     attempted = False
     try:
-        _, variables = per_device(list(desired), dict(variables), task.host)
-        if variables.get('manages_auth') or variables.get('prefer') or variables.get('vrf'):
-            raise ValueError('Aruba NTP authentication, preferred-server and VRF overrides are not supported')
+        _, variables = per_device(list(desired), dict(variables), task.host, manage_vrf=False)
+        # Only server addresses, iburst and source selection are supported here.
+        variables = {**variables, 'manages_auth': False, 'prefer': None, 'vrf': None}
         options = settings(variables.get('aruba'))
         inventory = task.host.data.get('mobility_conductor')
         tagged = 'mobility_conductor' in task.host.data

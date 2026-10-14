@@ -4,6 +4,9 @@
 <li class="breadcrumb-item">{% if object.operation == 'remediate' or object.operation == 'audit_config' %}<a href="{% url 'plugins:netbox_discovery:standardsjob_list' %}">Standards Jobs</a>{% else %}<a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}">Upgrade Jobs</a>{% endif %}</li>
 {% endblock %}
 {% block content %}
+{% if object.status == 'failed' or object.status == 'recovery_required' %}
+<div class="alert alert-danger" role="alert"><strong>{{ object.get_status_display }}:</strong> {{ object.message|default:'No failure detail was reported by the worker.' }}</div>
+{% endif %}
 <div class="row"><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Scheduled work</h5><div class="card-body">
     <table class="table attr-table">

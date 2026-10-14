@@ -827,8 +827,10 @@ It patches only `servers` on
 leaving timezone, restrict rules, routing and HA config-sync untouched. Add mode
 preserves extra servers; replace mode reconciles the entire server list. Read-back
 verification precedes saving. The archive includes a REST restore payload.
-Authentication, preferred-server, source-tag and VRF overrides are rejected on
-F5 rather than ignored. Custom NTP include directives also require manual review.
+F5 uses the global or nearest matching regional server list and ignores shared
+authentication, preferred-server, source-tag and VRF settings. F5-only jobs do
+not require NTP authentication keys. These settings still apply to platforms
+that support them. Custom NTP include directives require manual review.
 
 This matrix covers configuration compliance, not operational synchronization.
 `check-ntp` health checks remain IOS/IOS-XE and EOS only. New adapters are tested
@@ -874,8 +876,8 @@ legacy `aruba_conductor`, `aruba_config_path` custom fields and
 `ntp.aruba.conductor` explicitly. Use IPv4 literals for NTP servers, including regional lists;
 DNS names and IPv6 are deliberately rejected by this adapter. Tag one `VlanN`
 interface or `Loopback0` with `service-source`. Without a selection, the existing
-source is preserved. Nondefault VRFs, preference and managed authentication are
-not supported. Existing authentication bindings survive iburst-only corrections.
+source is preserved. Shared VRF, preference and managed authentication settings
+are ignored by this adapter. Existing authentication bindings survive iburst-only corrections.
 
 Audit reads committed effective configuration, including inherited settings,
 and requires the controller to be online and synchronized. Inherited/protected
@@ -946,7 +948,7 @@ Add mode preserves existing servers; replace mode requests the exact desired
 list. There is a five-server limit. Order alone is not drift: ClearPass's primary
 label is not an NTP preference. Only IPv4 literal server addresses are supported.
 Timezone is left unchanged. Source-interface tags, VRF overrides, preferred
-servers and managed authentication are rejected; iburst and source routing are
+servers and managed authentication settings are ignored; iburst and source routing are
 not managed by this adapter. Existing authenticated configurations can be audited
 for their server list but are never rewritten without the unreadable key material.
 
@@ -2681,6 +2683,23 @@ initializes missing NetBox interface tags/VRF selections. See
 conflict handling and the `--no-ntp-discovery` opt-out.
 
 ### NetBox-scheduled upgrades
+
+On a device page, **Run standards now** queues a single standard (NTP is listed
+first) or a complete saved profile without opening the scheduling form. **Use
+standard / profile settings** uses the assigned profile's add/remove mode and
+audits standards that do not allow remediation. A standard without an assigned
+profile defaults to adding missing entries; permission to remove entries alone
+does not select replace mode. The action dropdown also offers **Audit only**,
+**Add missing**, and **Add and remove**, subject to permissions and the standard's
+remediation settings. Stack members resolve to their master. The shortcut creates
+a normal job record, opens its progress page, and runs on the next assigned
+worker check-in. Existing queued or active work prevents duplicate submissions.
+
+Failed jobs show their reported reason in the job list and prominently on the
+job page. Workers distinguish SSH authentication failures, connection/read
+timeouts, HTTPS authentication (401), access denied (403), and TLS problems.
+Feature findings retain the redacted diagnostic, including failures before
+device processing; report-file paths no longer replace the failure reason.
 
 Use **Device Operations → Software → Upgrade Jobs** to schedule audits, image staging,
 or upgrades by site/role/platform. Run `./configure.py upgrade-poll --apply`

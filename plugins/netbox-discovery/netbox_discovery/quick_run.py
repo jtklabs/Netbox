@@ -1,0 +1,113 @@
+"""Immediate device standards runs using the existing queue and permissions."""
+from datetime import timedelta
+
+from dcim.models import Device
+from django.contrib import messages
+from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.shortcuts import get_object_or_404, redirect
+from django.utils import timezone
+from django.views import View
+
+from . import upgrade_queue as queue
+from .models import JobProfile, UpgradeJob
+from .profile_assignments import default_profile_ids
+from .upgrade_choices import ACTIVE, WAITING
+
+
+def choices_for(user, device):
+    from netbox_compliance.definitions import FEATURE_SECTIONS, SnapshotResolver
+
+    defaults = default_profile_ids(user, [device], 'remediate')
+    profiles = list(JobProfile.objects.restrict(user, 'view').filter(kind='remediate').order_by('name'))
+    assigned = next((p for p in profiles if p.pk == defaults.get(device.pk)), None)
+    choices = []
+    for standard, revision in SnapshotResolver(user).for_device(device):
+        section, settings = next(iter(revision.definition['settings'].items()))
+        features = [feature for feature, key in FEATURE_SECTIONS.items() if key == section]
+        if section == 'snmp':
+            features = (['snmp'] if set(settings) - {'packetsize'} else [])
+            if 'packetsize' in settings:
+                features.append('snmp_packetsize')
+        if not features:
+            continue
+        # Policy is resolved again on POST. No commands or frozen settings come
+        # from the browser, and selecting one standard never applies its peers.
+        mode = assigned.plan['mode'] if assigned else 'add'
+        if mode == 'replace' and not standard.allow_enforce:
+            mode = 'add'
+        operation = 'remediate' if standard.auto_remediable else 'audit_config'
+        plan = {'features': features, 'mode': mode}
+        if assigned and assigned.plan.get('allow_clearpass_cluster_changes') and 'ntp' in features:
+            plan['allow_clearpass_cluster_changes'] = True
+        choices.append({'value': f'standard:{standard.pk}', 'label': standard.name,
+                        'plan': plan, 'operation': operation, 'profile_name': assigned.name if assigned else ''})
+    choices.sort(key=lambda item: ('ntp' not in item['plan']['features'], item['label']))
+    for profile in profiles:
+        choices.append({'value': f'profile:{profile.pk}',
+                        'label': f'Profile: {profile.name}' + (' (assigned)' if profile == assigned else ''),
+                        'plan': profile.resolved_plan(), 'operation': 'remediate', 'profile_name': profile.name})
+    return choices
+
+
+@transaction.atomic
+def run_now(user, device, selection, action):
+    from netbox_compliance.definitions import snapshot_for_device
+
+    if not user.has_perm('netbox_discovery.add_upgradejob'):
+        raise queue.QueueError('You do not have permission to run device standards.')
+    targets = queue.execution_devices(user, Device.objects.restrict(user, 'view').filter(pk=device.pk))
+    if not targets:
+        raise queue.QueueError('This device is not accessible.')
+    target = targets[0]
+    Device.objects.select_for_update().get(pk=target.pk)
+    if target.status != 'active':
+        raise queue.QueueError('The execution device must be active.')
+    choice = next((item for item in choices_for(user, target) if item['value'] == selection), None)
+    if choice is None:
+        raise queue.QueueError('Select an accessible standard or profile that applies to this device.')
+    if action not in ('auto', 'audit', 'add', 'replace'):
+        raise queue.QueueError('Choose standard settings, audit, add missing, or add and remove.')
+    plan = dict(choice['plan'])
+    operation = choice['operation']
+    # A profile contains its comparison mode; standards determine whether
+    # remediation is allowed. Read-only standards make an automatic run audit.
+    snapshot = snapshot_for_device(user, target, plan['features'], plan['mode'], audit=True)
+    if action == 'auto':
+        if not all(item['auto_remediable'] for item in snapshot['revisions']):
+            operation = 'audit_config'
+        if (selection.startswith('standard:') and plan['mode'] == 'replace'
+                and not all(item['allow_enforce'] for item in snapshot['revisions'])):
+            plan['mode'] = 'add'
+    elif action == 'audit':
+        operation = 'audit_config'
+    else:
+        operation, plan['mode'] = 'remediate', action
+    if operation == 'remediate' and not user.has_perm('netbox_discovery.apply_upgradejob'):
+        raise queue.QueueError('You do not have permission to apply changes. Select Audit only.')
+    if UpgradeJob.objects.filter(device=target, status__in=(*ACTIVE, *WAITING)).exists():
+        raise queue.QueueError('This device already has queued or active work. Open Standards Jobs or Upgrade Jobs to review it.')
+    now = timezone.now()
+    job = queue.schedule(user, {'operation': operation, 'filters': {'id': [target.pk]},
+                               'profile_source': 'custom', 'profile': plan,
+                               'scheduled_at': now, 'start_before': now + timedelta(hours=1),
+                               'description': f'Run now: {choice["label"]}'})[0]
+    job.profile_name = choice['profile_name']
+    job.save(update_fields=['profile_name'])
+    return job
+
+
+class DeviceRunNowView(PermissionRequiredMixin, View):
+    permission_required = ('dcim.view_device', 'netbox_discovery.add_upgradejob')
+    raise_exception = True
+
+    def post(self, request, pk):
+        device = get_object_or_404(Device.objects.restrict(request.user, 'view'), pk=pk)
+        try:
+            job = run_now(request.user, device, request.POST.get('selection'), request.POST.get('action', 'auto'))
+        except (queue.QueueError, ValidationError) as exc:
+            messages.error(request, '; '.join(exc.messages) if isinstance(exc, ValidationError) else str(exc))
+            return redirect(device.get_absolute_url())
+        messages.success(request, f'{job.device_name}: queued to run on the next {job.poller.name} worker check-in.')
+        return redirect(job.get_absolute_url())
