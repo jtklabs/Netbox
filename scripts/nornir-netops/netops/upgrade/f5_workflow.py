@@ -1,9 +1,10 @@
 """BIG-IP upgrade driver: the IOS XE stages, gates and reporting over iControl REST.
 
 Order of operations under --apply: save the configuration, baseline, verify or
-upload the image, the ready gate, UCS backup, an optional failover to standby,
-install to a boot volume, reboot to it, reconnect, then the shared convergence
-loop and comparison report.
+upload the image, the ready gate, UCS backup, install to a boot volume, reboot,
+reconnect, then convergence. Standalone units can disable VIPs after install,
+observe connections before reboot, and restore them after reconnect.
+Without draining, an optional failover happens before installation as usual.
 """
 
 import json
@@ -16,7 +17,7 @@ from pathlib import Path
 from nornir.core.task import Result
 
 from .. import f5_waf
-from . import checks, f5
+from . import checks, f5, f5_drain
 from .images import local_image
 from .profile import f5_version
 from .workflow import comparison_report, converge, device_lock, settle
@@ -56,6 +57,9 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
             "active_volume": info.get("active_volume"), "failover_state": info.get("failover_state"), "peers": info.get("peers", [])}
     if stage_only:
         return plan
+    if profile.drain_connections and (info.get("peers") or info.get("failover_state") != "active"):
+        blockers.append("connection draining is supported only on standalone BIG-IP units; "
+                        "HA peers or a non-active/unknown failover state prevent this upgrade")
     if any(str(v.get("status", "")).lower() != "complete" for v in info.get("volumes", [])):
         blockers.append("a software installation is already in progress on a boot volume")
     sync = info.get("sync_status")
@@ -88,7 +92,12 @@ def planned_commands(profile, plan, host):
     if plan.get("failover_first"):
         commands.append('POST /mgmt/tm/sys/failover {"command": "run", "standby": true}')
     commands.append(f"POST /mgmt/tm/sys/software/image {json.dumps(install)}")
+    if profile.drain_connections:
+        commands += ['PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"disabled": true}',
+                     'GET /mgmt/tm/ltm/virtual/stats (wait for zero connections or a plateau)']
     commands.append(f'POST /mgmt/tm/sys {json.dumps({"command": "reboot", "options": [{"volume": plan["volume"]["name"]}]})}')
+    if profile.drain_connections:
+        commands.append('PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"enabled": true} (after reconnect)')
     return commands
 
 
@@ -231,6 +240,13 @@ def upgrade_device(task, profile, options, reporter):
     settings = dict(getattr(options, "f5", None) or {})
 
     def emit(stage, message, payload=None, attachment=None):
+        if plan.get("connection_drain"):
+            payload = dict(payload or {})
+            record = plan["connection_drain"]
+            summary = {key: value for key, value in record.items()
+                       if key not in {"virtual_servers", "restore_pending"}}
+            summary["restoration_pending"] = len(record["restore_pending"])
+            payload["progress_summary"] = {**payload.get("progress_summary", {}), "connection_drain": summary}
         return reporter.emit(host, stage, message, payload, changed=changed, attachment=attachment)
 
     try:
@@ -253,6 +269,11 @@ def upgrade_device(task, profile, options, reporter):
                     configuration_saved = True
                 before = f5.collect(client, lambda path: emit("precheck", path))
                 plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved, allow_mismatch=allow_mismatch)
+                if profile.drain_connections and not stage_only and not plan["already_current"] and not plan["blockers"]:
+                    try:
+                        plan["connection_drain"] = f5_drain.prepare(client, profile)
+                    except Exception as exc:
+                        plan["blockers"].append(f"connection drain: {exc}")
                 plan["commands"] = [] if stage_only or "volume" not in plan else planned_commands(profile, plan, host)
                 emit("precheck_complete", "Image staging checks captured" if stage_only else "Baseline and upgrade plan captured",
                      {"pre": before, "upgrade_plan": plan,
@@ -304,12 +325,36 @@ def upgrade_device(task, profile, options, reporter):
                 emit("installing", f"Installing {profile.image} to boot volume {volume}" + (" (new volume)" if plan["volume"]["create"] else ""))
                 f5.install(client, profile.image, volume, plan["volume"]["create"])
                 wait_for_install(client, volume, options, emit)
-                emit("installing", f"Installation complete on {volume}; rebooting the unit to it")
-                f5.reboot_to(client, volume)
+                try:
+                    if profile.drain_connections:
+                        f5_drain.drain(client, profile, plan["connection_drain"], emit)
+                    emit("installing", f"Installation complete on {volume}; rebooting the unit to it")
+                    f5.reboot_to(client, volume)
+                except BaseException:
+                    if plan.get("connection_drain", {}).get("restore_pending"):
+                        f5_drain.restore(client, plan["connection_drain"], emit)
+                    raise
             finally:
                 close(client)
-            client = wait_for_target(host, settings, profile, volume, options, emit)
             try:
+                client = wait_for_target(host, settings, profile, volume, options, emit)
+            except Exception:
+                # A rejected reboot can leave the old volume running with VIPs disabled.
+                # Try restoring on whichever volume is reachable; never resend the reboot.
+                if plan.get("connection_drain", {}).get("restore_pending"):
+                    recovery_client = None
+                    try:
+                        recovery_client = f5_waf.Client(host, **settings).__enter__()
+                        f5_drain.restore(recovery_client, plan["connection_drain"], emit)
+                    except Exception:
+                        pass  # The failure report retains every unresolved virtual server.
+                    finally:
+                        if recovery_client is not None:
+                            close(recovery_client)
+                raise
+            try:
+                if plan.get("connection_drain", {}).get("restore_pending"):
+                    f5_drain.restore(client, plan["connection_drain"], emit)
                 settle(emit, options)
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
@@ -321,6 +366,9 @@ def upgrade_device(task, profile, options, reporter):
         from ..errors import DeviceHTTPError, summarize
         message = (redact(str(exc)) if isinstance(exc, (ValueError, TimeoutError, RuntimeError))
                    and not isinstance(exc, DeviceHTTPError) else redact(summarize(exc)))
+        pending = plan.get("connection_drain", {}).get("restore_pending", [])
+        if pending:
+            message += "; verify/restore original enabled state manually for: " + ", ".join(pending)
         status = ("staging_failed" if stage_only else "recovery_required") if changed else "failed"
         emit(status, message, {"error": message, "upgrade_plan": plan})
         return Result(host=host, result={"error": message}, failed=True, changed=changed)

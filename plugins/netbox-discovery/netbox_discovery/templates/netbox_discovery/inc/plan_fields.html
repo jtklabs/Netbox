@@ -15,10 +15,15 @@
     const source = form.querySelector('[name="profile_source"]');
     const remediate = operation && ['remediate', 'audit_config'].includes(operation.value);
     const custom = !source || !source.value || source.value === 'custom';
+    const drain = form.querySelector('[name="drain_connections"]');
     const visible = {
       profile: custom && !remediate,
       upgrade_yaml: !remediate,
       skip_running_config_check: !remediate,
+      drain_connections: !remediate,
+      drain_min_reduction_percent: !remediate && drain && drain.checked,
+      drain_window_seconds: !remediate && drain && drain.checked,
+      drain_timeout_seconds: !remediate && drain && drain.checked,
       features: custom && remediate,
       remediation_mode: custom && remediate,
       allow_clearpass_cluster_changes: custom && operation && operation.value === 'remediate',

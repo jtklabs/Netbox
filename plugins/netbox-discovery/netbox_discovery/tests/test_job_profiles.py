@@ -235,6 +235,55 @@ class JobProfileTest(UpgradeFixture, TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertIs(response.data['plan']['skip_running_config_check'], True)
 
+    def test_f5_drain_profile_form_round_trip_and_job_snapshot(self):
+        plan = {**PROFILE, 'image': 'BIGIP-17.5.1.8-0.0.19.iso'}
+        data = {'name': self.upgrade.name, 'kind': 'upgrade', 'upgrade_yaml': yaml.safe_dump(plan),
+                'device_types': [self.device.device_type_id], 'drain_connections': True,
+                'drain_min_reduction_percent': 3, 'drain_window_seconds': 120, 'drain_timeout_seconds': 600}
+        form = JobProfileForm(data=data, instance=self.upgrade)
+        self.assertTrue(form.is_valid(), form.errors)
+        saved = form.save()
+        edit = JobProfileForm(instance=saved)
+        self.assertTrue(edit.initial['drain_connections'])
+        self.assertEqual(edit.initial['drain_min_reduction_percent'], 3)
+        self.assertEqual(edit.initial['drain_window_seconds'], 120)
+        self.assertEqual(edit.initial['drain_timeout_seconds'], 600)
+        self.assertNotIn('drain_connections', yaml.safe_load(edit.initial['upgrade_yaml']))
+        job = queue.schedule(self.user, self.defaults)[0]
+        self.assertTrue(queue.assignment(job)['profile']['drain_connections'])
+        data.pop('drain_connections')
+        form = JobProfileForm(data=data, instance=saved)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn('drain_connections', form.save().plan)
+        job.refresh_from_db()
+        self.assertEqual(job.profile['drain_window_seconds'], 120)
+
+    def test_drain_api_validation(self):
+        url = reverse('plugins-api:netbox_discovery-api:jobprofile-detail', args=[self.upgrade.pk])
+        f5_plan = {**PROFILE, 'image': 'BIGIP-17.5.1.8-0.0.19.iso', 'drain_connections': True}
+        for change in ({'drain_connections': 'true'}, {'drain_min_reduction_percent': 0},
+                       {'drain_min_reduction_percent': 101}, {'drain_window_seconds': True},
+                       {'drain_timeout_seconds': 30}, {'drain_timeout_seconds': 1.5},
+                       {'image': PROFILE['image']}):
+            response = self.client.patch(url, {'plan': {**f5_plan, **change}}, format='json')
+            self.assertEqual(response.status_code, 400, response.data)
+        response = self.client.patch(url, {'plan': f5_plan}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['plan']['drain_connections'])
+
+    def test_drain_form_defaults_and_validation(self):
+        plan = {**PROFILE, 'image': 'BIGIP-17.5.1.8-0.0.19.iso'}
+        data = {'name': 'F5 upgrade', 'kind': 'upgrade', 'upgrade_yaml': yaml.safe_dump(plan),
+                'drain_connections': True}
+        form = JobProfileForm(data=data)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.instance.plan['drain_window_seconds'], 60)
+        self.assertEqual(form.instance.plan['drain_timeout_seconds'], 900)
+        for change in ({'drain_timeout_seconds': 10}, {'upgrade_yaml': yaml.safe_dump(PROFILE)}):
+            form = JobProfileForm(data={**data, **change})
+            self.assertFalse(form.is_valid())
+            self.assertIn('upgrade_yaml', form.errors)
+
     def test_ui_pages_and_model_default_schedule(self):
         from django.test import Client
         client = Client()

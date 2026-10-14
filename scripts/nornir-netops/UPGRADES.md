@@ -555,6 +555,10 @@ license_check_date: "2025-03-01"     # from F5 K7727 for the target; blocks unit
 volume: HD1.2                        # optional; default is the inactive volume, or a new one
 allow_active: false                  # true: an active HA member fails over to its peer before installing
 ucs_backup: true
+drain_connections: false             # opt-in; standalone BIG-IP only, HA/cluster members are blocked
+drain_min_reduction_percent: 5       # finish when reduction over a full window falls below this
+drain_window_seconds: 60
+drain_timeout_seconds: 900           # cancel reboot if the drain has not settled by this limit
 ```
 
 Order of operations under `--apply`: `save sys config`; baseline; image
@@ -579,6 +583,55 @@ and a license service check date older than `license_check_date`. With
 before installing, so upgrade the standby first and schedule the active unit
 afterwards. Reboots are not coordinated across a pair beyond that check; a
 standalone unit is upgraded with the outage that implies.
+
+### Optional standalone connection drain
+
+In a saved upgrade profile, check **Drain F5 connections before reboot** and
+set the percentage, observation window and maximum wait. CLI and custom API
+profiles use the four `drain_*` keys above. The option defaults to off and is
+rejected for other device families. Saved jobs keep a snapshot of the policy.
+
+Draining requires a standalone unit. Any detected peer, failover device group,
+or non-active/unknown failover state blocks the upgrade, even with
+`allow_active: true`. Membership is checked again immediately before disabling
+VIPs. There is no cluster override. Dry runs check eligibility and show the
+policy without changing VIPs; image staging never drains connections.
+
+After installing the image to the inactive volume, the worker records the
+original enabled state of every virtual server across all partitions and
+disables only those that were enabled. This prevents new connections while
+allowing established connections to finish, using F5's
+[virtual-server disabled setting](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_ltm_virtual.html).
+The worker samples the sum of `clientside.curConns` across virtual servers
+at most every five seconds. Management connections are not counted.
+
+The drain ends immediately at zero connections, or when the count decreases
+by less than the configured percentage over a full observation window. The
+percentage is relative to the count at the start of that window, not the
+initial baseline. With the defaults, 100 to 96 connections over 60 seconds
+finishes the drain; 100 to 90 continues into another window. An unchanged
+count qualifies as a plateau; an increasing count does not. Remaining
+connections can still be interrupted by the reboot.
+
+If the maximum wait expires without zero connections or a plateau, the worker
+restores the VIPs and cancels the reboot. Missing/malformed connection counters,
+inventory changes and disable failures also stop the workflow and trigger
+restoration. Original disabled VIPs stay disabled. The observation deadline is
+checked between bounded REST requests, so request latency can extend wall time.
+
+The temporary disabled state is never saved or synced. Draining runs after
+installation so the install's configuration snapshot contains the original
+VIP states. VIPs remain disabled through the reboot, then the worker restores
+the originally enabled VIPs before post-upgrade checks. If reconnect fails, it
+attempts restoration on whichever volume is reachable; unresolved VIPs are
+listed in the recovery-required result for manual restoration. Do not save,
+sync or edit device configuration concurrently with the upgrade.
+
+`draining` and `restoring_virtuals` events report the current count, elapsed
+time, window reduction, completion reason and pending restoration count in
+NetBox's `connection_drain` summary. Original VIP identities and enabled states
+are retained in the worker's private archive. Deploy the updated NetBox plugin
+and worker together before enabling this profile option.
 
 The baseline compares virtual server, pool and node availability and enabled
 state, pool active member counts, interface status, VLANs, self IPs, routes,

@@ -65,6 +65,18 @@ class JobProfileForm(NetBoxModelForm):
     skip_running_config_check = forms.BooleanField(
         label='Skip running-config matching', required=False,
     )
+    drain_connections = forms.BooleanField(
+        label='Drain F5 connections before reboot', required=False,
+        help_text='Standalone BIG-IP only; HA/cluster members are blocked. Temporarily disable virtual servers '
+                  'and wait for existing connections to settle. Original states are restored after reboot or on failure.')
+    drain_min_reduction_percent = forms.IntegerField(
+        label='F5 drain minimum reduction (%)', required=False, initial=5, min_value=1, max_value=100,
+        help_text='Finish when connections decrease by less than this percentage over a full observation window.')
+    drain_window_seconds = forms.IntegerField(
+        label='F5 drain observation window (seconds)', required=False, initial=60, min_value=1, max_value=86400)
+    drain_timeout_seconds = forms.IntegerField(
+        label='F5 drain maximum wait (seconds)', required=False, initial=900, min_value=1, max_value=86400,
+        help_text='If connections keep falling or increase until this limit, restore VIPs and cancel the reboot.')
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, required=False,
                                          widget=RemediationWidget, label='Remediate')
     remediation_mode = forms.ChoiceField(choices=REMEDIATION_MODES, required=False, initial='add')
@@ -74,7 +86,8 @@ class JobProfileForm(NetBoxModelForm):
     class Meta:
         model = JobProfile
         fields = ('name', 'kind', 'device_types', 'replace_existing', 'assignment_confirmation',
-                  'upgrade_yaml', 'skip_running_config_check', 'features',
+                  'upgrade_yaml', 'skip_running_config_check', 'drain_connections', 'drain_min_reduction_percent',
+                  'drain_window_seconds', 'drain_timeout_seconds', 'features',
                   'remediation_mode', 'allow_clearpass_cluster_changes', 'description', 'comments', 'tags')
 
     def __init__(self, *args, **kwargs):
@@ -94,6 +107,9 @@ class JobProfileForm(NetBoxModelForm):
                 plan = dict(self.instance.plan)
                 plan.pop('models', None)
                 self.initial['skip_running_config_check'] = plan.pop('skip_running_config_check', False)
+                for key, default in (('drain_connections', False), ('drain_min_reduction_percent', 5),
+                                     ('drain_window_seconds', 60), ('drain_timeout_seconds', 900)):
+                    self.initial[key] = plan.pop(key, default)
                 self.initial['upgrade_yaml'] = profile_yaml(plan)
 
     def clean(self):
@@ -106,6 +122,16 @@ class JobProfileForm(NetBoxModelForm):
                     if kind == 'remediate' else yaml.safe_load(data.get('upgrade_yaml', '')))
             if kind == 'remediate' and data.get('allow_clearpass_cluster_changes'):
                 plan['allow_clearpass_cluster_changes'] = True
+            if kind == 'upgrade' and isinstance(plan, dict):
+                # The form controls own these settings; raw API/CLI profiles use the same keys.
+                for key in ('drain_connections', 'drain_min_reduction_percent',
+                            'drain_window_seconds', 'drain_timeout_seconds'):
+                    plan.pop(key, None)
+                if data.get('drain_connections'):
+                    plan['drain_connections'] = True
+                    for key, default in (('drain_min_reduction_percent', 5), ('drain_window_seconds', 60),
+                                         ('drain_timeout_seconds', 900)):
+                        plan[key] = data.get(key) if data.get(key) is not None else default
             check_plan = dict(plan) if isinstance(plan, dict) else plan
             if kind == 'upgrade' and isinstance(check_plan, dict):
                 check_plan['models'] = ['assigned-models']

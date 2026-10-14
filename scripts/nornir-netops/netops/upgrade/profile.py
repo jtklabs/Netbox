@@ -77,6 +77,10 @@ class Profile:
     allow_active: bool = False
     ucs_backup: bool = True
     license_check_date: str = ""
+    drain_connections: bool = False
+    drain_min_reduction_percent: int = 5
+    drain_window_seconds: int = 60
+    drain_timeout_seconds: int = 900
     # Only the post-upgrade running-config baseline comparison.
     skip_running_config_check: bool = False
 
@@ -127,12 +131,23 @@ class Profile:
         floor = FREE_SPACE_FLOOR.get(result.family, DEFAULT_FREE_SPACE_FLOOR)
         if type(result.minimum_free_bytes) is not int or result.minimum_free_bytes < floor:
             raise ValueError(f"minimum_free_bytes must reserve at least {floor} bytes for expansion")
-        for key in ("bundle_conversion_validated", "allow_active", "ucs_backup", "skip_running_config_check"):
+        for key in ("bundle_conversion_validated", "allow_active", "ucs_backup", "skip_running_config_check", "drain_connections"):
             if type(getattr(result, key)) is not bool:
                 raise ValueError(f"{key} must be a boolean")
         for key in ("image_source", "volume", "license_check_date"):
             if not isinstance(getattr(result, key), str):
                 raise ValueError(f"{key} must be a string")
+        for key, maximum in (("drain_min_reduction_percent", 100), ("drain_window_seconds", 86400),
+                             ("drain_timeout_seconds", 86400)):
+            value = getattr(result, key)
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(f"{key} must be an integer between 1 and {maximum}")
+        if result.drain_timeout_seconds < result.drain_window_seconds:
+            raise ValueError("drain_timeout_seconds must be at least drain_window_seconds")
+        if result.family != "f5" and (result.drain_connections or any(
+                getattr(result, key) != cls.__dataclass_fields__[key].default
+                for key in ("drain_min_reduction_percent", "drain_window_seconds", "drain_timeout_seconds"))):
+            raise ValueError("connection drain settings apply to BIG-IP profiles only")
         if result.family == "f5":
             return cls._validate_f5(result)
         if result.family == "eos":
