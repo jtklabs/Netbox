@@ -1,5 +1,8 @@
 # Software upgrades: Catalyst IOS XE, Arista EOS and BIG-IP
 
+How the engine is built, what a new platform has to provide, and the open
+items are in [UPGRADE_HANDOVER.md](UPGRADE_HANDOVER.md).
+
 `configure.py upgrade` uses this directory's shared `.env`, AWS Secrets Manager
 login resolution, NetBox inventory/filtering, threaded Nornir runner and private
 JSON archives. It is read-only unless `--apply` is present. NetBox is the default
@@ -15,12 +18,15 @@ profiles through the IOS XE install workflow. C9350 uses `cisco9k_iosxe` images
 C3650 and C3850 use `cat3k_caa-universalk9` (or explicitly selected `cat3k_caa-universalk9ldpe`).
 Wrong-family images are rejected. Each hardware family uses a separate profile,
 including C3650 and C3850 even though they share the same image package.
-C9350 starting releases must be at least 17.18.1; C9350-24HX and C9350-48HXN
-require at least their introductory release, 26.1.1a. C9300 starting releases
-must be at least 16.6.2. C3650/C3850 starting releases must be at least 16.8.1a,
+Each PID has an introductory release: 17.18.1 for the original C9350 PIDs,
+26.1.1a for C9350-24HX and C9350-48HXN, and 16.6.2 for the C9300 family. A
+profile may list PIDs from both C9350 generations; every listed PID needs at
+least one starting version it can actually be running, every starting version
+must apply to at least one listed PID, and the target must not predate any
+listed PID. C3650/C3850 starting releases must be at least 16.8.1a,
 when the one-shot install command became available; targets are limited to
 16.8.1a through 16.12.x. Older 3650/3850 procedures are not implemented.
-These minimums do not approve an upgrade path: the exact
+These floors do not approve an upgrade path: the exact
 PIDs and tested starting/target releases still come from your profile. Other
 families, legacy `request platform software` upgrades, ISSU and xFSU are not
 implemented. No production release path is approved by the example or tests.
@@ -71,7 +77,10 @@ All existing NetBox selectors work, including repeated filters, `--filter`,
 `--limit`, poller ownership/autofilter and NetBox credentials from AWS. When
 the discovery plugin serves redundancy groups, a target set holding more
 members of a group than may upgrade at once is refused unless
-`--ignore-groups` is passed; see [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md#redundancy-groups-dependencies-and-holds).
+`--ignore-groups` is passed. An `--apply` run that cannot read the groups at
+all (plugin not deployed, no permission, NetBox down) is refused the same way
+rather than guessing; a dry run warns and continues, because it reloads
+nothing. See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md#redundancy-groups-dependencies-and-holds).
 Device login comes from the same `NET_USER`, `NET_PASS`, `NET_ENABLE`,
 `NET_AWS_SECRET`, `NET_AWS_REGION` and optional custom JSON-key settings used by
 standards deployment. `--env-file` selects an alternate shared file.
@@ -216,16 +225,26 @@ install add file flash:<approved-image>.bin activate commit
 The install command distributes software to stack members. Only the recognized
 reload, verified `packages.conf` boot confirmations and the documented IOS XE
 save-configuration `[y/n/q]` prompt are answered. Unexpected prompts, explicit installer errors,
-failed saves and bad checksums stop the device workflow. Installation is sent
+failed saves and bad checksums stop the device workflow. An installer error is
+recognized only where IOS XE prints one: `FAILED`, `ERROR`, `ABORTED` or
+`%Error` at the start of a line, or after an install operation name such as
+`install_add_activate_commit:`; a syslog line that merely contains the word
+"failed" is not treated as a failure. Installation is sent
 once; an ambiguous disconnect/timeout is checked by reconnecting, never by
-resending the install command. Fresh observations must confirm the target release
+resending the install command. Reconnection waits, within `--reload-timeout`,
+until every member from the baseline is back on the target release in INSTALL
+mode and `Ready` in `show switch`, so stack reformation is charged to the
+reload window rather than the validation window; each `reconnecting` event
+says which members are still missing or not ready. Fresh observations must confirm the target release
 in install mode, all original members and their committed image state, and the
 saved `packages.conf` autoboot configuration.
 
 The defaults allow 30 minutes per install/copy/checksum operation, 30 minutes for
 reconnection, an initial 120-second settling period, a 600-second validation
 window and 300 seconds for each configuration dump, the slowest read on a large
-stack. Two consecutive comparisons without errors are required. Use
+stack. Two consecutive comparisons without errors are required. The validation
+window starts once the first complete post-check has been collected, so a slow
+first read on a large stack is not charged against it. Use
 `--install-timeout`, `--reload-timeout`, `--settle-seconds`,
 `--validation-timeout`, `--poll-interval`, `--show-timeout` and
 `--config-timeout` for your tested environment. Deadlines are checked between individual bounded operations; they

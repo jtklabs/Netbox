@@ -24,7 +24,8 @@ standards-file examples.
   [collect](README.md#collect-show-commands-into-netbox).
 - [Upgrades](UPGRADES.md) for Catalyst IOS XE, Arista EOS and BIG-IP: approved
   profiles, NetBox targeting, install mode/conversion, parallel execution,
-  pre/post validation and progress webhooks.
+  pre/post validation and progress webhooks;
+  [UPGRADE_HANDOVER.md](UPGRADE_HANDOVER.md) for internals and adding a platform.
 - [Shared flags](#shared-flags): [inventory](#inventory-and-device-selection),
   [NetBox](#netbox-inventory-and-interface-tags), [authentication](#device-authentication),
   [AWS](#aws-secrets-manager), [F5 HTTPS](#f5-https),

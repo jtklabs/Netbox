@@ -336,7 +336,8 @@ the normal gates still apply. A pending job can also be held by hand. Held
 jobs expire with their start window like pending ones.
 
 Manual `configure.py upgrade` runs against NetBox inventory refuse a target
-set that contains more members of a group than its limit unless
+set that contains more members of a group than its limit, and an `--apply`
+run refuses to start when the groups cannot be read at all, unless
 `--ignore-groups` is given; they do not wait for dependencies, so use the
 queue for anything that needs ordering.
 

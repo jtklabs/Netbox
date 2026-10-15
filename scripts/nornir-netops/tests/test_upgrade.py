@@ -296,7 +296,7 @@ def fake_device(monkeypatch, profile):
             self.mutations.append(f"scp {local.name} {destination}")
             self.image_exists = True
 
-        def wait_for_target(self, profile):
+        def wait_for_target(self, profile, before=None):
             self.raw = transcript(profile.target_version)
             if self.lose_mac:
                 self.raw["show mac address-table"] = "Mac Address Table\nTotal Mac Addresses for this criterion: 0\n"
@@ -367,7 +367,7 @@ def test_c9300_171206_workflows(profile, options, fake_device, monkeypatch, tmp_
             if command.startswith("copy "):
                 self.image_exists = True
 
-        def wait_for_target(self, profile):
+        def wait_for_target(self, profile, before=None):
             # Cisco can zero-pad both the running and committed version.
             self.raw = output(image_version)
 
@@ -1275,7 +1275,7 @@ def test_cat3k_workflows(cat3k_profile, options, fake_device, monkeypatch, opera
             if command.startswith("copy "):
                 self.image_exists = True
 
-        def wait_for_target(self, profile):
+        def wait_for_target(self, profile, before=None):
             self.raw = cat3k_transcript(profile.target_version)
 
     monkeypatch.setattr(workflow, "Device", Cat3kDevice)
@@ -1359,7 +1359,7 @@ def test_c9350_workflows_use_cisco9k_image(c9350_profile, options, fake_device, 
             if command.startswith("copy "):
                 self.image_exists = True
 
-        def wait_for_target(self, profile):
+        def wait_for_target(self, profile, before=None):
             self.raw = c9350_transcript(profile.target_version)
 
     monkeypatch.setattr(workflow, "Device", C9350Device)
@@ -1441,8 +1441,8 @@ def test_apply_saves_running_config_before_comparing_it(profile, options, fake_d
     fake_device.raw = unsaved_transcript()
     original_wait = fake_device.wait_for_target
 
-    def reload_keeps_saved_config(self, profile):
-        original_wait(self, profile)
+    def reload_keeps_saved_config(self, profile, before=None):
+        original_wait(self, profile, before)
         for command in ("show running-config", "show startup-config"):
             self.raw[command] = self.raw[command].replace("switchport access vlan 10", "switchport access vlan 20")
 
@@ -1620,8 +1620,8 @@ def test_override_upgrade_completes_when_startup_never_matches_running(profile, 
             nvram_representation(self)
         return output
 
-    def reload(self, profile):
-        original_wait(self, profile)
+    def reload(self, profile, before=None):
+        original_wait(self, profile, before)
         nvram_representation(self)
 
     monkeypatch.setattr(fake_device, "write", write)
@@ -1843,3 +1843,129 @@ def test_cli_ignore_groups_flag():
     from netops.cli import build_parser
     assert build_parser().parse_args(["upgrade", "--profile", "p.yaml"]).ignore_groups is False
     assert build_parser().parse_args(["upgrade", "--profile", "p.yaml", "--ignore-groups"]).ignore_groups is True
+
+
+def member_rows(profile, *numbers):
+    return "Switch Ports Model SW Version SW Image Mode\n" + "".join(
+        f"{'*' if n == '1' else ' '} {n} 56 C9300-48P {profile.target_version} CAT9K_IOSXE INSTALL\n" for n in numbers)
+
+
+def switch_rows(states):
+    return "Switch# Role Mac Address Priority Version State\n" + "".join(
+        f"{'*' if n == '1' else ' '}{n} {'Active' if n == '1' else 'Member'} 0011.2233.445{n} 15 V02 {state}\n"
+        for n, state in states.items())
+
+
+def test_reconnect_waits_for_every_baseline_member_to_rejoin_and_be_ready(options, profile, monkeypatch):
+    # After a stack reload the active answers first; members rejoin later and
+    # sit in Initializing before Ready. None of that may count against validation.
+    device = workflow.Device(None, options, Mock())
+    device.close = Mock()
+    device.connect = Mock()
+    device.read = Mock(side_effect=[
+        member_rows(profile, "1"), switch_rows({"1": "Ready"}),
+        member_rows(profile, "1", "2"), switch_rows({"1": "Ready", "2": "Initializing"}),
+        member_rows(profile, "1", "2"), switch_rows({"1": "Ready", "2": "Ready"}),
+    ])
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+    device.wait_for_target(profile, {"software": {"1": {}, "2": {}}})
+    assert device.connect.call_count == 3
+    reasons = [call.args[1] for call in device.emit.call_args_list]
+    assert any("member(s) 2 have not rejoined the stack" in reason for reason in reasons)
+    assert any("member(s) 2 Initializing not Ready" in reason for reason in reasons)
+
+
+def test_reconnect_still_requires_the_target_release_on_every_present_member(options, profile, monkeypatch):
+    old = transcript()["show version"].replace("* 1 56", "  2 56")
+    device = workflow.Device(None, options, Mock())
+    device.close = Mock()
+    device.connect = Mock()
+    device.read = Mock(side_effect=[member_rows(profile, "1") + old.splitlines()[-1] + "\n", switch_rows({"1": "Ready", "2": "Ready"}),
+                                    member_rows(profile, "1", "2"), switch_rows({"1": "Ready", "2": "Ready"})])
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+    device.wait_for_target(profile, {"software": {"1": {}, "2": {}}})
+    assert any("member(s) 2 not yet running the target" in call.args[1] for call in device.emit.call_args_list)
+
+
+def test_validation_window_starts_after_the_first_complete_postcheck(monkeypatch):
+    # A first post-check slower than the whole window must not fail validation by itself.
+    clock = {"now": 0}
+    monkeypatch.setattr(workflow.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+    before = baseline()
+
+    def collect_after():
+        clock["now"] += 500
+        return baseline()
+
+    seen = []
+    result = workflow.converge(lambda stage, message, payload=None, attachment=None: seen.append(stage),
+                               SimpleNamespace(validation_timeout=300, poll_interval=0), before,
+                               {"profile": "lab", "target_version": "17.12.4"}, SimpleNamespace(run=None),
+                               SimpleNamespace(name="sw1", hostname="192.0.2.1"), collect_after, lambda after: [])
+    # The synthetic transcript lacks optional tables, so a clean run carries warnings.
+    assert not result.failed and "validation_failed" not in seen
+    assert seen[-1] in ("completed", "completed_with_warnings")
+
+
+@pytest.mark.parametrize("text,failure", [
+    ("FAILED: install_add_activate_commit : Image file flash:x.bin is not a valid file", True),
+    ("install_add_activate_commit: FAILED", True),
+    ("  ERROR: package verification failed", True),
+    ("%Error opening flash:missing.bin (No such file or directory)", True),
+    ("*Sep 14 02:00:01.000: %PLATFORM-3-ELEMENT_WARNING: Switch 2 R0/0: smand: sensor 1/0/1 failed to read; retrying", False),
+    ("install_add_activate_commit: Checking whether new add is allowed ....\nSUCCESS: install_add_activate_commit", False),
+    ("Verifying that no previously failed installs remain ... none", False),
+])
+def test_install_failure_is_recognized_only_where_the_installer_prints_it(text, failure):
+    assert bool(workflow.INSTALL_FAILURE.search(text)) is failure
+
+
+def test_profile_may_mix_c9350_generations_when_every_pid_has_a_starting_version(c9350_profile, tmp_path):
+    from dataclasses import replace
+    mixed = replace(c9350_profile, models=("C9350-48P", "C9350-24HX"), starting_versions=("17.18.1", "26.1.1a"),
+                    target_version="26.1.2", image="cisco9k_iosxe.26.1.02.SPA.bin")
+    assert Profile.load(write_profile_file(mixed, tmp_path)) == mixed
+    with pytest.raises(ValueError, match="C9350-24HX was introduced in 26.1.1a; the target"):
+        Profile.load(write_profile_file(replace(mixed, starting_versions=("17.18.1",), target_version="17.18.4",
+                                                image="cisco9k_iosxe.17.18.04.SPA.bin"), tmp_path))
+    with pytest.raises(ValueError, match="C9350 starting versions must be >=17.18.1"):
+        Profile.load(write_profile_file(replace(mixed, starting_versions=("17.17.1", "26.1.1a")), tmp_path))
+
+
+def test_dry_run_warns_but_apply_refuses_when_redundancy_groups_cannot_be_read(monkeypatch, capsys):
+    from netops.netbox import NetBoxError
+    from netops.upgrade import cli as upgrade_cli
+
+    def unavailable(self, path, params=None):
+        raise NetBoxError("GET plugins/discovery/upgrade-groups/ failed (404): not found")
+
+    monkeypatch.setattr("netops.netbox.settings_from", lambda standards, args: {"url": "https://netbox.example", "token": "t", "verify_tls": False})
+    monkeypatch.setattr("netops.netbox.Client.get", unavailable)
+    style = SimpleNamespace(warn=lambda text: text, bad=lambda text: text, dim=lambda text: text)
+    args = SimpleNamespace(standards=None, netbox_secret=None, aws_region=None, apply=False)
+    assert upgrade_cli.fetch_groups(args, style) == []
+    assert "redundancy groups not checked" in capsys.readouterr().err
+    args.apply = True
+    with pytest.raises(NetBoxError, match="redundancy groups could not be checked"):
+        upgrade_cli.fetch_groups(args, style)
+
+
+def test_apply_run_stops_before_any_device_work_when_groups_are_unreadable(profile, tmp_path, monkeypatch):
+    from netops import cli
+    from netops.netbox import NetBoxError
+    from netops.upgrade import cli as upgrade_cli
+    env = tmp_path / "shared.env"
+    env.write_text("NET_USER=svc\nNET_PASS=x\n")
+    targets = Mock()
+    targets.inventory.hosts = {"sw1": SimpleNamespace(name="sw1", data={"netbox_id": 1})}
+    monkeypatch.setattr(cli, "_connect", lambda args, style: (targets, SimpleNamespace(describe=lambda: "env"), 0))
+    monkeypatch.setattr(upgrade_cli, "fetch_groups", Mock(side_effect=NetBoxError("GET failed (404)")))
+    assert cli.main(["upgrade", "--profile", str(write_profile_file(profile, tmp_path)), "--env-file", str(env),
+                     "--netbox-filter", "site=atl", "--apply"]) == 3
+    targets.run.assert_not_called()
+    upgrade_cli.fetch_groups.reset_mock(side_effect=True)
+    upgrade_cli.fetch_groups.return_value = []
+    monkeypatch.setattr(cli, "_connect", lambda args, style: (None, None, 0))
+    assert cli.main(["upgrade", "--profile", str(write_profile_file(profile, tmp_path)), "--env-file", str(env),
+                     "--netbox-filter", "site=atl", "--apply", "--ignore-groups"]) == 0
