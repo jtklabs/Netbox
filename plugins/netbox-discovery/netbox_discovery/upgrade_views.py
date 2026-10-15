@@ -311,17 +311,21 @@ class UpgradeScheduleView(PermissionRequiredMixin, View):
 
     def post(self, request):
         form, rows = ScheduleForm(request.POST), []
+        skipped = []
         if form.is_valid():
             try:
                 data = form.schedule_data()
                 if request.POST.get('schedule') == 'yes':
-                    jobs = queue.schedule(request.user, data)
+                    jobs = queue.schedule(request.user, data, skipped=skipped)
                     messages.success(request, f'Scheduled {len(jobs)} device(s).')
+                    if skipped:
+                        messages.warning(request, f'Skipped {len(skipped)} ineligible device(s): ' +
+                                         '; '.join(f"{device['name']}: {device['reason']}" for device in skipped))
                     return redirect(reverse('plugins:netbox_discovery:upgradejob_list') + '?batch_id=' + str(jobs[0].batch_id))
-                rows = queue.prepare(request.user, data)
+                rows = queue.prepare(request.user, data, skipped=skipped)
             except (queue.QueueError, ValidationError) as exc:
                 form.add_error(None, str(exc))
-        return render(request, 'netbox_discovery/upgrade_schedule.html', {'form': form, 'preview': rows})
+        return render(request, 'netbox_discovery/upgrade_schedule.html', {'form': form, 'preview': rows, 'skipped': skipped})
 
 
 class UpgradeJobTable(NetBoxTable):

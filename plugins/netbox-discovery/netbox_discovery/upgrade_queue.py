@@ -24,6 +24,10 @@ class QueueError(ValueError):
     pass
 
 
+class NoEligibleDevices(QueueError):
+    pass
+
+
 @transaction.atomic
 def bulk_action(user, pks, action, reason=''):
     """Lock the entire selection before checking state or changing any job."""
@@ -149,15 +153,19 @@ def validate_remediation(profile):
         raise QueueError('ClearPass cluster-change approval requires the NTP standard.')
 
 
-def execution_devices(user, queryset, limit=None):
+def execution_devices(user, queryset, limit=None, *, skipped=None):
     """Resolve stack members to their visible master before profiles and IP checks."""
     targets = queryset.order_by().annotate(execution_id=Case(
         When(virtual_chassis__isnull=True, then=F('pk')),
         default=F('virtual_chassis__master_id'),
     )).values_list('execution_id', flat=True).distinct()
-    ids = set(targets[:limit + 1] if limit else targets)
+    ids = set(targets[:limit + 2] if limit else targets)
     if None in ids:
-        raise QueueError('A selected virtual chassis has no master. Assign its master before scheduling.')
+        if skipped is None:
+            raise QueueError('A selected virtual chassis has no master. Assign its master before scheduling.')
+        skipped.extend({'id': device.pk, 'name': device.name, 'reason': 'Virtual chassis has no master.'}
+                       for device in queryset.filter(virtual_chassis__isnull=False, virtual_chassis__master__isnull=True))
+        ids.discard(None)
     if limit and len(ids) > limit:
         raise QueueError(f'Selection must contain between 1 and {limit} execution devices (one per stack).')
     devices = list(Device.objects.restrict(user, 'view').filter(pk__in=ids).select_related(
@@ -168,7 +176,7 @@ def execution_devices(user, queryset, limit=None):
     return devices
 
 
-def select_devices(user, filters):
+def select_devices(user, filters, *, skipped=None):
     if not isinstance(filters, dict) or not filters:
         raise QueueError('Choose at least one device filter; an unfiltered fleet is not allowed.')
     for name, value in filters.items():
@@ -182,15 +190,18 @@ def select_devices(user, filters):
     selected = DeviceFilterSet(filters, queryset=Device.objects.restrict(user, 'view'))
     if not selected.is_valid():
         raise QueueError(str(selected.errors))
-    devices = execution_devices(user, selected.qs, limit=1000)
+    devices = execution_devices(user, selected.qs, limit=1000, skipped=skipped)
     if not devices or len(devices) > 1000:
+        if skipped:
+            raise NoEligibleDevices('No eligible devices remain. No jobs created.')
         raise QueueError('Selection must contain between 1 and 1000 devices.')
-    for device in devices:
-        address_of(device)
+    if skipped is None:
+        for device in devices:
+            address_of(device)
     return devices
 
 
-def resolve_profiles(user, data, devices):
+def resolve_profiles(user, data, devices, *, skipped=None):
     """Resolve only visible defaults; freeze a separate plan for every device."""
     source = data.get('profile_source') or ('custom' if data.get('profile') is not None else 'model')
     kind = 'remediate' if data['operation'] in CONFIG_OPERATIONS else 'upgrade'
@@ -216,6 +227,11 @@ def resolve_profiles(user, data, devices):
     for device in devices:
         profile = available.get(defaults.get(device.pk))
         if profile is None:
+            if source == 'model' and data['operation'] in CONFIG_OPERATIONS:
+                if skipped is not None:
+                    skipped.append({'id': device.pk, 'name': device.name,
+                                    'reason': 'No accessible standards profile assigned to its model or platform.'})
+                continue
             raise QueueError(f'{device}: no accessible {kind} profile assigned to its model or platform.')
         plan = profile.resolved_plan()
         if kind == 'upgrade' and not DeviceTypeProfile.objects.restrict(user, 'view').filter(
@@ -226,7 +242,7 @@ def resolve_profiles(user, data, devices):
     return resolved
 
 
-def prepare(user, data):
+def prepare(user, data, *, skipped=None):
     if data['operation'] not in {'audit', 'stage', 'upgrade', *CONFIG_OPERATIONS}:
         raise QueueError('Unsupported upgrade operation.')
     if data['operation'] not in READ_ONLY_OPERATIONS and not user.has_perm('netbox_discovery.apply_upgradejob'):
@@ -237,8 +253,13 @@ def prepare(user, data):
         raise QueueError('Start-before must be in the future and after the scheduled start.')
     preferred = (data.get('poller') or '').lower().removeprefix(plugin_setting('poller_tag_prefix'))
     rows = []
-    devices = select_devices(user, data['filters'])
-    profiles = resolve_profiles(user, data, devices)
+    skipped = skipped if skipped is not None else []
+    allow_skips = data['operation'] in CONFIG_OPERATIONS
+    devices = select_devices(user, data['filters'], skipped=skipped if allow_skips else None)
+    profiles = resolve_profiles(user, data, devices, skipped=skipped)
+    devices = [device for device in devices if device.pk in profiles]
+    if not devices:
+        raise NoEligibleDevices('No eligible devices: no accessible standards profile assigned to any selected model or platform. No jobs created.')
     pollers = {}
     if data['operation'] in CONFIG_OPERATIONS:
         from django.apps import apps
@@ -247,37 +268,45 @@ def prepare(user, data):
         from netbox_compliance.definitions import SnapshotResolver, snapshot_for_device
         snapshot_resolver = SnapshotResolver(user)
     for device in devices:
-        if device.virtual_chassis_id and device.virtual_chassis.master_id != device.pk:
-            raise QueueError(f'{device}: select only the virtual chassis master (one job per stack).')
-        candidates = owners(device)
-        chosen = preferred if preferred in candidates else next(iter(candidates)) if len(candidates) == 1 and not preferred else None
-        if not chosen:
-            raise QueueError(f'{device}: no unambiguous poller; check device/site/region tags or choose a matching poller.')
-        if chosen not in pollers:
-            pollers[chosen] = DiscoveryPoller.objects.filter(name=chosen).first()
-        poller = pollers[chosen]
-        if poller and poller.tenant_id and poller.tenant_id != device.tenant_id:
-            raise QueueError(f'{device}: poller tenant does not match the device.')
-        plan, profile_name = profiles[device.pk]
-        standards_snapshot = {}
-        if data['operation'] in CONFIG_OPERATIONS:
-            try:
-                standards_snapshot = snapshot_for_device(user, device, plan['features'], plan['mode'],
-                                                         audit=data['operation'] == 'audit_config',
-                                                         resolver=snapshot_resolver)
-            except ValidationError as exc:
-                raise QueueError('; '.join(exc.messages)) from None
-            if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:
-                from .clearpass_cluster import snapshot
-                applying = data['operation'] == 'remediate'
-                if applying and not plan.get('allow_clearpass_cluster_changes'):
-                    raise QueueError('Enable Allow ClearPass cluster-wide changes on the job/profile before scheduling remediation.')
-                standards_snapshot['clearpass_cluster'] = snapshot(user, device, apply=applying)
-            if device.platform and device.platform.slug == 'arubaos' and 'ntp' in plan['features']:
-                from .mobility_conductor import snapshot
-                standards_snapshot['mobility_conductor'] = snapshot(user, device)
-        rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device),
-                     'profile': plan, 'profile_name': profile_name, 'standards_snapshot': standards_snapshot})
+        try:
+            if device.virtual_chassis_id and device.virtual_chassis.master_id != device.pk:
+                raise QueueError(f'{device}: select only the virtual chassis master (one job per stack).')
+            candidates = owners(device)
+            chosen = preferred if preferred in candidates else next(iter(candidates)) if len(candidates) == 1 and not preferred else None
+            if not chosen:
+                raise QueueError(f'{device}: no unambiguous poller; check device/site/region tags or choose a matching poller.')
+            if chosen not in pollers:
+                pollers[chosen] = DiscoveryPoller.objects.filter(name=chosen).first()
+            poller = pollers[chosen]
+            if poller and poller.tenant_id and poller.tenant_id != device.tenant_id:
+                raise QueueError(f'{device}: poller tenant does not match the device.')
+            plan, profile_name = profiles[device.pk]
+            standards_snapshot = {}
+            if data['operation'] in CONFIG_OPERATIONS:
+                try:
+                    standards_snapshot = snapshot_for_device(user, device, plan['features'], plan['mode'],
+                                                             audit=data['operation'] == 'audit_config',
+                                                             resolver=snapshot_resolver)
+                except ValidationError as exc:
+                    raise QueueError('; '.join(exc.messages)) from None
+                if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:
+                    from .clearpass_cluster import snapshot
+                    applying = data['operation'] == 'remediate'
+                    if applying and not plan.get('allow_clearpass_cluster_changes'):
+                        raise QueueError('Enable Allow ClearPass cluster-wide changes on the job/profile before scheduling remediation.')
+                    standards_snapshot['clearpass_cluster'] = snapshot(user, device, apply=applying)
+                if device.platform and device.platform.slug == 'arubaos' and 'ntp' in plan['features']:
+                    from .mobility_conductor import snapshot
+                    standards_snapshot['mobility_conductor'] = snapshot(user, device)
+            rows.append({'device': device, 'poller_name': chosen, 'address': address_of(device),
+                         'profile': plan, 'profile_name': profile_name, 'standards_snapshot': standards_snapshot})
+        except (QueueError, ValidationError) as exc:
+            if not allow_skips:
+                raise
+            skipped.append({'id': device.pk, 'name': device.name, 'reason': str(exc)})
+    if not rows:
+        raise NoEligibleDevices('No eligible devices remain. No jobs created. ' + '; '.join(
+            f"{item['name']}: {item['reason']}" for item in skipped))
     devices = [row['device'] for row in rows]
     # A configuration push takes nothing out of service, so redundancy groups
     # and dependencies do not order it.
@@ -295,8 +324,8 @@ def prepare(user, data):
 
 
 @transaction.atomic
-def schedule(user, data):
-    rows = prepare(user, data)
+def schedule(user, data, *, skipped=None):
+    rows = prepare(user, data, skipped=skipped)
     batch = uuid.uuid4()
     jobs = []
     pollers = {}

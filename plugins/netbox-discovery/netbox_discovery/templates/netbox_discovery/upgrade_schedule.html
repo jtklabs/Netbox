@@ -13,6 +13,12 @@
   </form>
 </div></div>
 <script src="{% static 'netbox_discovery/upgrade_timing.js' %}" defer></script>
+{% if skipped %}
+<div class="alert alert-warning mt-4">
+  <strong>{{ skipped|length }} device(s) skipped</strong>
+  <ul class="mb-0">{% for device in skipped %}<li>{{ device.name }}: {{ device.reason }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
 {% if preview %}
 <h2 class="mt-4">{{ preview|length }} device(s) currently match</h2>
 <div class="table-responsive">

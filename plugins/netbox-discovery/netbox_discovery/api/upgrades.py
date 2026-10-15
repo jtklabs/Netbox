@@ -109,13 +109,22 @@ class ScheduleView(QueueView):
     serializer_class = ScheduleSerializer
 
     def execute(self, request, data):
+        skipped = []
         if data['preview']:
-            rows = queue.prepare(request.user, data)
+            try:
+                rows = queue.prepare(request.user, data, skipped=skipped)
+            except queue.NoEligibleDevices as exc:
+                return Response({'detail': str(exc), 'skipped': skipped}, status=409)
             return Response({'devices': [{'id': row['device'].pk, 'name': row['device'].name,
                                          'address': row['address'], 'poller': row['poller_name'],
-                                         'profile_name': row['profile_name'], 'profile': row['profile']} for row in rows]})
-        jobs = queue.schedule(request.user, data)
+                                         'profile_name': row['profile_name'], 'profile': row['profile']} for row in rows],
+                             'skipped': skipped})
+        try:
+            jobs = queue.schedule(request.user, data, skipped=skipped)
+        except queue.NoEligibleDevices as exc:
+            return Response({'detail': str(exc), 'skipped': skipped}, status=409)
         return Response({'batch_id': str(jobs[0].batch_id),
+                         'skipped': skipped,
                          'jobs': UpgradeJobSerializer(jobs, many=True, context={'request': request}).data}, status=201)
 
 

@@ -60,8 +60,8 @@ class PlatformProfileTest(TestCase):
             self.devices[1].save()
             self.assertEqual(default_profile_ids(self.user, self.devices, 'remediate'),
                              {self.devices[0].pk: self.profile.pk})
-            with self.assertRaisesRegex(queue.QueueError, 'no accessible'):
-                queue.schedule(self.user, self.data)
+            jobs = queue.schedule(self.user, self.data)
+            self.assertEqual([job.device_id for job in jobs], [self.devices[0].pk])
 
     def test_devices_of_same_model_can_resolve_different_platform_defaults(self):
         other = Platform.objects.create(name='Other IOS version', slug='other-ios')
@@ -162,11 +162,12 @@ class PlatformProfileTest(TestCase):
                          ([self.devices[0].pk], 2))
         self.assertEqual(reasons, {'missing_ip': 1, 'missing_profile': 1})
 
-    def test_direct_queue_still_rejects_an_unaddressed_device(self):
+    def test_direct_standards_queue_skips_an_unaddressed_device(self):
         Device.objects.filter(pk=self.devices[0].pk).update(primary_ip4=None, primary_ip6=None)
-        with self.assertRaisesMessage(queue.QueueError, 'no primary management IP'):
-            queue.schedule(self.user, self.data)
-        self.assertFalse(UpgradeJob.objects.exists())
+        skipped = []
+        jobs = queue.schedule(self.user, self.data, skipped=skipped)
+        self.assertEqual([job.device_id for job in jobs], [self.devices[1].pk])
+        self.assertIn('no primary management IP', skipped[0]['reason'])
 
     def test_saved_schedule_respects_effective_model_override(self):
         schedule = self.schedule('saved')
