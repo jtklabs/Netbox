@@ -551,7 +551,7 @@ def test_repeated_or_malformed_discovery_pages_fail():
         f5_waf.plan_waf(box, [("192.0.2.50", 514)], False)
 
 
-@pytest.mark.parametrize("tls_options,expected", [({}, False), ({"verify_tls": True}, True)])
+@pytest.mark.parametrize("tls_options,expected", [({}, False), ({"verify_tls": True}, False)])
 def test_rest_client_authentication_tls_ipv6_and_logout(monkeypatch, tls_options, expected):
     import requests
 
@@ -648,7 +648,7 @@ def test_cli_overrides_environment_connection_settings_and_filters(setup, monkey
                          netbox_inventory=True)
     assert code == cli.EXIT_OK
     assert setup.box.logins[0][4] == {"port": 443, "timeout": 60,
-                                      "verify_tls": True, "provider": "tmos"}
+                                      "verify_tls": False, "provider": "tmos"}
     assert setup.nb.calls[0][2]["platform"] == "f5-tmos"
     assert "site" not in setup.nb.calls[0][2]
 
@@ -668,8 +668,7 @@ def test_environment_csv_default_still_works(setup, monkeypatch):
     assert setup.nb.calls == []
 
 
-@pytest.mark.parametrize("variable,value", [("NETOPS_INVENTORY", "typo"),
-                                             ("NETOPS_F5_VERIFY_TLS", "typo")])
+@pytest.mark.parametrize("variable,value", [("NETOPS_INVENTORY", "typo")])
 def test_invalid_environment_defaults_fail_before_connection(setup, monkeypatch, variable, value):
     monkeypatch.setenv(variable, value)
     with pytest.raises(SystemExit):
@@ -808,3 +807,11 @@ def test_netbox_policy_is_resolved_independently_for_multiple_devices(setup, mon
         if expected != "audit":
             patch = boxes[f"f5-{offset}"].writes[0][1]
             assert len(patch["servers" if feature == "waf" else "remoteServers"]) == (3 if expected == "add" else 2)
+
+
+@pytest.mark.parametrize("legacy_tls", ["true", "false", "typo"])
+def test_device_certificate_verification_ignores_legacy_environment(setup, monkeypatch, legacy_tls):
+    monkeypatch.setenv("NETOPS_F5_VERIFY_TLS", legacy_tls)
+    code, _ = setup.run(direct=True)
+    assert code == cli.EXIT_OK
+    assert setup.box.logins[0][4]["verify_tls"] is False

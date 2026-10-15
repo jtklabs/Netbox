@@ -115,7 +115,7 @@ def test_no_verify_no_save_and_explicit_tls(setup):
     row = report["devices"]["192.0.2.1"]
     assert row["verified"] is row["saved"] is None
     assert setup.box.reads == [SSH, GUI] and setup.box.saves == 0
-    assert setup.box.logins[0][4]["verify_tls"] is True
+    assert setup.box.logins[0][4]["verify_tls"] is False
 
 
 @pytest.mark.parametrize("body", [{}, {"banner": "maybe"}, {"banner": "enabled", "bannerText": 42}])

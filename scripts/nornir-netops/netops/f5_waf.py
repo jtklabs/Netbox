@@ -18,13 +18,10 @@ class Client:
 
     def __init__(self, host, port=443, verify_tls=False, timeout=30, provider="tmos"):
         import requests
+        import urllib3
 
-        if not verify_tls:
-            import urllib3
-
-            # Certificate verification is disabled. Install a process-wide
-            # category filter so concurrent F5 requests and logout stay quiet.
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        # Device certificates are self-signed; legacy TLS options remain accepted.
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         address = host.hostname
         if ":" in address and not address.startswith("["):
@@ -32,7 +29,7 @@ class Client:
         self.base = f"https://{address}:{port}"
         self.username = host.username
         self.password = host.password
-        self.verify_tls = verify_tls
+        self.verify_tls = False
         self.timeout = timeout
         self.provider = provider
         self.session = requests.Session()

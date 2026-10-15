@@ -102,7 +102,7 @@ class F5Client:
         self.session = requests.Session()
         # Passed per-request rather than via session.verify: a REQUESTS_CA_BUNDLE
         # env var would silently override the session-level setting.
-        self.verify = verify_ssl
+        self.verify = False  # Legacy argument accepted; devices use self-signed certificates.
         self.token = None
 
     def login(self):
@@ -382,7 +382,7 @@ def load_settings(config_path):
         "login_provider": creds.get("login_provider", "tmos"),
         "ucs_passphrase": creds.get("ucs_passphrase", ""),
         "port": int(defaults.get("port", 443)),
-        "verify_ssl": str(defaults.get("verify_ssl", "false")).strip().lower() in ("1", "true", "yes"),
+        "verify_ssl": False,  # Legacy INI setting is ignored for self-signed devices.
         "workers": int(defaults.get("workers", 3)),
         "chunk_size": min(int(defaults.get("chunk_size_kb", 1024)) * 1024, MAX_CHUNK),
         "verify_timeout": int(defaults.get("verify_timeout", 300)),

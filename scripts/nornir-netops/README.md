@@ -919,7 +919,7 @@ ntp:
   iburst: true
   aruba:
     port: 4343
-    verify_tls: true
+    verify_tls: false  # Device certificate verification is always disabled.
     timeout: 30
     exclusive_change: false
 ```
@@ -1413,18 +1413,18 @@ list such as `"platform=f5-tmos site=atl"`. Repeated keys are supported; any
 These inventory defaults apply to other features too, so use `--env-file` for
 a dedicated F5 configuration if needed. Shell environment variables override
 `.env`, and explicit command-line options override their environment defaults.
-TLS certificate verification defaults to **false** for NetBox and F5 device
-connections (WAF, syslog and SNMP). Set `NETBOX_VERIFY_TLS=true` and
-`NETOPS_F5_VERIFY_TLS=true` in `.env` to enable it. NetBox also accepts
-`netbox.verify_tls: true` in the standards file; the environment takes precedence.
-`--f5-verify-tls` enables F5 verification even when the environment disables it.
-Existing explicit true settings continue to enable verification.
+Device HTTPS certificate verification is always disabled for self-signed F5 and
+Aruba certificates, including upgrades and rollback. Legacy `NETOPS_F5_VERIFY_TLS`,
+`--f5-verify-tls`, `--f5-insecure`, and Aruba `verify_tls` settings remain accepted
+but cannot enable device certificate verification.
+NetBox verification defaults to false and can be enabled with
+`NETBOX_VERIFY_TLS=true` or `netbox.verify_tls: true`; the environment takes precedence.
 The execution flags `--apply` and `--yes` remain on the command line.
 
 On **Python 3.10+**, both `configure.py` and the installed `netops` command call
 `truststore.inject_into_ssl()` before loading the network clients. The
 `truststore` dependency is installed automatically with either installation
-method above. NetBox, F5, and AWS HTTPS clients can use the system trust store,
+method above. NetBox and AWS HTTPS clients can use the system trust store,
 including inside a virtual environment; `REQUESTS_CA_BUNDLE` is not needed.
 Importing the `netops` package alone does not modify global SSL behavior.
 
@@ -1443,7 +1443,7 @@ See [RHEL's Python versions](https://docs.redhat.com/en/documentation/red_hat_en
 and the [truststore application startup guide](https://truststore.readthedocs.io/en/latest/#user-guide).
 
 For **Python 3.9**, retain the system CA bundle setting in `.env` for NetBox
-and F5 HTTPS connections. It also remains available on newer Python versions
+HTTPS connections. It also remains available on newer Python versions
 to supply an additional CA bundle to Requests:
 
 | Operating system | Setting in `.env` |
@@ -1451,7 +1451,7 @@ to supply an additional CA bundle to Requests:
 | Ubuntu 24.04 | `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt` |
 | RHEL 9 | `REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt` |
 
-Set `NETBOX_VERIFY_TLS=true` and `NETOPS_F5_VERIFY_TLS=true`, then select
+Set `NETBOX_VERIFY_TLS=true`, then select
 only the bundle for the operating
 system running the script. If the internal CA is already in the system trust
 store, no installation is needed. Otherwise, install its PEM certificate
@@ -1481,8 +1481,7 @@ usual `--netbox-filter`, `--filter` and `--limit` options narrow the inventory.
 Authentication uses the existing `NET_USER`/`NET_PASS`, AWS secret, or CSV
 credentials. F5 uses HTTPS port 443; `--f5-port`, `--f5-timeout`, and
 `--f5-login-provider` override connection settings. Certificate verification is
-on by default; `--f5-insecure` explicitly disables it. With F5 verification
-disabled (by that flag or `NETOPS_F5_VERIFY_TLS=false`), urllib3's repeated
+always disabled for device connections. urllib3's repeated
 `InsecureRequestWarning` messages are suppressed for the process. Other warning
 categories and connection errors remain visible. SSH port/key options do
 not control this REST connection. Platforms must be present in NetBox/CSV, or
@@ -1596,8 +1595,8 @@ selected, their text is joined with a blank line, in selection order. F5 uses
 one combined message on each login surface rather than separate MOTD and login
 banner objects. Both `--add` and `--replace` reconcile these two F5 settings.
 
-F5 uses the existing REST login and HTTPS options. TLS verification defaults
-to false; `--f5-verify-tls` enables it. The task reads both settings before any
+F5 uses the existing REST login and HTTPS options. Device TLS certificate
+verification is always disabled. The task reads both settings before any
 write, changes only banner enablement/text, and reads both back before saving.
 `--no-verify` and `--no-save` keep their usual meanings. NetBox is used for
 inventory; banner runs do not write syslog custom fields or use syslog tags.
@@ -2231,8 +2230,7 @@ not exist yet.
 
 The same `snmp` command uses the management REST API for `f5_tmsh` devices.
 NetBox supplies inventory and the existing AWS device secret supplies the login.
-F5 TLS options, including `NETOPS_F5_VERIFY_TLS=false` and `--f5-insecure`, work
-here too. SNMP uses `--add` / `--replace`; syslog policy tags and syslog audit
+Device TLS certificate verification is always disabled here too. SNMP uses `--add` / `--replace`; syslog policy tags and syslog audit
 fields apply only to the logging commands.
 
 ```bash

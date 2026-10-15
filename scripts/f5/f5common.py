@@ -113,7 +113,7 @@ def load_settings(env_file=None):
         password=get("F5_PASSWORD"),
         login_provider=get("F5_LOGIN_PROVIDER", "tmos"),
         port=get_int("F5_PORT", 443),
-        verify_ssl=get("F5_VERIFY_SSL", "false").lower() in ("1", "true", "yes", "on"),
+        verify_ssl=False,  # Device certificates are self-signed; legacy setting is ignored.
         timeout=get_int("F5_TIMEOUT", 60),
         workers=get_int("F5_WORKERS", 5),
         ucs_passphrase=get("F5_UCS_PASSPHRASE"),
@@ -316,8 +316,8 @@ def error_text(exc, base=""):
     """
     where = f" {base}" if base else ""
     if isinstance(exc, requests.exceptions.SSLError):
-        return (f"TLS verification failed for{where} — install the management CA "
-                f"or set F5_VERIFY_SSL=false in .env")
+        return (f"TLS handshake failed for{where} — certificate verification is disabled; "
+                f"check the management HTTPS service and supported TLS protocols")
     if isinstance(exc, requests.exceptions.Timeout):
         return f"timed out talking to{where} — raise F5_TIMEOUT if the unit is just slow"
     if isinstance(exc, requests.exceptions.ConnectionError):
@@ -338,7 +338,7 @@ class F5Client:
         self.session = requests.Session()
         # Passed per-request rather than via session.verify: a REQUESTS_CA_BUNDLE
         # env var would silently override the session-level setting.
-        self.verify = settings.verify_ssl
+        self.verify = False  # Always accept self-signed device certificates.
         self.token = None
 
     def __enter__(self):

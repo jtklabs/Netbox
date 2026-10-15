@@ -393,7 +393,8 @@ def test_server_limit():
         aruba.plan(before, {'servers': [f'192.0.2.{n}' for n in range(1, 18)], 'iburst': True}, MODE_REPLACE)
 
 
-def test_client_authentication_tls_and_redacted_transport_errors(monkeypatch):
+@pytest.mark.parametrize('legacy_tls', [False, True])
+def test_client_authentication_tls_and_redacted_transport_errors(monkeypatch, legacy_tls):
     import requests
 
     calls = []
@@ -414,11 +415,11 @@ def test_client_authentication_tls_and_redacted_transport_errors(monkeypatch):
 
     session = Session()
     monkeypatch.setattr(requests, 'Session', lambda: session)
-    with aruba.Client(SimpleNamespace(username='admin', password='password'), '192.0.2.254', aruba.settings({})) as client:
+    with aruba.Client(SimpleNamespace(username='admin', password='password'), '192.0.2.254', aruba.settings({'verify_tls': legacy_tls})) as client:
         with pytest.raises(RuntimeError) as exc:
             client.get(aruba.SERVERS, PATH)
         assert 'secret' not in str(exc.value)
         assert session.headers['X-CSRF-Token'] == 'csrf-secret'
     assert calls[0][2]['data'] == {'username': 'admin', 'password': 'password'}
-    assert all(call[2]['allow_redirects'] is False and call[2]['verify'] is True for call in calls)
+    assert all(call[2]['allow_redirects'] is False and call[2]['verify'] is False for call in calls)
     assert all('UIDARUBA' not in call[2]['params'] for call in calls)

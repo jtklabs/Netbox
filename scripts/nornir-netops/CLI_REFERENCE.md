@@ -476,8 +476,8 @@ Accepted by `waf`, `syslog`, `snmp`, `banner` and `rollback`:
 | --- | --- |
 | `--f5-port PORT` | Management HTTPS port. Default: `NETOPS_F5_PORT`, then 443. Range 1–65535. |
 | `--f5-timeout SECONDS` | REST request timeout; must be positive. Default: `NETOPS_F5_TIMEOUT`, then 30 seconds. Saves allow at least 120 seconds. |
-| `--f5-insecure` | Disable certificate verification. This is already the default; overrides `NETOPS_F5_VERIFY_TLS=true`. |
-| `--f5-verify-tls` | Enable certificate verification, overriding `NETOPS_F5_VERIFY_TLS=false`. Mutually exclusive with `--f5-insecure`. |
+| `--f5-insecure` | Legacy option; device certificate verification is always disabled. |
+| `--f5-verify-tls` | Legacy option (ignored); device certificate verification is always disabled. Mutually exclusive with `--f5-insecure`. |
 | `--f5-login-provider NAME` | Authentication provider. Default: `NETOPS_F5_LOGIN_PROVIDER`, then `tmos`. |
 
 NetBox TLS is separate: `NETBOX_VERIFY_TLS` in `.env`, or
@@ -591,7 +591,7 @@ equivalents next to their corresponding flags.
 | `NETBOX_TOKEN` | NetBox API token; takes precedence over the NetBox secret's token. |
 | `NETBOX_FILTERS` | Space-separated `KEY=VALUE` API filters; replaced by any `--netbox-filter` arguments. |
 | `NETBOX_VERIFY_TLS` | NetBox TLS verification; overrides standards, default false. |
-| `NETOPS_F5_VERIFY_TLS` | F5 TLS verification; overridden by the explicit F5 TLS flags, default false. |
+| `NETOPS_F5_VERIFY_TLS` | Legacy setting (ignored); device certificate verification is always disabled. |
 | `NETOPS_SYSLOG_POLICY` | Logging policy default for `syslog` / `waf`; explicit policy/mode flags win. |
 | `NETOPS_F5_POLICY` | Legacy logging policy fallback used only if `NETOPS_SYSLOG_POLICY` is unset. |
 | `NETOPS_NTP_KEY_<ID>` | NTP key material. |
@@ -641,11 +641,11 @@ Preview an Arista device by direct IP:
 ./configure.py syslog --ip 192.0.2.20 --platform arista_eos --policy manage
 ```
 
-Enable certificate verification separately for NetBox and F5 in `.env`:
+Enable certificate verification for NetBox in `.env`; device verification stays disabled:
 
 ```dotenv
 NETBOX_VERIFY_TLS=true
-NETOPS_F5_VERIFY_TLS=true
+NETOPS_F5_VERIFY_TLS=false
 ```
 
 ## Exit codes

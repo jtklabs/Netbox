@@ -15,7 +15,7 @@ login_provider = tmos
 [defaults]
 # Management HTTPS port, applied to every unit in the CSV.
 port = 443
-# Set true once the management interfaces have certs your machine trusts.
+# Legacy setting; device certificate verification is always disabled.
 verify_ssl = false
 # How many units to upload to at the same time.
 workers = 3

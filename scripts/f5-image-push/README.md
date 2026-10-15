@@ -168,5 +168,6 @@ fleet-wide; rebooting load balancers is not.)
   re-uploads only what's missing).
 - **400 near the end of an upload / image never verifies** — space ran out on
   a unit where the pre-check couldn't run; same fix as above.
-- **TLS errors** — self-signed management certs are the norm; leave
-  `verify_ssl = false` until you've deployed real ones.
+- **TLS errors** — device certificate verification is always disabled for
+  self-signed certificates. The legacy `verify_ssl` setting is ignored; check
+  connectivity and supported TLS protocols if a handshake still fails.

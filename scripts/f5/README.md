@@ -11,6 +11,9 @@ from a `.env` file in this directory; the standards they apply come from
 (`scripts/f5-image-push/` is a separate, older tool with its own `config.ini`;
 new F5 tooling belongs here.)
 
+Device certificate verification is always disabled for self-signed management
+certificates. The legacy `F5_VERIFY_SSL` setting is ignored.
+
 ## Setup
 
 ```bash

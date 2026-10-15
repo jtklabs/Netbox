@@ -238,7 +238,7 @@ def test_child_uses_worker_credentials_and_connection_settings(monkeypatch, tmp_
         assert env['NET_KEY_FILE'] == '/test/device-key'
         assert env['NET_PORT'] == '2222' and env['NET_CONN_TIMEOUT'] == '42'
         assert env['NETOPS_F5_PORT'] == '8443' and env['NETOPS_F5_TIMEOUT'] == '60'
-        assert env['NETOPS_F5_LOGIN_PROVIDER'] == 'radius' and env['NETOPS_F5_VERIFY_TLS'] == 'true'
+        assert env['NETOPS_F5_LOGIN_PROVIDER'] == 'radius' and env['NETOPS_F5_VERIFY_TLS'] == 'false'
     assert remediation.os.environ['NET_PASS'] == 'old-password'
     assert remediation.os.environ['NET_AWS_SECRET'] == 'other-login'
 

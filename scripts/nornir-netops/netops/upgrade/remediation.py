@@ -96,8 +96,7 @@ def child_environment(args):
             if field == 'key_file' and value:
                 value = Path(value).expanduser().resolve()
             env[variable] = str(value) if value is not None else ''
-    if getattr(args, 'f5_insecure', None) is not None:
-        env['NETOPS_F5_VERIFY_TLS'] = str(not args.f5_insecure).lower()
+    env['NETOPS_F5_VERIFY_TLS'] = 'false'
     settings = getattr(args, 'remediation_netbox', None)
     if settings is not None:
         env.update(NETBOX_URL=settings['url'], NETBOX_TOKEN=settings['token'],

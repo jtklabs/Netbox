@@ -30,8 +30,8 @@ use SSH or REST as appropriate. Rollback does not update NetBox custom fields.
 Login uses the existing credentials flags and environment settings, including
 AWS secret name and username/password keys. F5 connection options also apply:
 `--f5-port`, `--f5-timeout`, `--f5-login-provider`, `--f5-verify-tls` and
-`--f5-insecure`. TLS verification defaults to false; `NETOPS_F5_VERIFY_TLS`
-or an explicit flag can override it. See [CLI reference](CLI_REFERENCE.md).
+`--f5-insecure`. Device certificate verification is always disabled for self-signed
+certificates. Legacy TLS flags and `NETOPS_F5_VERIFY_TLS` cannot enable it. See [CLI reference](CLI_REFERENCE.md).
 
 ## Previous SNMP credentials
 

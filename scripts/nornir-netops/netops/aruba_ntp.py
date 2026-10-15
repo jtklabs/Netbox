@@ -23,7 +23,7 @@ def settings(value):
     unknown = set(value) - {'conductor', 'port', 'verify_tls', 'timeout', 'exclusive_change'}
     if unknown:
         raise ValueError(f'Unknown ntp.aruba settings: {sorted(unknown)}')
-    result = dict(conductor=None, port=4343, verify_tls=True, timeout=30, exclusive_change=False)
+    result = dict(conductor=None, port=4343, verify_tls=False, timeout=30, exclusive_change=False)
     result.update(value)
     if result['conductor'] is not None:
         if not isinstance(result['conductor'], str) or not result['conductor'].strip():
@@ -34,6 +34,8 @@ def settings(value):
     for key, maximum in (('port', 65535), ('timeout', 300)):
         if type(result[key]) is not int or not 1 <= result[key] <= maximum:
             raise ValueError(f'ntp.aruba.{key} must be an integer from 1 to {maximum}')
+    # Keep the legacy profile field accepted; devices use self-signed certificates.
+    result['verify_tls'] = False
     return result
 
 
@@ -77,7 +79,9 @@ def checked(document, require_result=False):
 class Client:
     def __init__(self, host, address, options):
         import requests
+        import urllib3
 
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         address = validate_address(str(address))
         if ':' in address:
             raise ValueError('Use an IPv4 address or hostname for Mobility Conductor')
@@ -96,7 +100,7 @@ class Client:
         try:
             response = self.session.request(method, self.base + path, params=params,
                                             timeout=self.options['timeout'],
-                                            verify=self.options['verify_tls'],
+                                            verify=False,
                                             allow_redirects=False, **kwargs)
             if not 200 <= response.status_code < 300:
                 raise RuntimeError(f'Aruba {method} {path} failed (HTTP {response.status_code})')
