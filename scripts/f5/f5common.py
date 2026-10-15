@@ -8,6 +8,7 @@ import from this module rather than re-implementing any of it.
 """
 
 import csv
+import hashlib
 import ipaddress
 import os
 import stat
@@ -23,6 +24,9 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ENV_FILE = os.path.join(HERE, ".env")
+
+# BIG-IP's file-transfer workers cap one request at 1 MB, in both directions.
+MAX_CHUNK = 1024 * 1024
 
 _print_lock = threading.Lock()
 
@@ -80,6 +84,7 @@ class Settings:
     verify_ssl: bool
     timeout: int
     workers: int
+    ucs_passphrase: str = ""
 
 
 def load_settings(env_file=None):
@@ -111,6 +116,7 @@ def load_settings(env_file=None):
         verify_ssl=get("F5_VERIFY_SSL", "false").lower() in ("1", "true", "yes", "on"),
         timeout=get_int("F5_TIMEOUT", 60),
         workers=get_int("F5_WORKERS", 5),
+        ucs_passphrase=get("F5_UCS_PASSPHRASE"),
     )
 
 
@@ -398,6 +404,88 @@ class F5Client:
         """
         self.post_json("/mgmt/tm/sys/config", {"command": "save"},
                        timeout=max(self.timeout, 120))
+
+    def run_bash(self, command):
+        """Run a shell command on the unit and return its stdout.
+
+        iControl REST has no worker for a good deal of what tooling needs to ask
+        about a file — its size, its checksum, whether it exists — so this is the
+        way to ask. It needs the Administrator role and an account with an
+        advanced shell; a unit that refuses fails with the usual RuntimeError, so
+        callers that can live without the answer should catch it.
+
+        The command is sent as a double-quoted tmsh argument, so anything the
+        shell would act on inside those quotes is rejected rather than sent:
+        callers build commands from fixed paths and sanitized names.
+        """
+        bad = [ch for ch in '"`$\\' if ch in command]
+        if bad:
+            raise ValueError(f"refusing to run a command containing {' '.join(bad)}: {command}")
+        result = self.post_json("/mgmt/tm/util/bash",
+                                {"command": "run", "utilCmdArgs": f'-c "{command}"'})
+        return result.get("commandResult") or ""
+
+    def download(self, endpoint, dest, total=None):
+        """Download a file one of BIG-IP's file-transfer workers serves, in 1 MB
+        chunks, and return the number of bytes written.
+
+        The workers speak ranged GETs where the *client* sends Content-Range, and
+        answer with the real total in their own Content-Range header — so when
+        the size isn't known up front a one-byte probe asks the unit for it.
+
+        The file is created 0600: everything these workers serve (a UCS, an SCF)
+        carries private keys or password hashes.
+        """
+        uri = f"{self.base}{endpoint}"
+
+        def fetch(start, end, known_total):
+            resp = self.session.get(
+                uri,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Range": f"{start}-{end}/{known_total}",
+                },
+                verify=self.verify,
+                timeout=max(self.timeout, 120),
+            )
+            raise_for_status(resp)
+            return resp
+
+        if total is None:
+            probe = fetch(0, 0, 0)
+            header = probe.headers.get("Content-Range", "")
+            try:
+                total = int(header.rsplit("/", 1)[-1])
+            except ValueError:
+                raise RuntimeError(f"{endpoint} did not report a size "
+                                   f"(Content-Range: {header or 'missing'})") from None
+
+        written = 0
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            while written < total:
+                resp = fetch(written, min(written + MAX_CHUNK, total) - 1, total)
+                if not resp.content:
+                    # Without this an empty 200 spins forever on a file the unit
+                    # has stopped serving mid-transfer.
+                    raise RuntimeError(f"{endpoint} stopped sending at {written} of "
+                                       f"{total} bytes")
+                fh.write(resp.content)
+                written += len(resp.content)
+        return written
+
+
+def md5_of(path):
+    """md5 of a local file, read in blocks so a multi-GB UCS never lands in RAM.
+
+    md5 because it is what BIG-IP's own `md5sum` gives us to compare against:
+    this is a transfer check, not a signature.
+    """
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 # --------------------------------------------------------------------------- #
