@@ -177,6 +177,46 @@ def test_failed_operations_never_report_success(setup, failure):
         assert 'commit' not in setup.box.calls and 'rollback 0' not in setup.box.calls
 
 
+@pytest.mark.parametrize('operation,stage', [
+    ('send_command', 'reading NTP configuration'),
+    ('config_mode', 'entering private configuration mode'),
+    ('send_config_set', 'sending NTP configuration'),
+    ('commit', 'running commit check'),
+])
+@pytest.mark.parametrize('error_type', [EOFError, TimeoutError, AssertionError])
+def test_empty_errors_keep_type_stage_and_traceback(setup, monkeypatch, operation, stage, error_type):
+    def fail_without_message(*args, **kwargs):
+        raise error_type()
+
+    monkeypatch.setattr(setup.box, operation, fail_without_message)
+    code, report = setup.run('--apply', '--debug')
+    assert code == cli.EXIT_FAILED
+    row = report['devices']['srx']
+    assert row['failure_stage'] == stage
+    assert stage in row['error'] and error_type.__name__ in row['error']
+    assert 'fail_without_message' in row['traceback']
+    assert row['saved'] is not True and row['verified'] is not True
+    assert 'commit confirmed 5' not in setup.box.calls
+    if operation in ('send_config_set', 'commit'):
+        assert 'rollback 0' in setup.box.calls
+
+
+def test_device_rejection_detail_is_preserved_and_redacted(setup, monkeypatch):
+    setup.standard['ntp']['authentication'] = {'key_id': 7, 'type': 'md5'}
+    setup.file.write_text(json.dumps(setup.standard))
+    monkeypatch.setenv('NETOPS_NTP_KEY_7', 'ntp-test-secret')
+    monkeypatch.setattr(setup.box, 'send_config_set',
+                        lambda *args, **kwargs: 'error: invalid key ntp-test-secret')
+    code, report = setup.run('--apply', '--debug')
+    assert code == cli.EXIT_FAILED
+    row = report['devices']['srx']
+    assert row['failure_stage'] == 'sending NTP configuration'
+    assert 'invalid key <redacted>' in row['error']
+    assert 'ntp-test-secret' not in json.dumps(report)
+    assert 'rollback 0' in setup.box.calls
+    assert 'commit confirmed 5' not in setup.box.calls
+
+
 @pytest.mark.parametrize('flag', ['--no-save', '--no-verify'])
 def test_apply_requires_commit_and_verification(setup, flag):
     assert setup.run('--apply', flag)[0] == cli.EXIT_FAILED

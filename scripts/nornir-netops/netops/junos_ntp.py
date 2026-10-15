@@ -208,8 +208,9 @@ def observe(read):
 
 
 def checked(output):
-    if re.search(r'(?im)^\s*(?:error:|syntax error|unknown command|permission denied)', output or ''):
-        raise ValueError('Junos rejected the operation; review device permissions and configuration')
+    error = re.search(r'(?im)^[ \t]*(?:error:|syntax error|unknown command|permission denied)[^\r\n]*', output or '')
+    if error:
+        raise ValueError('Junos rejected the operation: ' + error.group(0).strip())
     return output or ''
 
 
@@ -225,18 +226,25 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     locked = changed_candidate = confirmed_attempted = attempted = False
     secrets = [entry['material'] for entry in variables['entries'].values() if entry['kind'] == 'key']
     protect(secrets)
+    stage = 'validating desired NTP settings'
     try:
         _, variables = per_device(list(desired), dict(variables), task.host)
         # Validate desired values before opening a connection.
         plan(dict(servers={}, sources={}, keys={}, trusted=[]), dict(variables), mode)
+        stage = 'opening the SSH connection'
         connection = task.host.get_connection('netmiko', task.nornir.config)
 
         def read(command):
+            nonlocal stage
+            stage = {'show system commit': 'checking pending commits',
+                     SHOW: 'reading NTP configuration',
+                     INTERFACES: 'reading source interfaces'}[command]
             return checked(connection.send_command(('run ' if locked else '') + command, read_timeout=60))
 
         if variables.get('source'):
             variables['source_address'] = source_address(variables['source'], read(INTERFACES))
         before = parse(read(SHOW))
+        stage = 'planning NTP changes'
         commands = plan(before, variables, mode, notes=payload['notes'])
         payload.update(config_before=before, current=list(before['servers']), desired=variables['servers'],
                        commands=[scrub(c, secrets) for c in commands], compliant=not commands,
@@ -253,12 +261,15 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             if before['protected']:
                 payload['advisories'].append('NTP has inherited, inactive, protected or NTS configuration; remediate its owning configuration manually')
             if not dry_run:
+                stage = 'checking remediation prerequisites'
                 if not save or not verify:
                     raise ValueError('Junos NTP remediation requires saving and verification')
                 if before['protected']:
                     raise ValueError(payload['advisories'][0])
+                stage = 'entering private configuration mode'
                 checked(connection.config_mode(config_command='configure private'))
                 locked = True
+                stage = 'checking candidate changes'
                 if checked(connection.send_command('show | compare', read_timeout=60)).strip():
                     raise ValueError('Junos has pending candidate changes; no changes were made')
                 commits = read('show system commit')
@@ -268,33 +279,44 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                     raise ValueError('Junos NTP changed during planning; retry the job')
                 if variables.get('source') and source_address(variables['source'], read(INTERFACES)) != variables['source_address']:
                     raise ValueError('Junos source address changed during planning; retry the job')
+                stage = 'archiving the change plan'
                 archive.checkpoint(task, payload)
                 attempted = changed_candidate = True
+                stage = 'sending NTP configuration'
                 checked(connection.send_config_set(commands, exit_config_mode=False))
+                stage = 'running commit check'
                 output = checked(connection.commit(check=True))
                 if 'configuration check succeeds' not in output:
                     raise ValueError('Junos did not confirm successful commit check')
                 confirmed_attempted = True
+                stage = 'running commit confirmed 5'
                 output = checked(connection.commit(confirm=True, confirm_delay=5))
                 if 'commit complete' not in output:
                     raise ValueError('Junos did not confirm the temporary commit')
                 payload.update(applied=True, saved=False, verified=False)
                 after = parse(read(SHOW))
+                stage = 'verifying NTP configuration'
                 payload['config_after'] = after
                 remaining = plan(after, variables, mode, verification=True)
                 payload['missing_after'] = [scrub(c, secrets) for c in remaining]
                 if remaining:
                     raise ValueError('Junos NTP verification failed; the unconfirmed commit will roll back')
+                stage = 'confirming the permanent commit'
                 checked_output = checked(connection.commit())
                 if 'commit complete' not in checked_output:
                     raise ValueError('Junos did not confirm the permanent commit')
                 payload.update(saved=True, verified=True)
         return Result(host=task.host, result=payload, changed=attempted)
     except Exception as exc:
+        payload['failure_stage'] = stage
         if confirmed_attempted and not payload['saved']:
             payload['advisories'].append('Commit outcome requires review. Do not confirm it manually; an unconfirmed commit rolls back after five minutes.')
+        # Some SSH failures (including EOFError and TimeoutError) have no text.
+        # Keep their type, operation and traceback without exposing key material.
+        detail = str(exc).strip() or 'no error detail returned'
+        error = RuntimeError(scrub(f'Junos NTP failed while {stage}: {type(exc).__name__}: {detail}', secrets))
         return Result(host=task.host, result=payload, changed=attempted, failed=True,
-                      exception=RuntimeError(scrub(str(exc), secrets)))
+                      exception=error.with_traceback(exc.__traceback__))
     finally:
         if locked:
             try:
