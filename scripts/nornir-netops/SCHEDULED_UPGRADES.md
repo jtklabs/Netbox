@@ -1,5 +1,8 @@
 # Schedule IOS XE work from NetBox
 
+[Complete profile examples](PROFILE_EXAMPLES.md) includes the F5 lab upgrade
+and ready-to-adapt saved standards profiles with their configuration definitions.
+
 NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing in NetBox connects to a switch. The worker lives alongside `configure.py`, shares its `.env`, AWS Secrets Manager login, and upgrade engine, and exits when its running jobs finish and a queue check finds no eligible work.
 
 `--workers` limits concurrently executing jobs. While a slot is free, the worker

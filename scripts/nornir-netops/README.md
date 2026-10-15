@@ -5,6 +5,9 @@ using per-platform Jinja templates or the BIG-IP REST API. **Dry run by default*
 it connects read-only, works out the delta, and prints the exact commands it
 would send.
 
+See [complete profile examples](PROFILE_EXAMPLES.md) for the F5 lab upgrade,
+saved standards job profiles, and their full configuration definitions.
+
 Every run automatically saves a private JSON archive with original feature configuration,
 implementation steps, backout steps, effective action and the resulting state.
 See [JSON run archives](RUN_ARCHIVES.md) for the schema, `.env` settings and examples.
