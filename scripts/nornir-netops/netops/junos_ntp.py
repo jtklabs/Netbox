@@ -10,15 +10,39 @@ from .debuglog import protect
 
 SHOW = 'show configuration system ntp | display inheritance | display xml groups'
 INTERFACES = 'show interfaces terse | display xml'
+CLI_CONTEXT = re.compile(
+    r'(?:(?:\{(?:master|backup|primary|secondary|line)(?::[\w.-]+)?\}'
+    r'|\[edit(?:[ \t]+[^\]\r\n]*)?\])[ \t]*)+'
+)
+CLI_ROLLBACK_NOTICE = re.compile(
+    r'#[ \t]*commit confirmed will be rolled back in \d+ (?:minutes?|seconds?)'
+)
 
 
 def xml(output):
     if '<!DOCTYPE' in output.upper() or '<!ENTITY' in output.upper():
         raise ValueError('Unexpected Junos XML declaration')
+    # Netmiko strips the prompt and at most one Junos context line. Separate
+    # RE/edit context lines and confirmed-commit notices can remain outside
+    # the XML document. Only remove these known lines at its boundaries;
+    # never salvage a truncated document or discard arbitrary CLI warnings.
+    lines = output.strip().splitlines()
+    start, end = 0, len(lines)
+
+    def context(line):
+        line = line.strip()
+        return not line or CLI_CONTEXT.fullmatch(line) or CLI_ROLLBACK_NOTICE.fullmatch(line)
+
+    while start < end and context(lines[start]):
+        start += 1
+    while end > start and context(lines[end - 1]):
+        end -= 1
     try:
-        root = ET.fromstring(output.strip())
-    except ET.ParseError:
-        raise ValueError('Junos returned invalid XML; check command permissions') from None
+        root = ET.fromstring('\n'.join(lines[start:end]))
+    except ET.ParseError as exc:
+        # ElementTree's diagnostic contains only the parser reason and position,
+        # not configuration text that could include authentication material.
+        raise ValueError(f'Junos returned invalid XML: {exc}') from None
     for node in root.iter():
         node.tag = node.tag.rsplit('}', 1)[-1]
         node.attrib = {key.rsplit('}', 1)[-1]: value for key, value in node.attrib.items()}
