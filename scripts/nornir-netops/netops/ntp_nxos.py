@@ -56,7 +56,8 @@ def plan(current, desired, mode, context):
     normalized, mapping, records = [], {}, {}
     for key in desired:
         record = variables['entries'][key]
-        plain = _server_key(record['host'], record.get('key')) if record['kind'] == 'server' else key
+        plain = (_server_key(record['host'], record.get('key')) +
+                 (':vrf:' + (record.get('vrf') or 'default') if ':vrf:' in key else '')) if record['kind'] == 'server' else key
         normalized.append(plain)
         mapping[plain] = key
         records[plain] = {**record, 'source': None} if record['kind'] == 'server' else record
@@ -64,7 +65,9 @@ def plan(current, desired, mode, context):
                             data={**e.data, 'source': None, 'inherited_source': None})
                       if e.data.get('kind') == 'server' else e
                       for e in current if e.data.get('kind') not in ('source', 'source-address')]
-    options = {**variables, 'entries': records, 'server_options': {}}
+    options = {**variables, 'entries': records,
+               'server_options': {plain: variables.get('server_options', {}).get(original, [])
+                                  for plain, original in mapping.items()}}
     add, remove = plan_ntp(server_current, normalized, mode, {**context, 'variables': options})
     variables['server_options'] = {mapping[k]: v for k, v in options['server_options'].items()}
     add = [mapping[key] for key in add]

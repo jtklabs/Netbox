@@ -255,9 +255,7 @@ def test_namespaced_inheritance_marks_configuration_protected():
 
 def test_leaf_updates_preserve_version_and_unmanaged_settings():
     before = junos.parse(config('<server><name>192.0.2.10</name><key>4</key><prefer/><version>3</version><routing-instance>old</routing-instance></server><peer><name>192.0.2.90</name><key>4</key></peer><authentication-key><name>4</name><type>md5</type><value>hidden</value></authentication-key><trusted-key>4</trusted-key>'))
-    assert junos.plan(before, desired(), MODE_REPLACE) == [
-        'delete system ntp server 192.0.2.10 key', 'delete system ntp server 192.0.2.10 prefer',
-        'delete system ntp server 192.0.2.10 routing-instance']
+    assert junos.plan(before, desired(), MODE_REPLACE) == ['delete system ntp server 192.0.2.10 prefer']
 
 
 @pytest.mark.parametrize('bad', ['error: denied', '<rpc-reply/>', '<configuration><system>',

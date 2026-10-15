@@ -345,7 +345,10 @@ choose one NTP variant and one SNMP variant per device.
 The basic examples intentionally omit source interfaces and VRFs. On supported
 platforms, NetBox's existing source-interface tags can still supply a source;
 omitting it here does not remove those inventory tags or clear existing source
-configuration.
+configuration. When inventory also leaves the selection unset, IOS/IOS-XE,
+EOS, NX-OS and Junos reuse the current NTP routing context and source settings
+for new server addresses. Use `replace` / **Add and remove** to migrate the
+server list while retaining that context.
 
 ### Basic NTP
 

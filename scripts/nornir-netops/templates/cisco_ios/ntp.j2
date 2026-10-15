@@ -33,7 +33,7 @@ ntp trusted-key {{ item.id }}
 {% elif item.kind == 'authenticate' %}
 ntp authenticate
 {% else %}
-ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if source %} source {{ source }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
+ntp server {% if item.get("vrf", vrf) %}vrf {{ item.get("vrf", vrf) }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if item.get("source", source) %} source {{ item.get("source", source) }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}{% if item.get("source_address") and not item.get("source", source) %} source-address {{ item.source_address }}{% endif %}
 {% endif %}
 {% endfor %}
 {#- Remove obsolete endpoints after adding their replacements. -#}

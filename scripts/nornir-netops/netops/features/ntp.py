@@ -40,6 +40,7 @@ from ..core import (
 from ..netbox import source_for
 from ..ntp_discovery import global_sources, interface_name, source_ip
 from .. import aruba_ntp, clearpass_ntp, f5_ntp, junos_ntp, ntp_nxos
+from .. import ntp_context
 from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
 
@@ -209,9 +210,11 @@ def plan_ntp(
     context: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[str], List[Entry]]:
     context = context or {}
+    variables = context.get("variables") or {}
+    if not context.get('nxos_servers'):
+        desired = ntp_context.resolve(current, desired, variables, platform=context.get('platform'), notes=context.get('notes'))
     if context.get('platform') == 'cisco_nxos' and not context.get('nxos_servers'):
         return ntp_nxos.plan(current, desired, mode, {**context, 'nxos_servers': True})
-    variables = context.get("variables") or {}
     configured = {entry.key for entry in current}
     entries = variables.get("entries") or {}
     eos = context.get("platform") == "arista_eos"
@@ -224,7 +227,9 @@ def plan_ntp(
 
     def matches(entry, wanted):
         source = entry.data.get('source')
-        if wanted.get('source'):
+        if wanted.get('source_address') and not wanted.get('source'):
+            source_matches = entry.data.get('source_address') == wanted['source_address'] and not source
+        elif wanted.get('source'):
             if entry.data.get('source_address'):
                 # A literal override cannot be validated against an interface
                 # name. Reset it before setting the selected interface.
@@ -235,10 +240,10 @@ def plan_ntp(
             except ValueError:
                 source_matches = source == wanted['source']
         else:
-            source_matches = not source
+            source_matches = not source and not entry.data.get('source_address')
         return (entry.data.get('kind') == 'server' and entry.data.get('host') == wanted['host']
                 and entry.data.get('key') == wanted.get('key') and source_matches
-                and entry.data.get("vrf") == variables.get("vrf")
+                and entry.data.get("vrf") == wanted.get("vrf", variables.get("vrf"))
                 and bool(entry.data.get("prefer")) == (wanted["host"] == variables.get("prefer"))
                 and (not eos or bool(entry.data.get("iburst")) == bool(variables.get("iburst"))))
     if variables.get("regions") and isinstance(context.get("notes"), list):
@@ -274,15 +279,11 @@ def plan_ntp(
         for key in to_add:
             wanted = entries.get(key, {})
             if (wanted.get("kind") == "server" and entry.data.get("host") == wanted["host"]
-                    and entry.data.get("vrf") == variables.get("vrf")):
+                    and entry.data.get("vrf") == wanted.get("vrf", variables.get("vrf"))):
                 to_remove.append(Entry(key=entry.key, line=entry.line,
                                        data={**entry.data, "before_add": True}))
                 # Retain options outside this standard, such as version/minpoll.
                 extra = list(entry.data.get('extra', []))
-                if entry.data.get('source_address') and not wanted.get('source'):
-                    # With no interface selection, basic server updates leave
-                    # the existing address source alone.
-                    extra.extend(['source-address', entry.data['source_address']])
                 if not eos and entry.data.get('iburst'):
                     extra.append('iburst')
                 variables.setdefault('server_options', {})[key] = extra
@@ -293,7 +294,7 @@ def plan_ntp(
         # authentication is not asking for it to be torn off devices that have
         # it -- only a file that declares `authentication:` manages those lines.
         manages_auth = bool(variables.get("manages_auth"))
-        wanted_hosts = {(entry["host"], variables.get("vrf")) for entry in entries.values()
+        wanted_hosts = {(entry["host"], entry.get("vrf", variables.get("vrf"))) for entry in entries.values()
                         if entry.get("kind") == "server"}
         wanted_key_ids = {entry["id"] for entry in entries.values() if entry.get("kind") == "key"}
         for entry in current:
@@ -377,8 +378,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--vrf",
-        help="configure the servers in this VRF (must match how they are "
-        "already configured, or existing lines look like different servers)",
+        help="configure the servers in this VRF; default selects the global table. "
+        "When unset, reuse the device's existing NTP routing context.",
     )
     parser.add_argument(
         "--prefer",
@@ -388,7 +389,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--source",
         metavar="INTERFACE",
-        help="source interface for the server statements",
+        help="source interface for the server statements; when unset, retain existing source settings",
     )
     parser.add_argument(
         "--no-iburst",
@@ -499,6 +500,7 @@ def build_desired(args: argparse.Namespace) -> Desired:
             "regions": regions,
             "key_id": key_id,
             "vrf": None if basic_servers else _word(args.vrf or standards.value("ntp.vrf")),
+            "vrf_explicit": not basic_servers and bool(args.vrf or standards.value("ntp.vrf")),
             "prefer": prefer,
             "source": source,
             "iburst": iburst,
@@ -610,14 +612,15 @@ def per_device(keys, variables, host, *, manage_vrf=True):
     servers, prefer, regional = server_settings(variables, host)
 
     source, authoritative = source_for(host, "ntp")
-    if authoritative:
+    if authoritative and source:
         source = interface_name(str(source)) if source else None
     else:
-        source = variables.get("source")  # a CSV has no opinion; the file's value stands
+        source = variables.get("source")  # Missing tags do not clear the standard or device's source.
     vrf = variables.get('vrf') if manage_vrf else None
     selected_vrf = (getattr(host, 'data', {}) or {}).get('ntp_vrf') if manage_vrf else None
     if selected_vrf:
         vrf = None if selected_vrf == 'default' else validate_word(str(selected_vrf), 'NTP VRF')
+        variables = {**variables, 'vrf_explicit': True}
     if (servers == variables.get("servers") and source == variables.get("source") and vrf == variables.get('vrf')
             and prefer == variables.get("prefer") and not regional):
         return keys, variables

@@ -118,7 +118,7 @@ def test_invalid_address_sources_still_fail_before_planning(config):
 @pytest.mark.parametrize('old_vrf,new_vrf', [(None, 'MGMT'), ('MGMT', None), ('OLD', 'NEW')])
 def test_eos_vrf_migration_requires_replace_and_round_trips(old_vrf, new_vrf):
     original = 'ntp server ' + (f'vrf {old_vrf} ' if old_vrf else '') + '192.0.2.9 iburst'
-    flags = ['--vrf', new_vrf] if new_vrf else []
+    flags = ['--vrf', new_vrf or 'default']
     with pytest.raises(ValueError, match='one VRF'):
         planned('arista_eos', original, *flags, mode=MODE_ADD)
     commands, reversal = planned('arista_eos', original, *flags)

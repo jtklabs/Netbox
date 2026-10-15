@@ -12,7 +12,7 @@ ntp trusted-key {{ item.id }}
 {% elif item.kind == 'authenticate' %}
 ntp authenticate
 {% else %}
-ntp server {{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if vrf %} use-vrf {{ vrf }}{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
+ntp server {{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if item.get("vrf", vrf) %} use-vrf {{ item.get("vrf", vrf) }}{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
 {% endif %}
 {% endfor %}
 {% for entry in remove if not entry.data.get('before_add') %}

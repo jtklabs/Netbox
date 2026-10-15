@@ -347,7 +347,7 @@ The rule that follows:
 
 | Interfaces tagged | Result |
 | --- | --- |
-| none | NTP uses no source interface, overriding `ntp.source`. Syslog leaves the current source alone and ignores the fleet-wide source default. |
+| none | NTP uses an explicit `ntp.source`/`--source` if supplied, otherwise preserves the device's existing NTP source. Syslog leaves the current source alone and ignores the fleet-wide source default. |
 | exactly one | That interface is the source. |
 | two or more | **That device fails**, naming the interfaces. |
 
@@ -793,6 +793,34 @@ tag. Its CLI grammar follows the
 Firmware-dependent authentication key lengths and algorithms require a device
 pilot before fleet rollout.
 
+An address-only NTP standard reuses the device's current VRF and source
+configuration when those selections are absent from NetBox and the standard.
+This applies to IOS/IOS-XE, EOS, NX-OS and Junos. No source-interface tag or
+interface object is needed to preserve an existing interface or source IP.
+Global source statements stay in place. New server statements inherit the
+current routing context and inline source options; replace mode adds the new
+addresses and removes old servers using their original statements.
+
+For example, replacing `ntp server vrf MGMT 192.0.2.9 source Loopback0` with
+servers `192.0.2.10` and `192.0.2.11` on IOS produces:
+
+```text
+ntp server vrf MGMT 192.0.2.10 source Loopback0
+ntp server vrf MGMT 192.0.2.11 source Loopback0
+no ntp server vrf MGMT 192.0.2.9 source Loopback0
+```
+
+Explicit selections still override inherited settings. Use `--vrf default`
+or NetBox's `ntp_vrf: default` to deliberately move to the global routing
+table; leaving VRF blank preserves the current routing context. IOS/NX-OS
+devices with multiple existing NTP VRFs receive the new server list in each
+VRF. Different sources within one VRF require an explicit selection for new
+addresses. Junos also requires a selection when several routing instances
+would assign the same new address to different instances. Existing key bindings
+are preserved when authentication is unmanaged; conflicting key IDs require
+an explicit authentication standard. Verification retains the resolved server
+VRFs and inline sources instead of deriving new expectations from read-back.
+
 Arista audit includes `no ntp`. Remediation enables NTP when disabled, verifies
 enablement before saving, and records the original disabled state for rollback.
 If an interface is selected, a server-level `source-address` override is reset
@@ -810,13 +838,15 @@ Assign the NTP standard/profile to the devices' **Junos platform** (`junos` or
 `juniper_junos`); the same regional server lists and audit schedules apply.
 CSV aliases `juniper_srx`, `juniper_mx`, `srx` and `mx` are also accepted.
 
-Tag one logical interface, such as **lo0.0**, **fxp0.0** or **irb.100**, with
-`service-source`. Junos requires a source address: SSH resolves that interface
+To select a new source, tag one logical interface, such as **lo0.0**, **fxp0.0**
+or **irb.100**, with `service-source`. Junos uses a source address: SSH resolves that interface
 to exactly one IPv4 address. Missing or multiple IPv4 addresses block the job
 rather than picking one. Set the device's `ntp_vrf` to `default`, `mgmt_junos`
 or the intended routing-instance name. Discovery can bootstrap both selections
 when the existing explicit NTP source identifies a single interface. An
-unselected source is left unchanged, including in replace mode.
+unselected source is left unchanged, including in replace mode. When the VRF
+is also unset, new addresses reuse the existing NTP routing instance without
+looking up or tagging the existing source interface.
 
 Audit is read-only. Remediation uses `configure private`, refuses a dirty
 private candidate or a pending confirmed commit, rechecks the observed state,

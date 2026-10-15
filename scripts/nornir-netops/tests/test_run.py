@@ -1702,15 +1702,12 @@ def test_a_tagged_interface_becomes_that_devices_source(device, login, netbox, c
     assert "ntp server 10.50.0.10 source Loopback0" in capsys.readouterr().out
 
 
-def test_no_tagged_interface_means_no_source_at_all(device, login, netbox, capsys):
-    """Even though the standards file names one -- NetBox is asked per device,
-    and 'not set' is an answer, not a gap to fill from the file."""
+def test_no_tagged_interface_falls_back_to_standard_source(device, login, netbox, capsys):
     netbox["interfaces"]["ntp-source"] = [tagged("Loopback0", 1)]
     run_netbox("ntp", "--limit", "sw2")
     out = capsys.readouterr().out
     assert "ntp server 10.50.0.10" in out
-    assert "source" not in out
-    assert "Loopback99" not in out
+    assert "source Loopback99" in out
 
 
 def test_two_tagged_interfaces_fail_that_device_and_no_other(

@@ -4,8 +4,8 @@ import ipaddress
 import re
 import xml.etree.ElementTree as ET
 
-from . import archive
-from .core import MODE_REPLACE, scrub, validate_word
+from . import archive, ntp_context
+from .core import Entry, MODE_REPLACE, scrub, validate_word
 from .debuglog import protect
 
 SHOW = 'show configuration system ntp | display inheritance | display xml groups'
@@ -121,8 +121,17 @@ def source_address(source, output):
     return next(iter(addresses))
 
 
-def plan(before, variables, mode, *, verification=False):
-    wanted = [ipv4(server) for server in variables['servers']]
+def plan(before, variables, mode, *, verification=False, notes=None):
+    current = [Entry(key=address, line=address, data={'kind': 'server', 'host': address, **row})
+               for address, row in before['servers'].items()]
+    keys = ntp_context.resolve(current, list(variables['entries']), variables,
+                               platform='juniper_junos', notes=notes)
+    records = [variables['entries'][key] for key in keys if variables['entries'][key]['kind'] == 'server']
+    # Junos keys server statements by address, so the same address cannot be
+    # installed in several routing instances as it can on IOS/NX-OS.
+    if len({row['host'] for row in records}) != len(records):
+        raise ValueError('Existing Junos NTP servers use multiple routing instances; select the routing instance for the new addresses')
+    wanted = [ipv4(row['host']) for row in records]
     vrf = variables.get('vrf')
     vrf = validate_word(vrf, 'NTP routing instance') if vrf else None
     prefer = variables.get('prefer')
@@ -144,14 +153,16 @@ def plan(before, variables, mode, *, verification=False):
     trusted = {key_id(entry['id']) for entry in variables['entries'].values() if entry['kind'] == 'trusted-key'}
     for number in sorted(trusted - set(before['trusted'])):
         commands.append(f'set system ntp trusted-key {number}')
-    for address in wanted:
+    for record in records:
+        address = ipv4(record['host'])
         current = before['servers'].get(address)
         base = f'system ntp server {address}'
         if current is None:
             commands.append('set ' + base)
             current = dict(key=None, prefer=False, vrf=None)
-        for leaf, field, value in (('key', 'key', selected_key), ('prefer', 'prefer', address == prefer),
-                                   ('routing-instance', 'vrf', vrf)):
+        server_key = key_id(str(record['key'])) if record.get('key') else None
+        for leaf, field, value in (('key', 'key', server_key), ('prefer', 'prefer', address == prefer),
+                                   ('routing-instance', 'vrf', record['vrf'])):
             if current[field] == value:
                 continue
             if value:
@@ -217,7 +228,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     try:
         _, variables = per_device(list(desired), dict(variables), task.host)
         # Validate desired values before opening a connection.
-        plan(dict(servers={}, sources={}, keys={}, trusted=[]), variables, mode)
+        plan(dict(servers={}, sources={}, keys={}, trusted=[]), dict(variables), mode)
         connection = task.host.get_connection('netmiko', task.nornir.config)
 
         def read(command):
@@ -226,7 +237,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         if variables.get('source'):
             variables['source_address'] = source_address(variables['source'], read(INTERFACES))
         before = parse(read(SHOW))
-        commands = plan(before, variables, mode)
+        commands = plan(before, variables, mode, notes=payload['notes'])
         payload.update(config_before=before, current=list(before['servers']), desired=variables['servers'],
                        commands=[scrub(c, secrets) for c in commands], compliant=not commands,
                        add=[scrub(c, secrets) for c in commands if c.startswith('set ')],

@@ -275,8 +275,8 @@ def _configure_feature(
     variables = dict(variables)
 
     if feature.per_device is not None:
-        # Before touching the device: an inventory that cannot say what this
-        # device's source interface is should stop here, not halfway through.
+        # Validate explicit inventory selections before touching the device.
+        # NTP's planner fills missing transport settings from the read below.
         desired, variables = feature.per_device(list(desired), dict(variables), task.host)
     payload["desired"] = list(desired)
 
