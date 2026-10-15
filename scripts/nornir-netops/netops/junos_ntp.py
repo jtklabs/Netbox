@@ -214,6 +214,26 @@ def checked(output):
     return output or ''
 
 
+def commit(connection, command):
+    """Read through the configuration prompt and check Junos completion output.
+
+    Netmiko's commit(confirm=True) requires a particular rollback warning,
+    which Junos does not always print even when the confirmed commit succeeds.
+    Its loose prompt match can also stop at the hostname inside commit output.
+    NTP does not change the hostname, so wait for the complete current prompt.
+    """
+    prompt = connection.find_prompt().strip()
+    if not prompt.endswith('#') or '\n' in prompt or '\r' in prompt:
+        raise ValueError('Junos commit requires a configuration-mode prompt')
+    output = checked(connection.send_command(
+        command, expect_string=r'(?m)^' + re.escape(prompt) + r'[ \t]*$',
+        read_timeout=120, strip_prompt=True, strip_command=True))
+    marker = 'configuration check succeeds' if command == 'commit check' else 'commit complete'
+    if not re.search(r'(?m)^[ \t]*(?:re\d+:[ \t]*)?' + re.escape(marker) + r'[ \t]*$', output):
+        raise ValueError(f'Junos {command} did not report {marker}:\n{output.strip() or "<empty response>"}')
+    return output
+
+
 def run(task, desired, variables, mode, dry_run, save, verify):
     from nornir.core.task import Result
     from .features.ntp import per_device
@@ -285,14 +305,10 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 stage = 'sending NTP configuration'
                 checked(connection.send_config_set(commands, exit_config_mode=False))
                 stage = 'running commit check'
-                output = checked(connection.commit(check=True))
-                if 'configuration check succeeds' not in output:
-                    raise ValueError('Junos did not confirm successful commit check')
+                commit(connection, 'commit check')
                 confirmed_attempted = True
                 stage = 'running commit confirmed 5'
-                output = checked(connection.commit(confirm=True, confirm_delay=5))
-                if 'commit complete' not in output:
-                    raise ValueError('Junos did not confirm the temporary commit')
+                commit(connection, 'commit confirmed 5')
                 payload.update(applied=True, saved=False, verified=False)
                 after = parse(read(SHOW))
                 stage = 'verifying NTP configuration'
@@ -302,9 +318,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 if remaining:
                     raise ValueError('Junos NTP verification failed; the unconfirmed commit will roll back')
                 stage = 'confirming the permanent commit'
-                checked_output = checked(connection.commit())
-                if 'commit complete' not in checked_output:
-                    raise ValueError('Junos did not confirm the permanent commit')
+                commit(connection, 'commit')
                 payload.update(saved=True, verified=True)
         return Result(host=task.host, result=payload, changed=attempted)
     except Exception as exc:
