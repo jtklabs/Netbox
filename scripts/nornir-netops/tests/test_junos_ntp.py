@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import shlex
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
@@ -39,6 +40,13 @@ class Junos:
         self.private = False
 
     def send_command(self, command, **kwargs):
+        if command in ('commit', 'commit check', 'commit confirmed 5'):
+            assert self.private
+            assert kwargs['read_timeout'] == 120
+            assert re.search(kwargs['expect_string'], 'admin@srx#')
+            assert not re.search(kwargs['expect_string'], 'Synchronizing admin@srx configuration')
+            return self.commit(**({'check': True} if command == 'commit check' else
+                                  {'confirm': True, 'confirm_delay': 5} if command == 'commit confirmed 5' else {}))
         self.calls.append(command)
         if command.removeprefix('run ') == junos.SHOW:
             if self.failure == 'read':
@@ -54,6 +62,10 @@ class Junos:
             self.candidate = copy.deepcopy(self.ntp)
             return 'load complete'
         raise AssertionError(command)
+
+    def find_prompt(self):
+        assert self.private
+        return 'admin@srx#'
 
     def config_mode(self, config_command):
         self.calls.append(config_command)
@@ -161,6 +173,81 @@ def test_apply_and_idempotence(setup, platform, replace):
     assert setup.box.calls == [junos.SHOW]
 
 
+@pytest.mark.parametrize('dual_re', [False, True])
+def test_confirmed_commit_does_not_require_rollback_warning(setup, monkeypatch, dual_re):
+    original = setup.box.commit
+
+    def response(**kwargs):
+        original(**kwargs)
+        if kwargs.get('check'):
+            return 're0:\nconfiguration check succeeds\nre1:\nconfiguration check succeeds' if dual_re else 'configuration check succeeds'
+        return 're1:\ncommit complete\nre0:\ncommit complete' if dual_re else 'commit complete'
+
+    monkeypatch.setattr(setup.box, 'commit', response)
+    code, report = setup.run('--apply', '--replace')
+    assert code == cli.EXIT_OK
+    row = report['devices']['srx']
+    assert row['applied'] and row['saved'] and row['verified']
+    assert set(row['config_after']['servers']) == {'192.0.2.10'}
+    calls = setup.box.calls
+    assert calls.index('commit check') < calls.index('commit confirmed 5') < calls.index('commit')
+    assert junos.SHOW in [call.removeprefix('run ') for call in
+                         calls[calls.index('commit confirmed 5') + 1:calls.index('commit')]]
+
+
+@pytest.mark.parametrize('output', [
+    '', 're1:\ncommit complete\nre0:\nerror: synchronization failed',
+    'error: commit complete was not reported', 'warning: previous commit complete',
+])
+def test_incomplete_or_rejected_dual_re_commit_is_not_confirmed(setup, monkeypatch, output):
+    original = setup.box.commit
+
+    def response(**kwargs):
+        if kwargs.get('confirm'):
+            setup.box.calls.append('commit confirmed 5')
+            return output
+        return original(**kwargs)
+
+    monkeypatch.setattr(setup.box, 'commit', response)
+    code, report = setup.run('--apply')
+    assert code == cli.EXIT_FAILED
+    row = report['devices']['srx']
+    assert row['failure_stage'] == 'running commit confirmed 5'
+    assert row['saved'] is not True and row['verified'] is not True
+    assert row['advisories']
+    assert 'commit' not in setup.box.calls and 'rollback 0' not in setup.box.calls
+
+
+@pytest.mark.parametrize('second_re_error', [False, True])
+def test_commit_reads_both_routing_engines_through_real_netmiko(monkeypatch, second_re_error):
+    from netmiko.juniper.juniper import JuniperBase
+
+    connection = JuniperBase(host='example', auto_connect=False)
+    connection.base_prompt = 'admin@router'
+    monkeypatch.setattr(connection, 'find_prompt', lambda: 'admin@router#')
+    sent = []
+    monkeypatch.setattr(connection, 'write_channel', sent.append)
+    monkeypatch.setattr(connection, 'command_echo_read', lambda cmd, **kwargs: cmd + '\n')
+    # A hostname in progress output and the first RE's success must not end
+    # the read before the second RE finishes and the actual CLI prompt returns.
+    chunks = [
+        'Synchronizing configuration on admin@router\n',
+        're1:\ncommit complete\n',
+        're0:\n' + ('error: synchronization failed\n' if second_re_error else 'commit complete\n'),
+        '#commit confirmed will be rolled back in 5 minutes\n',
+        '{master}\n[edit]\nadmin@router#',
+    ]
+    monkeypatch.setattr(connection, 'read_channel', lambda: chunks.pop(0))
+    if second_re_error:
+        with pytest.raises(ValueError, match='synchronization failed'):
+            junos.commit(connection, 'commit confirmed 5')
+    else:
+        output = junos.commit(connection, 'commit confirmed 5')
+        assert output.count('commit complete') == 2
+    assert chunks == []
+    assert [command.strip() for command in sent] == ['commit confirmed 5']
+
+
 @pytest.mark.parametrize('failure', ['read', 'lock', 'dirty', 'pending', 'write', 'check', 'commit', 'verify', 'confirm'])
 def test_failed_operations_never_report_success(setup, failure):
     setup.box.failure = failure
@@ -183,7 +270,7 @@ def test_failed_operations_never_report_success(setup, failure):
     ('send_config_set', 'sending NTP configuration'),
     ('commit', 'running commit check'),
 ])
-@pytest.mark.parametrize('error_type', [EOFError, TimeoutError, AssertionError])
+@pytest.mark.parametrize('error_type', [EOFError, TimeoutError, AssertionError, ValueError])
 def test_empty_errors_keep_type_stage_and_traceback(setup, monkeypatch, operation, stage, error_type):
     def fail_without_message(*args, **kwargs):
         raise error_type()
