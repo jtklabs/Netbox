@@ -366,9 +366,6 @@ class UpgradeFilterForm(NetBoxModelFilterSetForm):
 
 
 class StandardsJobFilterForm(UpgradeFilterForm):
-    hide_finished = forms.ChoiceField(choices=(('', 'All jobs'), ('true', 'Yes'), ('false', 'No')), required=False,
-                                     label='Hide finished jobs',
-                                     help_text='Includes completed, warning, failed, expired and cancelled jobs.')
     operation = forms.ChoiceField(choices=[('', '---------')] + [
         (value, label) for value, label in UpgradeOperationChoices if value in CONFIG_OPERATIONS], required=False)
 
@@ -400,10 +397,9 @@ class UpgradeJobListView(ObjectListView):
     filterset = UpgradeJobFilterSet
     filterset_form = UpgradeFilterForm
     actions = (AddObject, BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
-    standards = False
 
     def get(self, request):
-        request.GET = job_list_params(request.GET, standards=self.standards)
+        request.GET = job_list_params(request.GET)
         return super().get(request)
 
 
@@ -412,17 +408,6 @@ class StandardsJobListView(UpgradeJobListView):
     template_name = 'netbox_discovery/standardsjob_list.html'
     filterset_form = StandardsJobFilterForm
     actions = (BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
-    standards = True
-
-    def get_extra_context(self, request):
-        filtered = UpgradeJobFilterSet(request.GET)
-        filtered.is_valid()
-        hidden = filtered.form.cleaned_data.get('hide_finished') is True
-        params = request.GET.copy()
-        params['hide_finished'] = 'false' if hidden else 'true'
-        params.pop('page', None)
-        return {**super().get_extra_context(request), 'hide_finished': hidden,
-                'toggle_finished_url': '?' + params.urlencode()}
 
 
 class BulkJobForm(forms.Form):
@@ -456,7 +441,7 @@ class UpgradeBulkActionView(PermissionRequiredMixin, View):
         form = BulkJobForm(request.POST) if request.POST.get('confirm') == 'yes' else None
         if form is None:
             if request.POST.get('_all'):
-                filtered = UpgradeJobFilterSet(job_list_params(request.GET, standards=scope == 'standards'),
+                filtered = UpgradeJobFilterSet(job_list_params(request.GET),
                                                queryset=queryset, request=request)
                 if not filtered.is_valid():
                     messages.error(request, 'Invalid filters. No jobs were changed.')

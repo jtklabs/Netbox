@@ -1,4 +1,0 @@
-<a class="btn btn-outline-secondary" href="{{ toggle_finished_url }}" role="button" aria-pressed="{{ hide_finished|yesno:'true,false' }}" title="Completed, warning, failed, expired and cancelled jobs">
-  <i class="mdi mdi-eye{% if hide_finished %}-off{% endif %}-outline" aria-hidden="true"></i>
-  Hide finished jobs: {{ hide_finished|yesno:'On,Off' }}
-</a>

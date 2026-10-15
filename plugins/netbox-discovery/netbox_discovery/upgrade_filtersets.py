@@ -6,13 +6,10 @@ from .models import PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob
 from .upgrade_choices import TERMINAL
 
 
-def job_list_params(data, *, standards=False):
-    """Upgrade lists show all jobs; standards lists retain their history toggle."""
+def job_list_params(data):
+    """Both job lists show history, including links with the retired toggle."""
     params = data.copy()
-    if not standards:
-        params.pop('hide_finished', None)
-    elif 'hide_finished' not in params:
-        params['hide_finished'] = 'false' if params.get('status') else 'true'
+    params.pop('hide_finished', None)
     return params
 
 
