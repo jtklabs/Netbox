@@ -31,6 +31,20 @@ def f5_version(value):
 F5_IMAGE = re.compile(r"^(?:Hotfix-)?BIGIP-(\d+(?:\.\d+){2,3})-(\d+\.\d+\.\d+)(?:[.-][A-Za-z0-9.-]+)?\.iso$")
 F5_MODEL = re.compile(r"^(?:BIG-IP .+|[A-Z][A-Z0-9]{2,5})$")
 
+# Introductory IOS XE release per family, and per PID where a PID arrived later
+# than its family. From Cisco's C9350 release notes: the eight original PIDs at
+# 17.18.1, C9350-24HX and C9350-48HXN at 26.1.1a; C9300 install mode from 16.6.2.
+FAMILY_FLOORS = {"C9350": (17, 18, 1, ""), "C9300": (16, 6, 2, "")}
+PID_FLOORS = {"C9350-24HX": (26, 1, 1, "a"), "C9350-48HXN": (26, 1, 1, "a")}
+
+
+def introductory_release(model, family):
+    return PID_FLOORS.get(model, FAMILY_FLOORS[family])
+
+
+def release_text(release):
+    return ".".join(str(x) for x in release[:3]) + release[3]
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -106,15 +120,23 @@ class Profile:
         if len(families) != 1:
             raise ValueError("C9300 and C9350 require separate profiles and image packages")
         family = next(iter(families))
-        minimum = (17, 18, 1, "") if family == "C9350" else (16, 6, 2, "")
-        # These two PIDs were introduced after the original C9350 models.
-        if set(result.models) & {"C9350-24HX", "C9350-48HXN"}:
-            minimum = (26, 1, 1, "a")
         target = version(result.target_version)
-        for start in result.starting_versions:
-            if version(start) < minimum or version(start) >= target:
-                floor = ".".join(str(x) for x in minimum[:3]) + minimum[3]
-                raise ValueError(f"{family} starting versions must be >={floor} and older than the target")
+        starts = [version(start) for start in result.starting_versions]
+        if any(start >= target for start in starts):
+            raise ValueError(f"{family} starting versions must be older than the target")
+        # Each PID has its own introductory release, and a profile may list
+        # PIDs from different generations. Every PID needs a starting version
+        # it can actually be running, every starting version must apply to at
+        # least one listed PID, and the target must not predate any PID.
+        floors = {model: introductory_release(model, family) for model in result.models}
+        for model, floor in floors.items():
+            if target < floor:
+                raise ValueError(f"{model} was introduced in {release_text(floor)}; the target must be at least that release")
+            if not any(start >= floor for start in starts):
+                raise ValueError(f"{model} was introduced in {release_text(floor)}; none of the starting versions applies to it")
+        lowest = min(floors.values())
+        if any(start < lowest for start in starts):
+            raise ValueError(f"{family} starting versions must be >={release_text(lowest)} for the listed PIDs")
         prefix = r"cisco9k_iosxe(?:_npe)?" if family == "C9350" else "cat9k_iosxe"
         if not re.fullmatch(prefix + r"\.[A-Za-z0-9_.-]+\.bin", result.image):
             raise ValueError(f"{family} image must use the {'cisco9k_iosxe (or cisco9k_iosxe_npe)' if family == 'C9350' else 'cat9k_iosxe'} .bin package")

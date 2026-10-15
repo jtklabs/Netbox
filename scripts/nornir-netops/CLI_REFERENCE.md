@@ -23,7 +23,8 @@ standards-file examples.
   [discovery](#discover), [rollback](#rollback), [selftest](#selftest),
   [collect](README.md#collect-show-commands-into-netbox).
 - [IOS XE upgrades](UPGRADES.md): approved profiles, NetBox targeting, install
-  mode/conversion, parallel execution, pre/post validation and progress webhooks.
+  mode/conversion, parallel execution, pre/post validation and progress webhooks;
+  [UPGRADE_HANDOVER.md](UPGRADE_HANDOVER.md) for internals and adding a platform.
 - [Shared flags](#shared-flags): [inventory](#inventory-and-device-selection),
   [NetBox](#netbox-inventory-and-interface-tags), [authentication](#device-authentication),
   [AWS](#aws-secrets-manager), [F5 HTTPS](#f5-https),

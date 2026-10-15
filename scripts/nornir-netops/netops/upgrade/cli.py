@@ -43,7 +43,12 @@ def add_arguments(parser, scheduled=False):
 
 
 def fetch_groups(args, style):
-    """Redundancy groups from the discovery plugin, or [] when NetBox does not serve them."""
+    """Redundancy groups from the discovery plugin.
+
+    A dry run warns and continues when NetBox does not serve them: it reloads
+    nothing. An apply run must not guess at redundancy, so the error propagates
+    and the caller refuses to start without --ignore-groups.
+    """
     from ..credentials import fetch_json_secret
     from ..netbox import Client, NetBoxError, settings_from
     settings = settings_from(args.standards, args)
@@ -54,6 +59,8 @@ def fetch_groups(args, style):
     try:
         return Client(settings["url"], settings["token"], settings["verify_tls"]).get("plugins/discovery/upgrade-groups/")
     except NetBoxError as exc:
+        if getattr(args, "apply", False):
+            raise NetBoxError(f"redundancy groups could not be checked: {exc}") from None
         print(style.warn(f"redundancy groups not checked: {exc}"), file=sys.stderr)
         return []
 
@@ -89,7 +96,14 @@ def run(args, style):
     if targets is None:
         return code
     if args.netbox and not getattr(args, "ignore_groups", False):
-        conflicts = group_conflicts(fetch_groups(args, style), targets.inventory.hosts.values())
+        from ..netbox import NetBoxError
+        try:
+            groups = fetch_groups(args, style)
+        except NetBoxError as exc:
+            print(style.bad(f"error: {exc}"), file=sys.stderr)
+            print(style.dim("an apply run does not guess at redundancy; restore NetBox access or pass --ignore-groups"), file=sys.stderr)
+            return 3
+        conflicts = group_conflicts(groups, targets.inventory.hosts.values())
         if conflicts:
             for line in conflicts:
                 print(style.bad(f"error: {line}"), file=sys.stderr)

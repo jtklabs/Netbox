@@ -15,7 +15,13 @@ from . import checks, report
 from .profile import version
 
 BOOT_COMMANDS = ["no boot system", "boot system flash:packages.conf", "no boot manual"]
-INSTALL_FAILURE = re.compile(r"(?im)(?:^\s*(?:FAILED:|ERROR:|%Error)|\b(?:install_add_activate_commit|install_add|install_activate|install_commit):\s*(?:FAIL|ERROR)|\b(?:FAILED|ABORTED)\b|\bfailed to\b)")
+# Installer and copy failures are recognized only where IOS XE prints them: at
+# the start of a line (`FAILED: install_add_activate_commit : ...`, `ERROR: ...`,
+# `%Error opening ...`) or after an install operation name. A syslog line or a
+# message that merely contains the word "failed" is not a failure; the outcome
+# is settled by fresh observations after the reload, never by prose.
+INSTALL_FAILURE = re.compile(r"(?im)(?:^\s*(?:FAILED|ERROR|ABORTED)\b|^\s*%\s*Error\b"
+                             r"|\binstall_[a-z_]+:\s*(?:FAIL(?:ED|URE)?|ERROR|ABORT(?:ED)?)\b)")
 
 
 @contextmanager
@@ -95,6 +101,28 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
         if set(installed) != set(members) or any(not release_matches(installed.get(key, ""), row["version"]) for key, row in members.items()):
             blockers.append("committed starting image cannot be confirmed on every stack member")
     return plan
+
+
+def stack_pending(members, stack, expected, profile):
+    """Why a reloaded stack is not yet whole, or '' once every expected member is back.
+
+    `members` and `stack` are fresh `show version` / `show switch` tables;
+    `expected` is the baseline member set (empty skips the stack checks).
+    """
+    target = version(profile.target_version)
+    wrong = sorted((key for key, row in members.items()
+                    if version(row["version"]) != target or row["mode"] != "INSTALL"), key=int)
+    if wrong:
+        return f"member(s) {', '.join(wrong)} not yet running the target in INSTALL mode"
+    if not expected:
+        return ""
+    missing = sorted((expected - set(members)) | (expected - set(stack)), key=int)
+    if missing:
+        return f"member(s) {', '.join(missing)} have not rejoined the stack"
+    not_ready = sorted((key for key in expected if stack[key]["state"].lower() != "ready"), key=int)
+    if not_ready:
+        return "member(s) " + ", ".join(f"{key} {stack[key]['state']}" for key in not_ready) + " not Ready"
+    return ""
 
 
 class Device:
@@ -186,18 +214,27 @@ class Device:
                       {"install_output" if reload else "copy_output": transcript})
         raise TimeoutError("install/copy dialogue timed out; do not automatically retry")
 
-    def wait_for_target(self, profile):
+    def wait_for_target(self, profile, before=None):
+        """Reconnect after the reload and wait for the whole stack, not just the active.
+
+        Members rejoin one at a time after a stack reload. Returning as soon as
+        the active answers would spend the validation window on reformation, so
+        the reload window covers it: every baseline member must be back on the
+        target release in INSTALL mode and Ready before validation begins.
+        """
         self.close()
+        expected = set((before or {}).get("software", {}))
         deadline = time.monotonic() + self.options.reload_timeout
         last_error = "device has not returned"
         while time.monotonic() < deadline:
-            self.emit("reconnecting", "Waiting for target IOS XE release in INSTALL mode")
+            self.emit("reconnecting", f"Waiting for the target IOS XE release in INSTALL mode ({last_error})")
             try:
                 self.connect()
                 members = checks.software(self.read("show version"))
-                if all(version(row["version"]) == version(profile.target_version) and row["mode"] == "INSTALL" for row in members.values()):
+                stack = checks.stack(self.read("show switch")) if expected else {}
+                last_error = stack_pending(members, stack, expected, profile)
+                if not last_error:
                     return
-                last_error = "device reachable but not running the target in INSTALL mode"
             except Exception as exc:
                 last_error = type(exc).__name__
             self.close()
@@ -319,13 +356,17 @@ def settle(emit, options):
 def converge(emit, options, before, plan, reporter, host, collect_after, extra_findings):
     """Compare fresh baselines until two consecutive clean passes, or the deadline.
 
-    Every event says why validation has not passed: the checks that differ,
-    the clean passes still needed and the time left.
+    The validation window starts once the first post-check has been collected,
+    so a slow first read on a large stack is not charged against it. Every
+    event says why validation has not passed: the checks that differ, the
+    clean passes still needed and the time left.
     """
-    deadline, consecutive, attempt = time.monotonic() + options.validation_timeout, 0, 0
+    deadline, consecutive, attempt = None, 0, 0
     while True:
         attempt += 1
         after = collect_after()
+        if deadline is None:
+            deadline = time.monotonic() + options.validation_timeout
         findings = checks.compare(before, after) + extra_findings(after)
         errors = [f for f in findings if f["severity"] == "error"]
         consecutive = 0 if errors else consecutive + 1
@@ -482,7 +523,7 @@ def upgrade_device(task, profile, options, reporter):
                 device.interactive(plan["commands"][-1], options.install_timeout, reload=True)
             except (TimeoutError, OSError, EOFError):
                 emit("reconnecting", "Install dialogue interrupted; checking outcome without resending install")
-            device.wait_for_target(profile)
+            device.wait_for_target(profile, before)
             settle(emit, options)
             return converge(emit, options, before, plan, reporter, task.host,
                             lambda: checks.collect(device.read, lambda cmd: emit("postcheck", cmd), before["routing_commands"]),
