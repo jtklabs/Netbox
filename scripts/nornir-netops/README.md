@@ -802,6 +802,10 @@ Global source statements stay in place. New server statements inherit the
 current routing context and inline source options; replace mode adds the new
 addresses and removes old servers using their original statements.
 
+On Cisco IOS/IOS-XE and NX-OS, `--replace` also removes all `ntp peer`
+statements, including peers whose addresses match a desired server. Peers do
+not satisfy the server standard. Add mode leaves existing peers in place.
+
 For example, replacing `ntp server vrf MGMT 192.0.2.9 source Loopback0` with
 servers `192.0.2.10` and `192.0.2.11` on IOS produces:
 

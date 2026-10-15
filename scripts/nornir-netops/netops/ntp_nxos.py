@@ -15,7 +15,7 @@ def parse(output):
     lines = []
     for raw in output.splitlines():
         tokens = raw.strip().split()
-        if tokens[:2] == ['ntp', 'server'] and 'use-vrf' in tokens:
+        if tokens[:2] in (['ntp', 'server'], ['ntp', 'peer']) and 'use-vrf' in tokens:
             index = tokens.index('use-vrf')
             if index + 1 >= len(tokens):
                 raise ValueError('Incomplete NX-OS NTP use-vrf setting')
@@ -25,8 +25,9 @@ def parse(output):
                 tokens = tokens[:2] + ['vrf', vrf] + tokens[2:]
         lines.append(' '.join(tokens))
     entries = parse_ntp('\n'.join(lines), platform='cisco_nxos')
-    originals = [line.strip() for line in output.splitlines() if line.split()[:2] == ['ntp', 'server']]
-    servers = [entry for entry in entries if entry.data.get('kind') == 'server']
+    originals = [line.strip() for line in output.splitlines()
+                 if line.split()[:2] in (['ntp', 'server'], ['ntp', 'peer'])]
+    servers = [entry for entry in entries if entry.data.get('kind') in ('server', 'peer')]
     if len(originals) != len(servers):
         raise ValueError('Incomplete NX-OS NTP server configuration')
     lines_by_key = {id(entry): line for entry, line in zip(servers, originals)}

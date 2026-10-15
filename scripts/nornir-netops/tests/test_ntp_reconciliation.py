@@ -1,6 +1,7 @@
 """NTP source overrides, EOS enablement and VRF migration regressions."""
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,93 @@ def planned(platform, before, *flags, mode=MODE_REPLACE):
     add, remove = plan_ntp(current, wanted.keys, mode, {'platform': platform, 'variables': variables})
     commands = render('ntp', platform, add, remove, variables)
     return commands, default_reversal(commands, current, remove)
+
+
+@pytest.mark.parametrize('platform,peers', [
+    ('cisco_ios', [
+        'ntp peer 192.0.2.1',
+        'ntp peer vrf MGMT 192.0.2.9 key 7 source Loopback0 prefer version 4',
+        'ntp peer 2001:db8::9',
+        'ntp peer time.example.net',
+    ]),
+    ('cisco_nxos', [
+        'ntp peer 192.0.2.1',
+        'ntp peer 192.0.2.9 key 7 prefer use-vrf management',
+        'ntp peer 2001:db8::9 use-vrf default',
+        'ntp peer time.example.net',
+    ]),
+])
+@pytest.mark.parametrize('server_present', [False, True])
+@pytest.mark.parametrize('mode', [MODE_ADD, MODE_REPLACE])
+def test_cisco_peer_replacement_verifies_and_rolls_back(platform, peers, server_present, mode):
+    server = 'ntp server 192.0.2.1'
+    unmanaged = ['ntp authenticate', 'ntp trusted-key 7',
+                 'ntp authentication-key 7 md5 encrypted 7', 'ntp access-group peer 10']
+    original = unmanaged + peers + ([server] if server_present else [])
+    commands, reversal = planned(platform, '\n'.join(original), mode=mode)
+    assert commands == ([] if server_present else [server]) + (
+        ['no ' + peer for peer in peers] if mode == MODE_REPLACE else [])
+    # A peer with the desired address is not a server, and peers left behind
+    # must still appear in the corrective plan during read-back verification.
+    if mode == MODE_REPLACE:
+        assert planned(platform, '\n'.join(unmanaged + peers + [server]))[0] == [
+            'no ' + peer for peer in peers]
+    box = FakeDevice(original)
+    box.apply(commands)
+    assert set(box.lines) == set(unmanaged + [server] + (peers if mode == MODE_ADD else []))
+    assert planned(platform, '\n'.join(box.lines), mode=mode)[0] == []
+    box.apply(reversal.commands)
+    assert set(box.lines) == set(original)
+
+
+@pytest.mark.parametrize('platform,line', [
+    ('cisco_ios', 'ntp peer'),
+    ('cisco_ios', 'ntp peer vrf'),
+    ('cisco_ios', 'ntp peer vrf MGMT'),
+    ('cisco_ios', 'ntp peer 192.0.2.1 key'),
+    ('cisco_nxos', 'ntp peer'),
+    ('cisco_nxos', 'ntp peer 192.0.2.1 use-vrf'),
+])
+def test_incomplete_cisco_peers_fail_before_planning(platform, line):
+    with pytest.raises(ValueError, match='Incomplete'):
+        planned(platform, line)
+
+
+@pytest.mark.parametrize('platform,peer', [
+    ('cisco_ios', 'ntp peer vrf MGMT 192.0.2.9 source Loopback0'),
+    ('cisco_nxos', 'ntp peer 192.0.2.9 use-vrf management'),
+])
+@pytest.mark.parametrize('ignore_removal', [False, True])
+def test_cisco_peer_cli_only_saves_after_removal(
+        device, csv_file, login, tmp_path, platform, peer, ignore_removal):
+    class PeerDevice(FakeDevice):
+        def apply(self, commands):
+            super().apply([command for command in commands
+                           if not (ignore_removal and command == 'no ' + peer)])
+
+    Path(csv_file).write_text(f'host,name,platform\n192.0.2.10,sw1,{platform}\n')
+    original = ['ntp server 192.0.2.1', peer]
+    box = device['devices']['sw1'] = PeerDevice(original)
+    report = tmp_path / 'ntp.json'
+    args = ['-s', '192.0.2.1', '--replace', '--report', str(report)]
+    assert run(csv_file, *args, '--fail-on-diff') == cli.EXIT_DIFF
+    assert device['config'] == {}
+    assert box.lines == original
+    code = run(csv_file, *args, '--apply', '-y')
+    row = json.loads(report.read_text())['devices']['sw1']
+    assert code == (cli.EXIT_FAILED if ignore_removal else cli.EXIT_OK)
+    assert row['verified'] is not ignore_removal
+    assert row['saved'] is not ignore_removal
+    assert device['config']['sw1'] == ['no ' + peer]
+    if ignore_removal:
+        assert 'write memory' not in device['commands']['sw1']
+        assert 'copy running-config startup-config' not in device['commands']['sw1']
+    else:
+        assert box.lines == [original[0]]
+        assert run(csv_file, *args, '--apply', '-y') == cli.EXIT_OK
+        assert device['config']['sw1'] == ['no ' + peer]
+        box.apply(row['rollback'])
+        assert set(box.lines) == set(original)
 
 
 class EosDevice(FakeDevice):
