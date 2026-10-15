@@ -551,8 +551,15 @@ def build_parser() -> argparse.ArgumentParser:
         "what was changed, not what is in the CSV now. Dry run unless --apply.",
         formatter_class=HelpFormatter,
     )
+    from .features.waf import add_connection_arguments as f5_connection_arguments
+    f5_connection_arguments(undo)
+    material = undo.add_mutually_exclusive_group()
+    material.add_argument("--rollback-secrets", metavar="FILE", default=None,
+                          help="previous SNMP credentials as device/resource/field JSON [$NETOPS_ROLLBACK_SECRETS_FILE]")
+    material.add_argument("--rollback-secret", metavar="NAME", default=None,
+                          help="AWS secret with previous SNMP credentials [$NETOPS_ROLLBACK_SECRET]")
     undo.add_argument(
-        "journal", nargs="?", help="journal to replay (default: the most recent)"
+        "journal", nargs="?", help="journal or applied-run JSON archive (default: most recent journal)"
     )
     undo.add_argument(
         "--rollback-dir", metavar="DIR", help="where to look for the journal"
@@ -912,7 +919,6 @@ def _execute(argv: Optional[List[str]] = None) -> int:
         except CredentialError as exc:
             print(style.bad(f"error: {exc}"), file=sys.stderr)
             return EXIT_USAGE
-        archive.current().prepare()
         log = bootstrap_log(argv)
         return _run(argv, style, log, env_note)
     except KeyboardInterrupt:
@@ -935,6 +941,7 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     parser = build_parser()
     args = parser.parse_args(argv)
     archive.configure(args)
+    archive.current().prepare()
 
     # Resolve the default source only when no source was explicitly selected.
     # In particular, an .env selecting NetBox must not defeat --csv or --ip.
@@ -1281,6 +1288,14 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
     if args.apply and not args.no_rollback_file:
         journal = rollback_journal.Journal(feature=feature.name, mode=args.mode)
         for name, record in records.items():
+            if record.get("platform") == "f5_tmsh" and archive.current():
+                row = archive.current().document["devices"][name]
+                if row.get("change_attempted") or row.get("applied"):
+                    from .f5_rollback import journal_record
+                    entry = journal_record(feature.name, row)
+                    if entry["restore_steps"]:
+                        journal.add(name, entry)
+                continue
             if not record.get("rollback") or not record.get("applied"):
                 continue
             journal.add(
@@ -1449,7 +1464,11 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     """Replay a recorded reversal."""
     directory = rollback_journal.journal_directory(args.rollback_dir, PROJECT_ROOT)
     try:
-        path = Path(args.journal) if args.journal else rollback_journal.latest(directory)
+        run_archive = archive.current()
+        if run_archive and getattr(run_archive, "rollback_input_error", None):
+            raise rollback_journal.RollbackError(run_archive.rollback_input_error)
+        path = (run_archive.rollback_input if run_archive else None) or (
+            Path(args.journal).expanduser() if args.journal else rollback_journal.latest(directory))
         journal = rollback_journal.load(path)
     except rollback_journal.RollbackError as exc:
         print(style.bad(f"error: {exc}"), file=sys.stderr)
@@ -1462,6 +1481,17 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     if not devices:
         print(style.bad(f"error: {path} records nothing that can be undone"), file=sys.stderr)
         return EXIT_USAGE
+
+    f5_settings, rollback_secrets = None, {}
+    if any(record.get("platform") == "f5_tmsh" for record in devices.values()):
+        from . import f5_rollback
+        from .features.waf import connection_settings
+        try:
+            f5_settings = connection_settings(args)
+            rollback_secrets = f5_rollback.load_secrets(args)
+        except (ValueError, rollback_journal.RollbackError, CredentialError) as exc:
+            print(style.bad(f"error: {exc}"), file=sys.stderr)
+            return EXIT_USAGE
 
     credentials, code = _login(args, style)
     if credentials is None:
@@ -1504,7 +1534,7 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     )
     print(style.dim(f"journal: {path}"))
 
-    unsupported = {n: r["unsupported"] for n, r in devices.items() if r.get("unsupported")}
+    unsupported = {n: r["unsupported"] for n, r in devices.items() if r.get("unsupported") and r.get("transport") != "rest"}
     for name, reasons in sorted(unsupported.items()):
         for reason in reasons:
             print(style.warn(f"  {name}: cannot be undone -- {reason}"))
@@ -1521,7 +1551,7 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
     archive.targets(nr.inventory)
     if archive.current():
         archive.current().document["rollback_feature"] = journal.feature
-    archive.capture({name: {"commands": record["rollback"], "rollback": record.get("applied", []),
+    archive.capture({name: {"commands": record.get("rollback", []), "rollback": record.get("applied", []),
                            "status": "pending", "rollback_unsupported": ["Reapplying the original journal commands may not restore intervening drift; compare the new before snapshot. Previous secret values may be unavailable."]}
                      for name, record in devices.items()})
 
@@ -1529,7 +1559,8 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
 
     failed = 0
     results = nr.run(task=apply_rollback, save=args.save, feature=FEATURES.get(journal.feature),
-                     dry_run=dry_run, archive_sink=archive.current())
+                     dry_run=dry_run, archive_sink=archive.current(),
+                     f5_settings=f5_settings, rollback_secrets=rollback_secrets)
     for name, result in sorted(results.items()):
         if isinstance(result[0].result, dict):
             archive.capture({name: {**result[0].result, "status": "failed" if result.failed else "completed",
@@ -1541,6 +1572,9 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
             log.failure(name, message, exception)
             print(f"{style.bold(name)} {style.bad('FAILED')} -- {message}")
             failed += 1
+            if dry_run and isinstance(result[0].result, dict):
+                for command in result[0].result.get("commands", []):
+                    print(f"    {command}")
         else:
             count = len(result[0].result["commands"])
             print(f"{style.bold(name)} {style.ok('would undo' if dry_run else 'undone')} ({count} commands)")
@@ -1549,7 +1583,7 @@ def _rollback(args: argparse.Namespace, style: Style, log: DebugLog) -> int:
                     print(f'    {command}')
 
     print()
-    summary = [f"{len(devices)} device(s)", style.ok(f"{len(devices) - failed} undone")]
+    summary = [f"{len(devices)} device(s)", style.ok(f"{len(devices) - failed} " + ("to undo" if dry_run else "undone"))]
     if failed:
         summary.append(style.bad(f"{failed} failed"))
     print(style.bold("summary: ") + ", ".join(summary))

@@ -173,7 +173,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                        "extra": plan.extra, "remove": plan.extra if clean else [],
                        "payload": plan.payload, "applied": False, "verified": None,
                        "fully_managed_compliant": not plan.drift(True)}
-                # Keep exact original server objects for a manual REST reversal.
+                # Keep exact original server objects for REST rollback.
                 row["before_servers"] = plan.before_servers
                 payload["profiles"].append(row)
                 payload["current"].extend(f"{plan.label}: {entry}" for entry in plan.current)
@@ -232,10 +232,6 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                     # add-only with extra destinations is not fully managed.
                     payload["syslog_compliant"] = all(
                         row["fully_managed_compliant"] is True for row in payload["profiles"])
-            if attempted:
-                payload["rollback_unsupported"] = [
-                    "REST rollback is manual; profiles.before_servers in --report records the original lists"]
-                payload["notes"].extend(payload["rollback_unsupported"])
         return Result(host=host, result=payload, changed=attempted)
     except Exception as exc:
         payload["checked_at"] = None

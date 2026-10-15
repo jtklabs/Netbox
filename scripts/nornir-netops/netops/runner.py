@@ -141,8 +141,15 @@ def run_check(task: Task, check, expected, options) -> Result:
     )
 
 
-def apply_rollback(task: Task, save: bool, feature=None, dry_run=False, archive_sink=None) -> Result:
+def apply_rollback(task: Task, save: bool, feature=None, dry_run=False, archive_sink=None, f5_settings=None, rollback_secrets=None) -> Result:
     """Read the affected feature, replay the journal, and observe the result."""
+    if canonical_platform(task.host.platform) == "f5_tmsh":
+        from . import f5_rollback
+        result = f5_rollback.run(task, save, dry_run, f5_settings or {}, rollback_secrets or {}, archive_sink)
+        if archive_sink:
+            payload = {**result.result, "error": str(result.exception) if result.exception else None}
+            archive_sink.record(task.host, payload, failed=result.failed, changed=result.changed)
+        return result
     commands = list(task.host.data.get("rollback") or [])
     platform = canonical_platform(task.host.platform)
     payload = {"platform": platform, "commands": commands, "applied": False,

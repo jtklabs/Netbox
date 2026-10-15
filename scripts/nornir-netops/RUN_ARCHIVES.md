@@ -160,8 +160,10 @@ their feature-specific limitations.
 
 The JSON archive is separate from `.rollback/` journals. `--no-rollback-file`
 disables the journal only; it does not disable archival JSON. `configure.py rollback`
-still consumes SSH journals, not these JSON archives. F5 REST restoration is
-performed using the listed API steps. Rollback invocations read the affected
-feature before and after applying; reapplying the original journal's forward
-commands is recorded as an incomplete backout because intervening drift may
-prevent an exact restoration.
+accepts a journal or an applied-run JSON archive. Only device rows with applied
+or attempted changes are eligible. [F5 rollback](F5_ROLLBACK.md) executes validated
+REST steps and reads back the affected settings before saving. Each rollback
+writes a new archive; its output cannot overwrite its input. F5 rollback archives
+include reverse steps derived from the state read immediately before restoration.
+SSH rollback archives record reapplying the original forward commands as an
+incomplete backout because intervening drift may prevent an exact restoration.

@@ -197,9 +197,10 @@ def plan(client, root, users, clean, forbid, rewrite, secrets):
         operations.append(("DELETE", resource(item, COMMUNITIES), None))
         remove.append("community:" + str(item["name"]))
     state = {key: current.get(key) for key in root}
-    state["users"] = [{"name": item["name"], "path": resource(item, USERS), **metadata(item)} for item in existing]
+    state["users"] = [{"name": item["name"], "path": resource(item, USERS),
+                      **{k: item[k] for k in ("partition", "fullPath", "description") if k in item}, **metadata(item)} for item in existing]
     state["communities"] = [{"path": resource(item, COMMUNITIES), **{
-        key: item[key] for key in ("name", "access", "ipv6", "oidSubset", "source", "description") if key in item}}
+        key: item[key] for key in ("name", "partition", "fullPath", "access", "ipv6", "oidSubset", "source", "description") if key in item}}
         for item in communities]
     return operations, add, remove, extra, state
 
@@ -237,7 +238,8 @@ def reversal(operations, state):
             if required:
                 limitations.append(f"Supply previous {', '.join(required)} for {restore_path} before restoring.")
         steps.append({"transport": "rest", "method": restore_method, "path": restore_path,
-                      "body": restore, "requires_secret_fields": required, "purpose": "restore"})
+                      "body": restore, "target": path if method != "POST" else restore_path,
+                      "requires_secret_fields": required, "purpose": "restore"})
     return steps, limitations
 
 

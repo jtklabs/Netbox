@@ -1252,8 +1252,8 @@ device's policy and use the appropriate SSH or REST transport.
 Install `requests` (or the `waf` extra) for direct-IP/CSV F5 use. Supply an
 explicit F5 platform in inventory or via `--platform`. Changes are read back
 and saved by default; `--no-verify` and `--no-save` retain their usual meanings.
-REST rollback is manual; `before_servers` in the report preserves the original
-remote server list. ConfigSync is not triggered.
+[F5 rollback](F5_ROLLBACK.md) restores the original remote server list from the
+journal or applied-run archive. ConfigSync is not triggered.
 
 F5 `syslog` and `waf` are independent features that share the destination IPs
 and ports from `syslog.destinations` in the standards file:
@@ -1514,7 +1514,7 @@ Writes are saved once per device after successful verification, unless
 applications, but any failure prevents the device save and timestamp. Partial
 changes remain in the running configuration and are identified in `--report`.
 The report includes each profile's original `before_servers`, plan, and result.
-REST rollback is manual; this feature does not produce an SSH rollback journal.
+[F5 rollback](F5_ROLLBACK.md) restores the original destinations from the REST journal or applied-run archive.
 No ConfigSync operation is issued.
 
 ## Banner
@@ -1571,8 +1571,8 @@ inventory; banner runs do not write syslog custom fields or use syslog tags.
 
 `--report banner-results.json` records each F5 banner's original fields,
 planned values and apply/verification results. A failure may leave partial
-changes; failed verification prevents saving. F5 rollback is manual: PATCH the
-recorded `before` fields to their recorded endpoint and save the configuration.
+changes; failed verification prevents saving. [F5 rollback](F5_ROLLBACK.md)
+restores the recorded original banner fields and verifies them before saving.
 Cisco and Arista retain their existing SSH templates and rollback journals.
 
 API references: [F5 SSH banner](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_sshd.html)
@@ -2258,7 +2258,9 @@ agent settings are outside this command's F5 scope. The result includes a note
 when trap hosts or chassis ID are specified. Applied changes are read back and
 saved unless `--no-verify` / `--no-save` is supplied; failed verification prevents
 saving. REST changes are not atomic, and a failure may leave partial changes.
-Rollback is manual because previous passphrases are not retained.
+[F5 rollback](F5_ROLLBACK.md) restores the original agent settings, users and
+communities. Supply previous SNMP secrets when restoring credentials; the
+archive deliberately does not retain them. Incomplete restoration blocks writes.
 
 API references: [F5 SNMP agent](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_snmp.html)
 and [F5 SNMP users](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_sys_snmp_users.html).
@@ -2466,11 +2468,12 @@ summary: 1 device(s) to undo
 re-run with --apply to push the commands above
 ```
 
-`rollback` replays the most recent journal, or one named on the command line.
-It is a dry run unless `--apply`, like everything else here, and `--limit`
-narrows it to particular devices. The device list comes **from the journal**,
-not from the inventory: what matters is what was changed, not what is in the
-CSV now.
+`rollback` replays the most recent journal, or a journal/applied-run JSON archive
+named on the command line. It is a dry run unless `--apply`, and `--limit`
+narrows it to particular devices. Device names, addresses and platforms come
+from that file. Current inventory and NetBox tags do not change the restoration.
+F5 syslog, WAF, banner and SNMP use REST; Cisco and Arista use SSH.
+See [F5 rollback](F5_ROLLBACK.md) for examples and previous-secret handling.
 
 **The reversal is worked out at the time of the change**, because afterwards it
 cannot be. Once `logging trap informational` has replaced `notifications`, the
