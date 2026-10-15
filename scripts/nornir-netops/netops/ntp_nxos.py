@@ -2,7 +2,7 @@
 from dataclasses import replace
 
 from .core import Entry, validate_word
-from .ntp_discovery import global_sources
+from .ntp_discovery import global_sources, nxos_source_address
 
 SAMPLE = '''ntp source-interface mgmt0
 ntp server 192.0.2.1 prefer use-vrf management
@@ -24,17 +24,21 @@ def parse(output):
             if vrf != 'default':
                 tokens = tokens[:2] + ['vrf', vrf] + tokens[2:]
         lines.append(' '.join(tokens))
-    entries = parse_ntp('\n'.join(lines))
+    entries = parse_ntp('\n'.join(lines), platform='cisco_nxos')
     originals = [line.strip() for line in output.splitlines() if line.split()[:2] == ['ntp', 'server']]
     servers = [entry for entry in entries if entry.data.get('kind') == 'server']
     if len(originals) != len(servers):
         raise ValueError('Incomplete NX-OS NTP server configuration')
     lines_by_key = {id(entry): line for entry, line in zip(servers, originals)}
     entries = [replace(entry, line=lines_by_key[id(entry)]) if id(entry) in lines_by_key else entry for entry in entries]
-    source = global_sources(output).get('*')
+    source = global_sources(output, 'cisco_nxos').get('*')
     if source:
         entries.append(Entry(key='source:' + source.lower(), line='ntp source-interface ' + source,
                              data={'kind': 'source', 'source': source}))
+    address = nxos_source_address(output)
+    if address:
+        entries.append(Entry(key='source-address:' + address, line='ntp source ' + address,
+                             data={'kind': 'source-address', 'address': address}))
     return entries
 
 
@@ -59,12 +63,15 @@ def plan(current, desired, mode, context):
     server_current = [Entry(key=_server_key(e.data['host'], e.data.get('key')), line=e.line,
                             data={**e.data, 'source': None, 'inherited_source': None})
                       if e.data.get('kind') == 'server' else e
-                      for e in current if e.data.get('kind') != 'source']
+                      for e in current if e.data.get('kind') not in ('source', 'source-address')]
     options = {**variables, 'entries': records, 'server_options': {}}
     add, remove = plan_ntp(server_current, normalized, mode, {**context, 'variables': options})
     variables['server_options'] = {mapping[k]: v for k, v in options['server_options'].items()}
     add = [mapping[key] for key in add]
     source = variables.get('source')
+    if source:
+        remove.extend(replace(e, data={**e.data, 'before_add': True})
+                      for e in current if e.data.get('kind') == 'source-address')
     if source and not any(e.data.get('kind') == 'source' and e.data['source'].lower() == source.lower() for e in current):
         key = 'source:' + source.lower()
         variables['entries'] = {**variables['entries'], key: {'kind': 'source', 'source': source}}

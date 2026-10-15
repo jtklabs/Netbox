@@ -67,4 +67,20 @@ class PlatformJobProfiles(PluginTemplateExtension):
         return self.render('netbox_discovery/inc/platform_profiles.html', extra_context={'assignment': assignment})
 
 
-template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles, DeviceRunStandards]
+class DeviceUCSBackups(PluginTemplateExtension):
+    models = ['dcim.device']
+
+    def right_page(self):
+        from .models import UpgradeJob
+        from .upgrade_backups import backup_context
+        user = self.context['request'].user
+        if not (user.has_perm('netbox_discovery.view_upgradejob')
+                and user.has_perm('netbox_discovery.apply_upgradejob')):
+            return ''
+        jobs = UpgradeJob.objects.restrict(user, 'view').restrict(user, 'apply').filter(
+            device=self.context['object'], summary__has_key='ucs_backup').order_by('-scheduled_at', '-pk')[:10]
+        backups = [record for job in jobs if (record := backup_context(job, user))]
+        return self.render('netbox_discovery/inc/ucs_backups.html', extra_context={'backups': backups}) if backups else ''
+
+
+template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles, DeviceRunStandards, DeviceUCSBackups]

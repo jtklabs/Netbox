@@ -21,6 +21,8 @@ ntp authentication-key {{ item.id }} {{ item.type }} {{ item.material }}
 ntp trusted-key {{ item.id }}
 {% elif item.kind == 'authenticate' %}
 ntp authenticate
+{% elif item.kind == 'enable' %}
+ntp
 {% else %}
 ntp server {% if vrf %}vrf {{ vrf }} {% endif %}{{ item.host }}{% if item.key %} key {{ item.key }}{% endif %}{% if prefer and item.host == prefer %} prefer{% endif %}{% if iburst %} iburst{% endif %}{% if source %} source {{ source }}{% endif %}{% for option in (server_options | default({})).get(key, []) %} {{ option }}{% endfor %}
 {% endif %}

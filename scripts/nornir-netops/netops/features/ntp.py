@@ -38,7 +38,7 @@ from ..core import (
     validate_word,
 )
 from ..netbox import source_for
-from ..ntp_discovery import global_sources, interface_name
+from ..ntp_discovery import global_sources, interface_name, source_ip
 from .. import aruba_ntp, clearpass_ntp, f5_ntp, junos_ntp, ntp_nxos
 from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
@@ -70,7 +70,7 @@ EOS_SAMPLE = """\
 ntp authentication-key 1 md5 7 072C285F4D06
 ntp trusted-key 1
 ntp server 10.10.10.1 key 1 iburst
-ntp server vrf MGMT 192.168.5.5 prefer iburst
+ntp server 192.168.5.5 prefer iburst
 ntp server time.example.net
 """
 
@@ -92,7 +92,7 @@ def _server_key(host: str, key_id: Optional[str], source: Optional[str] = None) 
     return base
 
 
-def parse_ntp(output: str) -> List[Entry]:
+def parse_ntp(output: str, *, platform=None) -> List[Entry]:
     """Pull servers and authentication out of `ntp ...` lines.
 
     Shared by IOS and EOS. Both render a server as
@@ -101,7 +101,7 @@ def parse_ntp(output: str) -> List[Entry]:
     arguments differently.
     """
     entries: List[Entry] = []
-    sources = global_sources(output)
+    sources = global_sources(output, platform)
     for raw in output.splitlines():
         line = raw.strip()
         if not line.startswith("ntp "):
@@ -125,7 +125,7 @@ def parse_ntp(output: str) -> List[Entry]:
             position = index + 1
             while position < len(tokens):
                 keyword = tokens[position]
-                if keyword in ('key', 'source'):
+                if keyword in ('key', 'source', 'source-address'):
                     if position + 1 >= len(tokens):
                         raise ValueError(f'Incomplete NTP server {keyword} option')
                     value = tokens[position + 1]
@@ -133,6 +133,8 @@ def parse_ntp(output: str) -> List[Entry]:
                     if keyword == 'source' and value.isalpha() and position < len(tokens) and tokens[position].isdigit():
                         value += tokens[position]
                         position += 1
+                    if keyword == 'source-address':
+                        value = source_ip(value)
                     options[keyword] = value
                 elif keyword in ('prefer', 'iburst'):
                     position += 1
@@ -148,6 +150,7 @@ def parse_ntp(output: str) -> List[Entry]:
                         "host": normalize(host),
                         "key": options.get("key"),
                         "source": options.get("source"),
+                        "source_address": options.get("source-address"),
                         "inherited_source": sources.get(vrf or 'default') or sources.get('*'),
                         "vrf": vrf,
                         "prefer": "prefer" in tokens[index + 1:],
@@ -192,6 +195,13 @@ def parse_ntp(output: str) -> List[Entry]:
     return entries
 
 
+def parse_eos(output: str) -> List[Entry]:
+    entries = parse_ntp(output, platform='arista_eos')
+    if any(line.strip() == 'no ntp' for line in output.splitlines()):
+        entries.append(Entry(key='ntp:disabled', line='no ntp', data={'kind': 'disabled'}))
+    return entries
+
+
 def plan_ntp(
     current: Sequence[Entry],
     desired: Sequence[str],
@@ -205,10 +215,20 @@ def plan_ntp(
     configured = {entry.key for entry in current}
     entries = variables.get("entries") or {}
     eos = context.get("platform") == "arista_eos"
+    disabled = eos and any(entry.data.get('kind') == 'disabled' for entry in current)
+    current = [entry for entry in current if entry.data.get('kind') != 'disabled']
+    if eos and mode != MODE_REPLACE and any(
+            entry.data.get('kind') == 'server' and entry.data.get('vrf') != variables.get('vrf')
+            for entry in current):
+        raise ValueError('EOS NTP servers must use one VRF; use the existing VRF or --replace to migrate it')
 
     def matches(entry, wanted):
         source = entry.data.get('source')
         if wanted.get('source'):
+            if entry.data.get('source_address'):
+                # A literal override cannot be validated against an interface
+                # name. Reset it before setting the selected interface.
+                return False
             source = source or entry.data.get('inherited_source')
             try:
                 source_matches = interface_name(source or '').lower() == interface_name(wanted['source']).lower()
@@ -259,6 +279,10 @@ def plan_ntp(
                                        data={**entry.data, "before_add": True}))
                 # Retain options outside this standard, such as version/minpoll.
                 extra = list(entry.data.get('extra', []))
+                if entry.data.get('source_address') and not wanted.get('source'):
+                    # With no interface selection, basic server updates leave
+                    # the existing address source alone.
+                    extra.extend(['source-address', entry.data['source_address']])
                 if not eos and entry.data.get('iburst'):
                     extra.append('iburst')
                 variables.setdefault('server_options', {})[key] = extra
@@ -287,6 +311,10 @@ def plan_ntp(
                 # EOS permits NTP in only one VRF; clear old-VRF servers first.
                 entry = Entry(key=entry.key, line=entry.line, data={**entry.data, 'before_add': True})
             to_remove.append(entry)
+    if disabled:
+        key = 'ntp:enabled'
+        variables['entries'] = {**entries, key: {'kind': 'enable'}}
+        to_add.append(key)
     return to_add, to_remove
 
 
@@ -617,7 +645,8 @@ FEATURE = Feature(
     help="converge the NTP servers and their authentication key",
     platforms={
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_ntp, IOS_SAMPLE),
-        "arista_eos": PlatformSupport(SHOW_COMMAND, parse_ntp, EOS_SAMPLE),
+        "arista_eos": PlatformSupport(SHOW_COMMAND, parse_eos, EOS_SAMPLE,
+                                      extra_commands=('show running-config | include ^no.ntp$',)),
         "cisco_nxos": PlatformSupport('show running-config ntp', ntp_nxos.parse, ntp_nxos.SAMPLE),
     },
     add_arguments=add_arguments,

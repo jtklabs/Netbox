@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from netops.upgrade import f5, f5_workflow, report, scheduler, workflow
 from netops.upgrade.profile import Profile, f5_version
@@ -136,12 +137,16 @@ class FakeBigIP:
                 volume["status"] = f"installing {50 * (3 - polls)}.000 pct"
                 self.installing = (name, polls - 1)
             else:
-                volume.update(status="complete", version=self.pending_version)
+                volume.update(status="complete", version=self.pending_version, build="0.0.19")
                 self.installing = None
 
     def _post(self, path, payload):
         if path == "/mgmt/tm/util/bash":
             command = payload.get("utilCmdArgs", "")
+            if "/sbin/cpcfg" in command:
+                return {"commandResult": "NETOPS_CPCFG_STARTED\n"}
+            if "NETOPS_CPCFG_RUNNING" in command:
+                return {"commandResult": "NETOPS_CPCFG_EXIT=0\n"}
             if "df -Pk" in command:
                 return {"commandResult": "/dev/mapper/vg--db--sda-dat.share 30000000 100000 29900000 1% /shared\n"}
             match = re.search(r"md5sum '([^']+)'", command)
@@ -162,13 +167,14 @@ class FakeBigIP:
             self.installing = (name, 2)
             return {}
         if path == "/mgmt/tm/sys" and payload.get("command") == "reboot":
-            self.rebooted_to = payload["options"][0]["volume"]
+            assert "options" not in payload
+            self.rebooted_to = payload["volume"]
             for volume in self.volumes:
                 volume["active"] = volume["name"] == self.rebooted_to
                 if volume["active"]:
                     self.version = volume["version"]
             self.down_until = time.monotonic() + self.reboot_downtime
-            raise RuntimeError("F5 POST /mgmt/tm/sys: connection failed (ConnectionError)")
+            raise requests.ConnectionError("connection reset during reboot")
         if path == "/mgmt/tm/sys/failover":
             self.failovers += 1
             self.failover = "standby"
@@ -345,9 +351,9 @@ def test_apply_upgrades_a_standby_member_end_to_end(profile, options, unit, tmp_
     assert stages[-1] in ("completed", "completed_with_warnings")
     order = [stages.index(s) for s in ("saving_config", "precheck", "ready", "staging", "backing_up", "installing", "reconnecting", "validating")]
     assert order == sorted(order)
-    assert unit.saved == 1 and unit.ucs == ["bigip-a-pre-17.5.1.8.ucs"] and unit.failovers == 0
+    assert unit.saved == 1 and len(unit.ucs) == 1 and unit.failovers == 0
     assert unit.rebooted_to == "HD1.2" and unit.version == "17.5.1.8"
-    assert (tmp_path / "ucs" / "bigip-a-pre-17.5.1.8.ucs").read_bytes() == b"ucs"
+    assert (tmp_path / "ucs" / unit.ucs[0]).read_bytes() == b"ucs"
     plan = reporter.emit.call_args.args[3]["upgrade_plan"]
     assert plan["ucs_backup"]["md5_verified"] and plan["configuration_saved"]
     assert reporter.emit.call_args.kwargs["attachment"] is None or "report" in reporter.emit.call_args.kwargs["attachment"]

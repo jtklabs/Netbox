@@ -10,9 +10,12 @@ row order or counters.
 
 import os
 import re
+import shlex
 import time
+import tempfile
+import uuid
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from .images import download, local_md5  # noqa: F401  (BIG-IP callers use f5.download/f5.local_md5)
 
@@ -76,7 +79,8 @@ def remote_md5(client, filename, directory=IMAGES):
     it is never compared against the profile.
     """
     try:
-        out = bash(client, f"md5sum '{directory}/{filename}'").split()
+        # Cold-cache multi-GB images can exceed the normal REST read timeout.
+        out = bash(client, f"md5sum '{directory}/{filename}'", timeout=max(client.timeout, 120)).split()
     except RuntimeError:
         return None
     return out[0].lower() if out and re.fullmatch(r"[0-9a-fA-F]{32}", out[0]) else None
@@ -158,18 +162,39 @@ def download_ucs(client, name, destination):
             raise RuntimeError(f"UCS download returned HTTP {response.status_code}")
         return response
 
-    probe = get_range(0, 0, 0)
-    total = int(str(probe.headers.get("Content-Range", "0-0/0")).split("/")[-1])
+    def checked_range(response, start, end, total=None):
+        match = re.fullmatch(r"(?:bytes )?(\d+)-(\d+)/(\d+)",
+                             str(response.headers.get("Content-Range", "")))
+        if not match:
+            raise RuntimeError("UCS download has no valid Content-Range")
+        first, last, size = map(int, match.groups())
+        if (size <= 0 or first != start or last != end or last >= size
+                or (total is not None and size != total) or len(response.content) != end - start + 1):
+            raise RuntimeError("UCS download returned an incomplete or inconsistent byte range")
+        return size
+
+    total = checked_range(get_range(0, 0, 0), 0, 0)
     written = 0
+    destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(destination, "wb") as handle:
-        while written < total:
-            response = get_range(written, min(written + MAX_CHUNK, total) - 1, total)
-            handle.write(response.content)
-            if not response.content:
-                raise RuntimeError("UCS download stalled")
-            written += len(response.content)
-    os.chmod(destination, 0o600)
+    temporary = None
+    try:
+        # Private from creation, even if the process has a permissive umask.
+        with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".ucs-", delete=False) as handle:
+            temporary = Path(handle.name)
+            while written < total:
+                end = min(written + MAX_CHUNK, total) - 1
+                response = get_range(written, end, total)
+                checked_range(response, written, end, total)
+                handle.write(response.content)
+                written += len(response.content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Never overwrite a prior recovery archive.
+        os.link(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return written
 
 
@@ -179,21 +204,84 @@ def install(client, image, volume, create):
     payload = {"command": "install", "name": image, "volume": volume}
     if create:
         payload["options"] = [{"create-volume": True}]
-    client.request("POST", "/mgmt/tm/sys/software/image", payload, timeout=max(client.timeout, 120))
+    result = client.request("POST", "/mgmt/tm/sys/software/image", payload, timeout=max(client.timeout, 120))
+    if str(result.get("commandResult", "")).strip():
+        raise RuntimeError(f"software install command failed: {result['commandResult']}")
 
 
 def volume_status(client, volume):
     return str(client.get_json("/mgmt/tm/sys/software/volume/" + quote(volume)).get("status", ""))
 
 
+def volume_info(client, volume):
+    # A newly created volume may not yet have a resource endpoint.
+    return next((v for v in client.get_json("/mgmt/tm/sys/software/volume").get("items", [])
+                 if v.get("name") == volume), {})
+
+
+def copy_configuration(client, source, destination, timeout, poll=5, progress=lambda message: None):
+    """Copy saved configuration to the inactive target; require cpcfg exit zero."""
+    if (source == destination or any(not re.fullmatch(r"HD\d+\.\d+", str(v))
+                                     for v in (source, destination))):
+        raise ValueError("configuration copy requires distinct valid boot volumes")
+    volumes = client.get_json("/mgmt/tm/sys/software/volume").get("items", [])
+    origin = next((v for v in volumes if v.get("name") == source), {})
+    target = next((v for v in volumes if v.get("name") == destination), {})
+    if (str(origin.get("active")).lower() != "true" or str(target.get("active", False)).lower() != "false"
+            or str(target.get("status", "")).lower() != "complete"):
+        raise ValueError("configuration copy requires the original active source and a complete inactive target")
+    # REST's own AsyncContext deadline is shorter than a large cpcfg run.
+    # Launch once, detach all streams, then poll an atomic exit-code file.
+    directory = f"/var/tmp/netops-cpcfg-{uuid.uuid4().hex}"
+    log = directory + "/output.log"
+    script = (f"flock -n /var/run/netops-cpcfg.lock /sbin/cpcfg --source={source} {destination}; "
+              f"rc=$?; printf '%s\\n' \"$rc\" > {directory}/status.tmp; "
+              f"mv {directory}/status.tmp {directory}/status")
+    command = (f"umask 077; mkdir {directory} || exit 1; "
+               f"nohup /bin/bash -c {shlex.quote(script)} </dev/null >{log} 2>&1 & "
+               "printf 'NETOPS_CPCFG_STARTED\\n'")
+
+    def run_script(command):
+        result = client.request("POST", "/mgmt/tm/util/bash",
+                                {"command": "run", "utilCmdArgs": "-c " + shlex.quote(command)})
+        return str(result.get("commandResult", "")).strip()
+
+    deadline = time.monotonic() + timeout
+    progress(f"Starting configuration copy to {destination}; private log on unit: {log}")
+    # An unacknowledged launch is never resent. Recovery can inspect this log.
+    if run_script(command) != "NETOPS_CPCFG_STARTED":
+        raise RuntimeError(f"configuration copy launch was not confirmed; reboot cancelled; inspect {log}")
+    query = (f"if test -f {directory}/status; then printf 'NETOPS_CPCFG_EXIT='; cat {directory}/status; "
+             f"elif test -d {directory}; then printf 'NETOPS_CPCFG_RUNNING\\n'; "
+             "else printf 'NETOPS_CPCFG_MISSING\\n'; fi")
+    while True:
+        output = run_script(query)
+        match = re.fullmatch(r"NETOPS_CPCFG_EXIT=(\d+)", output)
+        if match and match[1] == "0":
+            return {"source": source, "destination": destination, "verified": True, "log_path": log}
+        if output != "NETOPS_CPCFG_RUNNING":
+            raise RuntimeError(f"configuration copy to {destination} failed or completion was not confirmed; "
+                               f"reboot cancelled; inspect {log}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"configuration copy to {destination} exceeded {int(timeout)}s; "
+                               f"it may still be running, reboot cancelled; inspect {log}")
+        progress(f"Configuration copy to {destination} still running; waiting for confirmed completion")
+        time.sleep(min(max(poll, 1), remaining))
+
+
 def reboot_to(client, volume):
+    import requests
     try:
-        client.request("POST", "/mgmt/tm/sys", {"command": "reboot", "options": [{"volume": volume}]},
-                       timeout=max(client.timeout, 60))
-    except RuntimeError:
-        # The management plane drops as the unit reboots; the outcome is
-        # established by reconnecting, never by resending the reboot.
-        pass
+        result = client.request("POST", "/mgmt/tm/sys", {"command": "reboot", "volume": volume},
+                                timeout=max(client.timeout, 60))
+    except (requests.ConnectionError, requests.Timeout):
+        # Only transport loss is ambiguous. HTTP rejections must fail immediately.
+        # Never resend a reboot whose outcome is unknown.
+        return False
+    if str(result.get("commandResult", "")).strip():
+        raise RuntimeError(f"reboot command failed: {result['commandResult']}")
+    return True
 
 
 def failover_to_standby(client):
@@ -222,7 +310,10 @@ def facts(get):
     volumes = get("/mgmt/tm/sys/software/volume").get("items", [])
     active = next((v for v in volumes if str(v.get("active", "")).lower() == "true"), {})
     sync = first_entry(get("/mgmt/tm/cm/sync-status"))
-    license_entries = first_entry(get("/mgmt/tm/sys/license"))
+    license_document = get("/mgmt/tm/sys/license")
+    license_entries = first_entry(license_document)
+    license_unavailable = (str(license_document.get("apiRawValues", {}).get("apiAnonymous", "")).strip()
+                           == "Can't load license, may not be operational")
     system = first_entry(get("/mgmt/tm/sys/version"))
     check = describe(license_entries.get("serviceCheckDate"))
     check = check.replace("/", "-") if isinstance(check, str) else None
@@ -235,6 +326,7 @@ def facts(get):
         "active_volume": active.get("name"), "active_status": active.get("status"),
         "sync_status": describe(sync.get("status")), "sync_color": describe(sync.get("color")),
         "license_service_check_date": check,
+        "license_unavailable": license_unavailable,
     }
 
 
@@ -269,6 +361,69 @@ CONFIG = {
 }
 
 
+ASM_POLICIES = "/mgmt/tm/asm/policies"
+
+
+def waf_policies(get):
+    """Read every page; an unavailable or partial collection is never an empty baseline."""
+    path, seen, rows, identities, expected = ASM_POLICIES, set(), [], set(), None
+    while path:
+        if path in seen or len(seen) >= 10000:
+            raise ValueError("WAF policy pagination did not finish")
+        seen.add(path)
+        document = get(path)
+        items = document.get("items")
+        if not isinstance(items, list):
+            raise ValueError("WAF policy response is missing its items list")
+        if "totalItems" in document:
+            total = document["totalItems"]
+            if not isinstance(total, int) or total < 0 or (expected is not None and total != expected):
+                raise ValueError("WAF policy total changed during collection")
+            expected = total
+        for item in items:
+            if (not isinstance(item, dict) or not item.get("fullPath")
+                    or not isinstance(item.get("active"), bool)
+                    or item.get("enforcementMode") not in {"blocking", "transparent"}):
+                raise ValueError("WAF policy identity or enforcement state is unreadable")
+            identity = item["fullPath"]
+            if identity in identities:
+                raise ValueError("WAF policy collection contains duplicate identities")
+            identities.add(identity)
+            rows.append({key: item[key] for key in ("fullPath", "active", "enforcementMode")})
+        link = document.get("nextLink")
+        if link:
+            parts = urlsplit(link)
+            if parts.path != ASM_POLICIES or parts.fragment:
+                raise ValueError("Unexpected WAF policy pagination path")
+            # Only pass a relative path to our authenticated client; never follow a supplied host.
+            path = parts.path + ("?" + parts.query if parts.query else "")
+        else:
+            path = None
+    if expected is not None and len(rows) != expected:
+        raise ValueError(f"WAF policy collection incomplete: {len(rows)} of {expected}")
+    return rows
+
+
+def collect_waf(client, get, snapshot):
+    snapshot["waf"] = {"provisioned": True, "ready": None, "policy_count": None}
+    try:
+        policies = waf_policies(get)
+        snapshot["tables"]["waf_policies"] = policies
+        snapshot["waf"]["policy_count"] = len(policies)
+    except Exception as exc:
+        snapshot["errors"]["waf_policies"] = str(exc)
+    try:
+        # F5's ASM readiness signal, rather than REST availability or inventory alone.
+        output = bash(client, "perl -MF5::ASMReady -e 'print F5::ASMReady::is_asm_ready() ? 1 : 0'").strip()
+        if output not in {"0", "1"}:
+            raise ValueError("ASM readiness signal is unavailable")
+        snapshot["waf"]["ready"] = output == "1"
+        if output != "1":
+            snapshot["errors"]["waf_ready"] = "ASM is still loading; readiness signal is false"
+    except Exception as exc:
+        snapshot["errors"]["waf_ready"] = str(exc)
+
+
 def collect(client, progress):
     snapshot = {"raw": {}, "tables": {}, "errors": {}, "warnings": {}, "routing": {}, "routing_commands": {}}
 
@@ -299,6 +454,9 @@ def collect(client, progress):
             snapshot["tables"][key] = rows_from_stats(get(path), mapping)
         except Exception as exc:
             snapshot["errors" if (ltm or not needs_ltm) else "warnings"][key] = str(exc)
+    if any(row.get("name") == "asm" and row.get("level") not in (None, "none")
+           for row in snapshot["tables"].get("provision", [])):
+        collect_waf(client, get, snapshot)
     snapshot["metrics"] = {"counts": {key: len(rows) for key, rows in snapshot["tables"].items()}}
     info = snapshot.get("facts", {})
     snapshot["health"] = {"alarms": [], "interface_errors": {}, "failover_state": info.get("failover_state"),

@@ -1,5 +1,6 @@
 """Read NTP source configuration over SSH; optionally bootstrap NetBox intent."""
 from datetime import datetime, timezone
+import ipaddress
 import re
 
 from . import archive
@@ -35,11 +36,36 @@ def interface_name(value):
     return aliases.get(match[1].lower(), match[1]) + match[2]
 
 
-def global_sources(output):
+def source_ip(value):
+    """NTP source addresses must be IP literals, never interface names or DNS."""
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise ValueError('NTP source address must be an IPv4 or IPv6 literal') from None
+
+
+def nxos_source_address(output):
+    addresses = set()
+    for raw in output.splitlines():
+        tokens = raw.split()
+        if tokens[:2] == ['ntp', 'source']:
+            if len(tokens) != 3:
+                raise ValueError('Incomplete NX-OS NTP source address')
+            addresses.add(source_ip(tokens[2]))
+    if len(addresses) > 1:
+        raise ValueError('Conflicting NX-OS NTP source addresses')
+    return next(iter(addresses), None)
+
+
+def global_sources(output, platform=None):
     sources = {}
     for raw in output.splitlines():
         tokens = raw.strip().split()
         if tokens[:2] not in (['ntp', 'source'], ['ntp', 'source-interface'], ['ntp', 'local-interface']):
+            continue
+        if platform == 'cisco_nxos' and tokens[:2] == ['ntp', 'source']:
+            # NX-OS uses `source` for an IP, unlike IOS's interface syntax.
+            nxos_source_address(raw)
             continue
         rest = tokens[2:]
         vrf = '*' if tokens[1] in ('source', 'source-interface') else 'default'
@@ -58,7 +84,8 @@ def source_config(output, platform):
     """Resolve explicit source settings only; never infer a routed egress port."""
     if platform not in PLATFORMS:
         raise ValueError(f'NTP source discovery is not supported for {platform}')
-    globals_, servers = global_sources(output), []
+    globals_, servers = global_sources(output, platform), []
+    global_address = nxos_source_address(output) if platform == 'cisco_nxos' else None
     for raw in output.splitlines():
         tokens = raw.strip().split()
         if tokens[:2] == ['ntp', 'server']:
@@ -83,9 +110,22 @@ def source_config(output, platform):
                 if index + 1 < len(rest) and rest[index + 1].isdigit() and value.isalpha():
                     value += rest[index + 1]
                 source = interface_name(value)
-            servers.append({'server': rest[0], 'vrf': validate_word(vrf, 'NTP VRF'), 'source': source})
+            row = {'server': rest[0], 'vrf': validate_word(vrf, 'NTP VRF'), 'source': source}
+            if 'source-address' in rest[1:]:
+                index = rest.index('source-address', 1) + 1
+                if index >= len(rest):
+                    raise ValueError('Incomplete NTP server source-address')
+                row['source_address'] = source_ip(rest[index])
+            elif global_address:
+                row['source_address'] = global_address
+            servers.append(row)
     if not servers:
         return {'status': 'unconfigured', 'reason': 'No NTP servers configured', 'servers': []}
+    if any(server.get('source_address') for server in servers):
+        # An IP does not identify an interface without an address lookup. Do
+        # not bootstrap a global interface tag that a source IP may override.
+        return {'status': 'ambiguous', 'reason': 'NTP uses an explicit source IP; select its source interface and VRF manually',
+                'servers': servers}
     for server in servers:
         if not server['source']:
             server['source'] = globals_.get(server['vrf'])

@@ -166,6 +166,60 @@ class RunTest(PrestageFixture):
         self.assertEqual(sorted(job.device_name for job in jobs), ['sw1', 'sw2', 'sw3'])
         self.assertEqual({job.profile['image'] for job in jobs}, {'cisco9k_iosxe.17.18.5.SPA.bin'})
 
+    def test_cancelled_jobs_do_not_count_toward_the_interval(self):
+        now = timezone.now()
+        jobs, _ = prestage.run_policy(self.policy, now)
+        UpgradeJob.objects.filter(pk__in=[job.pk for job in jobs]).update(status='cancelled')
+        jobs, summary = prestage.run_policy(self.policy, now + timedelta(hours=1))
+        self.assertEqual({job.device_name for job in jobs}, {'sw1', 'sw3'})
+        self.assertEqual(summary['scheduled'], 2)
+
+    def test_cancelled_retry_does_not_hide_earlier_completed_job(self):
+        now = timezone.now()
+        prestage.run_policy(self.policy, now)
+        UpgradeJob.objects.all().update(status='completed')
+        jobs, _ = prestage.run_policy(self.policy, now + timedelta(hours=1), force=True)
+        UpgradeJob.objects.filter(pk__in=[job.pk for job in jobs]).update(status='cancelled')
+        jobs, summary = prestage.run_policy(self.policy, now + timedelta(hours=2))
+        self.assertEqual(jobs, [])
+        self.assertEqual(summary['reasons'], {'Given this image within the interval': 2})
+
+    def test_forced_run_restarts_interval_from_new_jobs(self):
+        now = timezone.now()
+        prestage.run_policy(self.policy, now)
+        UpgradeJob.objects.all().update(status='completed')
+        forced_at = now + timedelta(hours=12)
+        jobs, summary = prestage.run_policy(self.policy, forced_at, force=True)
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual({job.scheduled_at for job in jobs}, {forced_at})
+        self.policy.refresh_from_db()
+        self.assertEqual(self.policy.last_run_at, forced_at)
+        self.assertEqual(self.policy.last_summary, summary)
+        UpgradeJob.objects.all().update(status='completed')
+        # The original window has elapsed, but the manual run reset it.
+        jobs, _ = prestage.run_policy(self.policy, now + timedelta(hours=25))
+        self.assertEqual(jobs, [])
+        jobs, _ = prestage.run_policy(self.policy, forced_at + timedelta(hours=24, seconds=1))
+        self.assertEqual(len(jobs), 2)
+
+    def test_forced_run_preserves_all_busy_states_and_exemptions(self):
+        from netbox_discovery.upgrade_choices import ACTIVE, WAITING
+        now = timezone.now()
+        jobs, _ = prestage.run_policy(self.policy, now)
+        ids = [job.pk for job in jobs]
+        DeviceSoftware.objects.filter(device=self.devices['sw1']).update(exempt=True)
+        for status in ACTIVE + WAITING:
+            with self.subTest(status=status):
+                UpgradeJob.objects.filter(pk__in=ids).update(status=status)
+                new_jobs, summary = prestage.run_policy(self.policy, now + timedelta(hours=1), force=True)
+                self.assertEqual(new_jobs, [])
+                self.assertEqual(summary['reasons'], {
+                    'Marked do not upgrade in Lifecycle': 1,
+                    'Already has a queued or active upgrade job': 1})
+                self.assertEqual(summary['current'], 1)
+                self.assertEqual(set(UpgradeJob.objects.values_list('status', flat=True)), {status})
+                self.assertEqual(set(UpgradeJob.objects.values_list('scheduled_at', flat=True)), {now})
+
     def test_disabled_policies_do_not_run(self):
         self.policy.enabled = False
         self.policy.save()
@@ -229,6 +283,20 @@ class PermissionTest(PrestageFixture):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()['C9350-48P']['scheduled'], 2)
 
+    def test_api_manual_runs_bypass_interval_but_not_busy_devices(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        prestage.run_policy(self.policy)
+        for data in ({'policy': self.policy.pk}, {}):
+            with self.subTest(data=data):
+                UpgradeJob.objects.all().update(status='completed')
+                url = reverse('plugins-api:netbox_discovery-api:prestagepolicy-run')
+                response = client.post(url, data, format='json')
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(response.json()['C9350-48P']['scheduled'], 2)
+                response = client.post(url, data, format='json')
+                self.assertEqual(response.json()['C9350-48P']['scheduled'], 0)
+
 
 class ViewTest(PrestageFixture):
     def test_delete_existing_policy_through_browser(self):
@@ -265,3 +333,22 @@ class ViewTest(PrestageFixture):
         response = client.post(reverse('plugins:netbox_discovery:prestagepolicy_run_all'))
         self.assertEqual(response.status_code, 302)
         self.assertEqual(UpgradeJob.objects.filter(operation='stage').count(), 2)
+
+    def test_both_run_now_buttons_bypass_interval_and_preserve_running_job(self):
+        client = Client()
+        client.force_login(self.user)
+        prestage.run_policy(self.policy)
+        urls = [reverse('plugins:netbox_discovery:prestagepolicy_run', args=[self.policy.pk]),
+                reverse('plugins:netbox_discovery:prestagepolicy_run_all')]
+        busy = UpgradeJob.objects.get(device=self.devices['sw3'])
+        for url in urls:
+            with self.subTest(url=url):
+                UpgradeJob.objects.exclude(pk=busy.pk).update(status='completed')
+                UpgradeJob.objects.filter(pk=busy.pk).update(status='running')
+                count = UpgradeJob.objects.count()
+                response = client.post(url)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(UpgradeJob.objects.count(), count + 1)
+                self.assertEqual(UpgradeJob.objects.latest('pk').device_id, self.devices['sw1'].pk)
+                busy.refresh_from_db()
+                self.assertEqual(busy.status, 'running')

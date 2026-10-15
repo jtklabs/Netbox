@@ -410,7 +410,8 @@ def settle(emit, options):
         emit("converging", f"Initial settling time remaining: {remaining}s")
 
 
-def converge(emit, options, before, plan, reporter, host, collect_after, extra_findings):
+def converge(emit, options, before, plan, reporter, host, collect_after, extra_findings,
+             *, compare_snapshots=None, on_validated=None):
     """Compare fresh baselines until two consecutive clean passes, or the deadline.
 
     Every event says why validation has not passed: the checks that differ,
@@ -421,21 +422,32 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
         attempt += 1
         after = collect_after()
         skip_running_config = plan.get("approved_profile", {}).get("skip_running_config_check", False)
-        findings = checks.compare(before, after, skip_running_config_check=skip_running_config) + extra_findings(after)
+        compare = compare_snapshots or checks.compare
+        findings = compare(before, after, skip_running_config_check=skip_running_config) + extra_findings(after)
         errors = [f for f in findings if f["severity"] == "error"]
         consecutive = 0 if errors else consecutive + 1
         reasons = checks.describe_findings(errors)
         seconds_left = max(0, int(deadline - time.monotonic()))
+        waf_summary, waf_message = {}, ""
+        if before.get("waf", {}).get("provisioned"):
+            observed = after.get("waf", {})
+            waf_summary = {"expected_policies": before["waf"].get("policy_count"),
+                           "observed_policies": observed.get("policy_count"), "ready": observed.get("ready")}
+            waf_message = (f"; WAF policies {waf_summary['observed_policies'] if waf_summary['observed_policies'] is not None else 'unknown'}"
+                           f"/{waf_summary['expected_policies']}, ASM ready: {waf_summary['ready']}; {seconds_left}s left")
         clean_message = "enabled checks match baseline; running-config matching skipped" if skip_running_config else "no differences from baseline"
         emit("validating", f"Comparison {attempt}: " + (clean_message if not errors
-                                                        else f"{len(errors)} check(s) differ from baseline"),
+                                                        else f"{len(errors)} check(s) differ from baseline") + waf_message,
              {"post": after, "findings": findings,
               "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
                                    "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
                                    "seconds_remaining": seconds_left,
+                                   **({"waf": waf_summary} if waf_summary else {}),
                                    "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})
         if consecutive >= 2:
+            if on_validated:
+                after, findings = on_validated(after, findings)
             status = "completed_with_warnings" if findings else "completed"
             fields, attachment = comparison_report(reporter, host, before, after, findings, plan, status)
             message = ("Target installed; enabled checks passed; running-config matching skipped"
@@ -450,10 +462,10 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
             return Result(host=host, result={"findings": findings}, failed=True, changed=True)
         if errors:
             emit("converging", f"Still differs from baseline after comparison {attempt}: {reasons}. "
-                               f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails")
+                               f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails" + waf_message)
         else:
             emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
-                               f"({seconds_left}s left)")
+                               f"({seconds_left}s left)" + waf_message)
         time.sleep(options.poll_interval)
 
 

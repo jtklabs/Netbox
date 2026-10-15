@@ -29,10 +29,34 @@ class DeviceJobScheduleTest(UpgradeFixture, TestCase):
         response = self.browser.get(self.url)
         self.assertContains(response, 'type="datetime-local"', count=2)
         self.assertContains(response, 'name="time_zone"')
+        self.assertContains(response, 'data-schedule-now')
+        self.assertContains(response, 'data-browser-time-zone="true"')
         for name in ('regions', 'tenants', 'sites', 'roles', 'platforms', 'models', 'device_tags', 'devices'):
             self.assertContains(response, f'name="{name}"')
         response = self.browser.get(reverse('plugins:netbox_discovery:upgradejob_list'))
         self.assertContains(response, 'Upgrade Jobs')
+
+    @override_settings(TIME_ZONE='UTC')
+    def test_new_jobs_default_to_new_york_without_browser_detection(self):
+        form = ScheduleForm()
+        self.assertEqual(form.initial['time_zone'], 'America/New_York')
+        form = ScheduleForm(self.form_data(time_zone=''))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data['scheduled_at'].astimezone(dt_timezone.utc),
+                         datetime(2030, 7, 8, 14, 30, tzinfo=dt_timezone.utc))
+
+    def test_browser_default_never_overwrites_posted_or_prefilled_times(self):
+        data = self.form_data(time_zone='America/Chicago')
+        response = self.browser.post(self.url, data)
+        self.assertContains(response, 'data-browser-time-zone="false"')
+        self.assertEqual(response.context['form']['time_zone'].value(), 'America/Chicago')
+        self.assertEqual(response.context['form']['scheduled_at'].value(), data['scheduled_at'])
+        data['profile'] = 'invalid'
+        response = self.browser.post(self.url, data)
+        self.assertContains(response, 'data-browser-time-zone="false"')
+        self.assertEqual(response.context['form']['time_zone'].value(), 'America/Chicago')
+        explicit = ScheduleForm(initial={'time_zone': 'UTC'})
+        self.assertFalse(explicit.browser_time_zone_default)
 
     def test_selected_zone_becomes_correct_utc_in_preview_and_saved_job(self):
         response = self.browser.post(self.url, self.form_data())
@@ -125,4 +149,5 @@ class DeviceJobScheduleTest(UpgradeFixture, TestCase):
         form = response.context['form']
         self.assertIsInstance(form.initial['scheduled_at'], datetime)
         self.assertTrue(timezone.is_naive(form.initial['scheduled_at']))
+        self.assertFalse(form.browser_time_zone_default)
         self.assertContains(response, 'type="datetime-local"', count=2)

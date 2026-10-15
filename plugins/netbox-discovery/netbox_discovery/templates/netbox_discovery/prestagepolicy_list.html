@@ -2,7 +2,7 @@
 {% block extra_controls %}
   {% if perms.netbox_discovery.apply_upgradejob %}
   <form method="post" action="{% url 'plugins:netbox_discovery:prestagepolicy_run_all' %}" class="d-inline">{% csrf_token %}
-    <button class="btn btn-secondary"><i class="mdi mdi-play"></i> Run enabled policies now</button>
+    <button class="btn btn-secondary" title="Bypass the repeat interval and restart it for scheduled devices; queued and active jobs are skipped."><i class="mdi mdi-play"></i> Run enabled policies now</button>
   </form>
   {% endif %}
 {% endblock %}

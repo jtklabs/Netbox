@@ -1,6 +1,21 @@
 # Schedule IOS XE work from NetBox
 
-NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing in NetBox connects to a switch. The worker lives alongside `configure.py`, shares its `.env`, AWS Secrets Manager login, and upgrade engine, and exits after one bounded batch.
+NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing in NetBox connects to a switch. The worker lives alongside `configure.py`, shares its `.env`, AWS Secrets Manager login, and upgrade engine, and exits when its running jobs finish and a queue check finds no eligible work.
+
+`--workers` limits concurrently executing jobs. While a slot is free, the worker
+checks for newly scheduled jobs every `--poll-interval` seconds (30 by default);
+it also checks immediately when a running job finishes. Each claim requests only
+the available slots. NetBox still enforces device locks, group limits, dependency
+ordering and scheduled start windows. Overlapping cron invocations exit while
+the current worker holds the poller lock.
+
+Progress for active jobs remains owned by those jobs. Before claiming more work,
+the worker replays saved progress only for jobs that are no longer running. A
+queue outage pauses new claims while active jobs continue their recovery and
+reporting. Replacing the scheduler file does not change an already running
+process: let its batch finish, and the next cron invocation will load the new
+scheduler. Do not remove its lock or start a worker with a different state
+directory to bypass that handover.
 
 ## In NetBox
 
@@ -144,8 +159,12 @@ it on every device without waiting out the interval.
 
 The policy page lists what the next run would do for every device of the
 model, and the result of the last run. **Run now** on a policy, or **Run
-enabled policies now** on the list, runs straight away, for example after
-changing a standard. Otherwise the NetBox worker runs every enabled policy
+enabled policies now** on the list, runs straight away and bypasses the
+repeat interval. Each newly scheduled job starts a fresh interval from the
+time of that manual run. Cancelled jobs do not count toward the interval;
+an earlier non-cancelled job can still count. Manual runs still skip queued
+or active devices, devices already running the preferred version, and
+devices marked do not upgrade. Otherwise the NetBox worker runs every enabled policy
 every `prestage_interval_minutes` (default 60; see
 [Plugin settings](#plugin-settings)). Restart the worker container after
 deploying so it picks up the schedule.
@@ -266,6 +285,12 @@ jobs to schedule and a worker running with `--apply`, and each device must be
 active with a primary IP in NetBox.
 
 ## Redundancy groups, dependencies and holds
+
+The jobs table's **Progress / waiting reason** column and each pending job's
+detail page explain why it has not started. Dependency and group-capacity
+waits link to the blocking jobs you can view, including their current stage
+and groups. These explanations are recalculated when the page is refreshed;
+they do not change the queue or release its safety gates.
 
 Two switches in an HSRP pair, the A and B closets on one floor, or the F5
 units behind one load balancer must not be upgraded at the same time, and a
@@ -578,7 +603,7 @@ There is **no automatic replay of a claimed upgrade**:
 - Failed post-validation, ambiguous install outcomes, and errors after apply authorization also require recovery. Inspect the switch and its archive, stop any surviving worker, then use **Record recovery and release device**, describing the verified state. This releases the scheduling lock; it sends no rollback command.
 - Pending and held jobs can be cancelled. Active installs are not interrupted by a UI cancellation.
 
-Before changes, the NetBox ready acknowledgement and any configured webhook must succeed. Afterwards, the upgrade engine continues recovery through a callback outage. Progress is saved locally before delivery and retried on the next cron tick, using the same job/sequence for deduplication. A start authorization is never put in the deferred-delivery spool. A lost claim response is not retried; those claims expire without device changes.
+Before changes, the NetBox ready acknowledgement and any configured webhook must succeed. Afterwards, the upgrade engine continues recovery through a callback outage. Progress is saved locally before delivery and retried on a later queue check after the job finishes, using the same job/sequence for deduplication. A start authorization is never put in the deferred-delivery spool. Jobs from a lost claim response are never started or replayed; those claims expire without device changes.
 
 If progress remains undeliverable, the poller reports an error and claims no additional work until delivery succeeds. Permission changes or manually closing a job can make old reports permanently unreportable: inspect the corresponding archive and NetBox state before moving those outbox files aside. Never replay a start command manually from the spool. If the entire remote is down, the detail page warns about a stale heartbeat and allows verified recovery of a job that had started; stored stale status transitions occur when its worker next checks in. The API also exposes `heartbeat_stale` and `needs_recovery` without waiting for another check-in.
 
@@ -602,7 +627,7 @@ Redundancy groups and dependencies are ordinary NetBox REST resources under `/ap
 - `source`, `key` and `stale` are read-only on both; anything created through the API is manual.
 - `POST upgrade-groups/refresh/` with an empty body runs the same refresh as the button and returns `{"groups", "dependencies", "stale_groups", "stale_dependencies"}`. It needs `change` on redundancy groups and a write-enabled token.
 
-Prestage policies are under `/api/plugins/discovery/prestage-policies/`: `device_type` (id), `enabled`, `interval_hours`, `window_hours`, `minimum_free_bytes`, `description`, `comments`, `tags`; `last_run_at` and `last_summary` are read-only. Filters: `device_type_id`, `manufacturer_id`, `enabled` and `q`. `POST prestage-policies/run/` with an empty body runs every enabled policy, or with `{"policy": <id>}` one policy, and returns each model's summary. Writes and runs need `apply` on upgrade jobs and a write-enabled token. `GET upgrade-jobs/?operation=stage&device_type_id=<id>` lists the staging jobs for a model.
+Prestage policies are under `/api/plugins/discovery/prestage-policies/`: `device_type` (id), `enabled`, `interval_hours`, `window_hours`, `minimum_free_bytes`, `description`, `comments`, `tags`; `last_run_at` and `last_summary` are read-only. Filters: `device_type_id`, `manufacturer_id`, `enabled` and `q`. `POST prestage-policies/run/` with an empty body runs every enabled policy, or with `{"policy": <id>}` one policy, and returns each model's summary. Like the Run now buttons, this bypasses the repeat interval and restarts it for newly scheduled devices, while retaining the queued/active-job and other eligibility checks. Writes and runs need `apply` on upgrade jobs and a write-enabled token. `GET upgrade-jobs/?operation=stage&device_type_id=<id>` lists the staging jobs for a model.
 
 ```bash
 # An F5 pair that must go one at a time (members are NetBox device ids)

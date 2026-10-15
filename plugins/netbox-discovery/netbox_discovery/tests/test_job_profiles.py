@@ -15,7 +15,7 @@ from users.models import ObjectPermission
 
 from netbox_discovery import upgrade_queue as queue
 from netbox_discovery.models import DeviceTypeProfile, JobProfile, UpgradeJob
-from netbox_discovery.profile_views import JobProfileForm, UPGRADE_TEMPLATE
+from netbox_discovery.profile_views import DeviceTypeProfileForm, JobProfileForm, UPGRADE_TEMPLATE
 from .test_upgrades import UpgradeFixture, PROFILE
 
 
@@ -450,3 +450,141 @@ class JobProfileTest(UpgradeFixture, TestCase):
         response = self.client.patch(url, {'upgrade_profile': profile.pk, 'replace_existing': True}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(profile.resolved_plan()['models'], [self.device.device_type.model])
+
+    def test_model_assignment_form_creates_assignment(self):
+        dtype = DeviceType.objects.create(manufacturer=self.device.device_type.manufacturer,
+                                         model='New model', slug='new-model')
+        form = DeviceTypeProfileForm({'device_type': dtype.pk, 'upgrade_profile': self.upgrade.pk})
+        self.assertTrue(form.is_valid(), form.errors)
+        assignment = form.save()
+        self.assertEqual(assignment.device_type_id, dtype.pk)
+        self.assertEqual(assignment.upgrade_profile_id, self.upgrade.pk)
+        self.assertIsNone(assignment.remediation_profile_id)
+
+    def test_model_assignment_form_replacement_requires_confirmation(self):
+        profile = JobProfile.objects.create(name='Replacement upgrade', kind='upgrade', plan=PROFILE)
+        data = {'device_type': self.device.device_type_id, 'upgrade_profile': profile.pk,
+                'remediation_profile': self.remediation.pk}
+        form = DeviceTypeProfileForm(data, instance=self.assignment)
+        self.assertFalse(form.is_valid())
+        self.assertIn('Replace existing assignments', str(form.errors))
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.upgrade_profile_id, self.upgrade.pk)
+        form = DeviceTypeProfileForm({**data, 'replace_existing': True}, instance=self.assignment)
+        self.assertTrue(form.is_valid(), form.errors)
+        saved = form.save()
+        self.assertEqual(saved.upgrade_profile_id, profile.pk)
+        self.assertEqual(saved.remediation_profile_id, self.remediation.pk)
+
+    def test_model_assignment_post_returns_duplicate_validation(self):
+        from django.test import Client
+        client = Client()
+        client.force_login(self.user)
+        url = reverse('plugins:netbox_discovery:devicetypeprofile_add')
+        response = client.post(f'{url}?upgrade_profile={self.upgrade.pk}',
+                               {'device_type': self.device.device_type_id, 'upgrade_profile': self.upgrade.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('device_type', response.context['form'].errors)
+        self.assertEqual(DeviceTypeProfile.objects.count(), 1)
+
+    def test_model_assignment_form_missing_fields_returns_validation(self):
+        form = DeviceTypeProfileForm({})
+        self.assertFalse(form.is_valid())
+        self.assertIn('device_type', form.errors)
+
+    def test_assign_to_model_can_replace_either_profile_without_clearing_other_fields(self):
+        from django.test import Client
+        from extras.models import Tag
+        browser = Client()
+        browser.force_login(self.user)
+        tag = Tag.objects.create(name='Keep assignment tag', slug='keep-assignment-tag')
+        self.assignment.description = 'Keep description'
+        self.assignment.comments = 'Keep comments'
+        self.assignment.save()
+        self.assignment.tags.add(tag)
+        url = reverse('plugins:netbox_discovery:devicetypeprofile_add')
+        for kind, field, other_field, plan in (
+            ('upgrade', 'upgrade_profile', 'remediation_profile', PROFILE),
+            ('remediate', 'remediation_profile', 'upgrade_profile', self.remediation.plan),
+        ):
+            with self.subTest(kind=kind):
+                self.assignment.refresh_from_db()
+                other_id = getattr(self.assignment, other_field + '_id')
+                profile = JobProfile.objects.create(name=f'Replace {kind} from add', kind=kind, plan=plan)
+                response = browser.post(url + f'?{field}={profile.pk}', {
+                    'device_type': self.device.device_type_id, field: profile.pk,
+                    other_field: '', 'description': '', 'comments': '', 'replace_existing': 'on',
+                })
+                self.assertEqual(response.status_code, 302,
+                                 response.context['form'].errors if response.context else None)
+                self.assignment.refresh_from_db()
+                self.assertEqual(DeviceTypeProfile.objects.count(), 1)
+                self.assertEqual(getattr(self.assignment, field + '_id'), profile.pk)
+                self.assertEqual(getattr(self.assignment, other_field + '_id'), other_id)
+                self.assertEqual(self.assignment.description, 'Keep description')
+                self.assertEqual(self.assignment.comments, 'Keep comments')
+                self.assertEqual(list(self.assignment.tags.values_list('pk', flat=True)), [tag.pk])
+        self.assertFalse(UpgradeJob.objects.exists())
+
+    def test_assign_to_model_replacement_requires_change_permission(self):
+        from django.test import Client
+        user = get_user_model().objects.create_user('assignment-add-only')
+        permission = ObjectPermission.objects.create(name='Add but do not change assignments', actions=['view', 'add'])
+        permission.object_types.add(ContentType.objects.get_for_model(DeviceTypeProfile))
+        permission.users.add(user)
+        browser = Client()
+        browser.force_login(user)
+        profile = JobProfile.objects.create(name='Forbidden replacement', kind='upgrade', plan=PROFILE)
+        response = browser.post(reverse('plugins:netbox_discovery:devicetypeprofile_add'), {
+            'device_type': self.device.device_type_id, 'upgrade_profile': profile.pk, 'replace_existing': 'on',
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.upgrade_profile_id, self.upgrade.pk)
+
+    def test_assign_to_model_replacement_honors_object_change_restrictions(self):
+        from django.test import Client
+        user = get_user_model().objects.create_user('restricted-assignment-editor')
+        permission = ObjectPermission.objects.create(name='Change a different assignment', actions=['view', 'change'],
+                                                     constraints={'pk': self.assignment.pk + 1000})
+        permission.object_types.add(ContentType.objects.get_for_model(DeviceTypeProfile))
+        permission.users.add(user)
+        browser = Client()
+        browser.force_login(user)
+        response = browser.post(reverse('plugins:netbox_discovery:devicetypeprofile_add'), {
+            'device_type': self.device.device_type_id, 'upgrade_profile': self.upgrade.pk,
+            'replace_existing': 'on',
+        })
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(DeviceTypeProfile.objects.count(), 1)
+
+    def test_job_profile_editor_replaces_upgrade_and_standards_assignments(self):
+        from django.test import Client
+        browser = Client()
+        browser.force_login(self.user)
+        for kind, field, other_field, plan, settings in (
+            ('upgrade', 'upgrade_profile', 'remediation_profile', PROFILE,
+             {'upgrade_yaml': yaml.safe_dump(PROFILE)}),
+            ('remediate', 'remediation_profile', 'upgrade_profile', self.remediation.plan,
+             {'features': ['ntp', 'syslog'], 'remediation_mode': 'add'}),
+        ):
+            with self.subTest(kind=kind):
+                self.assignment.refresh_from_db()
+                other_id = getattr(self.assignment, other_field + '_id')
+                target = JobProfile.objects.create(name=f'Editor replacement {kind}', kind=kind, plan=plan)
+                url = reverse('plugins:netbox_discovery:jobprofile_edit', args=[target.pk])
+                self.assertContains(browser.get(url), 'Replace existing assignments')
+                data = {'name': target.name, 'kind': kind, 'device_types': [self.device.device_type_id],
+                        'replace_existing': 'on', **settings}
+                response = browser.post(url, data)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'Already assigned:')
+                confirmation = response.context['form']['assignment_confirmation'].value()
+                self.assertTrue(confirmation)
+                response = browser.post(url, {**data, 'assignment_confirmation': confirmation})
+                self.assertEqual(response.status_code, 302,
+                                 response.context['form'].errors if response.context else None)
+                self.assignment.refresh_from_db()
+                self.assertEqual(getattr(self.assignment, field + '_id'), target.pk)
+                self.assertEqual(getattr(self.assignment, other_field + '_id'), other_id)
+        self.assertFalse(UpgradeJob.objects.exists())

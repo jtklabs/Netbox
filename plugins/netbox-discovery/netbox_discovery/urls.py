@@ -1,4 +1,5 @@
 from django.urls import path
+from .upgrade_backups import UpgradeBackupDownloadView
 from netbox.views.generic import ObjectChangeLogView
 
 from netbox_discovery import views
@@ -158,6 +159,7 @@ urlpatterns += [
     path('upgrades/bulk-cancel/', upgrade_views.UpgradeBulkActionView.as_view(action='cancel'), name='upgradejob_bulk_cancel'),
     path('upgrades/bulk-delete/', upgrade_views.UpgradeBulkActionView.as_view(action='delete'), name='upgradejob_bulk_delete'),
     path('upgrades/<int:pk>/', upgrade_views.UpgradeJobView.as_view(), name='upgradejob'),
+    path('upgrades/<int:pk>/ucs/', UpgradeBackupDownloadView.as_view(), name='upgradejob_ucs'),
     path('upgrades/<int:pk>/edit/', upgrade_views.UpgradeJobEditView.as_view(), name='upgradejob_edit'),
     path('upgrades/<int:pk>/cancel/', upgrade_views.UpgradeCancelView.as_view(), name='upgradejob_cancel'),
     path('upgrades/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradejob_changelog',

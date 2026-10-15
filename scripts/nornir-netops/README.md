@@ -781,11 +781,25 @@ tool does not model still goes away cleanly. IOS/EOS global source commands,
 
 NX-OS uses `copy running-config startup-config` only after successful
 verification. A selected source updates the global source-interface without
-rebuilding unchanged servers; with no selection the current global source is
-preserved. Its CLI grammar follows the
+rebuilding unchanged servers and removes any explicit `ntp source <IP>`
+override. With no selection, the current global interface or IP source is
+preserved, including during basic server-list replacement. Source-IP settings
+are valid configuration; discovery records them without guessing an interface
+tag. Its CLI grammar follows the
 [NX-OS 10.3 NTP guide](https://www.cisco.com/c/en/us/td/docs/dcn/nx-os/nexus9000/103x/configuration/system-management/cisco-nexus-9000-series-nx-os-system-management-configuration-guide-103x/m-configuring-ntp-10x.html).
 Firmware-dependent authentication key lengths and algorithms require a device
 pilot before fleet rollout.
+
+Arista audit includes `no ntp`. Remediation enables NTP when disabled, verifies
+enablement before saving, and records the original disabled state for rollback.
+If an interface is selected, a server-level `source-address` override is reset
+before applying that interface. With no interface selection, existing source IPs
+are preserved during server updates. Discovery reports explicit source IPs for
+manual interface selection instead of assuming the global interface is used.
+EOS permits one NTP VRF: add mode rejects a different VRF before writing;
+`--replace` removes old-VRF servers before adding the new ones. These behaviors
+follow the [EOS NTP documentation](https://www.arista.com/en/um-eos/eos-system-clock-and-time-protocols)
+and [command reference](https://www.arista.com/en/um-eos/eos-switch-administration-commands).
 
 ### Juniper SRX and MX
 

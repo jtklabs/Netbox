@@ -4,6 +4,12 @@
 <li class="breadcrumb-item">{% if object.operation == 'remediate' or object.operation == 'audit_config' %}<a href="{% url 'plugins:netbox_discovery:standardsjob_list' %}">Standards Jobs</a>{% else %}<a href="{% url 'plugins:netbox_discovery:upgradejob_list' %}">Upgrade Jobs</a>{% endif %}</li>
 {% endblock %}
 {% block content %}
+{% if waiting %}
+<div class="alert alert-warning" role="status">
+  {% include 'netbox_discovery/inc/queue_wait.html' %}
+  <div class="mt-2">The poller rechecks automatically. Refresh this page to see the current waiting reason.</div>
+</div>
+{% endif %}
 {% if object.status == 'failed' or object.status == 'recovery_required' %}
 <div class="alert alert-danger" role="alert"><strong>{{ object.get_status_display }}:</strong> {{ object.message|default:'No failure detail was reported by the worker.' }}</div>
 {% endif %}
@@ -78,6 +84,7 @@
   </tbody></table>
   {% endif %}
 </div><div class="col-lg-6">
+  {% if ucs_backups %}{% include 'netbox_discovery/inc/ucs_backups.html' with backups=ucs_backups %}{% endif %}
   {% include 'netbox_compliance/inc/feature_findings.html' with checks=object.summary.compliance_details %}
   <div class="card"><h5 class="card-header">Validation summary</h5><pre class="card-body">{{ summary_text }}</pre></div>
   <div class="card"><h5 class="card-header">Progress</h5><div class="card-body">

@@ -456,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
                               formatter_class=HelpFormatter)
     upgrade_arguments(upgrade)
     poll_upgrades = subs.add_parser("upgrade-poll", parents=[_discover_arguments()],
-                                   help="claim due NetBox upgrade jobs once (for cron)",
+                                   help="run due NetBox jobs, refilling free slots until idle (for cron)",
                                    formatter_class=HelpFormatter)
     upgrade_arguments(poll_upgrades, scheduled=True)
     poll_upgrades.add_argument("--queue-state-dir", default=os.environ.get("NETOPS_UPGRADE_QUEUE_STATE_DIR"),

@@ -20,6 +20,7 @@ scripts/f5/devices.csv
 scripts/ios/.env
 *.pyc
 __pycache__/
+*.egg-info/
 .DS_Store
 # SNMP inventory scanner — real config, credentials and inventory stay local
 scripts/snmp-inventory/snmp-inventory.conf

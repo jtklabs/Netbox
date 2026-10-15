@@ -75,7 +75,7 @@ def candidates(policy):
             .prefetch_related('tags').order_by('name'))
 
 
-def plan(policy, now=None):
+def plan(policy, now=None, *, force=False):
     """One row per device: what the next run does with it, and why.
 
     Rows are dicts with device, action (schedule, current or skip), detail and,
@@ -92,9 +92,11 @@ def plan(policy, now=None):
     devices = list(candidates(policy))
     # Newest first, so the first match per device and image is the latest.
     recent_jobs = {}
-    for job in UpgradeJob.objects.filter(device__in=devices, operation__in=(STAGE, 'upgrade'),
-                                         scheduled_at__gte=since).order_by('-scheduled_at'):
-        recent_jobs.setdefault((job.device_id, job.profile.get('image')), job)
+    if not force:
+        for job in (UpgradeJob.objects.filter(device__in=devices, operation__in=(STAGE, 'upgrade'),
+                                              scheduled_at__gte=since)
+                    .exclude(status='cancelled').order_by('-scheduled_at')):
+            recent_jobs.setdefault((job.device_id, job.profile.get('image')), job)
     rows = []
     for device in devices:
         row = {'device': device, 'action': SKIP, 'detail': ''}
@@ -163,11 +165,15 @@ def summarize(rows):
 
 
 @transaction.atomic
-def run_policy(policy, now=None):
-    """Schedule the staging jobs one policy calls for now, in one batch."""
+def run_policy(policy, now=None, *, force=False):
+    """Schedule a batch; manual runs bypass only the per-image repeat interval.
+
+    New jobs' scheduled_at restarts that interval. Busy devices are still
+    skipped, and their existing jobs and interval are never changed.
+    """
     now = now or timezone.now()
     policy = PrestagePolicy.objects.select_for_update().get(pk=policy.pk)
-    rows = plan(policy, now)
+    rows = plan(policy, now, force=force)
     batch = uuid.uuid4()
     jobs = []
     for row in rows:
@@ -191,12 +197,12 @@ def run_policy(policy, now=None):
     return jobs, summary
 
 
-def run(now=None, logger=None):
+def run(now=None, logger=None, *, force=False):
     """Every enabled policy; one policy's failure does not stop the others."""
     results = {}
     for policy in PrestagePolicy.objects.filter(enabled=True).select_related('device_type'):
         try:
-            jobs, summary = run_policy(policy, now)
+            jobs, summary = run_policy(policy, now, force=force)
         except Exception as exc:
             summary = {'error': str(exc)}
             PrestagePolicy.objects.filter(pk=policy.pk).update(last_run_at=now or timezone.now(), last_summary=summary)

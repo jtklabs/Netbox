@@ -565,10 +565,41 @@ Order of operations under `--apply`: `save sys config`; baseline; image
 verified in `/shared/images` or uploaded from `image_source` and md5-checked
 on the unit (an existing file with a different checksum is never overwritten);
 the `ready` gate; a UCS archive saved on the unit as
-`<device>-pre-<target>.ucs` and, with `--ucs-dir` or `NETOPS_UCS_DIR`,
-downloaded and checksum-verified (set `NETOPS_F5_UCS_PASSPHRASE` to encrypt
-it; UCS files contain private keys); then install to the boot volume, reboot
-to it, reconnect, the same convergence loop and the comparison report.
+`<device>-pre-<target>-<UTC timestamp>-<unique suffix>.ucs`, then downloaded
+to `--ucs-dir` / `NETOPS_UCS_DIR` (default `<project>/ucs-backups`). Downloads
+use private temporary files, validate every byte range and require a matching
+checksum from the unit before installation can proceed. A missing checksum or
+failed download stops the upgrade; prior backups are never overwritten. The
+job records the worker path, size and verification result (set `NETOPS_F5_UCS_PASSPHRASE` to encrypt
+it; UCS files contain private keys); then install to the boot volume, copy the
+saved configuration to it with `cpcfg`, reboot to it, reconnect, the same
+convergence loop and the comparison report.
+
+A complete inactive volume with the exact target version **and build** is
+reused explicitly; sending the same install request again does not guarantee
+a fresh installation. Other volumes must finish installing that version/build
+before proceeding: a stale `complete` status for older software is insufficient.
+Both paths copy configuration from the original active volume with
+`cpcfg --source=<active> <target>` and require a confirmed zero exit status.
+The copy runs as a detached, locked process, with short REST calls polling an
+atomic exit-code file. This avoids BIG-IP's REST AsyncContext timeout during
+long copies. Progress records its private `/var/tmp/netops-cpcfg-*/output.log`
+on the device. A lost launch acknowledgment is never retried, and reaching the
+copy deadline leaves the operation for recovery without rebooting or killing
+a potentially active copy.
+Copy failures or unknown outcomes stop before rebooting. With standalone
+connection draining enabled, the worker disables and saves the VIPs before
+installation and configuration copy, so the target boots disabled. The original
+boot volume remains the recovery location, but its saved VIPs are also disabled;
+restore their recorded original states after validating a rollback, or restore
+the pre-upgrade UCS.
+
+Reboot uses `POST /mgmt/tm/sys` with `command` and `volume` as top-level
+properties. HTTP errors fail immediately and trigger VIP restoration when
+needed. A transport disconnect or timeout is ambiguous, so the worker checks
+the boot volume without resending the reboot. Reconnect progress includes the
+observed version and active volume when the device is reachable; long boot and
+WAF validation deadlines remain unchanged.
 `--stage-only` uploads and verifies the image only. A dry run reads
 everything and writes nothing. An `image_source` URL is downloaded to the
 worker's image cache first (`--image-cache` or `NETOPS_IMAGE_CACHE`, default
@@ -584,6 +615,15 @@ before installing, so upgrade the standby first and schedule the active unit
 afterwards. Reboots are not coordinated across a pair beyond that check; a
 standalone unit is upgraded with the outage that implies.
 
+The explicit BIG-IP response `Can't load license, may not be operational`
+is recorded in the baseline. When no license eligibility date is required by
+the profile, that same pre-existing condition after reboot is reported as a
+warning, not a new failure that waits until the validation deadline. Losing a
+previously readable license remains an error. Unknown license responses block
+the upgrade, and a profile requiring `license_check_date` still blocks a unit
+whose date is unavailable. Completing with this warning does not validate the
+unit's licensing or ability to pass licensed traffic.
+
 ### Optional standalone connection drain
 
 In a saved upgrade profile, check **Drain F5 connections before reboot** and
@@ -597,8 +637,8 @@ or non-active/unknown failover state blocks the upgrade, even with
 VIPs. There is no cluster override. Dry runs check eligibility and show the
 policy without changing VIPs; image staging never drains connections.
 
-After installing the image to the inactive volume, the worker records the
-original enabled state of every virtual server across all partitions and
+After capturing the original baseline and UCS, but before installing the image
+to the inactive volume, the worker records the original enabled state of every virtual server across all partitions and
 disables only those that were enabled. This prevents new connections while
 allowing established connections to finish, using F5's
 [virtual-server disabled setting](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_ltm_virtual.html).
@@ -619,13 +659,17 @@ inventory changes and disable failures also stop the workflow and trigger
 restoration. Original disabled VIPs stay disabled. The observation deadline is
 checked between bounded REST requests, so request latency can extend wall time.
 
-The temporary disabled state is never saved or synced. Draining runs after
-installation so the install's configuration snapshot contains the original
-VIP states. VIPs remain disabled through the reboot, then the worker restores
-the originally enabled VIPs before post-upgrade checks. If reconnect fails, it
-attempts restoration on whichever volume is reachable; unresolved VIPs are
-listed in the recovery-required result for manual restoration. Do not save,
-sync or edit device configuration concurrently with the upgrade.
+After draining, the disabled state is saved before installation and configuration
+copy. The target therefore boots with those VIPs disabled. Validation uses fresh
+collections and accounts only for the deliberate VIP admin-state differences;
+raw snapshots retain the actual disabled states. WAF policy identity, count,
+enforcement state, ASM readiness, and all other health checks still apply.
+After two consecutive clean comparisons, the worker restores and saves the
+original VIP states, then captures a final full collection. A failed final check
+re-disables and saves the VIPs and requires recovery. Reconnect or validation
+timeouts leave VIPs disabled. Failures before an accepted or ambiguous reboot
+restore and save the original states on the running source volume. Never sync
+or edit device configuration concurrently with the upgrade.
 
 `draining` and `restoring_virtuals` events report the current count, elapsed
 time, window reduction, completion reason and pending restoration count in
@@ -640,7 +684,53 @@ unordered sets. Post-checks additionally require the target release on the
 planned volume and a readable license, and warn when the failover state or
 sync status is not what the plan expected, since sync is normally pending
 until both members are upgraded. Configuration text is not compared; the UCS
-is the configuration record. Hotfix ISOs, vCMP guests, multi-blade chassis,
+is the configuration record.
+
+When ASM is provisioned, prechecks also require a complete, paginated WAF
+policy inventory and ASM readiness. Postchecks compare policy full paths,
+active states and enforcement modes, including counts. A readable REST API
+or matching count alone is insufficient: F5's `F5::ASMReady::is_asm_ready()`
+signal must also return ready. Missing/failed queries block preflight or keep
+postchecks pending. The automation account needs access to the policy inventory
+and `util/bash` for the read-only readiness query. F5 documents this readiness
+function in its [ASM startup workaround](https://techdocs.f5.com/kb/en-us/products/big-ip_ltm/releasenotes/related/relnote-supplement-bigip-12-1-3-4.html).
+This checks inventory, enforcement state and ASM service readiness; it does not
+replace a synthetic request that exercises each application's WAF enforcement.
+
+Two consecutive clean comparisons are required. For slow units, use
+`--install-timeout 7200 --reload-timeout 7200 --validation-timeout 7200`:
+these are separate two-hour windows for installation, reconnect and validation,
+with the configured settling interval before validation. The lab worker uses
+these settings. Timeout produces a failed validation/recovery result, never an
+automatic rollback. The previous boot volume remains recorded in the plan.
+
+NetBox job messages include the current step out of eight, its name and elapsed
+time: prechecks, image staging, UCS backup, drain/install, reboot,
+reconnect, settling and health validation. Optional steps may be skipped; these
+are workflow steps, not a percentage or estimated finish time. Validation
+summaries include expected/observed WAF policy counts, ASM readiness, clean-pass
+count and time remaining. The archive retains `pre`, the latest full `post`,
+all progress events, and (for drained upgrades) `post_before_restore` plus its
+findings. Each comparison refreshes `post`; it does not retain every full snapshot.
+NetBox keeps compact baseline and post-validation summaries.
+
+Authenticated UCS download links appear on job and device pages when NetBox
+can read the verified backup. Configure `netbox_discovery.ucs_download_roots`
+as a mapping of poller ID strings to private local directories (this deployment's
+configuration supports the JSON environment variable `UCS_DOWNLOAD_ROOTS`).
+Mount each directory read-only, outside media/static roots. Downloads require
+view access to the device and job plus `apply_upgradejob` access to that job.
+Files must match verified metadata; arbitrary worker paths, symlinks, partial
+files, and unconfigured pollers are rejected. Device pages show the latest ten
+job backups; older jobs retain their own download link.
+
+By default UCS files stay owner-only. For a shared Unix group, add the poller
+and web process to that group, grant directory traversal, and set
+`NETOPS_UCS_READ_GROUP` on the poller. Only checksum-verified completed files
+are made group-readable (0640). Keep a separate protected recovery copy as
+appropriate; UCS files contain credentials and private keys.
+
+Hotfix ISOs, vCMP guests, multi-blade chassis,
 and `install` to a volume without a reboot are not implemented.
 
 This flow has been exercised against synthetic iControl REST responses only.

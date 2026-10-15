@@ -1,0 +1,14 @@
+services:
+  job-tracker:
+    build: .
+    restart: unless-stopped
+    env_file: ${TRACKER_ENV_FILE:-.env}
+    environment:
+      TRACKER_HOST: 0.0.0.0
+      TRACKER_PORT: 8090
+    ports:
+      - "${TRACKER_BIND_ADDRESS:-127.0.0.1}:${TRACKER_PUBLIC_PORT:-8090}:8090"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

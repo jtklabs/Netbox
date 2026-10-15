@@ -1,0 +1,9 @@
+{% if waiting %}
+<div class="{% if waiting.code == 'pickup' or waiting.code == 'scheduled' %}text-muted{% else %}text-warning{% endif %}">
+  <strong>{{ waiting.label }}</strong>
+  <div>{{ waiting.message }}</div>
+  {% for blocker in waiting.jobs %}
+  <div><a href="{{ blocker.get_absolute_url }}">{{ blocker.device_name }} — job #{{ blocker.pk }}</a>: {{ blocker.get_status_display }}{% if blocker.stage %} · {{ blocker.stage }}{% endif %}{% if blocker.groups %} ({{ blocker.groups|join:", " }}){% endif %}</div>
+  {% endfor %}
+</div>
+{% endif %}

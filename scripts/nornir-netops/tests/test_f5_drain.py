@@ -37,6 +37,21 @@ class DrainBigIP(FakeBigIP):
             }}} for i, (name, enabled) in enumerate(self.virtuals.items())}}
         return super()._get(path)
 
+    def save_config(self):
+        super().save_config()
+        self.saved_virtuals = dict(self.virtuals)
+
+    def _post(self, path, payload):
+        if '/sbin/cpcfg' in payload.get('utilCmdArgs', ''):
+            assert not any(self.saved_virtuals.values())
+        if path == '/mgmt/tm/sys/software/image' and payload.get('command') == 'install':
+            assert not any(self.virtuals.values())
+            assert not any(self.saved_virtuals.values())
+        if path == '/mgmt/tm/sys' and payload.get('command') == 'reboot':
+            self.virtuals = dict(self.saved_virtuals)
+            assert not any(self.virtuals.values())
+        return super()._post(path, payload)
+
     def request(self, method, path, payload=None, timeout=None):
         if method == "PATCH" and path.startswith("/mgmt/tm/ltm/virtual/"):
             self.calls.append((method, path, payload))
@@ -140,9 +155,10 @@ def test_full_upgrade_preserves_states_and_order(profile, options, unit, timer):
                                                 drain_window_seconds=5), options)
     assert not result.failed, reporter.emit.call_args.args[2]
     assert unit.virtuals == initial and unit.rebooted_to == "HD1.2"
-    assert stages.index("installing") < stages.index("draining") < stages.index("restoring_virtuals")
+    assert stages.index("draining") < stages.index("installing") < stages.index("validating") < stages.index("restoring_virtuals")
     assert "failing_over" not in stages
-    assert unit.saved == 1  # temporary VIP changes are never saved
+    assert unit.saved == 3  # baseline, disabled boot config, restored config
+    assert unit.saved_virtuals == initial
     assert reporter.emit.call_args.args[3]["progress_summary"]["connection_drain"]["restoration_pending"] == 0
 
 
@@ -172,15 +188,34 @@ def test_cluster_drain_is_blocked_even_with_allow_active(profile, options, unit,
 
 def test_cluster_membership_rechecked_immediately_before_disable(profile, options, unit, monkeypatch):
     options.apply = True
-    original = f5_workflow.wait_for_install
-    def install(*args):
-        original(*args)
+    original = f5_drain.drain
+    def drain(*args):
         unit.peers = ["new-peer"]
-    monkeypatch.setattr(f5_workflow, "wait_for_install", install)
+        return original(*args)
+    monkeypatch.setattr(f5_drain, "drain", drain)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and "standalone" in reporter.emit.call_args.args[2]
     assert unit.rebooted_to is None and unit.failovers == 0
     assert not any(method == "PATCH" for method, _, _ in unit.calls)
+
+
+def test_rejected_reboot_restores_vips_immediately(profile, options, unit, monkeypatch):
+    options.apply = True
+    initial = dict(unit.virtuals)
+    unit.read_count = lambda: 0
+    original = unit._post
+    def post(path, payload):
+        if path == '/mgmt/tm/sys':
+            raise RuntimeError('reboot rejected (400)')
+        return original(path, payload)
+    unit._post = post
+    wait = Mock(side_effect=AssertionError('rejected reboot must not enter reconnect loop'))
+    monkeypatch.setattr(f5_workflow, 'wait_for_target', wait)
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert result.failed and stages[-1] == 'recovery_required'
+    assert unit.virtuals == initial
+    assert '400' in reporter.emit.call_args.args[2]
+    wait.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["patch", "stats", "timeout"])
@@ -215,12 +250,13 @@ def test_restore_failures_do_not_skip_other_vips(profile, options, unit, timer):
     unit.patch_failure = fail
     result, reporter, stages = run_unit(replace(profile, drain_connections=True, drain_window_seconds=5), options)
     assert result.failed and "manual" in reporter.emit.call_args.args[2]
-    assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == ["/Common/vs-web"]
-    assert unit.virtuals["/Tenant/app/vs api"] is True
+    assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == ["/Common/vs-web", "/Tenant/app/vs api"]
+    assert not any(unit.virtuals.values())
+    assert not any(unit.saved_virtuals.values())
 
 
 @pytest.mark.parametrize("reachable", [True, False])
-def test_failed_reconnect_attempts_restoration_and_reports_unresolved_vips(
+def test_failed_reconnect_keeps_traffic_held_for_recovery(
         profile, options, unit, timer, monkeypatch, reachable):
     options.apply = True
     initial = dict(unit.virtuals)
@@ -230,11 +266,8 @@ def test_failed_reconnect_attempts_restoration_and_reports_unresolved_vips(
     monkeypatch.setattr(f5_workflow, "wait_for_target", failed_target)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True, drain_window_seconds=5), options)
     assert result.failed and stages[-1] == "recovery_required"
-    if reachable:
-        assert unit.virtuals == initial
-        assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == []
-    else:
-        assert "verify/restore original enabled state manually" in reporter.emit.call_args.args[2]
+    assert not any(unit.virtuals.values())
+    assert "verify/restore original enabled state manually" in reporter.emit.call_args.args[2]
 
 
 def test_progress_gate_failure_never_disables(profile, unit, timer):
@@ -304,3 +337,89 @@ def test_profile_rejects_invalid_drain_settings(profile, change):
     data["models"], data["starting_versions"] = list(data["models"]), list(data["starting_versions"])
     with pytest.raises(ValueError):
         Profile.from_mapping(data)
+
+
+def test_waf_loading_keeps_vips_disabled_until_two_clean_passes(profile, options, unit, monkeypatch):
+    from netops.upgrade import f5
+    options.apply = True
+    options.validation_timeout = 10
+    unit.read_count = lambda: 0
+    collect = f5.collect
+    attempts = []
+    def observed(client, progress):
+        snapshot = collect(client, progress)
+        snapshot['waf'] = {'provisioned': True, 'policy_count': 5, 'ready': True}
+        if unit.rebooted_to:
+            attempts.append(dict(unit.virtuals))
+            if len(attempts) < 3:
+                snapshot['waf']['ready'] = False
+                snapshot['errors']['waf_ready'] = 'ASM still loading'
+        return snapshot
+    monkeypatch.setattr(f5, 'collect', observed)
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert not result.failed
+    assert len(attempts) == 5  # two loading, two ready, final restored collection
+    assert all(not any(state.values()) for state in attempts[:4])
+    assert attempts[-1]['/Common/vs-web'] is True
+    raw = [c.args[3]['post_before_restore'] for c in reporter.emit.call_args_list
+           if len(c.args) > 3 and 'post_before_restore' in c.args[3]][0]
+    assert all(row['enabled'] == 'disabled' for row in raw['tables']['virtual_servers'])
+
+
+def test_validation_timeout_leaves_saved_vips_disabled(profile, options, unit, monkeypatch):
+    from netops.upgrade import f5
+    options.apply = True
+    options.validation_timeout = 0
+    unit.read_count = lambda: 0
+    collect = f5.collect
+    def observed(client, progress):
+        snapshot = collect(client, progress)
+        if unit.rebooted_to:
+            snapshot['errors']['waf_ready'] = 'ASM still loading'
+        return snapshot
+    monkeypatch.setattr(f5, 'collect', observed)
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert result.failed and stages[-1] == 'validation_failed'
+    assert 'restoring_virtuals' not in stages
+    assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+
+
+def test_install_failure_restores_original_saved_state(profile, options, unit, monkeypatch):
+    from netops.upgrade import f5
+    options.apply = True
+    unit.read_count = lambda: 0
+    initial = dict(unit.virtuals)
+    monkeypatch.setattr(f5, 'install', Mock(side_effect=RuntimeError('install failed')))
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert result.failed and unit.rebooted_to is None
+    assert unit.virtuals == unit.saved_virtuals == initial
+
+
+def test_final_health_failure_disables_and_saves_again(profile, options, unit, monkeypatch):
+    from netops.upgrade import f5
+    options.apply = True
+    unit.read_count = lambda: 0
+    collect = f5.collect
+    def observed(client, progress):
+        snapshot = collect(client, progress)
+        if unit.rebooted_to and any(unit.virtuals.values()):
+            snapshot['errors']['waf_ready'] = 'ASM became unhealthy'
+        return snapshot
+    monkeypatch.setattr(f5, 'collect', observed)
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert result.failed and stages[-1] == 'recovery_required'
+    assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+
+
+def test_drain_comparison_does_not_mask_missing_vips_or_pool_failure(profile, unit):
+    from netops.upgrade import f5
+    before = f5.collect(unit, lambda _: None)
+    record = {'restore_pending': ['/Common/vs-web']}
+    after = deepcopy(before)
+    after['tables']['virtual_servers'][0]['enabled'] = 'disabled'
+    assert not f5_drain.compare_while_drained(before, after, record)
+    assert after['tables']['virtual_servers'][0]['enabled'] == 'disabled'
+    after['tables']['virtual_servers'].pop(0)
+    after['tables']['pools'][0]['availability'] = 'offline'
+    findings = f5_drain.compare_while_drained(before, after, record)
+    assert {'virtual_servers', 'pools', 'traffic_hold'} <= {f['check'] for f in findings}

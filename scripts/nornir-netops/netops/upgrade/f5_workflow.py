@@ -11,6 +11,8 @@ import json
 import os
 import re
 import time
+import uuid
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 
@@ -19,7 +21,7 @@ from nornir.core.task import Result
 from .. import f5_waf
 from . import checks, f5, f5_drain
 from .images import local_image
-from .profile import f5_version
+from .profile import F5_IMAGE, f5_version
 from .workflow import comparison_report, converge, device_lock, settle
 
 FAILOVER_WAIT = 120
@@ -54,7 +56,8 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
             "starting_versions": [current] if current else [], "target_version": profile.target_version,
             "profile": profile.name, "approved_profile": asdict(profile), "operation": "stage_image" if stage_only else "upgrade",
             "unsaved_changes": False, "config_mismatch_overridden": False, "configuration_saved": saved,
-            "active_volume": info.get("active_volume"), "failover_state": info.get("failover_state"), "peers": info.get("peers", [])}
+            "active_volume": info.get("active_volume"), "failover_state": info.get("failover_state"), "peers": info.get("peers", []),
+            "license_unavailable_before": info.get("license_unavailable", False)}
     if stage_only:
         return plan
     if profile.drain_connections and (info.get("peers") or info.get("failover_state") != "active"):
@@ -68,6 +71,8 @@ def preflight(snapshot, profile, stage_only=False, saved=False, allow_mismatch=F
     plan["failover_first"] = bool(info.get("failover_state") == "active" and info.get("peers"))
     if plan["failover_first"] and not profile.allow_active:
         blockers.append("unit is the active member of a device group; upgrade the standby first or set allow_active to fail over first")
+    if not info.get("license_service_check_date") and not info.get("license_unavailable"):
+        blockers.append("license response could not be interpreted; verify licensing before upgrading")
     if profile.license_check_date:
         seen = info.get("license_service_check_date")
         if not seen:
@@ -88,21 +93,25 @@ def planned_commands(profile, plan, host):
         install["options"] = [{"create-volume": True}]
     commands = ['POST /mgmt/tm/sys/config {"command": "save"}']
     if profile.ucs_backup:
-        commands.append(f'POST /mgmt/tm/sys/ucs {json.dumps({"command": "save", "name": ucs_name(host, profile)})}')
+        commands.append(f'POST /mgmt/tm/sys/ucs {json.dumps({"command": "save", "name": plan.setdefault("ucs_name", ucs_name(host, profile))})}')
     if plan.get("failover_first"):
         commands.append('POST /mgmt/tm/sys/failover {"command": "run", "standby": true}')
-    commands.append(f"POST /mgmt/tm/sys/software/image {json.dumps(install)}")
     if profile.drain_connections:
         commands += ['PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"disabled": true}',
-                     'GET /mgmt/tm/ltm/virtual/stats (wait for zero connections or a plateau)']
-    commands.append(f'POST /mgmt/tm/sys {json.dumps({"command": "reboot", "options": [{"volume": plan["volume"]["name"]}]})}')
+                     'GET /mgmt/tm/ltm/virtual/stats (wait for zero connections or a plateau)',
+                     'POST /mgmt/tm/sys/config {"command": "save"} (persist disabled boot state)']
+    commands.append(f"POST /mgmt/tm/sys/software/image {json.dumps(install)}")
+    commands.append(f"POST /mgmt/tm/util/bash (cpcfg --source={plan['active_volume']} {plan['volume']['name']}; require exit 0)")
+    commands.append(f'POST /mgmt/tm/sys {json.dumps({"command": "reboot", "volume": plan["volume"]["name"]})}')
     if profile.drain_connections:
-        commands.append('PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"enabled": true} (after reconnect)')
+        commands += ['PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"enabled": true} (after WAF and health validation)',
+                     'POST /mgmt/tm/sys/config {"command": "save"} (persist restored states)']
     return commands
 
 
 def ucs_name(host, profile):
-    return f"{re.sub(r'[^A-Za-z0-9._-]+', '-', host.name)[:60]}-pre-{profile.target_version}.ucs"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{re.sub(r'[^A-Za-z0-9._-]+', '-', host.name)[:60]}-pre-{profile.target_version}-{stamp}-{uuid.uuid4().hex[:12]}.ucs"
 
 
 def verify_image(client, profile, options, plan, apply, emit):
@@ -139,12 +148,12 @@ def verify_image(client, profile, options, plan, apply, emit):
 
 
 def backup(client, host, profile, options, plan, emit):
-    name = ucs_name(host, profile)
+    name = plan.setdefault("ucs_name", ucs_name(host, profile))
     passphrase = os.environ.get("NETOPS_F5_UCS_PASSPHRASE", "")
     if passphrase:
         from ..debuglog import protect
         protect([passphrase])
-    directory = getattr(options, "ucs_dir", None)
+    directory = getattr(options, "ucs_dir", None) or Path(options.lock_dir).parent / "ucs-backups"
     emit("backing_up", f"Saving UCS {name} on the unit" + (" and downloading it" if directory else ""))
     f5.save_ucs(client, name, passphrase)
     record = {"name": name, "on_unit": True, "encrypted": bool(passphrase)}
@@ -152,10 +161,20 @@ def backup(client, host, profile, options, plan, emit):
         destination = Path(directory) / name
         record["bytes"] = f5.download_ucs(client, name, destination)
         digest = f5.remote_md5(client, name, f5.UCS_DIR)
-        if digest and digest != f5.local_md5(destination):
-            raise ValueError("UCS download checksum does not match the archive on the unit")
+        if not digest or digest != f5.local_md5(destination):
+            destination.unlink(missing_ok=True)
+            raise ValueError("UCS download checksum could not be verified against the archive on the unit")
+        # Optional private group sharing for an authenticated NetBox download
+        # mount. Unconfigured pollers retain the default owner-only mode.
+        group = os.environ.get("NETOPS_UCS_READ_GROUP")
+        if group:
+            import grp
+            os.chown(destination, -1, grp.getgrnam(group).gr_gid)
+            os.chmod(destination, 0o640)
         record.update(local_path=str(destination), md5_verified=bool(digest))
     plan["ucs_backup"] = record
+    emit("backing_up", f"UCS downloaded and checksum verified: {record['local_path']} ({record['bytes']} bytes)",
+         {"upgrade_plan": plan, "progress_summary": {"ucs_backup": record}})
 
 
 def wait_for_state(client, wanted, options, emit):
@@ -170,18 +189,31 @@ def wait_for_state(client, wanted, options, emit):
         time.sleep(options.poll_interval)
 
 
-def wait_for_install(client, volume, options, emit):
+def installed_target(info, profile):
+    """A stale 'complete' status alone does not prove the requested image is installed."""
+    image = F5_IMAGE.fullmatch(profile.image)
+    return (str(info.get("status", "")).lower() == "complete"
+            and str(info.get("active", False)).lower() == "false"
+            and bool(info.get("version")) and f5_version(info["version"]) == f5_version(profile.target_version)
+            and image is not None and str(info.get("build", "")) == image[2])
+
+
+def wait_for_install(client, volume, options, emit, profile):
     deadline, heartbeat = time.monotonic() + options.install_timeout, time.monotonic()
     while True:
-        status = f5.volume_status(client, volume)
-        if status.lower() == "complete":
+        info = f5.volume_info(client, volume)
+        status = str(info.get("status", "not yet visible"))
+        if str(info.get("active", "")).lower() == "true":
+            raise ValueError(f"installation target {volume} unexpectedly became active")
+        if installed_target(info, profile):
             return
         if re.search(r"fail|error|abort", status, re.I):
             raise ValueError(f"installation to {volume} reported: {status}")
         if time.monotonic() >= deadline:
-            raise TimeoutError(f"installation to {volume} did not complete within {int(options.install_timeout)}s; last status {status!r}")
+            raise TimeoutError(f"installation to {volume} did not complete with the target version/build within {int(options.install_timeout)}s; "
+                               f"last status {status!r}, version {info.get('version')}, build {info.get('build')}")
         if time.monotonic() - heartbeat >= 30:
-            emit("installing", f"Installing to {volume}: {status}")
+            emit("installing", f"Installing to {volume}: {status}; version {info.get('version')}, build {info.get('build')}")
             heartbeat = time.monotonic()
         time.sleep(options.poll_interval)
 
@@ -190,7 +222,6 @@ def wait_for_target(host, settings, profile, volume, options, emit):
     """Reconnect after the reboot; returns an open client once the target volume is active."""
     deadline, last = time.monotonic() + options.reload_timeout, "unit has not returned"
     while time.monotonic() < deadline:
-        emit("reconnecting", f"Waiting for the unit to boot {volume} on {profile.target_version}")
         client = None
         try:
             client = f5_waf.Client(host, **settings).__enter__()
@@ -200,6 +231,7 @@ def wait_for_target(host, settings, profile, volume, options, emit):
             last = f"unit reachable but active volume is {info.get('active_volume')} on {info.get('version')}"
         except Exception as exc:
             last = type(exc).__name__
+        emit("reconnecting", f"Waiting for the unit to boot {volume} on {profile.target_version}; last observation: {last}")
         if client is not None:
             try:
                 client.__exit__(None, None, None)
@@ -217,7 +249,11 @@ def target_findings(after, profile, plan):
             or f5_version(unit["version"]) != f5_version(profile.target_version)):
         findings.append({"check": "software", "severity": "error", "message": "unit is not running the target release from the planned volume"})
     if not info.get("license_service_check_date"):
-        findings.append({"check": "license", "severity": "error", "message": "license is not readable after the reboot"})
+        preexisting = (plan.get("license_unavailable_before") and info.get("license_unavailable")
+                       and not profile.license_check_date)
+        findings.append({"check": "license", "severity": "warning" if preexisting else "error",
+                         "message": "license was unavailable before the upgrade and remains unavailable; verify licensing before using the device for traffic"
+                         if preexisting else "license is not readable after the reboot"})
     if info.get("peers") and info.get("sync_status") not in ("In Sync", "Standalone"):
         findings.append({"check": "sync", "severity": "warning", "message": f"configuration sync is '{info.get('sync_status')}'; sync the device group once both members are upgraded"})
     if plan.get("expected_failover_state") and info.get("failover_state") != plan["expected_failover_state"]:
@@ -239,7 +275,26 @@ def upgrade_device(task, profile, options, reporter):
     allow_mismatch = getattr(options, "allow_config_mismatch", False)
     settings = dict(getattr(options, "f5", None) or {})
 
+    started = time.monotonic()
+    phase_step, phase_started = 1, started
+    phases = {"connecting": 1, "saving_config": 1, "precheck": 1, "precheck_complete": 1, "ready": 1,
+              "staging": 2, "image_verification": 2, "backing_up": 3, "failing_over": 4, "installing": 4,
+              "draining": 4, "rebooting": 5, "reconnecting": 6, "settling": 7,
+              "postcheck": 8, "validating": 8, "converging": 8}
+    labels = {1: "Prechecks", 2: "Image staging", 3: "UCS backup", 4: "Drain and install",
+              5: "Reboot", 6: "Reconnect", 7: "Settling", 8: "Health validation"}
+
     def emit(stage, message, payload=None, attachment=None):
+        nonlocal phase_step, phase_started
+        payload = dict(payload or {})
+        now = time.monotonic()
+        step = (7 if stage == "converging" and phase_step < 8 else phases.get(stage, phase_step))
+        if step > phase_step:
+            phase_step, phase_started = step, now
+        phase = {"step": phase_step, "total": 2 if stage_only else 8, "name": labels[phase_step],
+                 "elapsed_seconds": int(now - started), "phase_elapsed_seconds": int(now - phase_started)}
+        payload["progress_summary"] = {**payload.get("progress_summary", {}), "phase": phase}
+        message = f"Step {phase_step}/{phase['total']} · {labels[phase_step]} · {int(now - started)}s elapsed: {message}"
         if plan.get("connection_drain"):
             payload = dict(payload or {})
             record = plan["connection_drain"]
@@ -247,6 +302,11 @@ def upgrade_device(task, profile, options, reporter):
                        if key not in {"virtual_servers", "restore_pending"}}
             summary["restoration_pending"] = len(record["restore_pending"])
             payload["progress_summary"] = {**payload.get("progress_summary", {}), "connection_drain": summary}
+            if plan.get('rollback_note'):
+                payload['progress_summary'].update(rollback_note=plan['rollback_note'], rollback_volume=plan['active_volume'])
+            if stage == 'validation_failed' and record.get('restore_pending'):
+                message += '; virtual servers remain disabled in the saved configuration; manual recovery required'
+                payload['upgrade_plan'] = plan
         return reporter.emit(host, stage, message, payload, changed=changed, attachment=attachment)
 
     try:
@@ -278,6 +338,7 @@ def upgrade_device(task, profile, options, reporter):
                 emit("precheck_complete", "Image staging checks captured" if stage_only else "Baseline and upgrade plan captured",
                      {"pre": before, "upgrade_plan": plan,
                       "progress_summary": {"counts": before["metrics"]["counts"], "target_version": profile.target_version,
+                                           **({"waf": before["waf"]} if before.get("waf", {}).get("provisioned") else {}),
                                            "starting_versions": plan["starting_versions"], "bundle_conversion": False,
                                            "unsaved_changes": False, "failover_state": plan.get("failover_state")},
                       "rollback_unsupported": ["Staged image files are retained for inspection; there are no configuration changes to roll back." if stage_only
@@ -285,6 +346,8 @@ def upgrade_device(task, profile, options, reporter):
                 if plan.get("failover_first") and not stage_only:
                     emit("precheck", "Unit is the active member of its device group; the profile allows failing over before install"
                          if profile.allow_active else "Unit is the active member of its device group")
+                if plan.get("license_unavailable_before"):
+                    emit("precheck", "License unavailable before this job; verify licensing before using this device for traffic")
                 if plan["already_current"] and not plan["blockers"] and not stage_only:
                     emit("already_current", f"Already running {profile.target_version} from {plan['active_volume']}")
                     return Result(host=host, result=plan)
@@ -322,43 +385,76 @@ def upgrade_device(task, profile, options, reporter):
                     changed = True
                 volume = plan["volume"]["name"]
                 changed = True
-                emit("installing", f"Installing {profile.image} to boot volume {volume}" + (" (new volume)" if plan["volume"]["create"] else ""))
-                f5.install(client, profile.image, volume, plan["volume"]["create"])
-                wait_for_install(client, volume, options, emit)
+                reboot_resolved = False
                 try:
                     if profile.drain_connections:
                         f5_drain.drain(client, profile, plan["connection_drain"], emit)
-                    emit("installing", f"Installation complete on {volume}; rebooting the unit to it")
-                    f5.reboot_to(client, volume)
-                except BaseException:
-                    if plan.get("connection_drain", {}).get("restore_pending"):
-                        f5_drain.restore(client, plan["connection_drain"], emit)
+                        f5_drain.persist_disabled(client, plan["connection_drain"], emit)
+                        plan['rollback_note'] = ('The previous boot volume contains the disabled VIP configuration. '
+                                                 'Restore the recorded original VIP states after validating rollback, or restore the pre-upgrade UCS.')
+                    reused = installed_target(f5.volume_info(client, volume), profile)
+                    plan["volume"]["reused_installation"] = reused
+                    if reused:
+                        emit("installing", f"{volume} already contains the exact target version/build; refreshing its configuration")
+                    else:
+                        emit("installing", f"Installing {profile.image} to boot volume {volume}" + (" (new volume)" if plan["volume"]["create"] else ""))
+                        f5.install(client, profile.image, volume, plan["volume"]["create"])
+                        wait_for_install(client, volume, options, emit, profile)
+                    emit("installing", f"Copying saved configuration from {plan['active_volume']} to {volume}; reboot requires confirmed success")
+                    plan["configuration_copy"] = f5.copy_configuration(
+                        client, plan["active_volume"], volume, options.install_timeout, poll=options.poll_interval,
+                        progress=lambda message: emit("installing", message))
+                    emit("installing", f"Configuration copy to {volume} completed successfully", {"upgrade_plan": plan})
+                    emit("rebooting", f"Installation complete on {volume}; rebooting the unit to it")
+                    accepted = f5.reboot_to(client, volume)
+                    reboot_resolved = True  # Includes transport loss: target state must now be validated.
+                    emit("rebooting", "Reboot request accepted; waiting for the target boot volume" if accepted else
+                         "Connection lost during reboot request; outcome uncertain, checking the boot volume without resending")
+                except Exception:
+                    if not reboot_resolved and plan.get("connection_drain"):
+                        f5_drain.release_traffic(client, plan["connection_drain"], emit)
                     raise
             finally:
                 close(client)
+            # Once reboot was accepted (or its response was lost), never release
+            # traffic on an unvalidated target or an unexpected boot volume.
+            client = wait_for_target(host, settings, profile, volume, options, emit)
             try:
-                client = wait_for_target(host, settings, profile, volume, options, emit)
-            except Exception:
-                # A rejected reboot can leave the old volume running with VIPs disabled.
-                # Try restoring on whichever volume is reachable; never resend the reboot.
-                if plan.get("connection_drain", {}).get("restore_pending"):
-                    recovery_client = None
-                    try:
-                        recovery_client = f5_waf.Client(host, **settings).__enter__()
-                        f5_drain.restore(recovery_client, plan["connection_drain"], emit)
-                    except Exception:
-                        pass  # The failure report retains every unresolved virtual server.
-                    finally:
-                        if recovery_client is not None:
-                            close(recovery_client)
-                raise
-            try:
-                if plan.get("connection_drain", {}).get("restore_pending"):
-                    f5_drain.restore(client, plan["connection_drain"], emit)
+                drain = plan.get('connection_drain')
+                if drain:
+                    f5_drain.hold_after_reboot(client, drain, emit)
+                emit("settling", "Target volume is reachable; waiting before health validation")
                 settle(emit, options)
+                def finish_validation(after, findings):
+                    from . import checks
+                    emit('validating', 'WAF and health checks passed twice; restoring traffic',
+                         {'post_before_restore': after, 'findings_before_restore': findings})
+                    try:
+                        f5_drain.release_traffic(client, drain, emit)
+                        final = f5.collect(client, lambda path: emit('postcheck', path))
+                        final_findings = checks.compare(before, final) + target_findings(final, profile, plan)
+                        emit('validating', 'Final collection after restoring original virtual-server states',
+                             {'post': final, 'findings': final_findings,
+                              'progress_summary': {'counts': final['metrics']['counts'],
+                                                   'finding_count': len(final_findings),
+                                                   **({'waf': {'expected_policies': before['waf'].get('policy_count'),
+                                                               'observed_policies': final.get('waf', {}).get('policy_count'),
+                                                               'ready': final.get('waf', {}).get('ready')}} if before.get('waf', {}).get('provisioned') else {}),
+                                                   'error_count': sum(f['severity'] == 'error' for f in final_findings)}})
+                        if any(f['severity'] == 'error' for f in final_findings):
+                            raise RuntimeError('Validation failed after traffic restoration')
+                        return final, final_findings
+                    except Exception:
+                        # A partial restoration or failing final observation must
+                        # not leave traffic enabled on an unhealthy unit.
+                        f5_drain.disable_again(client, drain, emit)
+                        raise
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
-                                lambda after: target_findings(after, profile, plan))
+                                lambda after: target_findings(after, profile, plan),
+                                compare_snapshots=(lambda before, after, **kwargs:
+                                    f5_drain.compare_while_drained(before, after, drain, **kwargs)) if drain else None,
+                                on_validated=finish_validation if drain else None)
             finally:
                 close(client)
     except Exception as exc:

@@ -258,3 +258,199 @@ def test_connection_requires_live_authorization_for_every_operation(tmp_path, jo
     upgrade.assert_not_called()
     remediate.assert_not_called()
     assert not any(json.loads(path.read_text())['body']['stage'] == 'queued' for path in spool.glob('*.json'))
+
+
+def queue_job(number):
+    return {'id': number, 'device_id': number, 'device': f'device-{number}',
+            'hostname': f'192.0.2.{number}', 'claim_token': str(uuid4()), 'profile': {}}
+
+
+def queue_args(workers=2):
+    return SimpleNamespace(workers=workers, poller='lab', apply=True, poll_interval=0.01)
+
+
+def queue_login():
+    return SimpleNamespace(username='test', password='test-password', secret=None), 0
+
+
+def test_free_slots_pick_up_later_jobs_and_refill_while_long_job_runs(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    first_started, second_started, third_started = (threading.Event() for _ in range(3))
+    release_first, release_second = threading.Event(), threading.Event()
+    running, maximum, calls = set(), [], []
+    lock = threading.Lock()
+    jobs = [queue_job(i) for i in (1, 2, 3)]
+
+    def claim(path, body):
+        calls.append(body['limit'])
+        if len(calls) == 1:
+            return {'jobs': [jobs[0]]}
+        assert first_started.wait(2)
+        if len(calls) == 2:
+            return {'jobs': []}  # Nothing scheduled yet; keep polling the free slot.
+        if len(calls) == 3:
+            return {'jobs': [jobs[1]]}
+        if len(calls) == 4:
+            assert not release_first.is_set()
+            return {'jobs': [jobs[2]]}
+        return {'jobs': []}
+
+    def execute(job, *args):
+        with lock:
+            running.add(job['id'])
+            maximum.append(len(running))
+        try:
+            if job['id'] == 1:
+                first_started.set()
+                assert release_first.wait(5)
+            elif job['id'] == 2:
+                second_started.set()
+                assert release_second.wait(5)
+            else:
+                third_started.set()
+            return False
+        finally:
+            with lock:
+                running.remove(job['id'])
+
+    monkeypatch.setattr(scheduler, 'run_claimed_job', execute)
+    client, outbox, login = Mock(), Mock(), Mock(side_effect=queue_login)
+    client.post.side_effect = claim
+    outbox.replay.return_value = True
+    with ThreadPoolExecutor(max_workers=1) as supervisor:
+        result = supervisor.submit(scheduler.run_queue, queue_args(), client, outbox, login)
+        try:
+            assert second_started.wait(3), 'new job was not picked up while slot was free'
+            assert not release_first.is_set()
+            release_second.set()
+            assert third_started.wait(3), 'completed slot was not refilled'
+        finally:
+            release_first.set()
+            release_second.set()
+        assert result.result(timeout=3) == 0
+    assert max(maximum) == 2
+    assert calls[:4] == [2, 1, 1, 1]
+    login.assert_called_once()
+    assert any(call.kwargs['exclude_job_ids'] == {1} for call in outbox.replay.call_args_list)
+
+
+def test_outbox_skips_active_job_files_before_reading_them(tmp_path, job):
+    outbox = scheduler.Outbox(tmp_path, Mock())
+    active = tmp_path / f'{job["id"]}-0000000001.json'
+    active.write_text('in-flight file must not be read')
+    outbox.persist(99, {**event(), 'claim_token': str(uuid4())})
+    outbox.client.post.return_value = {'id': 99, 'sequence': 8}
+    assert outbox.replay(exclude_job_ids={job['id']})
+    assert active.exists()
+    outbox.client.post.assert_called_once()
+    assert outbox.client.post.call_args.args[0] == '99/report/'
+
+
+def test_queue_outage_and_undelivered_progress_do_not_interrupt_active_job(monkeypatch):
+    import threading
+    started, release = threading.Event(), threading.Event()
+    jobs = [queue_job(1), queue_job(2)]
+    calls, replays = [], []
+
+    def replay(**kwargs):
+        replays.append(kwargs)
+        return len(replays) != 3
+
+    def claim(path, body):
+        calls.append(body)
+        if len(calls) == 1:
+            return {'jobs': [jobs[0]]}
+        if len(calls) == 2:
+            assert started.wait(2)
+            raise NetBoxError('temporarily offline')
+        if len(calls) == 3:
+            assert not release.is_set()
+            return {'jobs': [jobs[1]]}
+        return {'jobs': []}
+
+    def execute(job, *args):
+        if job['id'] == 1:
+            started.set()
+            assert release.wait(4)
+        else:
+            release.set()
+        return False
+
+    monkeypatch.setattr(scheduler, 'run_claimed_job', execute)
+    client, outbox = Mock(), Mock()
+    client.post.side_effect = claim
+    outbox.replay.side_effect = replay
+    try:
+        assert scheduler.run_queue(queue_args(), client, outbox, queue_login) == 0
+    finally:
+        release.set()
+    assert len(replays) > len(calls)
+    assert all(call['limit'] == 1 for call in calls[1:3])
+
+
+@pytest.mark.parametrize('worker_failure', [True, RuntimeError('worker failed')])
+def test_failed_job_frees_slot_without_abandoning_other_work(monkeypatch, worker_failure):
+    jobs, executed = [queue_job(1), queue_job(2)], []
+    client, outbox = Mock(), Mock()
+    client.post.side_effect = [{'jobs': [jobs[0]]}, {'jobs': [jobs[1]]}, {'jobs': []}]
+    outbox.replay.return_value = True
+
+    def execute(job, *args):
+        executed.append(job['id'])
+        if job['id'] == 1:
+            if isinstance(worker_failure, Exception):
+                raise worker_failure
+            return worker_failure
+        return False
+
+    monkeypatch.setattr(scheduler, 'run_claimed_job', execute)
+    assert scheduler.run_queue(queue_args(workers=1), client, outbox, queue_login) == 1
+    assert executed == [1, 2]
+
+
+def test_undelivered_completed_progress_blocks_new_claims(monkeypatch):
+    client, outbox, login = Mock(), Mock(), Mock()
+    outbox.replay.return_value = False
+    assert scheduler.run_queue(queue_args(), client, outbox, login) == 1
+    client.post.assert_not_called()
+    login.assert_not_called()
+
+
+def test_queue_rejects_over_capacity_response_before_starting_any_job(monkeypatch):
+    client, outbox, login = Mock(), Mock(), Mock()
+    client.post.return_value = {'jobs': [queue_job(1), queue_job(2)]}
+    outbox.replay.return_value = True
+    execute = Mock()
+    monkeypatch.setattr(scheduler, 'run_claimed_job', execute)
+    with pytest.raises(NetBoxError, match='invalid batch'):
+        scheduler.run_queue(queue_args(workers=1), client, outbox, login)
+    execute.assert_not_called()
+    login.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', [False, True, RuntimeError('task runner failed')])
+def test_each_claim_has_isolated_inventory_and_closes_failed_connections(monkeypatch, failure):
+    from netops import inventory
+    args = SimpleNamespace(key_file=None, port=22, conn_timeout=30)
+    job = queue_job(1)
+    host = SimpleNamespace(data={})
+    nr = Mock()
+    nr.inventory.hosts = {'device-1 [job 1]': host}
+    if isinstance(failure, Exception):
+        nr.run.side_effect = failure
+    else:
+        nr.run.return_value.failed = failure
+    initialize = Mock(return_value=nr)
+    monkeypatch.setattr(inventory, 'init_from_records', initialize)
+    monkeypatch.setattr(inventory, 'missing_credentials', Mock(return_value=[]))
+    credentials, _ = queue_login()
+    if isinstance(failure, Exception):
+        with pytest.raises(RuntimeError, match='task runner failed'):
+            scheduler.run_claimed_job(job, args, credentials, Mock(), Mock())
+    else:
+        assert scheduler.run_claimed_job(job, args, credentials, Mock(), Mock()) is failure
+    assert initialize.call_args.args[-2] == 1
+    assert host.data['upgrade_job'] == job
+    assert host.data['netbox_id'] == 1
+    nr.close_connections.assert_called_once_with(on_good=True, on_failed=True)

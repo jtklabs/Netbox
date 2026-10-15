@@ -34,7 +34,7 @@ def add_arguments(parser, scheduled=False):
     add_connection_arguments(parser)
     bigip = parser.add_argument_group("BIG-IP upgrades")
     bigip.add_argument("--ucs-dir", default=os.environ.get("NETOPS_UCS_DIR"),
-                       help="download each unit's pre-upgrade UCS archive here; otherwise it stays on the unit [$NETOPS_UCS_DIR]")
+                       help="download each unit's pre-upgrade UCS archive here; default: <project>/ucs-backups [$NETOPS_UCS_DIR]")
     parser.add_argument("--image-cache", default=os.environ.get("NETOPS_IMAGE_CACHE"),
                         help="worker directory for images fetched from an image_source URL: BIG-IP uploads and the SCP fallback "
                              "when a switch cannot copy the image itself [$NETOPS_IMAGE_CACHE; default: <project>/.images]")

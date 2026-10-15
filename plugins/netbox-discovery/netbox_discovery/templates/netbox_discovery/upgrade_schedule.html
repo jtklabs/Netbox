@@ -1,16 +1,18 @@
 {% extends 'base/layout.html' %}
 {% load form_helpers %}
+{% load static %}
 {% block title %}Schedule upgrade{% endblock %}
 {% block content %}
 <div class="row"><div class="col-lg-8">
   <h1>Schedule upgrade</h1>
   {% if perms.netbox_discovery.add_auditschedule %}<a class="btn btn-outline-secondary mb-3" href="{% url 'plugins:netbox_discovery:auditschedule_add' %}"><i class="mdi mdi-calendar-refresh"></i> Standards audit / remediation</a>{% endif %}
-  <form method="post">{% csrf_token %}
+  <form method="post" data-upgrade-timing data-browser-time-zone="{{ form.browser_time_zone_default|yesno:'true,false' }}">{% csrf_token %}
     {% include 'netbox_discovery/inc/plan_fields.html' %}
     <div><button class="btn btn-secondary" type="submit">Preview devices</button>
     <button class="btn btn-primary" type="submit" name="schedule" value="yes">Schedule selected operation</button></div>
   </form>
 </div></div>
+<script src="{% static 'netbox_discovery/upgrade_timing.js' %}" defer></script>
 {% if preview %}
 <h2 class="mt-4">{{ preview|length }} device(s) currently match</h2>
 <div class="table-responsive">

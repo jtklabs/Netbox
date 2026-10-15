@@ -4,6 +4,7 @@
 # Keep this list in sync with both.
 
 from os import environ
+import json
 
 
 def _secret(name: str, env_var: str) -> str:
@@ -39,6 +40,9 @@ PLUGINS = [
 ]
 
 PLUGINS_CONFIG = {
+    "netbox_discovery": {
+        "ucs_download_roots": json.loads(environ.get("UCS_DOWNLOAD_ROOTS", "{}")),
+    },
     "netbox_refresh": {
         # Cisco Support API credentials for the EoX sync. Kept out of this
         # file so nothing secret is committed: from CISCO_CLIENT_ID /

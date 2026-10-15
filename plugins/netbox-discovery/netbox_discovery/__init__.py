@@ -91,6 +91,9 @@ class DiscoveryConfig(PluginConfig):
         # Largest show-command output the API accepts, in bytes. Larger files
         # stay on the poller and are listed here with a note.
         'command_output_max_bytes': 16 * 1024 * 1024,
+        # Private, read-only UCS directories, keyed by poller ID (as a string).
+        # Never place these directories under MEDIA_ROOT or a static web root.
+        'ucs_download_roots': {},
         # How often the worker runs the prestage policies, in minutes. Each
         # policy's own interval decides when a device is checked again; this
         # only bounds how soon a changed standard is picked up. 0 turns the

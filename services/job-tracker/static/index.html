@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Network operations · Job tracker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">≋</span><span>NETWORK OPERATIONS <span class="slash">/</span> <strong>LIVE JOBS</strong></span></div>
+    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection" role="status">Connecting…</span><span id="clock"></span></div>
+  </header>
+  <main>
+    <div id="demo" class="notice" hidden>DEMO · Simulated jobs for preview. No connection to NetBox.</div>
+    <div id="error" class="error" role="alert" hidden></div>
+    <section class="heading">
+      <div><div class="eyebrow">MAINTENANCE CONTROL</div><h1>Live job tracker</h1><p>Software upgrades, software staging and standards jobs.</p></div>
+      <button id="fullscreen" type="button">⛶ Full screen</button>
+    </section>
+    <section class="filters" aria-label="Filter jobs">
+      <label>Batch<select id="batch"><option value="">All tracked batches</option></select></label>
+      <label>Job type<select id="operation"><option value="">All job types</option></select></label>
+      <label>Site<select id="site"><option value="">All sites</option></select></label>
+      <label class="search">Find a device or group<input id="search" type="search" placeholder="Search devices, groups, messages…"></label>
+      <label class="toggle"><input id="attention" type="checkbox"> Needs attention</label>
+    </section>
+    <section class="overview" aria-label="Job summary">
+      <div class="progress-card"><div class="card-label">JOBS FINISHED <span id="scope">Waiting for jobs</span></div><div class="progress-numbers"><strong id="percent">—</strong><span id="finished">Connecting to NetBox</span></div><p class="status-caption">Job status breakdown · all jobs in this view</p><div id="overall-bar"></div><div id="outcome-legend" class="legend"></div></div>
+      <div class="stat"><span class="card-label">IN PROGRESS</span><strong id="running">—</strong><span>Workers executing</span></div>
+      <div class="stat"><span class="card-label">WAITING</span><strong id="waiting">—</strong><span>Scheduled or held</span></div>
+      <div class="stat attention-stat"><span class="card-label">NEEDS ATTENTION</span><strong id="issues">—</strong><span>Failures, holds & warnings</span></div>
+    </section>
+    <div class="section-heading"><h2>Active batches</h2><span id="order-note">Upgrade group → batch → wave</span></div>
+    <p class="plan-note">Running work appears first, followed by pending and held jobs. Completed devices stay visible until every wave in their batch finishes. Wave numbers follow the saved plan within each batch; workers start jobs as dependencies and group capacity allow.</p>
+    <p id="shared-note" class="plan-note" hidden>Jobs shared by multiple upgrade groups appear in each group. Overall totals count each job once.</p>
+    <div id="plan">
+      <div id="live-plan"><div class="empty">Connecting to the job feed…</div></div>
+      <details id="finished-jobs" class="finished-jobs" hidden>
+        <summary><span>Finished batches · devices <b id="finished-count">0</b></span><small id="finished-outcomes"></small><span class="expand-hint">Expand / collapse</span></summary>
+        <p class="plan-note">Batches move here only when every device has completed, failed, been cancelled or expired. Finished does not always mean successful.</p>
+        <div id="finished-plan"></div>
+      </details>
+    </div>
+    <footer><span id="updated">Waiting for first update</span><span id="coverage">Read-only view · Automatically updated</span></footer>
+  </main>
+  <dialog id="details" aria-labelledby="detail-title"><div class="dialog-header"><h2 id="detail-title">Job details</h2><button id="close-details" aria-label="Close details">✕</button></div><div id="detail-content"></div></dialog>
+</body>
+</html>

@@ -1,0 +1,25 @@
+[Unit]
+Description=Network device job tracker
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/netbox-job-tracker
+ExecStart=/usr/bin/python3 /opt/netbox-job-tracker/server.py
+EnvironmentFile=/etc/netbox-job-tracker/config
+LoadCredentialEncrypted=netbox-token:/etc/credstore.encrypted/netbox-job-tracker-token
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

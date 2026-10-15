@@ -285,6 +285,6 @@ class PrestageRunView(QueueView):
 
     def execute(self, request, data):
         if data.get('policy') is not None:
-            jobs, summary = upgrade_prestage.run_policy(data['policy'])
+            jobs, summary = upgrade_prestage.run_policy(data['policy'], force=True)
             return Response({str(data['policy'].device_type): summary})
-        return Response(upgrade_prestage.run())
+        return Response(upgrade_prestage.run(force=True))

@@ -8,6 +8,7 @@ from django.utils.dateparse import parse_datetime
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.views import View
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -33,6 +34,7 @@ from .upgrade_choices import (CONFIG_OPERATIONS, REMEDIATION_FEATURES, REMEDIATI
 from .upgrade_filtersets import (PrestagePolicyFilterSet, UpgradeDependencyFilterSet, UpgradeGroupFilterSet,
                                  UpgradeJobFilterSet, job_list_params)
 from . import upgrade_queue as queue
+from .upgrade_wait import waiting_details
 
 
 class LocalScheduleDateTimeField(forms.DateTimeField):
@@ -51,7 +53,12 @@ class LocalScheduleDateTimeField(forms.DateTimeField):
         return parsed
 
 
+class ScheduleNowWidget(forms.DateTimeInput):
+    template_name = 'netbox_discovery/widgets/schedule_now.html'
+
+
 class UpgradePlanForm(forms.Form):
+    default_time_zone = None
     operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
     time_zone = forms.ChoiceField(choices=[(zone, zone) for zone in sorted(available_timezones())], required=False)
     scheduled_at = LocalScheduleDateTimeField(label='Scheduled start', widget=forms.DateTimeInput(
@@ -79,7 +86,7 @@ class UpgradePlanForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.initial.setdefault('time_zone', settings.TIME_ZONE)
+        self.initial.setdefault('time_zone', self.default_time_zone or settings.TIME_ZONE)
         zone = ZoneInfo(self.initial['time_zone'])
         for field in ('scheduled_at', 'start_before'):
             value = self.initial.get(field)
@@ -105,7 +112,7 @@ class UpgradePlanForm(forms.Form):
 
     def clean(self):
         data = super().clean()
-        zone = ZoneInfo(data.get('time_zone') or settings.TIME_ZONE)
+        zone = ZoneInfo(data.get('time_zone') or self.default_time_zone or settings.TIME_ZONE)
         for field in ('scheduled_at', 'start_before'):
             value = data.get(field)
             if value is None or timezone.is_aware(value):
@@ -146,6 +153,7 @@ def plan_initial(job):
 
 
 class ScheduleForm(UpgradePlanForm):
+    default_time_zone = 'America/New_York'
     saved_profile = DynamicModelChoiceField(queryset=JobProfile.objects.filter(kind='upgrade'), required=False,
                                             query_params={'kind': 'upgrade'})
     all_active = forms.BooleanField(required=False, label='All active devices')
@@ -183,7 +191,12 @@ class ScheduleForm(UpgradePlanForm):
                 args = (data, *args[1:])
             else:
                 kwargs['data'] = data
+        explicit_zone = bool((kwargs.get('initial') or {}).get('time_zone'))
         super().__init__(*args, **kwargs)
+        self.fields['scheduled_at'].widget = ScheduleNowWidget(
+            format='%Y-%m-%dT%H:%M:%S', attrs={'type': 'datetime-local', 'step': '1'})
+        self.browser_time_zone_default = not self.is_bound and not explicit_zone and not any(
+            self.initial.get(field) for field in ('scheduled_at', 'start_before'))
         self.fields['operation'].choices = [(value, label) for value, label in UpgradeOperationChoices
                                             if value not in CONFIG_OPERATIONS]
         self.fields['profile_source'].choices = (
@@ -321,8 +334,18 @@ class UpgradeJobTable(NetBoxTable):
     last_seen_at = columns.DateTimeColumn(verbose_name='Job last update', default='No job updates yet')
     groups = columns.TemplateColumn(template_code='{{ value|join:", " }}', verbose_name='Groups', orderable=False)
     planned_wave = tables.Column(verbose_name='Wave')
+    message = tables.Column(empty_values=(), verbose_name='Progress / waiting reason')
     poller_last_seen_at = columns.DateTimeColumn(accessor='poller__upgrade_last_seen_at',
                                                 verbose_name='Worker last seen', default='Never checked in')
+
+    def before_render(self, request):
+        self.wait_user = request.user
+
+    def render_message(self, record, value):
+        waiting = waiting_details(record, getattr(self, 'wait_user', None))
+        if waiting:
+            return render_to_string('netbox_discovery/inc/queue_wait.html', {'waiting': waiting})
+        return value or '—'
 
     class Meta(NetBoxTable.Meta):
         model = UpgradeJob
@@ -334,9 +357,6 @@ class UpgradeJobTable(NetBoxTable):
 
 class UpgradeFilterForm(NetBoxModelFilterSetForm):
     model = UpgradeJob
-    hide_finished = forms.ChoiceField(choices=(('', 'All jobs'), ('true', 'Yes'), ('false', 'No')), required=False,
-                                     label='Hide finished jobs',
-                                     help_text='Includes completed, warning, failed, expired and cancelled jobs.')
     status = forms.ChoiceField(choices=[('', '---------')] + list(UpgradeStatusChoices), required=False)
     operation = forms.ChoiceField(choices=[('', '---------')] + [
         (value, label) for value, label in UpgradeOperationChoices if value not in CONFIG_OPERATIONS], required=False)
@@ -346,6 +366,9 @@ class UpgradeFilterForm(NetBoxModelFilterSetForm):
 
 
 class StandardsJobFilterForm(UpgradeFilterForm):
+    hide_finished = forms.ChoiceField(choices=(('', 'All jobs'), ('true', 'Yes'), ('false', 'No')), required=False,
+                                     label='Hide finished jobs',
+                                     help_text='Includes completed, warning, failed, expired and cancelled jobs.')
     operation = forms.ChoiceField(choices=[('', '---------')] + [
         (value, label) for value, label in UpgradeOperationChoices if value in CONFIG_OPERATIONS], required=False)
 
@@ -377,12 +400,19 @@ class UpgradeJobListView(ObjectListView):
     filterset = UpgradeJobFilterSet
     filterset_form = UpgradeFilterForm
     actions = (AddObject, BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
+    standards = False
 
     def get(self, request):
-        # Include the default in pagination, filtering and bulk-action URLs.
-        # API consumers and direct job detail/history views retain all jobs.
-        request.GET = job_list_params(request.GET)
+        request.GET = job_list_params(request.GET, standards=self.standards)
         return super().get(request)
+
+
+class StandardsJobListView(UpgradeJobListView):
+    queryset = UpgradeJob.objects.filter(operation__in=CONFIG_OPERATIONS).select_related('device', 'poller')
+    template_name = 'netbox_discovery/standardsjob_list.html'
+    filterset_form = StandardsJobFilterForm
+    actions = (BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
+    standards = True
 
     def get_extra_context(self, request):
         filtered = UpgradeJobFilterSet(request.GET)
@@ -393,13 +423,6 @@ class UpgradeJobListView(ObjectListView):
         params.pop('page', None)
         return {**super().get_extra_context(request), 'hide_finished': hidden,
                 'toggle_finished_url': '?' + params.urlencode()}
-
-
-class StandardsJobListView(UpgradeJobListView):
-    queryset = UpgradeJob.objects.filter(operation__in=CONFIG_OPERATIONS).select_related('device', 'poller')
-    template_name = 'netbox_discovery/standardsjob_list.html'
-    filterset_form = StandardsJobFilterForm
-    actions = (BulkHoldJobs, BulkCancelJobs, BulkDeleteJobs)
 
 
 class BulkJobForm(forms.Form):
@@ -433,7 +456,8 @@ class UpgradeBulkActionView(PermissionRequiredMixin, View):
         form = BulkJobForm(request.POST) if request.POST.get('confirm') == 'yes' else None
         if form is None:
             if request.POST.get('_all'):
-                filtered = UpgradeJobFilterSet(job_list_params(request.GET), queryset=queryset, request=request)
+                filtered = UpgradeJobFilterSet(job_list_params(request.GET, standards=scope == 'standards'),
+                                               queryset=queryset, request=request)
                 if not filtered.is_valid():
                     messages.error(request, 'Invalid filters. No jobs were changed.')
                     return redirect(list_url)
@@ -477,7 +501,11 @@ class UpgradeJobView(ObjectView):
 
     def get_extra_context(self, request, instance):
         import json
+        from .upgrade_backups import backup_context
+        backup = backup_context(instance, request.user)
         return {'profile_text': json.dumps(instance.profile, indent=2),
+                'ucs_backups': [backup] if backup else [],
+                'waiting': waiting_details(instance, request.user),
                 'summary_text': json.dumps(instance.summary, indent=2),
                 'requeueable': instance.status in TERMINAL,
                 'waits_for_devices': Device.objects.filter(pk__in=instance.waits_for),
@@ -743,14 +771,14 @@ class PrestageRunView(PermissionRequiredMixin, View):
         if pk is not None:
             policy = get_object_or_404(PrestagePolicy.objects.restrict(request.user, 'view'), pk=pk)
             try:
-                jobs, summary = upgrade_prestage.run_policy(policy)
+                jobs, summary = upgrade_prestage.run_policy(policy, force=True)
             except queue.QueueError as exc:
                 messages.error(request, str(exc))
             else:
                 messages.success(request, f"Scheduled {summary['scheduled']} staging job(s); "
                                           f"{summary['current']} already current, {summary['skipped']} skipped.")
             return redirect(policy.get_absolute_url())
-        results = upgrade_prestage.run()
+        results = upgrade_prestage.run(force=True)
         scheduled = sum(summary.get('scheduled', 0) for summary in results.values())
         failed = [name for name, summary in results.items() if 'error' in summary]
         messages.success(request, f'Ran {len(results)} enabled policy(ies); scheduled {scheduled} staging job(s).')

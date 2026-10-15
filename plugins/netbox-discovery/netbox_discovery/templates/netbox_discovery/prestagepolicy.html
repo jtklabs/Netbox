@@ -26,6 +26,7 @@
     </table>
     <p class="text-muted">Each run gives every active device of this model a <em>Stage image only</em> job for the preferred version of the software standard that applies to it. A device is left alone while it runs that version, has a queued or active job, or was given the same image within the interval above; a new preferred version is picked up on the next run. The poller claims the jobs with <code>--apply</code>, copies and verifies the image, and never installs or reloads.</p>
     <a href="{{ jobs_url }}" class="btn btn-sm btn-outline-primary">Staging jobs for this model</a>
+    <p class="text-muted mt-3">Run now bypasses the repeat interval and starts a new interval for each device scheduled. Cancelled jobs do not count toward the interval. Devices with queued or active jobs, devices already running the preferred version, and devices marked do not upgrade are still skipped.</p>
   </div></div>
 </div><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Next run: {{ summary.scheduled }} to stage, {{ summary.current }} current, {{ summary.skipped }} skipped</h5><div class="card-body">

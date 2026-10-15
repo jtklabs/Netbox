@@ -186,7 +186,8 @@ class DeviceTypeProfileForm(NetBoxModelForm):
                   'description', 'comments', 'tags')
 
     def clean(self):
-        data = super().clean()
+        super().clean()
+        data = self.cleaned_data
         candidate = DeviceTypeProfile(pk=self.instance.pk,
                                        upgrade_profile=data.get('upgrade_profile'),
                                        remediation_profile=data.get('remediation_profile'))
@@ -286,6 +287,41 @@ class DeviceTypeProfileView(ObjectView):
 class DeviceTypeProfileEditView(ObjectEditView):
     queryset = DeviceTypeProfile.objects.all()
     form = DeviceTypeProfileForm
+
+    def dispatch(self, request, *args, **kwargs):
+        # "Assign to model" may replace a default without creating a second
+        # one-to-one assignment. Route through the normal edit permission and
+        # change-log handling, including its save-time object restrictions.
+        if request.method == 'POST' and not kwargs and request.user.is_authenticated:
+            replace = forms.BooleanField(required=False).clean(request.POST.get('replace_existing'))
+            try:
+                model_id = forms.IntegerField(min_value=1).clean(request.POST.get('device_type'))
+            except ValidationError:
+                model_id = None
+            if replace and model_id:
+                with transaction.atomic():
+                    list(DeviceType.objects.select_for_update().filter(pk=model_id))
+                    existing = DeviceTypeProfile.objects.filter(device_type_id=model_id).first()
+                    if existing:
+                        self._replacement_from_add = True
+                        return super().dispatch(request, *args, pk=existing.pk)
+        return super().dispatch(request, *args, **kwargs)
+
+    def alter_object(self, obj, request, url_args, url_kwargs):
+        if getattr(self, '_replacement_from_add', False):
+            # Blank fields on the add form mean "leave unchanged". Explicit
+            # clearing remains available on the regular edit page.
+            initial = self.form(instance=obj)
+            data = request.POST.copy()
+            for name in initial.fields:
+                if name not in data or data.get(name) == '':
+                    value = initial[name].value()
+                    if isinstance(value, (list, tuple)):
+                        data.setlist(name, value)
+                    elif value is not None:
+                        data[name] = value
+            request.POST = data
+        return obj
 
 
 @register_model_view(DeviceTypeProfile, 'delete')

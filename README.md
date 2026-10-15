@@ -150,6 +150,7 @@ the monthly AMI bake — see [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md).
 
 ## Layout
 
+- `services/job-tracker/` — standalone live device-job wallboard for another server. Reads the NetBox API, updates automatically, and shows progress by saved upgrade wave, tier, and group. See [setup and deployment](services/job-tracker/README.md).
 - `docker-compose.yml`, `configuration/`, `env/*.example` — imported from netbox-docker at the tag in [VERSIONS.md](VERSIONS.md) (deviation: the postgres service lives in `compose/dev.yml`; prod uses RDS)
 - `compose/` — env overlays: `dev.yml`, `prod.yml`, `dev-proxy.yml` (HTTPS proxy serving dev at `/netbox`, the prod path)
 - `plugins/netbox-quotes/` — our quotes/serial-matching plugin (REST **and** GraphQL: `quote_list`, `quote_line_list`, `quote_vendor_list`); `Dockerfile-Plugins` builds the image with it + PyPI plugins

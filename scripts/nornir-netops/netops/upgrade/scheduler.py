@@ -1,4 +1,4 @@
-"""One cron tick: replay progress, claim a bounded batch, run it, then exit."""
+"""Cron worker: refill available job slots until the queue and workers are idle."""
 import copy
 import fcntl
 import hashlib
@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from uuid import UUID
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from .. import archive
 from ..netbox import Client, NetBoxError
@@ -96,8 +97,12 @@ class Outbox:
                     time.sleep(2 ** attempt)
         return False
 
-    def replay(self):
+    def replay(self, exclude_job_ids=()):
         for path in sorted(self.root.glob('*.json')):
+            # Active workers own their event delivery. Do not read or replay
+            # files they may be sending/removing concurrently.
+            if int(path.name.split('-', 1)[0]) in exclude_job_ids:
+                continue
             data = json.loads(path.read_text())
             body = data['body']
             if body.get('stage') == 'ready':
@@ -222,10 +227,85 @@ def execute_job(task, args, client, outbox):
             print(f'{task.host.name}: report written to {run.path}', flush=True)
 
 
+def run_claimed_job(job, args, credentials, client, outbox):
+    from ..inventory import init_from_records, missing_credentials
+
+    key = f'{job["device"]} [job {job["id"]}]'
+    records = {key: {'hostname': job['hostname'], 'platform': platform_for(job.get('profile'))}}
+    nr = init_from_records(records, credentials.username, credentials.password, credentials.secret,
+                           args.key_file, args.port, 1, args.conn_timeout)
+    try:
+        for host in nr.inventory.hosts.values():
+            host.data.update(upgrade_job=job, netbox_id=job['device_id'])
+        if missing_credentials(nr, args.key_file):
+            raise ValueError('Device credentials are incomplete')
+        return nr.run(task=execute_job, args=args, client=client, outbox=outbox).failed
+    finally:
+        nr.close_connections(on_good=True, on_failed=True)
+
+
+def run_queue(args, client, outbox, login):
+    """Hold the caller's tick lock; claim only free slots, never queue locally."""
+    from ..debuglog import protect
+
+    active, credentials, failed = {}, None, False
+    # Executor shutdown waits for active work even if queue polling fails.
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        while True:
+            for future in list(active):
+                if future.done():
+                    del active[future]
+                    try:
+                        failed = bool(future.result()) or failed
+                    except Exception:
+                        failed = True
+                        print('Scheduled worker failed; inspect its job report before retrying.', flush=True)
+            free = args.workers - len(active)
+            if free:
+                try:
+                    delivered = outbox.replay(exclude_job_ids={job['id'] for job in active.values()})
+                    if not delivered:
+                        print('Some saved NetBox progress is still undelivered; no new jobs claimed.', flush=True)
+                        if not active:
+                            return 1
+                    else:
+                        response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply})
+                        jobs = response.get('jobs')
+                        if not isinstance(jobs, list) or len(jobs) > free or any(not isinstance(j, dict) for j in jobs):
+                            raise NetBoxError('Upgrade queue returned an invalid batch')
+                        job_ids = {job['id'] for job in active.values()}
+                        device_ids = {job['device_id'] for job in active.values()}
+                        for job in jobs:
+                            if (type(job.get('id')) is not int or job['id'] <= 0
+                                    or type(job.get('device_id')) is not int or job['device_id'] <= 0
+                                    or job['id'] in job_ids or job['device_id'] in device_ids):
+                                raise NetBoxError('Upgrade queue returned a duplicate or invalid job/device')
+                            UUID(job['claim_token'])
+                            ipaddress.ip_address(job['hostname'])
+                            job_ids.add(job['id'])
+                            device_ids.add(job['device_id'])
+                        if jobs and credentials is None:
+                            credentials, code = login()
+                            if credentials is None:
+                                return code
+                            protect([credentials.password, credentials.secret])
+                        protect([job.get('claim_token') for job in jobs])
+                        for job in jobs:
+                            active[executor.submit(run_claimed_job, job, args, credentials, client, outbox)] = job
+                except NetBoxError:
+                    if not active:
+                        raise
+                    print('Queue check-in unavailable; active jobs continue, new claims will be retried.', flush=True)
+            if not active:
+                return int(failed)
+            # A free slot polls periodically; a completed slot refills at once.
+            wait(active, timeout=args.poll_interval if len(active) < args.workers else None,
+                 return_when=FIRST_COMPLETED)
+
+
 def run(args, style):
     from ..cli import PROJECT_ROOT, _login
     from ..credentials import fetch_json_secret
-    from ..inventory import init_from_records, missing_credentials
     from ..netbox import settings_from
     from ..poller import poller_tag
     from ..standards import load as load_standards
@@ -246,46 +326,11 @@ def run(args, style):
     identity = hashlib.sha256((client.url + '/' + args.poller).encode()).hexdigest()
     root = Path(args.queue_state_dir or PROJECT_ROOT / '.upgrade-queue') / identity
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # This includes outbox replay: no overlapping cron tick can replay the
-    # previous worker's in-flight events or claim past local worker capacity.
+    # Overlapping cron ticks cannot replay in-flight events or exceed capacity.
     try:
         with tick_lock(root):
             outbox = Outbox(root / 'outbox', client)
-            if not outbox.replay():
-                print('Some saved NetBox progress is still undelivered; no new jobs claimed.')
-                return 1
-            response = client.post('check-in/', {'name': args.poller, 'limit': args.workers, 'apply': args.apply})
-            jobs = response.get('jobs')
-            if not isinstance(jobs, list) or len(jobs) > args.workers or any(not isinstance(j, dict) for j in jobs):
-                raise NetBoxError('Upgrade queue returned an invalid batch')
-            if not jobs:
-                return 0
-            # No credentials or SSH work on an idle tick.
-            credentials, code = _login(args, style)
-            if credentials is None:
-                # Claimed jobs expire without ever authorizing device changes.
-                return code
-            from ..debuglog import protect
-            protect([credentials.password, credentials.secret] + [job.get('claim_token') for job in jobs])
-            records = {}
-            for job in jobs:
-                UUID(job['claim_token'])
-                ipaddress.ip_address(job['hostname'])
-                key = f'{job["device"]} [job {job["id"]}]'
-                if key in records:
-                    raise NetBoxError('Upgrade queue returned a duplicate job')
-                records[key] = {'hostname': job['hostname'], 'platform': platform_for(job.get('profile'))}
-            nr = init_from_records(records, credentials.username, credentials.password, credentials.secret,
-                                   args.key_file, args.port, args.workers, args.conn_timeout)
-            for host, job in zip(nr.inventory.hosts.values(), jobs):
-                host.data.update(upgrade_job=job, netbox_id=job['device_id'])
-            if missing_credentials(nr, args.key_file):
-                raise ValueError('Device credentials are incomplete')
-            try:
-                result = nr.run(task=execute_job, args=args, client=client, outbox=outbox)
-                return 1 if result.failed else 0
-            finally:
-                nr.close_connections()
+            return run_queue(args, client, outbox, lambda: _login(args, style))
     except BlockingIOError:
         return 0
 

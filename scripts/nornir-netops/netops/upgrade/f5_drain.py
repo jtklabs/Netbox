@@ -1,6 +1,7 @@
-"""Temporary BIG-IP virtual-server drain; never save or sync disabled state."""
+"""BIG-IP drain, persisted disabled boot state, and validated restoration."""
 
 import time
+from copy import deepcopy
 from urllib.parse import quote, urlsplit
 
 
@@ -109,8 +110,62 @@ def restore(client, record, emit):
         raise RuntimeError("manual VIP restoration required for: " + ", ".join(failures))
 
 
+def persist_disabled(client, record, emit):
+    record['disabled_config_saved'] = True  # Save responses can be lost.
+    client.save_config()
+    emit('draining', 'Saved disabled virtual-server configuration for installation and boot',
+         {'connection_drain': record})
+
+
+def hold_after_reboot(client, record, emit):
+    current = {row['name']: row for row in inventory(client)}
+    if set(current) != {row['name'] for row in record['virtual_servers']}:
+        raise RuntimeError('Virtual-server inventory changed during reboot; recovery required')
+    if any(current[name]['enabled'] for name in record['restore_pending']):
+        disable_again(client, record, emit)
+        raise RuntimeError('A drained virtual server booted enabled; disabled again for recovery')
+    emit('converging', 'Virtual servers booted disabled; waiting for WAF and health validation',
+         {'connection_drain': record})
+
+
+def disable_again(client, record, emit):
+    record['restore_pending'] = [v['name'] for v in record['virtual_servers'] if v['enabled']]
+    failures = []
+    for name in record['restore_pending']:
+        try:
+            set_enabled(client, name, False)
+        except Exception:
+            failures.append(name)
+    persist_disabled(client, record, emit)
+    if failures:
+        raise RuntimeError('Could not re-disable virtual servers; manual recovery required for: ' + ', '.join(failures))
+
+
+def compare_while_drained(before, after, record, skip_running_config_check=False):
+    """Account only for the deliberate admin-state change; retain raw evidence."""
+    from . import checks
+    comparable = deepcopy(after)
+    pending = set(record['restore_pending'])
+    for row in comparable.get('tables', {}).get('virtual_servers', []):
+        if row.get('name') in pending and row.get('enabled') in {'disabled', 'disabled-by-user'}:
+            row['enabled'] = 'enabled'
+    findings = checks.compare(before, comparable, skip_running_config_check=skip_running_config_check)
+    observed = {r.get('name'): r.get('enabled') for r in after.get('tables', {}).get('virtual_servers', [])}
+    if any(observed.get(name) not in {'disabled', 'disabled-by-user'} for name in pending):
+        findings.append({'check': 'traffic_hold', 'severity': 'error', 'message': 'A drained virtual server is not disabled'})
+    return findings
+
+
+def release_traffic(client, record, emit):
+    restore(client, record, emit)
+    if record.get('disabled_config_saved'):
+        client.save_config()
+        record['disabled_config_saved'] = False
+        emit('restoring_virtuals', 'Original virtual-server states restored and saved', {'connection_drain': record})
+
+
 def drain(client, profile, record, emit):
-    # Refresh immediately before mutation; inventory or sync may have changed during install.
+    # Refresh immediately before mutation; inventory may have changed since prechecks.
     fresh = prepare(client, profile)
     record.clear()
     record.update(fresh)

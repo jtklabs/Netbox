@@ -24,6 +24,7 @@ and verification against simulated devices.
 | Behavior | Test modules |
 | --- | --- |
 | Shared CLI behavior, SSH apply/save, selftest | `test_run.py` |
+| NTP source-IP overrides, EOS enablement, VRF migration, verification and rollback | `test_ntp_reconciliation.py` |
 | Archive lifecycle, action provenance, checkpoints, interruption, output paths | `test_archive.py` |
 | Switch syslog policy, audit, failures, archived source/destination restoration | `test_syslog_netbox.py` |
 | F5 WAF policy, failures, original configuration and archived REST restoration | `test_waf.py` |

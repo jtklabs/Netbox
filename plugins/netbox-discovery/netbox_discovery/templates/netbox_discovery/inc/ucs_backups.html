@@ -1,0 +1,14 @@
+<div class="card">
+  <h5 class="card-header">UCS backups</h5>
+  <div class="card-body">
+    <table class="table table-sm"><thead><tr><th>Job</th><th>Backup</th></tr></thead><tbody>
+      {% for backup in backups %}<tr>
+        <td><a href="{{ backup.job.get_absolute_url }}">#{{ backup.job.pk }}</a><br>{{ backup.job.scheduled_at }}</td>
+        <td>{% if backup.available %}<a href="{% url 'plugins:netbox_discovery:upgradejob_ucs' pk=backup.job.pk %}">Download UCS</a> ({{ backup.bytes|filesizeformat }}){% else %}<span class="text-muted">Not available on this NetBox server</span>{% endif %}
+          <br><small>{{ backup.name }}</small>
+        </td>
+      </tr>{% endfor %}
+    </tbody></table>
+    <p class="text-muted mb-0">Checksum-verified pre-upgrade backups. Downloads require device and job visibility plus permission to apply upgrade jobs.</p>
+  </div>
+</div>
