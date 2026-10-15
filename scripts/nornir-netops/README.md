@@ -780,6 +780,7 @@ tool does not model still goes away cleanly. IOS/EOS global source commands,
 | ArubaOS 8 managed WLC | Mobility Conductor REST; IPv4 servers, iburst, tagged VLAN/loopback source; device-node scope only | Not implemented; select the source tag manually |
 | FortiGate | Deferred | Not implemented |
 | Palo Alto (Panorama-managed) | Deferred; template ownership is inconsistent across the fleet | Not implemented |
+| Opengear CM7100 / IM7200 | SSH Linux shell; legacy single-server NTP audit and remediation | Not managed |
 | Aruba ClearPass | SSH appadmin; IPv4 server-list audit, explicitly scoped publisher remediation | Not supported by the NTP configuration command |
 
 NX-OS uses `copy running-config startup-config` only after successful
@@ -957,6 +958,35 @@ The adapter follows the [AOS8 NTP API](https://developer.arubanetworks.com/aos8/
 [deployment monitoring API](https://developer.arubanetworks.com/aos8/docs/monitoring).
 It is fixture-tested; validate API response shapes and inheritance behavior on your
 ArubaOS release with a read-only audit, then a single-controller pilot before rollout.
+
+### Opengear CM7100 / IM7200
+
+Use NetBox platform slug `opengear` (worker platform `opengear_linux`) and a
+standards job profile selecting `ntp`. The existing global/regional NTP server
+standard applies. This legacy adapter manages the documented single
+`config.ntp.server` setting, selecting the **first** server from the nearest
+matching regional list, or the default list. Later addresses are not installed.
+Use an Opengear-specific standard if it needs a different primary server.
+
+Read-only audits query `/bin/config -g` for the NTP enable and server settings.
+Remediation writes only those two settings and invokes `/bin/config -r time`.
+Replace mode changes an existing server; add mode initializes an empty server
+or enables the selected server, but refuses to replace a different address.
+The SSH account needs permission to use `/bin/config`; no interactive sudo
+prompt is attempted. No NetBox schema or profile-type change is required.
+
+Writes persist immediately, so saving and verification must stay enabled.
+Verification rereads the configuration; it does not assert live clock sync.
+Timezone, authentication, preference, source-interface and VRF settings are
+not managed, and shared authentication settings do not require key secrets
+for Opengear-only jobs. The original server/enable values are recorded before
+writes; automatic rollback is not supported. Restore those recorded values
+with `/bin/config -s`, followed by `/bin/config -r time`, if manual recovery is
+needed after a partial failure.
+
+Scope: legacy CM7100/IM7200, **not** CM8100/OM `ogcli` devices. Tested with
+simulated CLI responses, not physical Opengear hardware. Command reference:
+[Opengear CLI and Scripting Reference, sections 1.1 and 1.1.19](https://ftp.opengear.com/download/documentation/manual/previous%20versions/Opengear%20CLI%20and%20Scripting%20Reference.pdf).
 
 ### Aruba ClearPass
 
