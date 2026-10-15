@@ -196,6 +196,28 @@ class FhrpGroup:
 
 
 @dataclass
+class Vlan:
+    """One VLAN in the device's own VLAN database."""
+
+    vid: int
+    name: str = ""
+
+
+@dataclass
+class PortVlans:
+    """How one port carries VLANs, in NetBox's terms.
+
+    `mode` is NetBox's 802.1Q mode: "access", "tagged", or "tagged-all" for a
+    trunk that allows every VLAN, where listing them would only restate the
+    VLAN database. `untagged` is the access VLAN or a trunk's native VLAN.
+    """
+
+    mode: str = ""
+    untagged: int | None = None
+    tagged: tuple = ()
+
+
+@dataclass
 class DeviceFacts:
     """Everything one device told us about itself."""
 
@@ -220,6 +242,15 @@ class DeviceFacts:
     access_points: list[AccessPoint] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
     fhrp_groups: list[FhrpGroup] = field(default_factory=list)
+    # The VLAN database, and each switched port's place in it by ifIndex. A
+    # port with no entry is one the device did not describe as switched: a
+    # routed port, or a platform whose VLAN tables are not served at all.
+    # `vlan_source` says which family of MIB answered, and is empty when
+    # neither did -- the difference between "no VLANs on that port" and "this
+    # device was never asked in a way it understands".
+    vlans: dict[int, Vlan] = field(default_factory=dict)
+    port_vlans: dict[int, PortVlans] = field(default_factory=dict)
+    vlan_source: str = ""
     # CISCO-VDC-MIB rows, NX-OS only. Which row is the agent that answered
     # decides whether this scan is the chassis or one of its virtual device
     # contexts -- see model.py.
@@ -267,6 +298,7 @@ class Collector:
     def __init__(self, credentials: list[Credential], timeout: int = 5, retries: int = 1,
                  use_bulk: bool = True, collect_interfaces: bool = True,
                  collect_ips: bool = True, collect_neighbors: bool = True,
+                 collect_vlans: bool = True,
                  max_repetitions: int = 25,
                  bulk_state: BulkState | None = None):
         if not credentials:
@@ -278,6 +310,7 @@ class Collector:
         self.collect_interfaces = collect_interfaces
         self.collect_ips = collect_ips
         self.collect_neighbors = collect_neighbors
+        self.collect_vlans = collect_vlans
         self.max_repetitions = max_repetitions
         # Devices that cannot answer a full-size GETBULK are remembered, so the
         # timeouts that discover the limit are paid once rather than every run.
@@ -393,6 +426,19 @@ class Collector:
             facts.fhrp_groups = _walk_vrrp_groups(session, host)
             if profile is not None and profile.name == "cisco":
                 facts.fhrp_groups += _walk_hsrp_groups(session, host)
+
+        if self.collect_vlans and self.collect_interfaces:
+            # One family or the other, never both: Catalyst IOS only answers
+            # the bridge MIBs per VLAN context, so a plain Q-BRIDGE walk of one
+            # comes back with VLAN 1 or nothing and would read as the truth.
+            if profile is not None and profile.name == "cisco":
+                facts.vlans, facts.port_vlans = _walk_cisco_vlans(session, host)
+                source = "cisco"
+            else:
+                facts.vlans, facts.port_vlans = _walk_qbridge_vlans(session, host)
+                source = "q-bridge"
+            if facts.vlans:
+                facts.vlan_source = source
 
         if profile is not None:
             _apply_vendor_scalars(session, host, facts, profile)
@@ -706,6 +752,168 @@ def _walk_vrrp_groups(session: CredentialSession, host: str) -> list[FhrpGroup]:
             peer_address="" if state == "master" or master in ("", "0.0.0.0") else master,
         ))
     return groups
+
+
+# --- VLANs ------------------------------------------------------------------
+
+
+def _walk_cisco_vlans(session: CredentialSession,
+                      host: str) -> tuple[dict[int, Vlan], dict[int, PortVlans]]:
+    """CISCO-VTP-MIB for the VLAN database and trunks, CISCO-VLAN-MEMBERSHIP-MIB
+    for access ports.
+
+    Columns are walked one at a time rather than as whole entries: a trunk row
+    carries sixteen 128-octet bitmaps and only four of them are the allowed
+    list, so the entry walk is mostly pruning state nobody asked for.
+    """
+    names = _walk_column(session, host, mibs.CISCO_VTP_VLAN_NAME, "vtpVlanName")
+    if not names:
+        # A router, or a switch whose view hides the table. Either way there
+        # is no VLAN database to file ports against, so the port tables are
+        # not worth their round trips.
+        return {}, {}
+    types = _walk_column(session, host, mibs.CISCO_VTP_VLAN_TYPE, "vtpVlanType")
+    vlans: dict[int, Vlan] = {}
+    for row, bind in names.items():
+        # Indexed by management domain, then VLAN id.
+        vid = _int_key(row.rsplit(".", 1)[-1])
+        if not mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID:
+            continue
+        vlan_type = _int(types.get(row), mibs.VTP_VLAN_TYPE_ETHERNET)
+        if vlan_type != mibs.VTP_VLAN_TYPE_ETHERNET:
+            continue
+        vlans[vid] = Vlan(vid=vid, name=_printable(bind))
+
+    ports: dict[int, PortVlans] = {}
+    for row, bind in _walk_column(session, host, mibs.CISCO_VM_VLAN, "vmVlan").items():
+        vid = _int(bind, 0)
+        if mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID:
+            ports[_int_key(row)] = PortVlans(mode="access", untagged=vid)
+
+    statuses = _walk_column(session, host, mibs.CISCO_TRUNK_DYNAMIC_STATUS,
+                            "vlanTrunkPortDynamicStatus")
+    trunking = {_int_key(row) for row, bind in statuses.items()
+                if _int(bind, 0) == mibs.CISCO_TRUNK_STATUS_TRUNKING}
+    if not trunking:
+        return vlans, ports
+
+    natives = _walk_column(session, host, mibs.CISCO_TRUNK_NATIVE_VLAN, "vlanTrunkPortNativeVlan")
+    bitmaps = [_walk_column(session, host, oid, "vlanTrunkPortVlansEnabled")
+               for oid in mibs.CISCO_TRUNK_VLAN_BITMAPS]
+    for if_index in sorted(trunking):
+        row = str(if_index)
+        allowed: set[int] = set()
+        answered = 0
+        for position, column in enumerate(bitmaps):
+            if row not in column:
+                continue
+            answered += 1
+            allowed |= _set_bits(_octets(column[row]), first=position * 1024)
+        allowed = {vid for vid in allowed if mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID}
+        native = _int(natives.get(row), 0)
+        untagged = native if mibs.MIN_VLAN_ID <= native <= mibs.MAX_VLAN_ID else None
+        # "Allowed: all" is the default on every trunk. Writing it out as the
+        # whole VLAN database would make each new VLAN look like a change to
+        # every uplink in the building.
+        possible = min(answered * 1024 - 1, mibs.MAX_VLAN_ID)
+        if answered and len(allowed) >= possible:
+            ports[if_index] = PortVlans(mode="tagged-all", untagged=untagged)
+            continue
+        # Allowed and defined: a trunk carries nothing for a VLAN the switch
+        # does not have, whatever the allowed list says.
+        tagged = tuple(sorted(vid for vid in allowed if vid in vlans and vid != untagged))
+        ports[if_index] = PortVlans(mode="tagged", untagged=untagged, tagged=tagged)
+    return vlans, ports
+
+
+def _walk_qbridge_vlans(session: CredentialSession,
+                        host: str) -> tuple[dict[int, Vlan], dict[int, PortVlans]]:
+    """Q-BRIDGE-MIB: VLAN names, and membership as per-VLAN port bitmaps.
+
+    Membership is read from the egress lists alone. dot1qPvid is only a tie
+    breaker: taken by itself it calls every trunk an access port in its native
+    VLAN, and says VLAN 1 of routed ports that are in no VLAN at all.
+    """
+    base_ports = {}
+    for row, bind in _walk_column(session, host, mibs.DOT1D_BASE_PORT_IF_INDEX,
+                                  "dot1dBasePortIfIndex").items():
+        if_index = _int(bind, 0)
+        if if_index > 0:
+            base_ports[_int_key(row)] = if_index
+    if not base_ports:
+        # Not a bridge. One round trip, and the firewalls and appliances that
+        # make up half of any fleet are done.
+        return {}, {}
+
+    names = _walk_column(session, host, mibs.DOT1Q_VLAN_STATIC_NAME, "dot1qVlanStaticName")
+    egress = _port_lists(session, host, mibs.DOT1Q_VLAN_CURRENT_EGRESS_PORTS)
+    if egress:
+        untagged = _port_lists(session, host, mibs.DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS)
+    else:
+        egress = _port_lists(session, host, mibs.DOT1Q_VLAN_STATIC_EGRESS_PORTS)
+        untagged = _port_lists(session, host, mibs.DOT1Q_VLAN_STATIC_UNTAGGED_PORTS)
+
+    vlans: dict[int, Vlan] = {}
+    for row, bind in names.items():
+        vid = _int_key(row)
+        if mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID:
+            vlans[vid] = Vlan(vid=vid, name=_printable(bind))
+    for vid in egress:
+        # Learned over GVRP/MVRP: in effect, with no static row to name it.
+        vlans.setdefault(vid, Vlan(vid=vid))
+    if not egress:
+        return vlans, {}
+
+    pvids = {_int_key(row): _int(bind, 0)
+             for row, bind in _walk_column(session, host, mibs.DOT1Q_PVID, "dot1qPvid").items()}
+    ports: dict[int, PortVlans] = {}
+    for port, if_index in base_ports.items():
+        member = {vid for vid, members in egress.items() if port in members}
+        if not member:
+            continue
+        bare = {vid for vid in member if port in untagged.get(vid, ())}
+        tagged = tuple(sorted(member - bare))
+        native = None
+        if bare:
+            native = pvids.get(port) if pvids.get(port) in bare else min(bare)
+        ports[if_index] = PortVlans(mode="tagged" if tagged else "access",
+                                    untagged=native, tagged=tagged)
+    return vlans, ports
+
+
+def _port_lists(session: CredentialSession, host: str, oid: str) -> dict[int, set[int]]:
+    """A PortList column as VLAN id -> bridge ports. The VLAN id is the last
+    part of the index in both tables; the current one puts a time mark first."""
+    lists: dict[int, set[int]] = {}
+    for row, bind in _walk_column(session, host, oid, "dot1q port list").items():
+        vid = _int_key(row.rsplit(".", 1)[-1])
+        if mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID:
+            lists[vid] = _set_bits(_octets(bind), first=1)
+    return lists
+
+
+def _walk_column(session: CredentialSession, host: str, oid: str, what: str) -> dict[str, VarBind]:
+    try:
+        return collect_column(session.walk(host, oid), oid)
+    except SnmpError as exc:
+        log.debug("%s: %s unavailable (%s)", host, what, exc)
+        return {}
+
+
+def _set_bits(data: bytes, first: int = 0) -> set[int]:
+    """Positions of the set bits, most significant first, counted from `first`.
+
+    Both MIBs number that way round and differ only in where they start: a
+    Cisco VLAN bitmap opens at VLAN 0, a PortList at bridge port 1.
+    """
+    found = set()
+    for offset, octet in enumerate(data):
+        if not octet:
+            continue
+        for bit in range(8):
+            if octet & (0x80 >> bit):
+                found.add(first + offset * 8 + bit)
+    return found
 
 
 # --- CDP / LLDP neighbors ---------------------------------------------------

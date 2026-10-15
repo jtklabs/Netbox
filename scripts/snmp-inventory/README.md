@@ -48,6 +48,9 @@ serial matching, Hardware Lifecycle EoL), so owning discovery fits.
 - **Aruba access points**, from the controller that terminates them
 - **CDP/LLDP neighbors**, synced into NetBox as tagged Cable objects — see
   [Cables from CDP/LLDP](#cables-from-cdplldp)
+- **VLANs**: the VLAN database, each switched port's mode with its untagged
+  and tagged VLANs, and the VLAN behind each routed prefix — see
+  [VLANs](#vlans)
 
 ### Show-command collection
 
@@ -108,6 +111,47 @@ turns those FHRP groups and the discovered cables into the groups and
 dependencies the upgrade queue enforces. `sync_fhrp_groups = false` in
 `[sync]` turns both off. See
 [docs/OID-SOURCES.md](docs/OID-SOURCES.md#first-hop-redundancy-hsrp-and-vrrp).
+
+### VLANs
+
+A switch is asked for its VLAN database and for what every port carries, and
+three things in NetBox follow from the answer:
+
+| In NetBox | Written from |
+|---|---|
+| **VLAN** objects | the device's VLAN database, scoped to the **site** the device is at, in no VLAN group. A VLAN already at that site with the same number is reused whichever group it sits in; VLAN 10 at another site is another VLAN |
+| Interface **802.1Q mode**, **untagged VLAN**, **tagged VLANs** | an access port gets `access` and its VLAN; a trunk gets `tagged`, its native VLAN as untagged and the VLANs it carries; a trunk that allows every VLAN gets `tagged-all`, because listing them would make each new VLAN look like a change to every uplink |
+| Prefix **VLAN** | a routed VLAN interface — `Vlan100`, `Vl100`, `vlan100`, `Vlan 100`, `Vlan-interface100` — holds an address, the address sits in a prefix, and the interface's name says which VLAN that prefix is. Only the prefix whose network is exactly the interface's, in the device's own VRF; never a containing one, and prefixes are never created |
+
+**The device wins.** A port whose mode or VLANs differ in NetBox is brought
+into line, a prefix on a different VLAN number is moved, and a port the switch
+reports as routed has its mode and VLANs cleared. That last one only happens
+when the switch answered for its ports at all: a firewall, a device whose VLAN
+tables are not served, and a stored onboarding preview applied while the device
+is unreachable clear nothing. Two things deliberately do *not* follow the
+device. A VLAN's **name** is set when the VLAN is created and afterwards only
+replaces a placeholder (`VLAN0100`) — two switches at a site rarely spell a
+name the same way, and following them would rename it on every sweep. And a
+prefix already on the **same VLAN number** filed under another site is left
+alone: that is one VLAN stretched between two sites, and claiming it would
+have the two ends trade it back and forth.
+
+A trunk's tagged list is what it is allowed **and** the switch has defined, so
+`switchport trunk allowed vlan 10,20,30` on a switch with no VLAN 30 reads as
+10 and 20.
+
+Two families of MIB, and the split is not a preference. Catalyst IOS answers
+the bridge MIBs one VLAN at a time, through an SNMPv3 context per VLAN, so a
+plain Q-BRIDGE walk of one returns VLAN 1 or nothing — Cisco devices are read
+from CISCO-VTP-MIB and CISCO-VLAN-MEMBERSHIP-MIB instead, and everything else
+(Arista, Aruba/HP, Dell, Fortinet switches) from Q-BRIDGE-MIB, where ports are
+numbered by bridge port and translated to interfaces through
+`dot1dBasePortIfIndex`. Juniper EX is not read: older Junos indexes Q-BRIDGE by
+an internal VLAN number rather than the VLAN ID, and writing those would be
+worse than writing nothing. `--probe` prints a VLANS section and each port's
+reading, so a platform can be checked before its sweep writes anything.
+`sync_vlans = false` in `[sync]` turns the writes and the walks off. See
+[docs/OID-SOURCES.md](docs/OID-SOURCES.md#vlans).
 
 ### Vendors
 
@@ -921,8 +965,8 @@ like any device, and a VDC reports none.
 ### What it writes
 
 Auto-created when missing: manufacturer, device type, module type, module bay,
-device, virtual chassis, interface, IP address, platform, device role, and the
-`software_version` custom field.
+device, virtual chassis, interface, IP address, VLAN, platform, device role,
+and the `software_version` custom field.
 
 Idempotent throughout — objects are looked up by natural key before being
 created, and existing ones are patched only where a field actually differs, so

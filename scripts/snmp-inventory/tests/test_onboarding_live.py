@@ -147,6 +147,9 @@ def _teardown(netbox):
         if pfx.get("prefix") in (TEST_PREFIX, "198.18.0.0/24"):
             delete("/ipam/prefixes/", pfx["id"])
     for site in sites:
+        # The scanned switch's VLANs are scoped to the site and hold it in place.
+        for vlan in netbox.all("/ipam/vlans/", {"site_id": site["id"]}):
+            delete("/ipam/vlans/", vlan["id"])
         delete("/dcim/sites/", site["id"])
     for region in netbox.all("/dcim/regions/"):
         if (region.get("slug") or "").startswith(SLUG):

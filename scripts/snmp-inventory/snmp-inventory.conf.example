@@ -58,6 +58,13 @@ sync_cables = true
 # Write HSRP/VRRP groups as NetBox FHRP groups and refresh the discovery
 # plugin's redundancy groups at the end of the sweep.
 sync_fhrp_groups = true
+# Write the VLANs each switch reports as NetBox VLANs scoped to its site, set
+# every switched port's 802.1Q mode with its untagged and tagged VLANs, and
+# link the prefix behind each routed VLAN interface (Vlan100) to its VLAN.
+# The device wins: a port or prefix that disagrees is brought into line, and a
+# port the switch reports as routed has its VLANs cleared. Off also skips the
+# VLAN walks, which are the largest tables a Catalyst trunk serves.
+sync_vlans = true
 # Which neighbor classes get cabled. Phones, APs and servers announce
 # themselves over CDP/LLDP too, and cabling them is a choice, not a fact:
 # the default is network gear only. Add from: phone, ap, host, unknown.

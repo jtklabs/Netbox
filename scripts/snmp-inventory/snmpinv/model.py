@@ -56,6 +56,17 @@ class InterfaceRecord:
     description: str = ""
     speed_kbps: int | None = None
     ip_addresses: list[str] = field(default_factory=list)
+    # NetBox's 802.1Q mode ("access", "tagged", "tagged-all") and the VLAN ids
+    # behind it. All empty for a port the device did not describe as switched.
+    mode: str = ""
+    untagged_vlan: int | None = None
+    tagged_vlans: list[int] = field(default_factory=list)
+
+
+@dataclass
+class VlanRecord:
+    vid: int
+    name: str = ""
 
 
 @dataclass
@@ -175,6 +186,11 @@ class ScanResult:
     virtual_chassis_name: str = ""
     access_points: list[DeviceRecord] = field(default_factory=list)
     fhrp_groups: list[FhrpRecord] = field(default_factory=list)
+    # The device's VLAN database. `vlans_reported` is whether it answered for
+    # its ports at all, which is what lets the sync read a port with no VLANs
+    # as "routed" rather than "not asked" and clear what NetBox holds for it.
+    vlans: list[VlanRecord] = field(default_factory=list)
+    vlans_reported: bool = False
     credential_name: str = ""
     facts: DeviceFacts | None = None
     # Values supplied by discovery rules rather than the device (rules.py),
@@ -232,6 +248,10 @@ def build_scan_result(facts: DeviceFacts, ap_role_enabled: bool = True,
 
     if ap_role_enabled and facts.access_points:
         result.access_points = _build_access_points(facts)
+
+    result.vlans = [VlanRecord(vid=vlan.vid, name=vlan.name)
+                    for vlan in sorted(facts.vlans.values(), key=lambda v: v.vid)]
+    result.vlans_reported = bool(facts.port_vlans)
 
     for group in facts.fhrp_groups:
         interface = facts.interfaces.get(group.if_index)
@@ -568,6 +588,11 @@ def _attach_interfaces(facts: DeviceFacts, result: ScanResult) -> None:
     for index in sorted(facts.interfaces):
         interface = facts.interfaces[index]
         record = _interface_record(interface, ips_by_index.get(index, []))
+        port = facts.port_vlans.get(index)
+        if port is not None:
+            record.mode = port.mode
+            record.untagged_vlan = port.untagged
+            record.tagged_vlans = list(port.tagged)
         owner = primary
         if result.is_stack:
             member_number = _member_from_interface_name(record.name)
@@ -590,6 +615,27 @@ def _interface_record(interface: Interface, ip_addresses: list[str]) -> Interfac
         speed_kbps=interface.speed_mbps * 1000 if interface.speed_mbps else None,
         ip_addresses=ip_addresses,
     )
+
+
+# "Vlan100" and "Vl100" (Cisco, Arista, NX-OS), "vlan100" (Aruba CX, OS10),
+# "Vlan 100" (FTOS), "Vlan-interface100" (Comware). Anchored at both ends so a
+# port that merely mentions a VLAN in its name is not taken for one.
+_SVI_NAME = re.compile(r"^(?:vlan-interface|vlan|vl)[\s\-]?(\d{1,4})$", re.IGNORECASE)
+
+
+def svi_vlan_id(name: str) -> int | None:
+    """The VLAN a routed VLAN interface belongs to, read from its name.
+
+    No standard MIB ties an SVI to its VLAN, and every platform supported here
+    names the interface after it. That is the link from a prefix to a VLAN:
+    the SVI holds an address, the address sits in a prefix, and the SVI's name
+    says which VLAN that prefix is.
+    """
+    match = _SVI_NAME.match(name.strip())
+    if not match:
+        return None
+    vid = int(match.group(1))
+    return vid if mibs.MIN_VLAN_ID <= vid <= mibs.MAX_VLAN_ID else None
 
 
 def _member_from_interface_name(name: str) -> int | None:

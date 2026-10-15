@@ -244,6 +244,76 @@ def cdp_neighbor(if_index: int, device_index: int, device_id: str, port: str,
     return rows
 
 
+def bitmap(positions, length: int, first: int = 0) -> str:
+    """Set bits as printed hex, most significant bit first, counted from `first`.
+
+    Cisco's VLAN bitmaps open at VLAN 0; a Q-BRIDGE PortList at bridge port 1.
+    """
+    data = bytearray(length)
+    for position in positions:
+        offset = position - first
+        data[offset // 8] |= 0x80 >> (offset % 8)
+    return " ".join(f"{octet:02X}" for octet in data)
+
+
+CISCO_VTP_VLAN = "1.3.6.1.4.1.9.9.46.1.3.1.1"
+CISCO_TRUNK_PORT = "1.3.6.1.4.1.9.9.46.1.6.1.1"
+CISCO_VM_VLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"
+
+
+def cisco_vlan(vid: int, name: str, vlan_type: int = 1) -> list[Varbind]:
+    """One vtpVlanTable row, in management domain 1."""
+    return [
+        i(f"{CISCO_VTP_VLAN}.2.1.{vid}", 1),              # vtpVlanState operational
+        i(f"{CISCO_VTP_VLAN}.3.1.{vid}", vlan_type),      # vtpVlanType
+        s(f"{CISCO_VTP_VLAN}.4.1.{vid}", name),           # vtpVlanName
+    ]
+
+
+def cisco_access_port(if_index: int, vid: int) -> list[Varbind]:
+    # Every switchport has a trunk row too, and an access port's says so.
+    return [
+        i(f"{CISCO_VM_VLAN}.{if_index}", vid),
+        i(f"{CISCO_TRUNK_PORT}.14.{if_index}", 2),        # notTrunking
+    ]
+
+
+def cisco_trunk_port(if_index: int, allowed, native: int = 1) -> list[Varbind]:
+    """A trunking vlanTrunkPortTable row; `allowed` is the VLAN ids, or "all"."""
+    vids = range(0, 4096) if allowed == "all" else allowed
+    rows = [
+        i(f"{CISCO_TRUNK_PORT}.5.{if_index}", native),
+        i(f"{CISCO_TRUNK_PORT}.14.{if_index}", 1),        # trunking
+    ]
+    for position, column in enumerate((4, 17, 18, 19)):
+        low = position * 1024
+        rows.append(Varbind(
+            f"{CISCO_TRUNK_PORT}.{column}.{if_index}", "Hex-STRING",
+            bitmap([v for v in vids if low <= v < low + 1024], 128, first=low),
+        ))
+    return rows
+
+
+DOT1D_BASE_PORT_IF_INDEX = "1.3.6.1.2.1.17.1.4.1.2"
+DOT1Q_VLAN = "1.3.6.1.2.1.17.7.1.4"
+
+
+def qbridge_port(port: int, if_index: int, pvid: int = 1) -> list[Varbind]:
+    return [
+        i(f"{DOT1D_BASE_PORT_IF_INDEX}.{port}", if_index),
+        g(f"{DOT1Q_VLAN}.5.1.1.{port}", pvid),            # dot1qPvid
+    ]
+
+
+def qbridge_vlan(vid: int, name: str, egress, untagged, octets: int = 4) -> list[Varbind]:
+    """A VLAN in both the static table and the current one (time mark 0)."""
+    return [
+        s(f"{DOT1Q_VLAN}.3.1.1.{vid}", name),
+        Varbind(f"{DOT1Q_VLAN}.2.1.4.0.{vid}", "Hex-STRING", bitmap(egress, octets, first=1)),
+        Varbind(f"{DOT1Q_VLAN}.2.1.5.0.{vid}", "Hex-STRING", bitmap(untagged, octets, first=1)),
+    ]
+
+
 def aruba_ap(mac: str, name: str, model: str, serial: str, address: str,
              group: str = "default", status: int = 1,
              sw_version: str = "") -> list[Varbind]:
@@ -425,6 +495,20 @@ def arista_7050sx() -> list[Varbind]:
     out += interface(5, "Management1", 6, 1000, mac="00:1C:73:AA:BB:FF", alias="oob")
     out += interface(6, "Port-Channel10", 161, 40000, alias="mlag peer link")
     out += ip_address("10.30.0.11", 24, 5)
+    out += interface(7, "Vlan100", 136, 0, mac="00:1C:73:AA:BB:FE", alias="servers gateway")
+    out += ip_address("10.30.100.2", 24, 7)
+
+    # Q-BRIDGE numbers ports by bridge port, and here that is DELIBERATELY not
+    # the ifIndex (Ethernet1 is bridge port 11), for the reason the LLDP
+    # numbering below is not either. Ethernet1 is an access port, Ethernet2 a
+    # trunk with a native VLAN, the port channel a trunk with none, and
+    # Ethernet3-4 are routed: bridge ports in no VLAN, whose PVID of 1 must
+    # not be read as membership.
+    for port, if_index in ((11, 1), (12, 2), (13, 3), (14, 4), (20, 6)):
+        out += qbridge_port(port, if_index, pvid=100 if if_index == 1 else 1)
+    out += qbridge_vlan(1, "default", egress=[12], untagged=[12])
+    out += qbridge_vlan(100, "SERVERS", egress=[11, 12, 20], untagged=[11])
+    out += qbridge_vlan(200, "STORAGE", egress=[12, 20], untagged=[])
 
     # LLDP only — the other side of the stack's Te1/1/1 sighting. The local
     # port numbering here is DELIBERATELY not the ifIndex (Ethernet1 is LLDP
@@ -675,6 +759,20 @@ def cisco_single_2960() -> list[Varbind]:
                          mac=f"00:1E:14:11:22:{index:02X}", alias=f"access {index}")
     out += interface(10, "Vlan1", 53, 0, mac="00:1E:14:11:22:FE", alias="management")
     out += ip_address("10.10.2.5", 24, 10)
+
+    # The VLAN database with the token ring relics every Catalyst carries, an
+    # uplink pruned to three VLANs with a non-default native, and two access
+    # ports. VOICE is allowed on the uplink but 30 is not defined here at all,
+    # which is the case the allowed list alone gets wrong.
+    out += cisco_vlan(1, "default")
+    out += cisco_vlan(10, "USERS")
+    out += cisco_vlan(20, "VOICE")
+    out += cisco_vlan(99, "MGMT")
+    out += cisco_vlan(1002, "fddi-default", vlan_type=2)
+    out += cisco_vlan(1003, "token-ring-default", vlan_type=3)
+    out += cisco_trunk_port(1, [10, 20, 30, 99], native=99)
+    out += cisco_access_port(2, 10)
+    out += cisco_access_port(3, 20)
 
     # The uplink to the 9300 stack, seen from this side — the stack fixture
     # reports the same link from member 2's port. Both protocols again, and

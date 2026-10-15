@@ -159,6 +159,7 @@ def load(config_path: str, credentials_path: str = "") -> Config:
             retired_device_status=section.get("retired_device_status", "inventory"),
             sync_cables=section.getboolean("sync_cables", True),
             sync_fhrp_groups=section.getboolean("sync_fhrp_groups", True),
+            sync_vlans=section.getboolean("sync_vlans", True),
             cable_neighbor_classes=_class_list(
                 section.get("cable_neighbor_classes", "network")),
         )

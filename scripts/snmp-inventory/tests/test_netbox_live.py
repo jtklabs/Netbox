@@ -164,7 +164,21 @@ def lab(netbox):
 # Addresses the fixtures hand out. They carry no test prefix of their own, so
 # they are listed explicitly rather than pattern-matched — this file must never
 # delete an address it did not create.
-FIXTURE_ADDRESSES = ("10.10.1.5/24", "10.30.0.11/24", "10.10.2.5/24")
+FIXTURE_ADDRESSES = ("10.10.1.5/24", "10.30.0.11/24", "10.10.2.5/24", "10.30.100.2/24")
+
+
+# The network behind the Arista fixture's Vlan100, created by the VLAN tests so
+# there is a prefix for the SVI to claim.
+VLAN_PREFIX = "10.30.100.0/24"
+
+
+def _delete_site_vlans(netbox: NetBox, site_slug: str) -> None:
+    """A site cannot be deleted while a VLAN is scoped to it, and any scan with
+    a routed VLAN interface (Vlan99) or a VLAN database files VLANs there."""
+    site = netbox.first("/dcim/sites/", {"slug": site_slug})
+    if site:
+        for vlan in netbox.all("/ipam/vlans/", {"site_id": site["id"]}):
+            netbox._request("DELETE", f"/ipam/vlans/{vlan['id']}/")
 
 
 def _teardown(netbox: NetBox) -> None:
@@ -226,8 +240,12 @@ def _teardown(netbox: NetBox) -> None:
     purge("/ipam/ip-addresses/",
           lambda o: str(o.get("address", "")).startswith("198.51.100.")
           or o.get("address") in FIXTURE_ADDRESSES)
-    purge("/ipam/prefixes/", lambda o: o.get("prefix") == "198.51.100.0/24")
+    purge("/ipam/prefixes/", lambda o: o.get("prefix") in ("198.51.100.0/24", VLAN_PREFIX))
     for site in test_sites:
+        # A site cannot be deleted while VLANs are scoped to it, and a scan of
+        # a switch files its whole VLAN database there.
+        for vlan in netbox.all("/ipam/vlans/", {"site_id": site["id"]}):
+            delete("/ipam/vlans/", vlan["id"])
         delete("/dcim/sites/", site["id"])
     purge("/dcim/regions/", named)
     purge("/extras/tags/", lambda o: (o.get("slug") or "") in (OUR_TAG, THEIR_TAG, SCAN_TAG))
@@ -571,6 +589,7 @@ class TestOneBadAddressDoesNotSinkTheDevice:
     def _cleanup(self, netbox):
         """The client has no delete() — the poller never removes anything —
         so the test reaches through to the request layer for its own tidying."""
+        _delete_site_vlans(netbox, self.SITE)
         for path, lookup in (
             ("/dcim/devices/", {"name": self.NAME}),
             ("/dcim/sites/", {"slug": self.SITE}),
@@ -674,6 +693,7 @@ class TestThePolledAddressBecomesThePrimaryIP:
     SITE = "snmpinv-primary-site"
 
     def _cleanup(self, netbox):
+        _delete_site_vlans(netbox, self.SITE)
         for path, lookup in (
             ("/dcim/devices/", {"name": self.NAME}),
             ("/dcim/sites/", {"slug": self.SITE}),
@@ -815,6 +835,7 @@ class TestALongModuleBayNameIsAccepted:
               "Position ")
 
     def _cleanup(self, netbox):
+        _delete_site_vlans(netbox, self.SITE)
         for path, lookup in (
             ("/dcim/devices/", {"name": self.NAME}),
             ("/dcim/sites/", {"slug": self.SITE}),
@@ -1236,3 +1257,68 @@ class TestCableSync:
         # Put the deleted interfaces back for whatever runs after.
         self._sync(netbox, "arista-7050sx", lab["site_ours"]["id"], "10.30.0.11")
         self._sync(netbox, "cisco-2960x", lab["site_ours"]["id"], "10.10.2.5")
+
+
+class TestVlansAgainstLiveNetBox:
+    """What a fake cannot check: NetBox validates an interface's mode, untagged
+    VLAN and tagged VLANs against each other and against the device's site, so
+    the shape of each PATCH is what is under test here."""
+
+    @pytest.fixture(scope="class")
+    def switch(self, netbox, lab):
+        site_id = lab["site_ours"]["id"]
+        prefix = (netbox.first("/ipam/prefixes/", {"prefix": VLAN_PREFIX})
+                  or netbox.create("/ipam/prefixes/", {"prefix": VLAN_PREFIX}))
+        syncer = Syncer(netbox, SyncOptions(device_role=f"{SLUG_PREFIX}network",
+                                            sync_cables=False, sync_fhrp_groups=False))
+        result = build_scan_result(collect_fixture("arista-7050sx"))
+        syncer.sync(result, site_id, scanned_address="10.30.0.11")
+        device = netbox.first("/dcim/devices/", {"name": "dc1-spine-01", "site_id": site_id})
+        return {"site_id": site_id, "device": device, "prefix_id": prefix["id"],
+                "result": result}
+
+    def _ports(self, netbox, switch) -> dict:
+        return {i["name"]: i for i in
+                netbox.all("/dcim/interfaces/", {"device_id": switch["device"]["id"]})}
+
+    def test_vlans_are_scoped_to_the_site_with_no_group(self, netbox, switch):
+        vlans = netbox.all("/ipam/vlans/", {"site_id": switch["site_id"]})
+        assert {(v["vid"], v["name"]) for v in vlans} >= {
+            (1, "default"), (100, "SERVERS"), (200, "STORAGE")}
+        assert all(v.get("group") is None for v in vlans if v["vid"] in (1, 100, 200))
+
+    def test_access_trunk_and_routed_ports(self, netbox, switch):
+        ports = self._ports(netbox, switch)
+        access, trunk, routed = ports["Ethernet1"], ports["Ethernet2"], ports["Ethernet3"]
+        assert (_choice(access["mode"]), access["untagged_vlan"]["vid"]) == ("access", 100)
+        assert _choice(trunk["mode"]) == "tagged" and trunk["untagged_vlan"]["vid"] == 1
+        assert sorted(v["vid"] for v in trunk["tagged_vlans"]) == [100, 200]
+        assert not _choice(routed["mode"]) and not routed["untagged_vlan"]
+
+    def test_the_svi_prefix_is_linked(self, netbox, switch):
+        prefix = netbox.get(f"/ipam/prefixes/{switch['prefix_id']}/")
+        assert (prefix.get("vlan") or {}).get("vid") == 100
+
+    def test_a_second_pass_changes_nothing(self, netbox, switch):
+        again = NetBox(URL, TOKEN, verify_ssl=False, timeout=30)
+        Syncer(again, SyncOptions(device_role=f"{SLUG_PREFIX}network", sync_cables=False,
+                                  sync_fhrp_groups=False)).sync(
+            switch["result"], switch["site_id"], scanned_address="10.30.0.11")
+        assert not again.created and not again.updated, (again.created, again.updated)
+
+    def test_a_port_that_became_routed_is_cleared_in_one_patch(self, netbox, switch):
+        """Mode, untagged and tagged VLANs go together: NetBox refuses a mode
+        of none while an untagged VLAN is still set."""
+        result = build_scan_result(collect_fixture("arista-7050sx"))
+        for interface in result.devices[0].interfaces:
+            if interface.name == "Ethernet2":
+                interface.mode, interface.untagged_vlan, interface.tagged_vlans = "", None, []
+        options = SyncOptions(device_role=f"{SLUG_PREFIX}network", sync_cables=False,
+                              sync_fhrp_groups=False)
+        Syncer(netbox, options).sync(result, switch["site_id"], scanned_address="10.30.0.11")
+        port = self._ports(netbox, switch)["Ethernet2"]
+        assert not _choice(port["mode"]) and not port["untagged_vlan"] and not port["tagged_vlans"]
+        # And back, which is the access -> trunk direction of the same rule.
+        Syncer(netbox, options).sync(switch["result"], switch["site_id"],
+                                     scanned_address="10.30.0.11")
+        assert _choice(self._ports(netbox, switch)["Ethernet2"]["mode"]) == "tagged"

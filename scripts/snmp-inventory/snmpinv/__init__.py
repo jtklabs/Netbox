@@ -30,7 +30,7 @@ after the "+" moves whenever the code does, bump or no bump.
 import hashlib
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 def build_version() -> str:

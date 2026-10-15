@@ -99,6 +99,54 @@ four further arcs.
 VRRPv3 (RFC 6527, VRRPV3-MIB) is not read yet; devices that publish only the
 v3 table produce no groups and are reported as having none.
 
+## VLANs
+
+Verified on 2026-09-21 from the published
+[CISCO-VTP-MIB](https://github.com/librenms/librenms/blob/master/mibs/cisco/CISCO-VTP-MIB),
+[CISCO-VLAN-MEMBERSHIP-MIB](https://github.com/librenms/librenms/blob/master/mibs/cisco/CISCO-VLAN-MEMBERSHIP-MIB)
+and [Q-BRIDGE-MIB](https://github.com/librenms/librenms/blob/master/mibs/Q-BRIDGE-MIB)
+(RFC 4363), each read for its `::= { parent N }` lines; `dot1dBasePortIfIndex`
+was additionally resolved with `snmptranslate` against the BRIDGE-MIB net-snmp
+ships. **None of it has been run against real hardware yet** — the fixtures are
+synthetic. `--probe` a Catalyst, a Nexus and an Arista and compare the VLANS
+section with `show vlan brief` / `show interfaces trunk` before trusting a
+sweep.
+
+| Object | OID | MIB |
+|---|---|---|
+| `vtpVlanState` | 1.3.6.1.4.1.9.9.46.1.3.1.1.2 | CISCO-VTP-MIB; index `<domain>.<vlan>` (fixtures only) |
+| `vtpVlanType` | 1.3.6.1.4.1.9.9.46.1.3.1.1.3 | CISCO-VTP-MIB (1 ethernet, 2 fddi, 3 tokenRing, 4 fddiNet, 5 trNet); only ethernet is kept |
+| `vtpVlanName` | 1.3.6.1.4.1.9.9.46.1.3.1.1.4 | CISCO-VTP-MIB |
+| `vlanTrunkPortVlansEnabled` | 1.3.6.1.4.1.9.9.46.1.6.1.1.4 | CISCO-VTP-MIB; index ifIndex; VLANs 0-1023 |
+| `vlanTrunkPortNativeVlan` | 1.3.6.1.4.1.9.9.46.1.6.1.1.5 | CISCO-VTP-MIB |
+| `vlanTrunkPortDynamicStatus` | 1.3.6.1.4.1.9.9.46.1.6.1.1.14 | CISCO-VTP-MIB (1 trunking, 2 notTrunking) |
+| `vlanTrunkPortVlansEnabled2k` / `3k` / `4k` | 1.3.6.1.4.1.9.9.46.1.6.1.1.17 / .18 / .19 | CISCO-VTP-MIB; VLANs 1024-2047, 2048-3071, 3072-4095 |
+| `vmVlan` | 1.3.6.1.4.1.9.9.68.1.2.2.1.2 | CISCO-VLAN-MEMBERSHIP-MIB; index ifIndex |
+| `dot1dBasePortIfIndex` | 1.3.6.1.2.1.17.1.4.1.2 | BRIDGE-MIB; bridge port -> ifIndex |
+| `dot1qVlanCurrentEgressPorts` | 1.3.6.1.2.1.17.7.1.4.2.1.4 | Q-BRIDGE-MIB; index `<timeMark>.<vlan>` |
+| `dot1qVlanCurrentUntaggedPorts` | 1.3.6.1.2.1.17.7.1.4.2.1.5 | Q-BRIDGE-MIB |
+| `dot1qVlanStaticName` | 1.3.6.1.2.1.17.7.1.4.3.1.1 | Q-BRIDGE-MIB; index `<vlan>` |
+| `dot1qVlanStaticEgressPorts` | 1.3.6.1.2.1.17.7.1.4.3.1.2 | Q-BRIDGE-MIB; read only when the current table is not served |
+| `dot1qVlanStaticUntaggedPorts` | 1.3.6.1.2.1.17.7.1.4.3.1.4 | Q-BRIDGE-MIB; column 3 is ForbiddenEgressPorts |
+| `dot1qPvid` | 1.3.6.1.2.1.17.7.1.4.5.1.1 | Q-BRIDGE-MIB; augments dot1dBasePortEntry, so indexed by bridge port |
+
+Bit order is the same in both families and they differ only in where they
+start. CISCO-VTP-MIB: "the first octet corresponds to VLANs with VlanIndex
+values of 0 through 7", most significant bit lowest. Q-BRIDGE PortList: "the
+most significant bit represents the lowest numbered port", and ports count
+from 1.
+
+A bitmap whose octets all happen to be printable is printed by net-snmp as a
+STRING rather than a Hex-STRING. Both forms decode to the same octets
+(`_octets` in collect.py), with one known gap: a STRING value is stripped of
+surrounding whitespace by the parser, so a PortList ending in octet 0x20 would
+lose that octet. It takes a list that is printable ASCII from end to end, and
+has not been seen.
+
+The Cisco tables are walked a column at a time. A `vlanTrunkPortEntry` row
+carries sixteen 128-octet bitmaps, of which four are the allowed list; the
+rest is VTP pruning state.
+
 ## Standard MIBs
 
 | Object | OID | MIB |

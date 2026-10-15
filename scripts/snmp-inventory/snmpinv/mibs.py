@@ -197,6 +197,62 @@ VRRP_ASSO_IP_ADDR_ENTRY = "1.3.6.1.2.1.68.1.4.1"
 VRRP_ASSO_IP_ADDR_ROW_STATUS = f"{VRRP_ASSO_IP_ADDR_ENTRY}.2"
 VRRP_STATES = {1: "initialize", 2: "backup", 3: "master"}
 
+# --- VLANs: CISCO-VTP-MIB, CISCO-VLAN-MEMBERSHIP-MIB, Q-BRIDGE-MIB ------------
+#
+# Two families, and the split is not a preference. Catalyst IOS answers the
+# bridge MIBs once per VLAN, through a context named after it (`vlan-10`), so
+# a plain walk of Q-BRIDGE-MIB on one returns VLAN 1 or nothing; Cisco's own
+# MIBs answer for every VLAN in one pass. Everything else speaks Q-BRIDGE.
+# Every column below is in docs/OID-SOURCES.md with the MIB it was read from.
+
+# vtpVlanTable, indexed by management domain then VLAN id.
+CISCO_VTP_VLAN_ENTRY = "1.3.6.1.4.1.9.9.46.1.3.1.1"
+CISCO_VTP_VLAN_STATE = f"{CISCO_VTP_VLAN_ENTRY}.2"
+CISCO_VTP_VLAN_TYPE = f"{CISCO_VTP_VLAN_ENTRY}.3"
+CISCO_VTP_VLAN_NAME = f"{CISCO_VTP_VLAN_ENTRY}.4"
+# 1002-1005 are in every Catalyst's table as fddi/tokenRing/fddiNet/trNet.
+# They carry no traffic on anything built this century; only ethernet is kept.
+VTP_VLAN_TYPE_ETHERNET = 1
+
+# vlanTrunkPortTable, indexed by ifIndex. The allowed-VLAN list is four
+# 128-octet bitmaps, one per 1024 VLANs, most significant bit first: the first
+# octet of the first column is VLANs 0-7.
+CISCO_TRUNK_PORT_ENTRY = "1.3.6.1.4.1.9.9.46.1.6.1.1"
+CISCO_TRUNK_VLANS_ENABLED = f"{CISCO_TRUNK_PORT_ENTRY}.4"
+CISCO_TRUNK_NATIVE_VLAN = f"{CISCO_TRUNK_PORT_ENTRY}.5"
+CISCO_TRUNK_DYNAMIC_STATUS = f"{CISCO_TRUNK_PORT_ENTRY}.14"
+CISCO_TRUNK_VLANS_ENABLED_2K = f"{CISCO_TRUNK_PORT_ENTRY}.17"
+CISCO_TRUNK_VLANS_ENABLED_3K = f"{CISCO_TRUNK_PORT_ENTRY}.18"
+CISCO_TRUNK_VLANS_ENABLED_4K = f"{CISCO_TRUNK_PORT_ENTRY}.19"
+# In VLAN order, so column N starts at VLAN N * 1024.
+CISCO_TRUNK_VLAN_BITMAPS = (
+    CISCO_TRUNK_VLANS_ENABLED,
+    CISCO_TRUNK_VLANS_ENABLED_2K,
+    CISCO_TRUNK_VLANS_ENABLED_3K,
+    CISCO_TRUNK_VLANS_ENABLED_4K,
+)
+CISCO_TRUNK_STATUS_TRUNKING = 1
+
+# vmMembershipTable, indexed by ifIndex: the VLAN of an access port.
+CISCO_VM_MEMBERSHIP_ENTRY = "1.3.6.1.4.1.9.9.68.1.2.2.1"
+CISCO_VM_VLAN = f"{CISCO_VM_MEMBERSHIP_ENTRY}.2"
+
+# BRIDGE-MIB: Q-BRIDGE numbers ports by bridge port, not ifIndex, and the two
+# only happen to agree on some platforms. This is the translation.
+DOT1D_BASE_PORT_IF_INDEX = "1.3.6.1.2.1.17.1.4.1.2"
+
+DOT1Q_VLAN_STATIC_NAME = "1.3.6.1.2.1.17.7.1.4.3.1.1"
+# What is configured, used when the current table below is not served.
+DOT1Q_VLAN_STATIC_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.2"
+DOT1Q_VLAN_STATIC_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.4"
+# What is in effect, indexed by a time mark and then the VLAN id. PortList:
+# bridge port 1 is the most significant bit of the first octet.
+DOT1Q_VLAN_CURRENT_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.4"
+DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.5"
+DOT1Q_PVID = "1.3.6.1.2.1.17.7.1.4.5.1.1"
+
+MIN_VLAN_ID, MAX_VLAN_ID = 1, 4094
+
 # --- LLDP-MIB (IEEE 802.1AB) ------------------------------------------------
 #
 # An IEEE MIB, so its root is 1.0.8802.1.1.2 — outside 1.3.6.1 entirely. A
