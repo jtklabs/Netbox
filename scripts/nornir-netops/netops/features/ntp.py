@@ -94,7 +94,7 @@ def _server_key(host: str, key_id: Optional[str], source: Optional[str] = None) 
 
 
 def parse_ntp(output: str, *, platform=None) -> List[Entry]:
-    """Pull servers and authentication out of `ntp ...` lines.
+    """Pull servers, Cisco peers and authentication out of `ntp ...` lines.
 
     Shared by IOS and EOS. Both render a server as
     ``ntp server [vrf NAME] <host> [options...]``, and both spell the
@@ -112,14 +112,14 @@ def parse_ntp(output: str, *, platform=None) -> List[Entry]:
             continue
         kind = tokens[1]
 
-        if kind == "server":
+        if kind == "server" or (kind == "peer" and platform in (None, 'cisco_ios', 'cisco_nxos')):
             index = 2
             vrf = None
             if len(tokens) > index and tokens[index] == "vrf":
                 vrf = tokens[index + 1] if len(tokens) > index + 1 else None
                 index += 2  # skip 'vrf' '<name>'
             if index >= len(tokens):
-                raise ValueError('Incomplete NTP server configuration')
+                raise ValueError(f'Incomplete NTP {kind} configuration')
             host = tokens[index]
             options = {}
             extra = []
@@ -128,7 +128,7 @@ def parse_ntp(output: str, *, platform=None) -> List[Entry]:
                 keyword = tokens[position]
                 if keyword in ('key', 'source', 'source-address'):
                     if position + 1 >= len(tokens):
-                        raise ValueError(f'Incomplete NTP server {keyword} option')
+                        raise ValueError(f'Incomplete NTP {kind} {keyword} option')
                     value = tokens[position + 1]
                     position += 2
                     if keyword == 'source' and value.isalpha() and position < len(tokens) and tokens[position].isdigit():
@@ -144,10 +144,11 @@ def parse_ntp(output: str, *, platform=None) -> List[Entry]:
                     position += 1
             entries.append(
                 Entry(
-                    key=_server_key(host, options.get("key"), options.get("source")),
+                    key=(_server_key(host, options.get("key"), options.get("source"))
+                         if kind == 'server' else 'peer:' + line),
                     line=line,
                     data={
-                        "kind": "server",
+                        "kind": kind,
                         "host": normalize(host),
                         "key": options.get("key"),
                         "source": options.get("source"),
@@ -303,7 +304,8 @@ def plan_ntp(
                     continue
             elif entry.key in wanted:
                 continue
-            if not manages_auth and entry.data.get("kind") != "server":
+            # Peers are obsolete endpoints even when authentication is unmanaged.
+            if not manages_auth and entry.data.get("kind") not in ("server", "peer"):
                 continue
             if entry.data.get("kind") == "key" and entry.data.get("id") in wanted_key_ids:
                 # Replacing the algorithm at the same ID must not delete the new key.
