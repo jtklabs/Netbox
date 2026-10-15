@@ -556,7 +556,7 @@ class RegionalAuditTest(TestCase):
     def test_large_region_uses_multiple_queue_batches_in_one_run(self):
         self.add_large_inventory()
 
-        def enqueue(user, data):
+        def enqueue(user, data, **kwargs):
             self.assertLessEqual(len(data['filters']['id']), 1000)
             return UpgradeJob.objects.bulk_create([
                 UpgradeJob(device_id=pk, device_name=f'device-{pk}', poller=self.poller,
@@ -575,7 +575,7 @@ class RegionalAuditTest(TestCase):
         original = queue.schedule
         calls = []
 
-        def enqueue(user, data):
+        def enqueue(user, data, **kwargs):
             calls.append(data)
             if len(calls) == 2:
                 raise queue.QueueError('Second batch rejected')

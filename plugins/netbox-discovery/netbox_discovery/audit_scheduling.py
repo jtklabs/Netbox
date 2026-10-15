@@ -64,9 +64,11 @@ def eligible_devices(schedule, user, *, exclusions=None):
                                 queryset=Device.objects.restrict(user, 'view'))
     if not selection.is_valid():
         raise queue.QueueError(str(selection.errors))
-    devices = queue.execution_devices(user, selection.qs)
-    if any(device.status != 'active' for device in devices):
-        raise queue.QueueError('A selected stack master is not active. Correct its status before scheduling.')
+    skipped = []
+    devices = queue.execution_devices(user, selection.qs, skipped=skipped)
+    inactive = [device for device in devices if device.status != 'active']
+    skipped.extend({'id': device.pk, 'name': device.name, 'reason': 'Execution device is not active.'} for device in inactive)
+    devices = [device for device in devices if device.status == 'active']
     # Resolve stacks first: an unaddressed member can still be covered by its
     # master, but an unaddressed execution target must never get a device job.
     addressed = [device for device in devices if device.primary_ip4_id or device.primary_ip6_id]
@@ -84,7 +86,9 @@ def eligible_devices(schedule, user, *, exclusions=None):
         matching = [device.pk for device in devices]
     if exclusions is not None:
         exclusions.update(missing_ip=missing_ip, missing_profile=missing_profile)
-    return matching, missing_ip + missing_profile
+        if skipped:
+            exclusions['ineligible'] = skipped
+    return matching, missing_ip + missing_profile + len(skipped)
 
 
 def check_run_as(schedule):
@@ -125,8 +129,12 @@ def dispatch(schedule_id, now=None):
                     data = payload(schedule, now)
                     # Keep the one-off queue's guardrail, while allowing a region
                     # to contain more than 1,000 devices in a single occurrence.
+                    skipped = []
                     for offset in range(0, len(device_ids), 1000):
-                        jobs = queue.schedule(schedule.run_as, {**data, 'filters': {'id': device_ids[offset:offset + 1000]}})
+                        try:
+                            jobs = queue.schedule(schedule.run_as, {**data, 'filters': {'id': device_ids[offset:offset + 1000]}}, skipped=skipped)
+                        except queue.NoEligibleDevices:
+                            continue
                         UpgradeJob.objects.filter(pk__in=[job.pk for job in jobs]).update(audit_run=run)
                         count += len(jobs)
                 run.outcome = 'queued' if count else 'skipped'
@@ -138,6 +146,11 @@ def dispatch(schedule_id, now=None):
                     run.message += f' {exclusions["missing_ip"]} execution devices without a primary management IP excluded.'
                 if exclusions['missing_profile']:
                     run.message += f' {exclusions["missing_profile"]} devices without a matching accessible model or platform profile excluded.'
+                ineligible = exclusions.get('ineligible', []) + skipped
+                if ineligible:
+                    run.message += f' {len(ineligible)} ineligible devices excluded: ' + '; '.join(
+                        f"{item['name']}: {item['reason']}" for item in ineligible)
+                run.message = run.message[:1000]
             except (queue.QueueError, ValidationError) as exc:
                 run.outcome = 'failed'
                 run.message = str(exc)[:1000]

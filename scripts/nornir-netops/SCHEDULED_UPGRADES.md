@@ -62,7 +62,12 @@ Open **Device Operations → Software and Standards → Upgrade Jobs → Add** o
 tags or explicit devices. Scope filters intersect; regions include child regions.
 An empty scope is rejected unless **All active devices** is explicitly selected.
 One-off scheduling still validates every execution device and is limited to 1,000
-devices per submission; it does not silently skip incompatible devices.
+devices per submission. Standards audit/remediation skips ineligible devices
+(such as missing default profiles, masterless virtual chassis, missing management
+addresses, or unavailable applicable standards) and reports the exclusions.
+Eligible devices are still queued; if none qualify, no jobs are created. Invalid
+requests and schedule/apply permission failures still reject the submission.
+Software upgrade, staging and pre-upgrade audit validation remains strict.
 Choose a **Time zone**, then use the date/time pickers for **Scheduled start** and
 **Start before**. Ambiguous or nonexistent daylight-saving times are rejected;
 select UTC to specify an exact instant around a clock change. Existing UTC-offset
