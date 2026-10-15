@@ -380,6 +380,78 @@ def test_namespaced_inheritance_marks_configuration_protected():
     assert junos.SHOW.endswith('display xml groups')
 
 
+@pytest.mark.parametrize('context', [
+    '{master}\n[edit]', '{master:0}[edit]', '{backup:1}\n[edit system]',
+    '{primary:node0}\n[edit]', '{secondary:node1}\n[edit]',
+    '#commit confirmed will be rolled back in 5 minutes\n{master}[edit]',
+    '# commit confirmed will be rolled back in 1 minute\n{master:0}\n[edit]',
+])
+def test_xml_accepts_context_left_by_real_netmiko(context):
+    from netmiko.juniper.juniper import JuniperBase
+
+    connection = JuniperBase(host='example', auto_connect=False)
+    connection.base_prompt = 'admin@router'
+    document = config('<server><name>192.0.2.10</name></server>')
+    output = connection._sanitize_output(document + '\n' + context + '\nadmin@router#',
+                                         strip_prompt=True)
+    assert junos.parse(output) == junos.parse(document)
+    assert junos.parse(context + '\n' + document) == junos.parse(document)
+    # Discovery/source-interface reads use the same XML parser.
+    assert junos.interface_addresses(interfaces() + '\n' + context) == {'lo0.0': {'192.0.2.254'}}
+
+
+@pytest.mark.parametrize('truncated', [False, True])
+def test_apply_verification_handles_xml_context_without_accepting_truncation(setup, monkeypatch, truncated):
+    original = setup.box.send_command
+
+    def response(command, **kwargs):
+        output = original(command, **kwargs)
+        if command.startswith('run ') and command.removeprefix('run ') in (junos.SHOW, junos.INTERFACES):
+            if truncated and 'commit confirmed 5' in setup.box.calls:
+                output = output.removesuffix('</rpc-reply>')
+            output += '\n#commit confirmed will be rolled back in 5 minutes\n{master:0}\n[edit]'
+        return output
+
+    monkeypatch.setattr(setup.box, 'send_command', response)
+    code, report = setup.run('--apply', '--source', 'lo0.0')
+    row = report['devices']['srx']
+    if truncated:
+        assert code == cli.EXIT_FAILED
+        assert 'invalid XML' in row['error']
+        assert row['saved'] is not True and row['verified'] is not True
+        assert 'commit' not in setup.box.calls and 'rollback 0' not in setup.box.calls
+        assert row['advisories']
+    else:
+        assert code == cli.EXIT_OK
+        assert row['saved'] and row['verified']
+        assert 'commit' in setup.box.calls
+
+
+def test_xml_context_inside_the_document_is_preserved():
+    document = '<rpc-reply><cli><banner>\n{master:0}\n[edit]\n</banner></cli></rpc-reply>'
+    assert junos.xml(document).findtext('cli/banner') == '\n{master:0}\n[edit]\n'
+
+
+@pytest.mark.parametrize('output', [
+    'warning: incomplete response\n' + config(''),
+    config('') + '\nerror: permission denied',
+    config('') + '\nunknown trailing text\n{master:0}\n[edit]',
+    config('') + '\n' + config(''),
+    '<rpc-reply><configuration>\n{master:0}\n[edit]',
+    '{master:0}\n[edit]',
+])
+def test_context_cleanup_still_rejects_invalid_or_ambiguous_xml(output):
+    with pytest.raises(ValueError, match=r'invalid XML:.*line \d+, column \d+'):
+        junos.xml(output)
+
+
+def test_invalid_xml_diagnostic_does_not_disclose_key_material():
+    with pytest.raises(ValueError) as caught:
+        junos.xml(config('<authentication-key><value>unregistered-secret&broken</value></authentication-key>'))
+    assert 'invalid XML:' in str(caught.value)
+    assert 'unregistered-secret' not in str(caught.value)
+
+
 def test_leaf_updates_preserve_version_and_unmanaged_settings():
     before = junos.parse(config('<server><name>192.0.2.10</name><key>4</key><prefer/><version>3</version><routing-instance>old</routing-instance></server><peer><name>192.0.2.90</name><key>4</key></peer><authentication-key><name>4</name><type>md5</type><value>hidden</value></authentication-key><trusted-key>4</trusted-key>'))
     assert junos.plan(before, desired(), MODE_REPLACE) == ['delete system ntp server 192.0.2.10 prefer']
