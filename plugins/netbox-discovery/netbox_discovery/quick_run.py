@@ -16,6 +16,20 @@ from .profile_assignments import default_profile_ids
 from .upgrade_choices import ACTIVE, WAITING
 
 
+class ExistingWork(queue.QueueError):
+    def __init__(self, job=None):
+        self.job = job
+        if job is None:
+            message = 'This device has queued or active work that you cannot view. Ask a job operator to review it.'
+        else:
+            guidance = ('Verify the device and stop any surviving worker, then use Record recovery and release device.'
+                        if job.needs_recovery else
+                        'Cancel or release this held job before starting another run.' if job.status == 'held' else
+                        'Wait for this job to finish, or cancel it if it has not started.')
+            message = f'Job #{job.pk} is blocking this run ({job.get_status_display()}). {guidance}'
+        super().__init__(message)
+
+
 def choices_for(user, device):
     from netbox_compliance.definitions import FEATURE_SECTIONS, SnapshotResolver
 
@@ -86,9 +100,14 @@ def run_now(user, device, selection, action):
         operation, plan['mode'] = 'remediate', action
     if operation == 'remediate' and not user.has_perm('netbox_discovery.apply_upgradejob'):
         raise queue.QueueError('You do not have permission to apply changes. Select Audit only.')
-    if UpgradeJob.objects.filter(device=target, status__in=(*ACTIVE, *WAITING)).exists():
-        raise queue.QueueError('This device already has queued or active work. Open Standards Jobs or Upgrade Jobs to review it.')
     now = timezone.now()
+    # An offline poller cannot expire missed start windows. These jobs can no
+    # longer start, so they must not prevent a fresh run from the device page.
+    UpgradeJob.objects.filter(device=target, status__in=WAITING, start_before__lte=now).update(
+        status='expired', completed_at=now, message='Start window missed; no work dispatched.')
+    blocking = UpgradeJob.objects.filter(device=target, status__in=(*ACTIVE, *WAITING))
+    if blocking.exists():
+        raise ExistingWork(blocking.restrict(user, 'view').order_by('scheduled_at', 'pk').first())
     job = queue.schedule(user, {'operation': operation, 'filters': {'id': [target.pk]},
                                'profile_source': 'custom', 'profile': plan,
                                'scheduled_at': now, 'start_before': now + timedelta(hours=1),
@@ -106,6 +125,9 @@ class DeviceRunNowView(PermissionRequiredMixin, View):
         device = get_object_or_404(Device.objects.restrict(request.user, 'view'), pk=pk)
         try:
             job = run_now(request.user, device, request.POST.get('selection'), request.POST.get('action', 'auto'))
+        except ExistingWork as exc:
+            messages.error(request, str(exc))
+            return redirect(exc.job.get_absolute_url() if exc.job else device.get_absolute_url())
         except (queue.QueueError, ValidationError) as exc:
             messages.error(request, '; '.join(exc.messages) if isinstance(exc, ValidationError) else str(exc))
             return redirect(device.get_absolute_url())

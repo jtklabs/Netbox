@@ -453,4 +453,8 @@ def test_each_claim_has_isolated_inventory_and_closes_failed_connections(monkeyp
     assert initialize.call_args.args[-2] == 1
     assert host.data['upgrade_job'] == job
     assert host.data['netbox_id'] == 1
+    child_args = nr.run.call_args.kwargs['args']
+    assert child_args is not args
+    assert child_args.device_credentials is credentials
+    assert not hasattr(args, 'device_credentials')
     nr.close_connections.assert_called_once_with(on_good=True, on_failed=True)

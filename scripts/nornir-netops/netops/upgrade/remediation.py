@@ -67,11 +67,42 @@ def command(feature, device_id, mode, apply, args):
             argv += ['--clearpass-cluster-snapshot', str(args.clearpass_cluster_snapshot)]
         if apply and getattr(args, 'allow_clearpass_cluster_changes', False):
             argv += ['--allow-clearpass-cluster-changes']
-    if getattr(args, 'env_file', None):
+    if getattr(args, 'device_credentials', None) is not None or getattr(args, 'no_env_file', False):
+        # The worker already loaded its environment. Re-reading from the child
+        # working directory can select a different .env or undo resolved values.
+        argv += ['--no-env-file']
+    elif getattr(args, 'env_file', None):
         argv += ['--env-file', args.env_file]
     if getattr(args, 'standards', None) is not None and getattr(args.standards, 'path', None):
         argv += ['--standards', str(args.standards.path)]
     return argv
+
+
+def child_environment(args):
+    """Pass resolved connection settings without secrets in argv or on disk."""
+    env = os.environ.copy()
+    credentials = getattr(args, 'device_credentials', None)
+    if credentials is not None:
+        for field, variable in (('username', 'NET_USER'), ('password', 'NET_PASS'), ('secret', 'NET_ENABLE')):
+            env[variable] = getattr(credentials, field) or ''
+        # AWS outranks environment credentials in the CLI. Resolution already
+        # happened in the worker, so do not fetch a different login in children.
+        env['NET_AWS_SECRET'] = ''
+    for field, variable in (('key_file', 'NET_KEY_FILE'), ('port', 'NET_PORT'),
+                            ('conn_timeout', 'NET_CONN_TIMEOUT'), ('f5_port', 'NETOPS_F5_PORT'),
+                            ('f5_timeout', 'NETOPS_F5_TIMEOUT'), ('f5_login_provider', 'NETOPS_F5_LOGIN_PROVIDER')):
+        if hasattr(args, field):
+            value = getattr(args, field)
+            if field == 'key_file' and value:
+                value = Path(value).expanduser().resolve()
+            env[variable] = str(value) if value is not None else ''
+    if getattr(args, 'f5_insecure', None) is not None:
+        env['NETOPS_F5_VERIFY_TLS'] = str(not args.f5_insecure).lower()
+    settings = getattr(args, 'remediation_netbox', None)
+    if settings is not None:
+        env.update(NETBOX_URL=settings['url'], NETBOX_TOKEN=settings['token'],
+                   NETBOX_VERIFY_TLS=str(settings['verify_tls']).lower(), NETBOX_SECRET='')
+    return env
 
 
 def project_root():
@@ -87,7 +118,8 @@ def invoke(feature, device_id, mode, apply, args):
     args.compliance_details[feature] = {}
     try:
         done = subprocess.run(command(feature, device_id, mode, apply, args) + ['--report', str(report)], capture_output=True, text=True,
-                              timeout=TIMEOUT, cwd=project_root(), stdin=subprocess.DEVNULL)
+                              timeout=TIMEOUT, cwd=project_root(), stdin=subprocess.DEVNULL,
+                              env=child_environment(args))
     except subprocess.TimeoutExpired:
         message = f'{feature} did not finish within {TIMEOUT // 60} minutes'
         args.compliance_details[feature] = {'error': message}

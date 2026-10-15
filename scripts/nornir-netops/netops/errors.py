@@ -49,6 +49,8 @@ def authentication_summary(exc: BaseException) -> str:
         chain.append(current)
         current = current.__cause__ or current.__context__
     detail = '\n'.join(str(error).lower() for error in chain)
+    if any(marker in detail for marker in ('unable to enter enable mode', 'failed to enter enable mode')):
+        return 'Could not enter privileged mode -- check the enable secret and account authorization'
     if (any(type(error).__name__ in ('TimeoutError', 'timeout') for error in chain)
             or any(marker in detail for marker in (
                 'authentication timeout', 'authentication timed out', 'authentication timed-out'))):

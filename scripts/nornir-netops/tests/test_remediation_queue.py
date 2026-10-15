@@ -204,6 +204,67 @@ def test_command_targets_the_one_device_through_netbox_inventory():
     assert remediation.command('ntp', 42, 'add', True, SimpleNamespace())[-3:] == ['--add', '--apply', '--yes']
 
 
+def test_child_uses_worker_credentials_and_connection_settings(monkeypatch, tmp_path):
+    from netops.credentials import Credentials
+    monkeypatch.setenv('NET_USER', 'old-user')
+    monkeypatch.setenv('NET_PASS', 'old-password')
+    monkeypatch.setenv('NET_ENABLE', 'old-enable')
+    monkeypatch.setenv('NET_AWS_SECRET', 'other-login')
+    monkeypatch.setenv('NETBOX_SECRET', 'other-netbox')
+    args = SimpleNamespace(
+        device_credentials=Credentials('resolved-user', 'resolved-password', 'resolved-enable'),
+        remediation_netbox={'url': 'https://netbox.example.test', 'token': 'resolved-token', 'verify_tls': True},
+        key_file='/test/device-key', port=2222, conn_timeout=42,
+        f5_port=8443, f5_timeout=60, f5_login_provider='radius', f5_insecure=False,
+        env_file='/unused/poller.env', report_dir=tmp_path, compliance_details={})
+    calls = []
+
+    def execute(argv, **kwargs):
+        calls.append((argv, kwargs['env']))
+        return SimpleNamespace(returncode=1, stdout='', stderr='')
+
+    monkeypatch.setattr(remediation.subprocess, 'run', execute)
+    for apply in (False, True):
+        remediation.invoke('ntp', 42, 'add', apply, args)
+    for argv, env in calls:
+        assert '--no-env-file' in argv and '--env-file' not in argv
+        assert not any(value in str(argv) for value in ('resolved-password', 'resolved-enable', 'resolved-token'))
+        assert {key: env[key] for key in ('NET_USER', 'NET_PASS', 'NET_ENABLE', 'NET_AWS_SECRET')} == {
+            'NET_USER': 'resolved-user', 'NET_PASS': 'resolved-password',
+            'NET_ENABLE': 'resolved-enable', 'NET_AWS_SECRET': ''}
+        assert env['NETBOX_URL'] == 'https://netbox.example.test'
+        assert env['NETBOX_TOKEN'] == 'resolved-token'
+        assert env['NETBOX_VERIFY_TLS'] == 'true' and env['NETBOX_SECRET'] == ''
+        assert env['NET_KEY_FILE'] == '/test/device-key'
+        assert env['NET_PORT'] == '2222' and env['NET_CONN_TIMEOUT'] == '42'
+        assert env['NETOPS_F5_PORT'] == '8443' and env['NETOPS_F5_TIMEOUT'] == '60'
+        assert env['NETOPS_F5_LOGIN_PROVIDER'] == 'radius' and env['NETOPS_F5_VERIFY_TLS'] == 'true'
+    assert remediation.os.environ['NET_PASS'] == 'old-password'
+    assert remediation.os.environ['NET_AWS_SECRET'] == 'other-login'
+
+
+def test_key_only_worker_does_not_fall_back_to_stale_password_or_enable(monkeypatch):
+    from netops.credentials import Credentials
+    from netops.cli import _login, build_parser, Style
+    monkeypatch.setenv('NET_PASS', 'stale-password')
+    monkeypatch.setenv('NET_ENABLE', 'stale-enable')
+    monkeypatch.setenv('NET_AWS_SECRET', 'stale-aws')
+    args = SimpleNamespace(device_credentials=Credentials('key-user'), key_file='/test/key')
+    env = remediation.child_environment(args)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    parsed = build_parser().parse_args(remediation.command('ntp', 42, 'add', False, args)[2:])
+    login, code = _login(parsed, Style(False))
+    assert code == 0
+    assert login.username == 'key-user' and login.password is None and login.secret is None
+    assert parsed.key_file == '/test/key'
+
+
+def test_explicit_no_env_file_is_preserved():
+    argv = remediation.command('ntp', 42, 'add', False, SimpleNamespace(no_env_file=True, env_file='ignored'))
+    assert '--no-env-file' in argv and '--env-file' not in argv
+
+
 @pytest.mark.parametrize('audit,pinned', [(False, True), (True, True), (False, False)])
 def test_cluster_snapshot_and_approval_forwarding(monkeypatch, audit, pinned):
     import json

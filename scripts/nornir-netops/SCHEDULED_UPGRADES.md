@@ -269,6 +269,13 @@ configure.py <feature> --netbox --netbox-filter id=<device> --no-netbox-autofilt
 
 so source-interface tags, syslog policy writeback, the run archive and the
 rollback journal all work as they do by hand. Every feature is dry-run first.
+The feature processes inherit the worker's resolved device credentials,
+SSH key/port/connection timeout, NetBox connection, and F5 HTTPS settings and
+login provider. CLI overrides and AWS field mappings are resolved once in
+the worker. Credentials go through each child's private environment, never
+its command line; children do not reload a different `.env` from their
+working directory.
+
 A device that is already compliant ends **Completed** without a change.
 Otherwise the job asks NetBox for the start (the same gate as an upgrade; a
 missed window changes nothing), then applies only the features with changes
@@ -280,6 +287,24 @@ A failure after the start is **Recovery required**, like an upgrade, because
 the device may be half changed. The job message names the rollback journal;
 check the device, run `configure.py rollback <journal>` on the poller if
 needed, then record recovery. A failure in the dry run is a plain failure.
+
+If device authentication logs show success but the job reports a login error,
+check the failed phase and the worker's `netops-debug.log`. A successful
+precheck login does not establish that the separate apply or verification
+connection succeeded. SSH authentication timeouts, disconnected transports,
+and enable-mode failures have separate error summaries. Older workers could
+also drop explicitly supplied credentials and connection options when starting
+feature processes; update the worker before retrying.
+
+The device page's **Run now** action allows another run after a **Failed** job.
+If another job blocks it, the action opens that job (when you have permission)
+and identifies its status. A **Recovery required** job still blocks retries
+until you verify the device and use **Record recovery and release device**.
+A pending or held job can be cancelled. Pending/held jobs whose start windows
+have elapsed are expired when scheduling a new immediate run, even if the
+poller has not checked in. Install the Device Operations plugin update on
+NetBox as well as the worker update to get this behavior; these changes do not
+require a database migration.
 
 Remediation ignores redundancy groups and dependencies, since a
 configuration push takes nothing out of service, and a failed staging or

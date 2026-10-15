@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from dcim.models import VirtualChassis
+from django.contrib.messages import get_messages
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.test import Client, TestCase
@@ -80,7 +83,61 @@ class QuickRunTest(TestCase):
 
     def test_duplicate_click_does_not_duplicate_pending_work(self):
         self.run_now()
+        job = UpgradeJob.objects.get()
+        response = self.run_now()
+        self.assertRedirects(response, job.get_absolute_url())
+        self.assertIn(f'Job #{job.pk}', str(list(get_messages(response.wsgi_request))[-1]))
+        self.assertEqual(UpgradeJob.objects.count(), 1)
+
+    def test_failed_job_does_not_prevent_retry(self):
         self.run_now()
+        UpgradeJob.objects.update(status='failed', completed_at=timezone.now())
+        self.run_now()
+        self.assertEqual(UpgradeJob.objects.count(), 2)
+        self.assertEqual(UpgradeJob.objects.filter(status='pending').count(), 1)
+
+    def test_missed_pending_or_held_windows_do_not_prevent_retry_without_poller(self):
+        for status in ('pending', 'held'):
+            with self.subTest(status=status):
+                self.run_now()
+                job = UpgradeJob.objects.latest('pk')
+                UpgradeJob.objects.filter(pk=job.pk).update(
+                    status=status, scheduled_at=timezone.now() - timedelta(hours=2),
+                    start_before=timezone.now() - timedelta(hours=1))
+                self.run_now()
+                job.refresh_from_db()
+                self.assertEqual(job.status, 'expired')
+                self.assertIsNotNone(job.completed_at)
+                self.assertEqual(UpgradeJob.objects.filter(status='pending').count(), 1)
+                UpgradeJob.objects.filter(status='pending').update(status='cancelled')
+
+    def test_recovery_required_job_links_to_recovery_and_keeps_device_locked(self):
+        self.run_now()
+        job = UpgradeJob.objects.get()
+        UpgradeJob.objects.filter(pk=job.pk).update(status='recovery_required', started_at=timezone.now())
+        response = self.run_now()
+        self.assertRedirects(response, job.get_absolute_url())
+        message = str(list(get_messages(response.wsgi_request))[-1])
+        self.assertIn('Recovery required', message)
+        self.assertIn('Record recovery and release device', message)
+        self.assertEqual(UpgradeJob.objects.count(), 1)
+        job.refresh_from_db()
+        self.assertEqual(job.status, 'recovery_required')
+
+    def test_blocking_job_without_view_permission_does_not_disclose_job(self):
+        self.run_now()
+        user = get_user_model().objects.create_user('quick-no-job-view')
+        for model, actions in ((type(self.device), ['view']), (ConfigStandard, ['view']),
+                               (UpgradeJob, ['add'])):
+            permission = ObjectPermission.objects.create(name=f'no-job-view-{model.__name__}', actions=actions)
+            permission.object_types.add(ContentType.objects.get_for_model(model))
+            permission.users.add(user)
+        self.browser.force_login(user)
+        response = self.run_now(action='audit')
+        self.assertRedirects(response, self.device.get_absolute_url())
+        message = str(list(get_messages(response.wsgi_request))[-1])
+        self.assertIn('cannot view', message)
+        self.assertNotIn('Job #', message)
         self.assertEqual(UpgradeJob.objects.count(), 1)
 
     def test_invalid_selection_or_action_never_creates_work(self):

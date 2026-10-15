@@ -49,6 +49,13 @@ def test_authentication_failure():
     assert "authentication failed" in summarize(NetmikoAuthenticationException("nope"))
 
 
+def test_asa_privilege_failure_is_not_reported_as_a_rejected_login():
+    from netmiko.exceptions import NetmikoAuthenticationException as AuthError
+    summary = summarize(AuthError('Unable to enter enable mode!'))
+    assert 'privileged mode' in summary and 'enable secret' in summary
+    assert 'authentication failed' not in summary
+
+
 @pytest.mark.parametrize('chained', [False, True])
 @pytest.mark.parametrize('detail,expected', [
     ('Authentication timeout.', 'SSH authentication timed out'),

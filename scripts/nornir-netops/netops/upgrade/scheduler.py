@@ -230,6 +230,11 @@ def execute_job(task, args, client, outbox):
 def run_claimed_job(job, args, credentials, client, outbox):
     from ..inventory import init_from_records, missing_credentials
 
+    # Each feature subprocess must use the same resolved login as this worker,
+    # including CLI overrides and AWS key mappings. Keep it private to the job;
+    # concurrent workers must not change the process environment.
+    args = copy.copy(args)
+    args.device_credentials = credentials
     key = f'{job["device"]} [job {job["id"]}]'
     records = {key: {'hostname': job['hostname'], 'platform': platform_for(job.get('profile'))}}
     nr = init_from_records(records, credentials.username, credentials.password, credentials.secret,
@@ -323,6 +328,7 @@ def run(args, style):
         settings['token'] = settings['token'] or document.get('token')
         settings['url'] = settings['url'] or document.get('url')
     client = QueueClient(settings['url'], settings['token'], settings['verify_tls'], timeout=15)
+    args.remediation_netbox = {key: settings[key] for key in ('url', 'token', 'verify_tls')}
     identity = hashlib.sha256((client.url + '/' + args.poller).encode()).hexdigest()
     root = Path(args.queue_state_dir or PROJECT_ROOT / '.upgrade-queue') / identity
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
