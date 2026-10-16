@@ -13,8 +13,9 @@ def resolve(current, desired, variables, *, platform, notes=None):
 
     Missing inventory is not an instruction to move NTP to another routing
     table or remove a source. Multiple routing tables each get the new server
-    set; different sources within one table require an explicit selection for
-    new addresses, since one server statement cannot represent both.
+    set; new addresses reuse a defined source even if some old servers have
+    none. Different defined sources within one table still require a selection,
+    since one server statement cannot represent both.
     """
     if '_ntp_context_keys' in variables:
         return variables['_ntp_context_keys']
@@ -48,11 +49,17 @@ def resolve(current, desired, variables, *, platform, notes=None):
             donors = existing or candidates
             record = {**wanted, 'vrf': scope}
             if not wanted.get('source') and donors:
-                if len({source(row) for row in donors}) != 1:
+                source_donors = donors
+                if not existing:
+                    # Unspecified sources are not competing source selections.
+                    # Reuse a defined source for new addresses, but preserve an
+                    # already configured endpoint's own source (including none).
+                    source_donors = [row for row in donors if source(row) != (None, None)] or donors
+                if len({source(row) for row in source_donors}) != 1:
                     raise ValueError(f'Existing NTP sources differ in VRF {scope or "default"}; '
                                      'select a source interface for the new server addresses')
                 # Prefer leaving an already configured global source in place.
-                donor = next((row for row in donors if not row.get('source')), donors[0])
+                donor = next((row for row in source_donors if not row.get('source')), source_donors[0])
                 record['source'] = interface_name(donor['source']) if donor.get('source') else None
                 record['source_address'] = donor.get('source_address')
             if not variables.get('manages_auth') and not wanted.get('key') and donors:
