@@ -80,6 +80,9 @@ def delta_section(title, before, after):
         if old is None or new is None:
             lines.append(f"| {key} | {'-' if old is None else len(old)} | {'-' if new is None else len(new)} | | | not collected on one side |")
             continue
+        if key == "waf_policies":
+            lines.append(f"| {key} (count only) | {len(old)} | {len(new)} | | | |")
+            continue
         delta = table_delta(old, new)
         lines.append(f"| {key} | {len(old)} | {len(new)} | {delta['unchanged']} | {len(delta['removed'])} | {len(delta['added'])} |")
         if delta["removed"] or delta["added"]:

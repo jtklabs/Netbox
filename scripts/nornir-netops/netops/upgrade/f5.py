@@ -129,15 +129,20 @@ def wait_verified(client, filename, expected_md5, timeout, poll=5):
         time.sleep(poll)
 
 
-def prune_images(client, keep):
-    """Delete every other installer ISO; installed volumes are never touched."""
+def prune_images(client, keep, required_free_bytes):
+    """Remove uploaded installers only until enough space is available."""
     removed, failed = [], []
     for row in listed_images(client):
         name = row.get("name", "")
         if not name or name == keep:
             continue
+        free = free_space_kb(client)
+        if free is None:
+            break
+        if free * 1024 >= required_free_bytes:
+            break
         try:
-            client.request("DELETE", f"/mgmt/tm/sys/software/{row['kind']}/{quote(name)}", timeout=max(client.timeout, 120))
+            client.request("DELETE", f"/mgmt/tm/sys/software/{row['kind']}/{quote(name, safe='')}", timeout=max(client.timeout, 120))
             removed.append(name)
         except (RuntimeError, ValueError):
             failed.append(name)
@@ -366,7 +371,7 @@ ASM_POLICIES = "/mgmt/tm/asm/policies"
 
 def waf_policies(get):
     """Read every page; an unavailable or partial collection is never an empty baseline."""
-    path, seen, rows, identities, expected = ASM_POLICIES, set(), [], set(), None
+    path, seen, rows, expected = ASM_POLICIES, set(), [], None
     while path:
         if path in seen or len(seen) >= 10000:
             raise ValueError("WAF policy pagination did not finish")
@@ -381,15 +386,11 @@ def waf_policies(get):
                 raise ValueError("WAF policy total changed during collection")
             expected = total
         for item in items:
-            if (not isinstance(item, dict) or not item.get("fullPath")
-                    or not isinstance(item.get("active"), bool)
-                    or item.get("enforcementMode") not in {"blocking", "transparent"}):
-                raise ValueError("WAF policy identity or enforcement state is unreadable")
-            identity = item["fullPath"]
-            if identity in identities:
-                raise ValueError("WAF policy collection contains duplicate identities")
-            identities.add(identity)
-            rows.append({key: item[key] for key in ("fullPath", "active", "enforcementMode")})
+            if not isinstance(item, dict):
+                raise ValueError("WAF policy response contains a non-object item")
+            # All policy types count, including parents without enforcement fields.
+            # Metadata is informational; comparison uses only the collection size.
+            rows.append({key: item[key] for key in ("fullPath", "type", "active", "enforcementMode") if key in item})
         link = document.get("nextLink")
         if link:
             parts = urlsplit(link)

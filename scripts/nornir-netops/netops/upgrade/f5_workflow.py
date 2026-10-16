@@ -114,6 +114,41 @@ def ucs_name(host, profile):
     return f"{re.sub(r'[^A-Za-z0-9._-]+', '-', host.name)[:60]}-pre-{profile.target_version}-{stamp}-{uuid.uuid4().hex[:12]}.ucs"
 
 
+def ensure_image_space(client, profile, plan, required, apply, emit):
+    """Plan cleanup read-only; apply it only after the job's ready gate."""
+    free = f5.free_space_kb(client)
+    plan["flash"] = {"1": {"free_bytes": free * 1024 if free is not None else None}}
+    if free is None and plan.get("image_cleanup"):
+        raise ValueError("free space in /shared/images could not be verified for planned installer cleanup")
+    if free is None or free * 1024 >= required:
+        plan.pop("image_cleanup", None)
+        return
+    candidates = [row["name"] for row in f5.listed_images(client)
+                  if row.get("name") and row["name"] != profile.image]
+    if not candidates:
+        raise ValueError("insufficient free space in /shared/images and no other uploaded installers can be removed")
+    volumes = client.get_json("/mgmt/tm/sys/software/volume").get("items")
+    if (not isinstance(volumes, list) or not volumes
+            or any(str(v.get("status", "")).lower() != "complete" for v in volumes)):
+        raise ValueError("installer cleanup requires readable boot volumes with no installation in progress")
+    cleanup = plan["image_cleanup"] = {"candidates": candidates, "required_free_bytes": required,
+                                       "free_bytes_before": free * 1024, "removed": [], "failed": []}
+    if not apply:
+        return
+    emit("staging", "Removing previously uploaded installers to free space in /shared/images",
+         {"upgrade_plan": plan})
+    cleanup["removed"], cleanup["failed"] = f5.prune_images(client, profile.image, required)
+    free = f5.free_space_kb(client)
+    cleanup["free_bytes_after"] = free * 1024 if free is not None else None
+    plan["flash"]["1"]["free_bytes"] = cleanup["free_bytes_after"]
+    emit("staging", f"Installer cleanup removed {len(cleanup['removed'])} image(s); "
+         f"{len(cleanup['failed'])} deletion(s) failed", {"upgrade_plan": plan})
+    if free is None:
+        raise ValueError("free space in /shared/images could not be verified after installer cleanup")
+    if free * 1024 < required:
+        raise ValueError("insufficient free space in /shared/images after installer cleanup for the image and the configured reserve")
+
+
 def verify_image(client, profile, options, plan, apply, emit):
     """Read-only unless apply: confirm the ISO is on the unit, or stage it."""
     free = f5.free_space_kb(client)
@@ -124,6 +159,7 @@ def verify_image(client, profile, options, plan, apply, emit):
         if digest == profile.md5.lower() or (digest is None and str(entry.get("verified", "")).lower() == "yes"):
             plan["image_verification"] = "verified"
             plan["image_size_bytes"] = entry.get("fileSize")
+            ensure_image_space(client, profile, plan, profile.minimum_free_bytes, apply, emit)
             return
         raise ValueError("an image with this name is already in /shared/images but its checksum differs; remove it before staging")
     if not profile.image_source:
@@ -132,8 +168,8 @@ def verify_image(client, profile, options, plan, apply, emit):
     if apply or not re.match(r"^https?://", profile.image_source):
         local = local_image(profile, options, emit)
     size = os.path.getsize(local) if local else None
-    if free is not None and size is not None and free * 1024 < profile.minimum_free_bytes + size:
-        raise ValueError("insufficient free space in /shared/images for the image and the configured reserve")
+    if size is not None:
+        ensure_image_space(client, profile, plan, profile.minimum_free_bytes + size, apply, emit)
     plan["image_verification"] = "pending_transfer"
     plan["staging_command"] = f"POST /mgmt/cm/autodeploy/software-image-uploads/{profile.image}"
     if not apply:
@@ -365,16 +401,16 @@ def upgrade_device(task, profile, options, reporter):
                                if stage_only else "Prechecks passed; upgrade planned")
                     emit("dry_run_complete", message, {"upgrade_plan": plan})
                     return Result(host=host, result=plan)
-                if stage_only and plan["image_verification"] == "verified":
+                if stage_only and plan["image_verification"] == "verified" and not plan.get("image_cleanup"):
                     emit("staged", "Image already present and checksum verified; no upload needed", {"upgrade_plan": plan})
                     return Result(host=host, result=plan)
                 if not emit("ready", "Staging checks passed; uploading image only" if stage_only else "Prechecks passed; starting approved upgrade", {"upgrade_plan": plan}):
                     raise ValueError("progress webhook unavailable before apply; no install or reboot performed")
-                if plan["image_verification"] == "pending_transfer":
+                if plan["image_verification"] == "pending_transfer" or plan.get("image_cleanup"):
                     changed = True
                     verify_image(client, profile, options, plan, apply=True, emit=emit)
                 if stage_only:
-                    emit("staged", "Image uploaded to /shared/images and checksum verified", {"upgrade_plan": plan})
+                    emit("staged", "Image ready in /shared/images and checksum verified", {"upgrade_plan": plan})
                     return Result(host=host, result=plan, changed=changed)
                 if profile.ucs_backup:
                     backup(client, host, profile, options, plan, emit)
