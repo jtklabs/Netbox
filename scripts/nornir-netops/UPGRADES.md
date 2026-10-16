@@ -558,6 +558,19 @@ upload, checksum and free-space checks come from the former
 role. The `--f5-port`, `--f5-timeout`, `--f5-verify-tls`/`--f5-insecure` and
 `--f5-login-provider` flags and their `NETOPS_F5_*` settings apply.
 
+If an authenticated REST request returns HTTP 401, the worker clears the old
+token, logs in with its configured credentials and authentication provider,
+and retries the rejected request once with the new token. This lets long WAF
+post-validation continue across token expiration. A rejected login or second
+401 makes that collection unsuccessful, but does not end post-validation:
+subsequent collections keep retrying authentication at the configured polling
+interval until services recover or the profile's validation window expires.
+Two consecutive healthy collections are still required; retries never reset
+the validation deadline. Each individual request has at most one immediate
+refresh/retry. A 403 response or transport failure does not trigger that immediate
+retry. A timeout while refreshing the token is a login failure, not evidence
+that a rejected reboot succeeded.
+
 ```yaml
 name: bigip-17.5
 models:

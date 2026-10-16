@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
 
 WAF_PROFILES = "/mgmt/tm/security/log/profile"
+LOGIN = "/mgmt/shared/authn/login"
 
 
 class Client:
@@ -34,12 +35,31 @@ class Client:
         self.provider = provider
         self.session = requests.Session()
         self.token = None
+        self._reauthentication_needed = False
 
     def request(self, method, path, payload=None, timeout=None):
         response = self.session.request(
             method, self.base + path, json=payload, verify=self.verify_tls,
             timeout=timeout or self.timeout,
         )
+        if response.status_code == 401 and (self.token or self._reauthentication_needed) and path != LOGIN:
+            # An explicit rejection is safe to retry; transport timeouts are not.
+            # Retry once without recursion, even if the new token is rejected.
+            # A failed refresh clears the token but must not prevent the next
+            # post-validation pass from trying to authenticate again.
+            self._reauthentication_needed = True
+            import requests
+            try:
+                self.authenticate()
+            except requests.RequestException as exc:
+                # The original operation was rejected. A lost login response
+                # must not be interpreted as a potentially successful reboot.
+                from .errors import summarize
+                raise RuntimeError(f"F5 session reauthentication failed: {summarize(exc)}") from None
+            response = self.session.request(
+                method, self.base + path, json=payload, verify=self.verify_tls,
+                timeout=timeout or self.timeout,
+            )
         if response.status_code >= 400:
             if response.status_code in (401, 403):
                 from .errors import DeviceHTTPError
@@ -53,16 +73,27 @@ class Client:
             raise ValueError(f"F5 {method} {path}: expected a JSON object")
         return document
 
+    def authenticate(self):
+        # Never attach the expired token to the credential-based login request.
+        self.token = None
+        self.session.headers.pop("X-F5-Auth-Token", None)
+        response = self.request("POST", LOGIN, {
+            "username": self.username, "password": self.password,
+            "loginProviderName": self.provider,
+        })
+        token = response.get("token", {})
+        token = token.get("token") if isinstance(token, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ValueError("F5 login response did not contain an authentication token")
+        from .debuglog import protect
+        protect([token])
+        self.token = token
+        self._reauthentication_needed = False
+        self.session.headers["X-F5-Auth-Token"] = token
+
     def __enter__(self):
         try:
-            response = self.request("POST", "/mgmt/shared/authn/login", {
-                "username": self.username, "password": self.password,
-                "loginProviderName": self.provider,
-            })
-            self.token = response["token"]["token"]
-            from .debuglog import protect
-            protect([self.token])
-            self.session.headers["X-F5-Auth-Token"] = self.token
+            self.authenticate()
             return self
         except Exception:
             self.session.close()

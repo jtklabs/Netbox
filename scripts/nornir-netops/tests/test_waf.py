@@ -592,6 +592,7 @@ def test_failed_rest_login_closes_session(monkeypatch):
 
     closed = []
     session = SimpleNamespace(
+        headers={},
         request=lambda *args, **kwargs: SimpleNamespace(status_code=403, text="denied"),
         close=lambda: closed.append(True),
     )
