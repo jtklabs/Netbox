@@ -65,6 +65,10 @@ class JobProfileForm(NetBoxModelForm):
     skip_running_config_check = forms.BooleanField(
         label='Skip running-config matching', required=False,
     )
+    validation_timeout = forms.IntegerField(
+        label='Post-upgrade validation timeout (seconds)', required=False, min_value=1,
+        help_text='Maximum wait for health checks, including WAF loading. For example: 600 for Cisco, '
+                  '4800 for 80 minutes, or 7200 for two hours. Blank uses the worker setting (default 600).')
     drain_connections = forms.BooleanField(
         label='Drain F5 connections before reboot', required=False,
         help_text='Standalone BIG-IP only; HA/cluster members are blocked. Temporarily disable virtual servers '
@@ -86,7 +90,7 @@ class JobProfileForm(NetBoxModelForm):
     class Meta:
         model = JobProfile
         fields = ('name', 'kind', 'device_types', 'replace_existing', 'assignment_confirmation',
-                  'upgrade_yaml', 'skip_running_config_check', 'drain_connections', 'drain_min_reduction_percent',
+                  'upgrade_yaml', 'validation_timeout', 'skip_running_config_check', 'drain_connections', 'drain_min_reduction_percent',
                   'drain_window_seconds', 'drain_timeout_seconds', 'features',
                   'remediation_mode', 'allow_clearpass_cluster_changes', 'description', 'comments', 'tags')
 
@@ -106,6 +110,7 @@ class JobProfileForm(NetBoxModelForm):
             else:
                 plan = dict(self.instance.plan)
                 plan.pop('models', None)
+                self.initial['validation_timeout'] = plan.pop('validation_timeout', None)
                 self.initial['skip_running_config_check'] = plan.pop('skip_running_config_check', False)
                 for key, default in (('drain_connections', False), ('drain_min_reduction_percent', 5),
                                      ('drain_window_seconds', 60), ('drain_timeout_seconds', 900)):
@@ -124,6 +129,9 @@ class JobProfileForm(NetBoxModelForm):
                 plan['allow_clearpass_cluster_changes'] = True
             if kind == 'upgrade' and isinstance(plan, dict):
                 # The form controls own these settings; raw API/CLI profiles use the same keys.
+                plan.pop('validation_timeout', None)
+                if data.get('validation_timeout') is not None:
+                    plan['validation_timeout'] = data['validation_timeout']
                 for key in ('drain_connections', 'drain_min_reduction_percent',
                             'drain_window_seconds', 'drain_timeout_seconds'):
                     plan.pop(key, None)

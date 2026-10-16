@@ -28,7 +28,8 @@ def add_arguments(parser, scheduled=False):
     parser.add_argument("--install-timeout", type=positive, default=1800, help="seconds for each copy, checksum or install operation")
     parser.add_argument("--reload-timeout", type=positive, default=1800, help="seconds to reconnect on the target software")
     parser.add_argument("--settle-seconds", type=positive, default=120, help="initial post-reload settling time")
-    parser.add_argument("--validation-timeout", type=positive, default=600, help="window for two passing post-checks")
+    parser.add_argument("--validation-timeout", type=positive, default=600,
+                        help="seconds for two passing post-checks when the profile has no validation_timeout")
     parser.add_argument("--poll-interval", type=positive, default=30, help="seconds between reconnect/convergence checks")
     from ..features.waf import add_connection_arguments
     add_connection_arguments(parser)

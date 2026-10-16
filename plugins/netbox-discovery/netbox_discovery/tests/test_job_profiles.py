@@ -235,6 +235,35 @@ class JobProfileTest(UpgradeFixture, TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertIs(response.data['plan']['skip_running_config_check'], True)
 
+    def test_validation_timeout_form_round_trip_and_frozen_job(self):
+        data = {'name': self.upgrade.name, 'kind': 'upgrade', 'upgrade_yaml': yaml.safe_dump(PROFILE),
+                'validation_timeout': '7200', 'device_types': [self.device.device_type_id]}
+        form = JobProfileForm(data=data, instance=self.upgrade)
+        self.assertTrue(form.is_valid(), form.errors)
+        saved = form.save()
+        self.assertEqual(saved.plan['validation_timeout'], 7200)
+        edit = JobProfileForm(instance=saved)
+        self.assertEqual(edit.initial['validation_timeout'], 7200)
+        self.assertNotIn('validation_timeout', yaml.safe_load(edit.initial['upgrade_yaml']))
+        job = queue.schedule(self.user, self.defaults)[0]
+        self.assertEqual(queue.assignment(job)['profile']['validation_timeout'], 7200)
+        data['validation_timeout'] = ''
+        form = JobProfileForm(data=data, instance=saved)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn('validation_timeout', form.save().plan)
+        job.refresh_from_db()
+        self.assertEqual(job.profile['validation_timeout'], 7200)
+
+    def test_validation_timeout_api_validation(self):
+        url = reverse('plugins-api:netbox_discovery-api:jobprofile-detail', args=[self.upgrade.pk])
+        for value in (0, -1, True, False, '7200', 1.5):
+            response = self.client.patch(url, {'plan': {**PROFILE, 'validation_timeout': value}}, format='json')
+            self.assertEqual(response.status_code, 400, response.data)
+        for value in (None, 600, 4800, 7200):
+            response = self.client.patch(url, {'plan': {**PROFILE, 'validation_timeout': value}}, format='json')
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data['plan']['validation_timeout'], value)
+
     def test_f5_drain_profile_form_round_trip_and_job_snapshot(self):
         plan = {**PROFILE, 'image': 'BIGIP-17.5.1.8-0.0.19.iso'}
         data = {'name': self.upgrade.name, 'kind': 'upgrade', 'upgrade_yaml': yaml.safe_dump(plan),

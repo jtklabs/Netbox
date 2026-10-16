@@ -730,7 +730,23 @@ function in its [ASM startup workaround](https://techdocs.f5.com/kb/en-us/produc
 This checks inventory count and ASM service readiness; it does not
 replace a synthetic request that exercises each application's WAF enforcement.
 
-Two consecutive clean comparisons are required. For slow units, use
+Two consecutive clean comparisons are required. Set `validation_timeout` in
+each upgrade profile to choose its post-upgrade health/WAF loading window:
+
+```yaml
+validation_timeout: 7200   # F5: up to two hours; 4800 is 80 minutes
+```
+
+Cisco profiles can use `validation_timeout: 600` for ten minutes. In NetBox,
+edit the saved profile's **Post-upgrade validation timeout (seconds)** field.
+The profile value overrides the worker's `--validation-timeout`; omitted or
+null values (a blank form field) retain the worker setting, whose default is
+600 seconds. The worker finishes early once two consecutive checks pass.
+Scheduled jobs keep the timeout from their profile snapshot; editing a saved
+profile affects newly scheduled jobs, not existing jobs. Deploy both the
+Discovery plugin and worker before setting this field; no migration is needed.
+
+For slow installation and reconnect operations as well, use
 `--install-timeout 7200 --reload-timeout 7200 --validation-timeout 7200`:
 these are separate two-hour windows for installation, reconnect and validation,
 with the configured settling interval before validation. The lab worker uses

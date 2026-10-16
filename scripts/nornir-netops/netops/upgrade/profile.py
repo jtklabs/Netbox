@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlsplit
 
 import yaml
@@ -97,6 +98,8 @@ class Profile:
     drain_timeout_seconds: int = 900
     # Only the post-upgrade running-config baseline comparison.
     skip_running_config_check: bool = False
+    # Seconds for post-upgrade convergence; None retains the worker CLI default.
+    validation_timeout: Optional[int] = None
 
     @property
     def family(self):
@@ -138,6 +141,9 @@ class Profile:
             raise ValueError(f"incomplete upgrade profile: {exc}") from None
         if not isinstance(result.name, str) or not result.name.strip():
             raise ValueError("profile name is required")
+        if result.validation_timeout is not None and (
+                type(result.validation_timeout) is not int or result.validation_timeout <= 0):
+            raise ValueError("validation_timeout must be a positive integer number of seconds or null")
         if not isinstance(result.image, str) or not result.image:
             raise ValueError("image must be the image filename")
         if not isinstance(result.md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result.md5):
