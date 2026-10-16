@@ -580,10 +580,11 @@ drain_window_seconds: 60
 drain_timeout_seconds: 900           # cancel reboot if the drain has not settled by this limit
 ```
 
-Order of operations under `--apply`: `save sys config`; baseline; image
-verified in `/shared/images` or uploaded from `image_source` and md5-checked
-on the unit (an existing file with a different checksum is never overwritten);
-the `ready` gate; a UCS archive saved on the unit as
+Order of operations under `--apply`: `save sys config`; baseline; read-only
+image checks; the `ready` gate; any required installer cleanup, followed by
+upload from `image_source` and checksum verification when the target image is
+absent (an existing file with a different checksum is never overwritten);
+a UCS archive saved on the unit as
 `<device>-pre-<target>-<UTC timestamp>-<unique suffix>.ucs`, then downloaded
 to `--ucs-dir` / `NETOPS_UCS_DIR` (default `<project>/ucs-backups`). Downloads
 use private temporary files, validate every byte range and require a matching
@@ -624,6 +625,17 @@ everything and writes nothing. An `image_source` URL is downloaded to the
 worker's image cache first (`--image-cache` or `NETOPS_IMAGE_CACHE`, default
 `<project>/.images`, shared with the IOS XE and EOS SCP fallback) and
 checksum-verified there before upload.
+
+When `/shared/images` lacks space for the upload plus `minimum_free_bytes`,
+the worker deletes previously uploaded installer images and hotfixes until
+enough space is available. An existing verified target needs only the configured
+reserve. Cleanup always keeps the target installer and never deletes installed
+boot volumes or UCS archives. It requires all boot volumes to report a complete
+installation, runs only after the `ready` gate under `--apply`, and records
+candidates, deletions, failures and free space in the job plan. Dry runs only
+plan cleanup. Free space is checked again after cleanup; an unreadable result
+or insufficient space stops the job before upload. This checks the filesystem
+holding `/shared/images`; it does not clean a separate `/var` filesystem.
 
 Prechecks block on: an unapproved platform, a release outside
 `starting_versions`, an install already in progress on a volume, a device
@@ -681,8 +693,8 @@ checked between bounded REST requests, so request latency can extend wall time.
 After draining, the disabled state is saved before installation and configuration
 copy. The target therefore boots with those VIPs disabled. Validation uses fresh
 collections and accounts only for the deliberate VIP admin-state differences;
-raw snapshots retain the actual disabled states. WAF policy identity, count,
-enforcement state, ASM readiness, and all other health checks still apply.
+raw snapshots retain the actual disabled states. WAF policy count,
+ASM readiness, and all other health checks still apply.
 After two consecutive clean comparisons, the worker restores and saves the
 original VIP states, then captures a final full collection. A failed final check
 re-disables and saves the VIPs and requires recovery. Reconnect or validation
@@ -706,14 +718,16 @@ until both members are upgraded. Configuration text is not compared; the UCS
 is the configuration record.
 
 When ASM is provisioned, prechecks also require a complete, paginated WAF
-policy inventory and ASM readiness. Postchecks compare policy full paths,
-active states and enforcement modes, including counts. A readable REST API
+policy inventory and ASM readiness. Every returned policy is counted, including
+parents, children and other types, even without active or enforcement fields.
+Postchecks compare only the total policy count; policy identities and enforcement
+states are informational and do not block the job. A readable REST API
 or matching count alone is insufficient: F5's `F5::ASMReady::is_asm_ready()`
 signal must also return ready. Missing/failed queries block preflight or keep
 postchecks pending. The automation account needs access to the policy inventory
 and `util/bash` for the read-only readiness query. F5 documents this readiness
 function in its [ASM startup workaround](https://techdocs.f5.com/kb/en-us/products/big-ip_ltm/releasenotes/related/relnote-supplement-bigip-12-1-3-4.html).
-This checks inventory, enforcement state and ASM service readiness; it does not
+This checks inventory count and ASM service readiness; it does not
 replace a synthetic request that exercises each application's WAF enforcement.
 
 Two consecutive clean comparisons are required. For slow units, use

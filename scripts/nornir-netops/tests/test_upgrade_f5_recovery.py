@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from netops.upgrade import checks, f5, f5_workflow, workflow
+from netops.upgrade import checks, f5, f5_workflow, report, workflow
 from test_upgrade_f5 import FakeBigIP, options, profile, iso, unit, run_unit
 
 
@@ -43,11 +43,34 @@ def test_readable_policies_do_not_imply_ready(monkeypatch, ready, profile):
     assert f5_workflow.preflight(snapshot, profile)["blockers"]
 
 
-def test_same_count_different_policy_is_a_failure(monkeypatch):
+def test_waf_comparison_uses_only_total_count(monkeypatch):
     before = f5.collect(waf_unit(monkeypatch), lambda _: None)
     after = deepcopy(before)
-    after["tables"]["waf_policies"][0]["fullPath"] = "/Common/replacement"
-    assert any(f["severity"] == "error" for f in checks.compare(before, after))
+    after["tables"]["waf_policies"] = [{"fullPath": "/Common/parent", "type": "parent"}]
+    assert not checks.compare(before, after)
+    rendered = "\n".join(report.delta_section("Tables", before["tables"], after["tables"]))
+    assert "waf_policies (count only) | 1 | 1" in rendered
+    assert "### waf_policies" not in rendered
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_waf_count_change_is_a_failure(monkeypatch, count):
+    before = f5.collect(waf_unit(monkeypatch), lambda _: None)
+    after = deepcopy(before)
+    after["tables"]["waf_policies"] = [{} for _ in range(count)]
+    finding = next(f for f in checks.compare(before, after) if f["check"] == "waf_policies")
+    assert finding["severity"] == "error"
+    assert (finding["before_count"], finding["after_count"]) == (1, count)
+
+
+def test_all_policy_types_count_without_enforcement_fields(monkeypatch):
+    policies = [policy(), {"fullPath": "/Common/parent", "type": "parent",
+                           "active": None, "enforcementMode": None},
+                {"type": "future-type"}, {}]
+    snapshot = f5.collect(waf_unit(monkeypatch, policies=policies), lambda _: None)
+    assert snapshot["waf"] == {"provisioned": True, "ready": True, "policy_count": 4}
+    assert snapshot["metrics"]["counts"]["waf_policies"] == 4
+    assert "waf_policies" not in snapshot["errors"]
 
 
 def test_empty_policies_only_valid_when_explicit_and_ready(monkeypatch):
@@ -59,14 +82,14 @@ def test_empty_policies_only_valid_when_explicit_and_ready(monkeypatch):
 def test_all_policy_pages_and_counts_are_verified():
     pages = {f5.ASM_POLICIES: {"items": [policy()], "totalItems": 2,
                              "nextLink": "https://localhost" + f5.ASM_POLICIES + "?$skip=1"},
-             f5.ASM_POLICIES + "?$skip=1": {"items": [policy("/Common/second")], "totalItems": 2}}
+             f5.ASM_POLICIES + "?$skip=1": {"items": [{"type": "parent"}], "totalItems": 2}}
     assert len(f5.waf_policies(pages.__getitem__)) == 2
     pages[f5.ASM_POLICIES + "?$skip=1"]["items"] = []
     with pytest.raises(ValueError, match="incomplete"):
         f5.waf_policies(pages.__getitem__)
 
 
-@pytest.mark.parametrize("document", [{}, {"items": [{}]}, {"items": [policy(), policy()]},
+@pytest.mark.parametrize("document", [{}, {"items": [None]}, {"items": "unreadable"},
     {"items": [], "nextLink": "https://localhost/mgmt/tm/sys"},
     {"items": [], "nextLink": f5.ASM_POLICIES}])
 def test_bad_policy_responses_fail_closed(document):

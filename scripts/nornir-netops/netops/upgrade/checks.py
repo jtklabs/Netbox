@@ -438,6 +438,11 @@ def compare(before, after, skip_running_config_check=False):
             if old is None or new is None:
                 findings.append({"check": key, "severity": "error", "message": "baseline or post-check unavailable"})
                 continue
+            if category == "tables" and key == "waf_policies":
+                if len(old) != len(new):
+                    findings.append({"check": key, "severity": "error", "before_count": len(old),
+                                     "after_count": len(new), "message": "WAF policy count changed"})
+                continue
             a = Counter(canonical(row) for row in old)
             b = Counter(canonical(row) for row in new)
             if a != b:
