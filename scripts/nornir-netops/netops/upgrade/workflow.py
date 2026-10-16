@@ -456,12 +456,16 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
     event says why validation has not passed: the checks that differ, the
     clean passes still needed and the time left.
     """
+    validation_timeout = plan.get("approved_profile", {}).get("validation_timeout")
+    if validation_timeout is None:
+        validation_timeout = options.validation_timeout
+    plan["validation_timeout"] = validation_timeout
     deadline, consecutive, attempt = None, 0, 0
     while True:
         attempt += 1
         after = collect_after()
         if deadline is None:
-            deadline = time.monotonic() + options.validation_timeout
+            deadline = time.monotonic() + validation_timeout
         skip_running_config = plan.get("approved_profile", {}).get("skip_running_config_check", False)
         compare = compare_snapshots or checks.compare
         findings = compare(before, after, skip_running_config_check=skip_running_config) + extra_findings(after)
@@ -483,6 +487,7 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
               "progress_summary": {"counts": after["metrics"]["counts"], "finding_count": len(findings),
                                    "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
                                    "seconds_remaining": seconds_left,
+                                   "validation_timeout": validation_timeout,
                                    **({"waf": waf_summary} if waf_summary else {}),
                                    "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})
@@ -498,7 +503,7 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
         if time.monotonic() >= deadline:
             fields, attachment = comparison_report(reporter, host, before, after, findings, plan, "validation_failed")
             emit("validation_failed", f"Upgrade returned, but baseline validation did not pass within "
-                                      f"{int(options.validation_timeout)}s after settling; still differing: {reasons}",
+                                      f"{int(validation_timeout)}s after settling; still differing: {reasons}",
                  {"findings": findings, **fields}, attachment)
             return Result(host=host, result={"findings": findings}, failed=True, changed=True)
         if errors:

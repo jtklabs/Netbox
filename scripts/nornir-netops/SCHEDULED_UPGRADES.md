@@ -575,6 +575,15 @@ Create the log location with suitable ownership first and rotate it. Set `NETOPS
 
 `--show-timeout`, `--config-timeout`, `--install-timeout`, `--reload-timeout`, `--settle-seconds`, `--validation-timeout`, and `--poll-interval` also apply, as does `--allow-config-mismatch`, which then covers every job the worker runs. Target/profile flags belong on manually invoked `upgrade`; `upgrade-poll` gets them from NetBox. Use `--report-dir` for per-job archives, not `--report`.
 
+Each upgrade profile can override `--validation-timeout` with `validation_timeout`
+in seconds. The saved-profile editor exposes **Post-upgrade validation timeout
+(seconds)**: use 7200 for a two-hour F5 WAF loading window and, for example,
+600 for Cisco. Blank uses the worker setting (default 600). This applies to
+post-upgrade validation, not individual HTTP requests, install or reconnect
+timeouts. Jobs retain the value captured when scheduled; changing a saved
+profile does not change an existing job. Update both the Discovery plugin and
+worker before using this field; no database migration is required.
+
 ## Progress and interrupted runs
 
 Each device has its own NetBox status, phase, baseline and post-validation counts, timestamps, run ID, and event history. Filter the job list by batch, poller, site, role, status or operation. The detail page shows the most recent 500 events; refresh to see updates. The separate bearer-authenticated webhook remains available for a future dashboard and includes `scheduled_job_id` and `batch_id` for scheduled work. Full baseline/configuration snapshots stay in the private remote archive.

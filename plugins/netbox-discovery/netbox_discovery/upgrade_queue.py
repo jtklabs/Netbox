@@ -100,10 +100,12 @@ def validate_profile(profile, operation=None):
         return validate_remediation(profile)
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
             'minimum_free_bytes', 'bundle_conversion_validated', 'image_source', 'skip_running_config_check',
+            'validation_timeout',
             # BIG-IP profiles; the worker's validator applies the family rules.
             'volume', 'allow_active', 'ucs_backup', 'license_check_date', 'drain_connections',
             'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
     required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup',
+                       'validation_timeout',
                        'license_check_date', 'skip_running_config_check', 'drain_connections',
                        'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
     if not isinstance(profile, dict) or set(profile) - keys or required - set(profile):
@@ -112,6 +114,9 @@ def validate_profile(profile, operation=None):
         raise QueueError('Upgrade profile is too large.')
     if type(profile.get('skip_running_config_check', False)) is not bool:
         raise QueueError('Profile skip_running_config_check must be a boolean.')
+    timeout = profile.get('validation_timeout')
+    if timeout is not None and (type(timeout) is not int or timeout <= 0):
+        raise QueueError('Profile validation_timeout must be a positive integer number of seconds or null.')
     for key in ('models', 'starting_versions'):
         optional = key == 'starting_versions' and operation == 'stage'
         if not isinstance(profile[key], list) or not (profile[key] or optional) or not all(isinstance(x, str) for x in profile[key]):
