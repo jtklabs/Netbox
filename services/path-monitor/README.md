@@ -14,6 +14,9 @@ network vantage point you want to measure.
   before/after paths, confirming trace, and recent confirmation evidence.
 - Provides an automatically updating dashboard, destination/time filters,
   expandable comparisons, raw trace history, paginated JSON and CSV export.
+- Dark styling covers the dashboard and sign-in page. Expanded history/JSON
+  sections keep their state and scroll position while new observations arrive;
+  open records remain visible until closed, even after leaving the latest page.
 - SQLite data and learned state survive container restarts. Default retention:
   **24 hours of raw traces, 90 days of events**.
 
@@ -336,6 +339,7 @@ docker compose -f compose.yaml run --build --rm --no-deps \
 # Open http://127.0.0.1:8091 and sign in — explicitly labeled simulated data.
 python3 -m unittest discover -s tests -v
 node --check static/app.js
+node --test tests/test_ui.cjs
 docker compose -f compose.yaml config --quiet
 docker build -t netbox-path-monitor:test .
 ```
