@@ -184,6 +184,33 @@ class HTTPAuthTests(unittest.TestCase):
         fields["password"] = "wrong"
         self.assertEqual(self.request("/login", "POST", fields, {"Cookie": cookie})[0], 401)
 
+    def test_login_policy_preserves_same_origin_form_submissions(self):
+        status, headers, _ = self.request("/login")
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["Referrer-Policy"], "same-origin")
+
+    def test_https_ip_login_and_logout_behind_tls_proxy(self):
+        self.auth = auth_instance(secure=True)
+        self.server.auth = self.auth
+        cookie, csrf = self.challenge()
+        host = "192.0.2.10:8443"
+        headers = {"Cookie": cookie, "Host": host, "Origin": "https://" + host}
+        fields = {"username": "reader", "password": PASSWORD, "csrf": csrf}
+        for origin in ("https://192.0.2.11:8443", "https://192.0.2.10:9443", "http://" + host, "null"):
+            self.assertEqual(self.request("/login", "POST", fields, headers | {"Origin": origin})[0], 403)
+        status, response_headers, _ = self.request("/login", "POST", fields, headers)
+        self.assertEqual(status, 303)
+        session_cookie = next(v for k, v in response_headers if k.lower() == "set-cookie" and self.auth.session_cookie in v)
+        self.assertIn("Secure", session_cookie)
+        self.assertIn("HttpOnly", session_cookie)
+        session_cookie = session_cookie.split(";", 1)[0]
+        status, response_headers, page = self.request("/", headers={"Cookie": session_cookie, "Host": host})
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(response_headers)["Referrer-Policy"], "same-origin")
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page)[1]
+        self.assertEqual(self.request("/logout", "POST", {"csrf": csrf}, headers | {"Cookie": session_cookie})[0], 303)
+        self.assertEqual(self.request("/api/status", headers={"Cookie": session_cookie})[0], 401)
+
     def test_favicon_and_other_login_tabs_do_not_invalidate_form_challenge(self):
         cookie, csrf = self.challenge()
         status, headers, _ = self.request("/favicon.ico", headers={"Cookie": cookie})

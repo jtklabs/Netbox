@@ -104,6 +104,10 @@ local HTTP testing; keep the default `true` behind HTTPS. Preserve the browser's
 `Host` header when proxying.
 Sign in from the service's normal HTTP(S) browser origin; opaque-origin frames
 or webviews that submit `Origin: null` are rejected.
+The app uses `Referrer-Policy: same-origin` so ordinary login/logout forms retain
+their origin. This supports HTTPS access by IP address as well as hostname;
+the proxy must preserve the browser's `Host` header, including a non-default
+port if used. Cross-origin requests do not receive referrer information.
 
 Integration clients send `Authorization: Bearer KEY` over HTTPS. Missing or
 invalid credentials return JSON HTTP 401 with a Bearer challenge. Keys in URLs
