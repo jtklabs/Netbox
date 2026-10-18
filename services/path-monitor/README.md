@@ -15,6 +15,10 @@ network vantage point you want to measure.
   before/after paths, confirming trace, and recent confirmation evidence.
 - Provides an automatically updating dashboard, destination/time filters,
   expandable comparisons, raw trace history, paginated JSON and CSV export.
+- History bars show the currently configured destination name before its IP
+  address, including for existing records. Names are omitted for destinations
+  no longer configured or without a distinct name. Live trace panels keep their
+  individual scroll positions when observations refresh.
 - Dark styling covers the dashboard and sign-in page. Expanded history/JSON
   sections keep their state and scroll position while new observations arrive;
   open records remain visible until closed, even after leaving the latest page.

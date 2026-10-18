@@ -1,6 +1,6 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = {mode: "events", rows: [], cursor: null, limit: 100, records: new Map(), paged: false, busy: false, revision: 0, filters: new URLSearchParams()};
+const state = {mode: "events", rows: [], cursor: null, limit: 100, records: new Map(), targets: new Map(), targetNames: new Map(), paged: false, busy: false, revision: 0, filters: new URLSearchParams()};
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -40,20 +40,52 @@ function observedPath(observation) {
   return {hops: Object.fromEntries((observation?.hops || []).map((hop) => [hop.ttl, hop.addresses]))};
 }
 const recordKey = (row) => `${state.mode}:${row.id}:${row.started}`;
+function updateRecordName(record, address) {
+  const label = record.querySelector(".record-target-name");
+  const name = state.targetNames.get(address);
+  label.textContent = name && name !== address ? name : "";
+  label.hidden = !label.textContent;
+}
 function renderTargets(snapshot) {
+  state.targetNames = new Map(snapshot.targets.map((target) => [target.address, target.name]));
+  // Refresh labels even while browsing older pages without refetching history.
+  for (const row of state.rows) {
+    const record = state.records.get(recordKey(row));
+    if (record) updateRecordName(record, row.target);
+  }
   const selected = $("target").value;
   $("target").replaceChildren(el("option", "All destinations"));
   $("target").firstChild.value = "";
-  $("targets").replaceChildren();
-  for (const target of snapshot.targets) {
+  const container = $("targets"), active = new Set(snapshot.targets.map((target) => target.address));
+  for (const [address, view] of state.targets) {
+    if (!active.has(address)) {
+      view.card.remove();
+      state.targets.delete(address);
+    }
+  }
+  snapshot.targets.forEach((target, index) => {
     const option = el("option", `${target.name} · ${target.address}`); option.value = target.address;
     $("target").append(option);
-    const card = el("article", undefined, "target-card"), header = el("div", undefined, "card-head");
-    const title = el("div"); title.append(el("h3", target.name), el("p", target.address, "address")); header.append(title);
+    let view = state.targets.get(target.address);
+    if (!view) {
+      const card = el("article", undefined, "target-card"), header = el("div", undefined, "card-head");
+      const hops = el("div", undefined, "hop-list"), error = el("p", undefined, "error-text"), meta = el("div", undefined, "card-meta");
+      hops.tabIndex = 0;
+      hops.setAttribute("role", "region");
+      card.append(header, hops, error, meta);
+      view = {card, header, hops, error, meta};
+      state.targets.set(target.address, view);
+    }
+    const {card, header, hops, error, meta} = view;
+    const title = el("div"); title.append(el("h3", target.name), el("p", target.address, "address"));
     const latest = target.latest, settings = snapshot.settings, learned = (target.state?.samples || 0) >= settings.learning_samples;
     let status = !target.fresh ? "Stale / starting" : latest?.error ? "Probe error" : !learned ? "Learning" : latest.reached ? "Reached" : "No destination reply";
-    header.append(badge(status, !target.fresh || latest?.error ? "error" : !learned || !latest?.reached ? "warn" : "")); card.append(header);
-    const hops = el("div", undefined, "hop-list");
+    header.replaceChildren(title, badge(status, !target.fresh || latest?.error ? "error" : !learned || !latest?.reached ? "warn" : ""));
+    // Keep the scroll container attached and restore its position after updating
+    // the hop rows. Each destination keeps an independent scroll position.
+    const scrollTop = hops.scrollTop, scrollLeft = hops.scrollLeft;
+    hops.setAttribute("aria-label", `${target.name} live traceroute`);
+    hops.replaceChildren();
     for (const hop of latest?.hops || []) {
       const row = el("div", undefined, "hop"); row.append(el("span", hop.ttl, "ttl"));
       const ips = el("div");
@@ -65,14 +97,16 @@ function renderTargets(snapshot) {
       row.append(ips); hops.append(row);
     }
     if (!latest?.hops?.length) hops.append(el("p", "Waiting for hop observations…", "muted"));
-    card.append(hops);
-    if (latest?.error) card.append(el("p", latest.error, "error-text"));
-    const meta = el("div", undefined, "card-meta");
+    error.textContent = latest?.error || "";
+    error.hidden = !latest?.error;
+    meta.replaceChildren();
     meta.append(el("span", target.protocol === "tcp" ? `TCP :${target.port ?? 443}` : "ICMP"));
     meta.append(el("span", latest ? `Last trace ${date(latest.started)}` : "No traces yet"), el("span", latest ? `${Math.round(latest.duration_ms)} ms` : ""), el("span", `${target.missed_ticks} missed slots`));
     if (!learned) meta.append(el("span", `Learning ${target.state?.samples || 0}/${settings.learning_samples}`));
-    card.append(meta); $("targets").append(card);
-  }
+    if (container.children[index] !== card) container.insertBefore(card, container.children[index] || null);
+    hops.scrollTop = scrollTop;
+    hops.scrollLeft = scrollLeft;
+  });
   $("target").value = selected;
   $("target-count").textContent = `${snapshot.targets.length} configured · ● observed in latest trace`;
   $("cadence").replaceChildren(document.createTextNode(`${snapshot.settings.interval_seconds}s`), el("span", "trace start interval"));
@@ -82,7 +116,8 @@ function createRecord(row) {
   const details = el("details", undefined, "record");
   const summary = el("summary"); summary.append(el("time", date(row.started)));
   const kind = row.kind || (row.error ? "Probe error" : row.reached ? "Reached" : "No destination reply");
-  summary.append(badge(kind.replaceAll("_", " "), row.kind === "path_change" || row.error ? "warn" : ""), el("code", row.target)); details.append(summary);
+  summary.append(badge(kind.replaceAll("_", " "), row.kind === "path_change" || row.error ? "warn" : ""), el("span", undefined, "record-target-name"), el("code", row.target)); details.append(summary);
+  updateRecordName(details, row.target);
   const body = el("div", undefined, "record-body");
   if (row.kind === "path_change" || row.kind === "baseline") {
     for (const move of row.hop_moves || []) {
