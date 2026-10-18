@@ -19,6 +19,23 @@ from .factories import feature_standards
 
 
 class RevisionTest(GridTest):
+    def test_ssh_mac_snapshot_pins_policy_and_requires_enforce_for_writes(self):
+        standard = ConfigStandard.objects.create(
+            name='SSH MAC policy', check_type='netops',
+            definition_yaml='ssh_mac: {macs: [hmac-sha2-512], ios_scope: both, asa_integrity: high}',
+            auto_remediable=True, allow_enforce=False,
+        )
+        device = self.devices['sw1']
+        snapshot = snapshot_for_device(self.user, device, ['ssh_mac'], 'replace', audit=True)
+        self.assertEqual(snapshot['document']['ssh_mac']['ios_scope'], 'both')
+        self.assertEqual(snapshot['revisions'][0]['standard_id'], standard.pk)
+        with self.assertRaises(ValidationError):
+            snapshot_for_device(self.user, device, ['ssh_mac'], 'replace')
+        standard.allow_enforce = True
+        standard.save()
+        self.assertEqual(snapshot_for_device(self.user, device, ['ssh_mac'], 'replace')
+                         ['revisions'][0]['revision'], standard.revision)
+
     def test_batch_snapshots_are_isolated_and_next_batch_reads_new_revisions(self):
         standard = feature_standards()[0]
         device = self.devices['sw1']

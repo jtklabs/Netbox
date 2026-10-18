@@ -1,0 +1,3 @@
+{% for key in add %}
+ip ssh {{ key.split(':')[0] }} algorithm mac hmac-sha2-512
+{% endfor %}

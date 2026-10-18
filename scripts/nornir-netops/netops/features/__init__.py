@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict
 
 from ..core import Feature
-from . import acl, banner, nac, ntp, snmp, snmp_packetsize, syslog, users, waf
+from . import acl, banner, nac, ntp, snmp, snmp_packetsize, ssh_mac, syslog, users, waf
 
 FEATURES: Dict[str, Feature] = {
     f.name: f for f in (
@@ -22,5 +22,6 @@ FEATURES: Dict[str, Feature] = {
         snmp.FEATURE,
         snmp_packetsize.FEATURE,
         waf.FEATURE,
+        ssh_mac.FEATURE,
     )
 }

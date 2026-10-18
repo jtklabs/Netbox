@@ -84,6 +84,8 @@ def netmask(network: str) -> str:
 # Spellings we accept in the CSV / autodetect, mapped to the netmiko platform
 # name used for both the connection and the template directory.
 PLATFORM_ALIASES = {
+    "asa": "cisco_asa",
+    "cisco-asa": "cisco_asa",
     "opengear": "opengear_linux",
     "junos": "juniper_junos",
     "juniper": "juniper_junos",
@@ -115,6 +117,7 @@ PLATFORM_ALIASES = {
 # than delegating to netmiko's save_config() so the dry run can print the exact
 # command that an apply would run.
 SAVE_COMMANDS = {
+    "cisco_asa": "write memory",
     "cisco_ios": "write memory",
     "arista_eos": "write memory",
     "cisco_nxos": "copy running-config startup-config",

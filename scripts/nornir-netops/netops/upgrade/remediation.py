@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize')
+FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize', 'ssh_mac')
 MODES = ('add', 'replace')
 CONFIG_OPERATIONS = ('remediate', 'audit_config')
 READ_ONLY_OPERATIONS = ('audit', 'audit_config')
@@ -56,7 +56,7 @@ def validate(profile):
 
 
 def command(feature, device_id, mode, apply, args):
-    argv = [sys.executable, str(project_root() / 'configure.py'), feature,
+    argv = [sys.executable, str(project_root() / 'configure.py'), feature.replace('_', '-'),
             '--netbox', '--netbox-filter', f'id={int(device_id)}', '--no-netbox-autofilter', f'--{mode}']
     # The dry run exits 2 when changes are pending, so "compliant" and "would change" differ.
     argv += ['--apply', '--yes'] if apply else ['--fail-on-diff']
