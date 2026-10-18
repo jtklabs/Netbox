@@ -244,7 +244,7 @@ def commit(connection, command):
     Netmiko's commit(confirm=True) requires a particular rollback warning,
     which Junos does not always print even when the confirmed commit succeeds.
     Its loose prompt match can also stop at the hostname inside commit output.
-    NTP does not change the hostname, so wait for the complete current prompt.
+    Callers must preserve the hostname; wait for the complete current prompt.
     """
     prompt = connection.find_prompt().strip()
     if not prompt.endswith('#') or '\n' in prompt or '\r' in prompt:

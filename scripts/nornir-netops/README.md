@@ -2798,3 +2798,10 @@ from cron each minute on the remotes. The worker shares this directory's `.env`
 and AWS settings, processes a bounded Nornir batch, and reports progress to
 NetBox and the optional upgrade webhook. Without `--apply` it claims audits only.
 See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruption/recovery behavior.
+
+## SSH MAC integrity
+
+`configure.py ssh-mac --replace` audits the SHA-512 MAC policy on IOS/IOS-XE,
+EOS and Junos, and the `high` integrity preset on ASA. Add `--apply` to remediate;
+add mode only reports drift. NetBox jobs expose **SSH MAC integrity** and pin
+its YAML standard revision. See [setup, scope and platform behavior](../../docs/SSH-MAC-STANDARD.md).

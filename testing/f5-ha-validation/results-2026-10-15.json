@@ -1,0 +1,211 @@
+{
+  "date": "2026-10-15",
+  "result": "FAILED_UNATTENDED_PAIR_VALIDATION",
+  "recovery_status": "complete_verified_healthy",
+  "source_commit": "edc85fe5ae98ece49be85fcb181be9ac917d78a8",
+  "units": {
+    "f5-lab01": "192.0.2.147",
+    "f5-lab02": "192.0.2.149"
+  },
+  "ha_group": "/Common/lab-ha",
+  "initial_version": "17.5.1.9",
+  "target_version": "17.5.1.10",
+  "initial_roles": {
+    "f5-lab01": "active",
+    "f5-lab02": "standby"
+  },
+  "configuration": {
+    "network_failover": true,
+    "auto_sync": false,
+    "asm_sync": true,
+    "shared_vips": [
+      "198.51.100.101:8080",
+      "198.51.100.102:8080"
+    ],
+    "netbox_group": "F5 Unit 1 and 2",
+    "max_concurrent": 1,
+    "standby_first_dependency": "f5-lab01 waits for f5-lab02",
+    "allow_active": true,
+    "drain_connections": false,
+    "profile_id": 5,
+    "profile_name": "F5 Lab HA - 17.5.1.9 to 17.5.1.10 - validation failed",
+    "dependency_id": 3
+  },
+  "tests": {
+    "automated_unit_tests": 149,
+    "initial_live_baseline": "Both members In Sync, ASM ready, matching 20-policy inventories",
+    "live_preflight_checks": [
+      "Default profile blocks active member",
+      "Standby passes preflight",
+      "HA connection draining rejected"
+    ],
+    "command": "python -m pytest tests/test_upgrade_f5.py tests/test_upgrade_f5_activation.py tests/test_upgrade_f5_recovery.py tests/test_upgrade_scheduler.py -q",
+    "working_directory": "scripts/nornir-netops",
+    "limitations": [
+      "The exact target installation already existed on HD1.1; this run validated staging, checksum verification, configuration copy, activation and postchecks, not a fresh software installation.",
+      "The active member job stopped at preflight, so poller-driven failover and second-member activation were not exercised.",
+      "Traffic measurement uses repeated HTTP health requests. It does not validate long-lived connection preservation or WAF attack-blocking behavior."
+    ]
+  },
+  "jobs": [
+    {
+      "id": 32,
+      "device_name": "f5-lab02",
+      "status": "completed_with_warnings",
+      "stage": "completed_with_warnings",
+      "message": "Step 8/8 \u00b7 Health validation \u00b7 2947s elapsed: Target installed and baseline restored",
+      "scheduled_at": "2026-10-15 20:28:38.736449+00:00",
+      "claimed_at": "2026-10-15 20:29:03.118872+00:00",
+      "started_at": "2026-10-15 20:29:26.258720+00:00",
+      "completed_at": "2026-10-15 21:18:12.439091+00:00",
+      "planned_wave": 1,
+      "waits_for": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": 33,
+      "device_name": "f5-lab01",
+      "status": "failed",
+      "stage": "blocked",
+      "message": "Step 1/8 \u00b7 Prechecks \u00b7 23s elapsed: configuration sync is 'Changes Pending'; sync the device group before upgrading",
+      "scheduled_at": "2026-10-15 20:28:38.736449+00:00",
+      "claimed_at": "2026-10-15 21:18:13.419616+00:00",
+      "started_at": null,
+      "completed_at": "2026-10-15 21:18:37.920636+00:00",
+      "planned_wave": 2,
+      "waits_for": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "finding": "standby_upgraded",
+      "detail": "Job 32 staged and verified the ISO, backed up UCS, reused the exact target installation on HD1.1, copied configuration, rebooted, and passed two clean comparisons with 20/20 WAF policies and ASM ready."
+    },
+    {
+      "finding": "manual_recovery_required",
+      "detail": "REST IcrWorker initialization logged ICRD Busy / Operation timedout. Repeated authentication HTTP503 prevented reconnect. restjavad was manually restarted once at 2026-10-15T21:11:31Z. The result is assisted, not an unattended pass."
+    },
+    {
+      "finding": "second_member_blocked",
+      "detail": "Job 33 was automatically claimed after job 32 completed, then blocked before failover/install/reboot because configuration sync was Changes Pending."
+    },
+    {
+      "finding": "automatic_failover_not_exercised",
+      "detail": "The sync precheck blocked the second job before it could perform failover. No automated pair failover or active-member upgrade was validated."
+    }
+  ],
+  "interventions": [
+    {
+      "time": "2026-10-15T21:11:27.873761+00:00",
+      "unit": "f5-lab02",
+      "action": "bigstart restart restjavad",
+      "reason": "REST IcrWorker initialization failed with ICRD Busy Operation timedout; repeated HTTP503 prevented reconnect",
+      "unattended_test_pass": false
+    }
+  ],
+  "recovery_plan": "Return non-serving lab02 to its preserved original HD1.2 volume; verify same release, WAF, roles and synchronization.",
+  "evidence": {
+    "standby_job": "https://netbox.example.invalid/netbox/plugins/discovery/upgrades/32/",
+    "active_job": "https://netbox.example.invalid/netbox/plugins/discovery/upgrades/33/",
+    "protected_backups_and_snapshots": "[private lab backup location redacted]",
+    "local_detailed_job_exports": "[private job export location redacted]"
+  },
+  "engineering_follow_up": [
+    "Add explicit pair context and validate the upgraded peer before permitting the expected mixed-version sync state; do not blanket-ignore sync failures.",
+    "Verify traffic-group ownership and peer readiness after failover.",
+    "Validate both members and final config sync after the second upgrade.",
+    "Define bounded REST startup failure diagnostics and an explicit recovery policy.",
+    "Determine standby-first ordering from current roles or validate configured ordering immediately before starting."
+  ],
+  "implementation_findings": {
+    "pair_discovery": "Current workflow detects peers but does not automatically create or order both member jobs. The test configured explicit standby-first dependencies.",
+    "sync_gate": "f5_workflow.py preflight blocks all peer sync states except None, In Sync, or Standalone. Postchecks allow Changes Pending as a warning, creating a mismatch between the first job completion and second job admission.",
+    "code_changed": false
+  },
+  "source_files": {
+    "scripts/nornir-netops/netops/upgrade/f5.py": "601bf3bf1957f3ecd8ed1078acae4524153652143d65cafc6c38ad2062e61781",
+    "scripts/nornir-netops/netops/upgrade/f5_workflow.py": "e8336d75e6bf7df2bf6654bde8ce377b52736cfe3cbbe0d699affd1e111fd0e7"
+  },
+  "recovery": {
+    "action": "Returned lab02 to preserved original HD1.2; normal configuration sync from lab02 to lab-ha and datasync-global-dg after both nodes were healthy on the same release.",
+    "final_version": "17.5.1.9",
+    "final_roles": {
+      "f5-lab01": "active",
+      "f5-lab02": "standby"
+    },
+    "sync_status": "In Sync on both members",
+    "asm_ready": true,
+    "policy_count_per_member": 20,
+    "matching_policy_inventories": true,
+    "snapshot_collection_errors": {},
+    "live_preflight_gates_passed": true,
+    "inventory_updated": true
+  },
+  "manual_cluster_failover": {
+    "result": "PASS",
+    "events": [
+      {
+        "time": "2026-10-15T21:45:13.613201+00:00",
+        "event": "manual_cluster_failover_started",
+        "source": "f5-lab01",
+        "destination": "f5-lab02"
+      },
+      {
+        "time": "2026-10-15T21:45:15.231847+00:00",
+        "event": "roles_verified",
+        "roles": [
+          "standby",
+          "active"
+        ]
+      },
+      {
+        "time": "2026-10-15T21:45:54.010770+00:00",
+        "event": "manual_cluster_failback_started",
+        "source": "f5-lab02",
+        "destination": "f5-lab01"
+      },
+      {
+        "time": "2026-10-15T21:45:56.662611+00:00",
+        "event": "roles_verified",
+        "roles": [
+          "active",
+          "standby"
+        ]
+      },
+      {
+        "time": "2026-10-15T21:46:06.670436+00:00",
+        "event": "MANUAL_CLUSTER_FAILOVER_PASS",
+        "poller_upgrade_failover_validated": false
+      }
+    ],
+    "separate_from_poller_upgrade_validation": true
+  },
+  "traffic_observation": {
+    "samples": 9510,
+    "failed": 0,
+    "first": 1792096034.6960878,
+    "last": 1792100796.4440033,
+    "last_sample": {
+      "time": 1792100796.4440033,
+      "target": "http://198.51.100.101:8080/health",
+      "status": 200,
+      "healthy": true,
+      "elapsed": 0.026
+    },
+    "failure_samples": [],
+    "first_utc": "2026-10-15T20:27:14.696088+00:00",
+    "last_utc": "2026-10-15T21:46:36.444003+00:00",
+    "nominal_interval_seconds": 0.5,
+    "scope": "Standby upgrade, manual REST recovery, standby rollback, and manual same-version failover/failback",
+    "temporary_task_removed": true,
+    "log_location": "[private traffic observer log location redacted]"
+  },
+  "completed_at": "2026-10-15T21:47:15.159822+00:00",
+  "publication_note": "Historical lab evidence. Management and VIP addresses use documentation placeholders; private artifact locations are redacted. Results and observations are unchanged."
+}

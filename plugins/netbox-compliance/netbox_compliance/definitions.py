@@ -9,9 +9,10 @@ from django.core.exceptions import ValidationError
 FEATURE_SECTIONS = {
     'ntp': 'ntp', 'syslog': 'syslog', 'snmp': 'snmp',
     'snmp_packetsize': 'snmp', 'banner': 'banner', 'acl': 'acls',
-    'users': 'local_accounts',
+    'users': 'local_accounts', 'ssh_mac': 'ssh_mac',
 }
 SECTION_KEYS = {
+    'ssh_mac': {'macs', 'ios_scope', 'asa_integrity'},
     'ntp': {'servers', 'regions', 'vrf', 'source', 'prefer', 'iburst', 'authentication', 'aruba', 'clearpass'},
     'syslog': {'destinations', 'severity', 'source', 'vrf', 'facility', 'origin_id'},
     'snmp': {'allow', 'acl', 'communities', 'contact', 'location', 'chassis_id',
@@ -74,6 +75,13 @@ def parse_definition(text):
                 for key, maximum in (('port', 65535), ('timeout', 300)):
                     if key in aruba and (type(aruba[key]) is not int or not 1 <= aruba[key] <= maximum):
                         raise ValueError(f'ntp.aruba.{key} must be an integer from 1 to {maximum}.')
+        if section == 'ssh_mac':
+            if settings.get('macs', ['hmac-sha2-512']) != ['hmac-sha2-512']:
+                raise ValueError('ssh_mac.macs must be [hmac-sha2-512].')
+            if settings.get('ios_scope', 'both') not in ('both', 'client', 'server'):
+                raise ValueError('ssh_mac.ios_scope must be both, client or server.')
+            if settings.get('asa_integrity', 'high') != 'high':
+                raise ValueError('ssh_mac.asa_integrity must be high.')
         if section == 'ntp' and 'clearpass' in settings:
             clearpass = settings['clearpass']
             if not isinstance(clearpass, dict) or set(clearpass) - {'cluster_members'}:
