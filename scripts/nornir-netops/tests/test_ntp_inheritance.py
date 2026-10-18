@@ -110,16 +110,26 @@ def test_verification_uses_original_context_even_if_device_loses_it():
     assert corrections[:2] == commands[:2]
 
 
-def test_netbox_with_no_source_tags_or_vrf_can_apply_verify_and_repeat(device, login, netbox, tmp_path):
+@pytest.mark.parametrize('mode', [MODE_ADD, MODE_REPLACE])
+@pytest.mark.parametrize('global_lines,server,new', [
+    (['ntp local-interface vrf MGMT Management1'], 'ntp server vrf MGMT 192.0.2.9 iburst',
+     'ntp server vrf MGMT {ip} iburst'),
+    ([], 'ntp server vrf MGMT 10.10.10.10 source Management1 key 1',
+     'ntp server vrf MGMT {ip} key 1 iburst source Management1'),
+])
+def test_netbox_with_no_source_tags_or_vrf_can_apply_verify_and_repeat(
+        device, login, netbox, tmp_path, mode, global_lines, server, new):
     (tmp_path / 'standards.yaml').write_text('ntp:\n  servers: [192.0.2.10, 192.0.2.11]\n')
-    original = ['ntp local-interface vrf MGMT Management1', 'ntp server vrf MGMT 192.0.2.9 iburst']
+    original = [*global_lines, server]
     box = device['devices']['leaf1'] = EosDevice(original)
     report = tmp_path / 'report.json'
-    args = ('--limit', 'leaf1', '--replace', '--apply', '-y', '--report', str(report))
+    args = ('--limit', 'leaf1', '--' + mode, '--apply', '-y', '--report', str(report))
     assert run_netbox('ntp', *args) == cli.EXIT_OK
     row = json.loads(report.read_text())['devices']['leaf1']
     assert row['verified'] is True and row['saved'] is True
-    assert box.lines == [original[0], 'ntp server vrf MGMT 192.0.2.10 iburst', 'ntp server vrf MGMT 192.0.2.11 iburst']
+    additions = [new.format(ip=ip) for ip in ('192.0.2.10', '192.0.2.11')]
+    assert device['config']['leaf1'] == additions + (['no ' + server] if mode == MODE_REPLACE else [])
+    assert box.lines == global_lines + ([server] if mode == MODE_ADD else []) + additions
     sent = list(device['config']['leaf1'])
     assert run_netbox('ntp', *args) == cli.EXIT_OK
     assert device['config']['leaf1'] == sent
