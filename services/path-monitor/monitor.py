@@ -61,14 +61,25 @@ def load_config(path):
         raise ValueError("configure 1..64 destinations")
     normalized = []
     for item in destinations:
-        if not isinstance(item, dict) or set(item) - {"address", "name", "expected_hops"}:
-            raise ValueError("destination fields: address, name, expected_hops")
+        if not isinstance(item, dict) or set(item) - {"address", "name", "expected_hops", "protocol", "port"}:
+            raise ValueError("destination fields: address, name, expected_hops, protocol, port")
         address = str(ipaddress.ip_address(item["address"]))
         if "%" in address or ipaddress.ip_address(address).is_multicast or ipaddress.ip_address(address).is_unspecified:
             raise ValueError("destinations must be unicast IP literals without a scope suffix")
         name = item.get("name", address)
         if not isinstance(name, str) or not 1 <= len(name) <= 120:
             raise ValueError("destination name must contain 1..120 characters")
+        protocol = item.get("protocol", "icmp")
+        if not isinstance(protocol, str) or protocol not in {"icmp", "tcp"}:
+            raise ValueError("destination protocol must be icmp or tcp")
+        options = {"protocol": protocol}
+        if protocol == "tcp":
+            port = item.get("port", 443)
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise ValueError("TCP destination port must be an integer in 1..65535")
+            options["port"] = port
+        elif "port" in item:
+            raise ValueError("destination port requires protocol tcp")
         expected = item.get("expected_hops", {})
         if not isinstance(expected, dict):
             raise ValueError("expected_hops must map TTL numbers to address lists")
@@ -81,7 +92,7 @@ def load_config(path):
             clean[str(int(ttl))] = sorted({str(ipaddress.ip_address(a)) for a in addresses})
             if any(ipaddress.ip_address(a).version != ipaddress.ip_address(address).version or "%" in a for a in clean[str(int(ttl))]):
                 raise ValueError("expected hop addresses must match the destination IP family")
-        normalized.append({"address": address, "name": name, "expected_hops": clean})
+        normalized.append({"address": address, "name": name, "expected_hops": clean, **options})
     if len({d["address"] for d in normalized}) != len(normalized):
         raise ValueError("duplicate destination address")
     return {"settings": settings, "destinations": normalized}
@@ -94,6 +105,8 @@ class Observation:
     hops: list
     reached: bool
     error: str | None = None
+    protocol: str = "icmp"
+    port: int | None = None
 
     @property
     def path(self):
@@ -140,8 +153,9 @@ def parse_trace(output, address, started, duration_ms, error=None):
 
 
 def trace_command(address, settings):
+    method = ["-T", "-p", str(settings.get("port", 443))] if settings.get("protocol", "icmp") == "tcp" else ["-I"]
     return ["traceroute", "-4" if ipaddress.ip_address(address).version == 4 else "-6",
-            "-I", "-n", "-q", str(settings["probes_per_hop"]),
+            *method, "-n", "-q", str(settings["probes_per_hop"]),
             "-m", str(settings["max_hops"]), "-N", str(settings["simultaneous_probes"]),
             "-w", str(settings["probe_wait_seconds"]), address]
 
@@ -169,8 +183,11 @@ async def probe(address, settings):
             error = "traceroute exceeded trace_timeout_seconds"
     except OSError as exc:
         error = str(exc)
-    return parse_trace(output.decode(errors="replace"), address, started,
-                       round((time.monotonic() - tick) * 1000, 3), error)
+    result = parse_trace(output.decode(errors="replace"), address, started,
+                         round((time.monotonic() - tick) * 1000, 3), error)
+    result.protocol = settings.get("protocol", "icmp")
+    result.port = settings.get("port", 443) if result.protocol == "tcp" else None
+    return result
 
 
 class Detector:
@@ -393,6 +410,9 @@ class Collector:
     async def target_loop(self, target):
         """Start each second; bounded overlapping probes are consumed in start order."""
         address, settings = target["address"], self.config["settings"]
+        protocol = target.get("protocol", "icmp")
+        port = target.get("port", 443) if protocol == "tcp" else None
+        probe_settings = settings | {"protocol": protocol, "port": port}
         detector = Detector(settings, target["expected_hops"], self.store.state(address))
         interval = settings["interval_seconds"]
         capacity = math.ceil(settings["trace_timeout_seconds"] / interval) + 2
@@ -403,6 +423,7 @@ class Collector:
             while True:
                 task = await queue.get()
                 result = await task
+                result.protocol, result.port = protocol, port
                 self.store.record(address, result, detector)
                 queue.task_done()
 
@@ -415,7 +436,7 @@ class Collector:
                 if queue.full() or len(pending) >= capacity:
                     self.missed[address] += 1
                 else:
-                    task = asyncio.create_task(self.probe_fn(address, settings))
+                    task = asyncio.create_task(self.probe_fn(address, probe_settings))
                     pending.add(task)
                     task.add_done_callback(pending.discard)
                     queue.put_nowait(task)

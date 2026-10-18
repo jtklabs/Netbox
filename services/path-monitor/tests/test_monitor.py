@@ -56,6 +56,28 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises((ValueError, KeyError, TypeError)):
                 self.config(**data)
 
+    def test_mixes_default_icmp_and_per_destination_tcp(self):
+        targets = self.config(destinations=[
+            {"address": DEST},
+            {"address": "192.0.2.81", "protocol": "tcp"},
+            {"address": "2001:db8::80", "protocol": "tcp", "port": 8443},
+        ])["destinations"]
+        self.assertEqual(targets[0]["protocol"], "icmp")
+        self.assertNotIn("port", targets[0])
+        self.assertEqual((targets[1]["protocol"], targets[1]["port"]), ("tcp", 443))
+        self.assertEqual(targets[2]["port"], 8443)
+        for port in (1, 65535):
+            self.assertEqual(self.config(destinations=[{"address": DEST, "protocol": "tcp", "port": port}])
+                             ["destinations"][0]["port"], port)
+
+    def test_rejects_invalid_protocol_and_port(self):
+        for options in ({"protocol": "udp"}, {"protocol": "-T"}, {"protocol": []},
+                        {"protocol": None}, {"port": 443}, {"protocol": "icmp", "port": 443},
+                        *({"protocol": "tcp", "port": port} for port in
+                          (0, -1, 65536, 443.0, True, "443", "443; echo invalid", None))):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.config(destinations=[{"address": DEST, **options}])
+
 
 class ParserTests(unittest.TestCase):
     def test_multipath_shorthand_rtt_and_timeouts(self):
@@ -78,6 +100,15 @@ class ParserTests(unittest.TestCase):
         self.assertIn("-4", command)
         self.assertEqual(command[-1], DEST)
         self.assertIn("-6", trace_command("::1", settings()))
+
+    def test_tcp_command_keeps_the_configured_port_constant(self):
+        for address, family, port in ((DEST, "-4", 443), ("2001:db8::80", "-6", 8443)):
+            command = trace_command(address, settings(protocol="tcp", port=port))
+            self.assertEqual(command, ["traceroute", family, "-T", "-p", str(port), "-n",
+                "-q", "3", "-m", "30", "-N", "32", "-w", "0.5", address])
+            self.assertNotIn("-I", command)
+        self.assertEqual(trace_command(DEST, settings(protocol="tcp"))[4], "443")
+        self.assertNotIn("-p", trace_command(DEST, settings()))
 
 
 class DetectorTests(unittest.TestCase):
@@ -269,6 +300,58 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(self.store.rows("traces"))
         self.assertEqual(next(e for e in self.store.rows("events") if e["id"] == event["id"])["last_reached_observation"]["started"], 4)
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mixed_methods_are_isolated_and_persisted_with_events(self):
+        store = Store(":memory:")
+        calls = {}
+        async def fake_probe(address, config):
+            calls[address] = trace_command(address, config)
+            return Observation(time.time(), 5, [{"ttl": 1, "addresses": [address],
+                "rtt_ms": [1.5], "timeouts": 0, "annotations": []}], True)
+        global_settings = settings(learning_samples=1)
+        config = {"settings": global_settings, "destinations": [
+            {"address": DEST, "expected_hops": {}},
+            {"address": "192.0.2.81", "expected_hops": {}, "protocol": "tcp", "port": 443},
+        ]}
+        collector = Collector(config, store, fake_probe)
+        task = asyncio.create_task(collector.run())
+        try:
+            async def wait_for_both():
+                while len(store.rows("traces")) < 2:
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(wait_for_both(), 2)
+            self.assertIn("-I", calls[DEST])
+            self.assertIn("-T", calls["192.0.2.81"])
+            self.assertEqual(calls["192.0.2.81"][4], "443")
+            self.assertNotIn("protocol", global_settings)
+            icmp = store.rows("traces", DEST)[0]
+            tcp = store.rows("traces", "192.0.2.81")[0]
+            self.assertEqual((icmp["protocol"], icmp["port"]), ("icmp", None))
+            self.assertEqual((tcp["protocol"], tcp["port"]), ("tcp", 443))
+            event = store.rows("events", "192.0.2.81")[0]
+            self.assertEqual(event["observed"]["protocol"], "tcp")
+            self.assertEqual(event["observed"]["port"], 443)
+        finally:
+            collector.stop.set()
+            await task
+            store.close()
+
+    async def test_tcp_probe_passes_flags_and_parses_latency(self):
+        calls = []
+        class Process:
+            returncode = 0
+            async def communicate(self):
+                return f"1 192.0.2.1 1.2 ms\n2 {DEST} 4.5 ms\n".encode(), b""
+        async def create(*args, **kwargs):
+            calls.append(args)
+            return Process()
+        with patch("monitor.asyncio.create_subprocess_exec", create):
+            result = await probe(DEST, settings(protocol="tcp", port=443))
+        self.assertIn("-T", calls[0])
+        self.assertEqual(calls[0][4], "443")
+        self.assertTrue(result.reached)
+        self.assertEqual(result.hops[1]["rtt_ms"], [4.5])
+        self.assertEqual((result.protocol, result.port), ("tcp", 443))
+
     async def test_cadence_overlaps_slow_probes_but_records_in_order(self):
         store = Store(":memory:")
         calls = []

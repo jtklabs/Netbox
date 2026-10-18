@@ -68,6 +68,7 @@ function renderTargets(snapshot) {
     card.append(hops);
     if (latest?.error) card.append(el("p", latest.error, "error-text"));
     const meta = el("div", undefined, "card-meta");
+    meta.append(el("span", target.protocol === "tcp" ? `TCP :${target.port ?? 443}` : "ICMP"));
     meta.append(el("span", latest ? `Last trace ${date(latest.started)}` : "No traces yet"), el("span", latest ? `${Math.round(latest.duration_ms)} ms` : ""), el("span", `${target.missed_ticks} missed slots`));
     if (!learned) meta.append(el("span", `Learning ${target.state?.samples || 0}/${settings.learning_samples}`));
     card.append(meta); $("targets").append(card);

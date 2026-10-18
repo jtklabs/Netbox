@@ -33,6 +33,8 @@ def openapi():
             "Trace": {"type": "object", "required": ["id", "target", "started", "hops", "reached", "error"], "properties": {
                 "id": {"type": "integer"}, "target": {"type": "string"}, "started": {"type": "number", "description": "Trace start, Unix seconds UTC."},
                 "duration_ms": {"type": "number"}, "reached": {"type": "boolean"}, "error": {"type": "string", "nullable": True},
+                "protocol": {"type": "string", "enum": ["icmp", "tcp"], "description": "Probe method; absent in observations recorded before protocol support (ICMP)."},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535, "nullable": True, "description": "TCP destination port; null for ICMP."},
                 "hops": {"type": "array", "items": {"type": "object", "properties": {"ttl": {"type": "integer"}, "addresses": {"type": "array", "items": {"type": "string"}},
                     "rtt_ms": {"type": "array", "items": {"type": "number"}}, "timeouts": {"type": "integer"}, "annotations": {"type": "array", "items": {"type": "string"}}}}}}},
             "Event": {"type": "object", "required": ["id", "target", "started", "kind", "observed"], "properties": {

@@ -5,7 +5,8 @@ destinations and reporting route changes. It lives alongside NetBox but has no
 dependency on NetBox, its database, or its API. Deploy one instance at each
 network vantage point you want to measure.
 
-- Starts an ICMP traceroute to **each destination every second** by default.
+- Starts a traceroute to **each destination every second** by default. Each
+  destination can use ICMP (default) or TCP to a configured port, such as 443.
 - Records every finished trace, including per-TTL address sets, RTTs, missing
   replies, ICMP annotations, execution errors, start time and elapsed time.
 - Keeps accepted multipath address sets per hop, rather than treating every
@@ -55,7 +56,8 @@ network view, use a local Compose override with `network_mode: host` and
 all host interfaces at port 8091. Choose the host/routing context intentionally.
 IPv6 destinations require working IPv6 routing in the chosen container network.
 
-The service uses Linux `traceroute -I -n` with only the `NET_RAW` capability;
+The service uses Linux `traceroute -I -n` by default, or `-T -p PORT -n` for
+TCP destinations, with only the `NET_RAW` capability;
 it does not need privileged mode, host PID access, or NetBox credentials.
 The container runs as root with all other capabilities removed so it can open
 ICMP raw sockets and write the named data volume. The filesystem is read-only
@@ -185,7 +187,8 @@ Edit `config/targets.json`, for example:
       "address": "10.60.70.80",
       "expected_hops": {"4": ["10.1.1.1", "10.1.1.2"]}
     },
-    {"name": "IPv6 endpoint", "address": "2001:db8::80"}
+    {"name": "IPv6 endpoint", "address": "2001:db8::80"},
+    {"name": "Kount", "address": "192.0.2.81", "protocol": "tcp", "port": 443}
   ]
 }
 ```
@@ -196,6 +199,22 @@ rejected. Up to 64 unique destinations can be configured. Names are optional.
 `expected_hops` is optional: it maps hop numbers (TTL) to known alternatives.
 These addresses stay accepted even when rarely observed. Other addresses at
 that TTL are still monitored and reported.
+
+Set `"protocol": "tcp", "port": 443` for destinations that need the equivalent
+of `traceroute -T -p 443`. Omit both fields for the existing ICMP behavior.
+Allowed protocols are `icmp` and `tcp`; TCP ports must be integers from 1 to
+65535 and default to 443 if omitted. A port is only valid with `protocol: tcp`.
+These options work with both IPv4 and IPv6. Other timing/retention settings
+remain shared. New raw traces and event observations include `protocol` and
+`port`, and the destination cards show the configured probe method.
+
+TCP uses SYN probes rather than HTTPS requests; a destination reply does not
+verify the web application. Intermediate hops still depend on ICMP time-exceeded
+replies, so filtering can hide some hops even when TCP reaches the destination.
+Changing a destination's protocol or port retains its learned state and can
+produce path/reachability events because different probes may reveal different
+routes. Existing retained observations remain available; older records without
+protocol metadata used ICMP.
 
 After editing, restart to validate and reload the file:
 
@@ -275,7 +294,7 @@ known sets; absence of evidence does not establish removal. The detector compare
 sets at each TTL, not correlations between complete paths; accepted sets do not
 prove every possible combination of addresses is a real end-to-end path.
 
-This is repeated ICMP traceroute, not a Paris traceroute or exhaustive ECMP
+This is repeated ICMP/TCP traceroute, not a Paris traceroute or exhaustive ECMP
 enumerator. It reports the paths routers reveal to these probes. Filtering,
 ICMP rate limiting, flow hashing and asymmetric return paths can affect what
 is observed. RTTs and ICMP annotations are stored but do not trigger topology
