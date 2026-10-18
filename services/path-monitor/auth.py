@@ -30,7 +30,7 @@ def token_hash(token):
 
 
 class Auth:
-    def __init__(self, username, password, api_token, secure_cookies=True, allow_any_origin=False):
+    def __init__(self, username, password, api_token, secure_cookies=True):
         if not isinstance(username, str) or not username.strip() or len(username) > 100:
             raise ValueError("PATH_MONITOR_USERNAME must contain 1..100 characters")
         if not isinstance(password, str) or not password.strip() or len(password) > 1024:
@@ -41,7 +41,6 @@ class Auth:
         self.password_digest = password_hash(password)
         self.token_digest = token_hash(api_token)
         self.secure = secure_cookies
-        self.allow_any_origin = allow_any_origin
         prefix = "__Host-" if secure_cookies else ""
         self.session_cookie = prefix + "path_monitor_session"
         self.login_cookie = prefix + "path_monitor_login"
@@ -56,12 +55,9 @@ class Auth:
         secure = os.environ.get("PATH_MONITOR_COOKIE_SECURE", "true").lower()
         if secure not in {"true", "false"}:
             raise ValueError("PATH_MONITOR_COOKIE_SECURE must be true or false")
-        allow_any_origin = os.environ.get("PATH_MONITOR_ALLOW_ANY_ORIGIN", "false").lower()
-        if allow_any_origin not in {"true", "false"}:
-            raise ValueError("PATH_MONITOR_ALLOW_ANY_ORIGIN must be true or false")
         return cls(os.environ.get("PATH_MONITOR_USERNAME", ""),
                    os.environ.get("PATH_MONITOR_PASSWORD", ""),
-                   os.environ.get("PATH_MONITOR_API_TOKEN", ""), secure == "true", allow_any_origin == "true")
+                   os.environ.get("PATH_MONITOR_API_TOKEN", ""), secure == "true")
 
     def cookie(self, name, value, max_age):
         cookie = SimpleCookie()
