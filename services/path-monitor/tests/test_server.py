@@ -9,14 +9,23 @@ import urllib.request
 
 from monitor import Collector, Detector, Store
 from server import Server, demo_config
+from auth import Auth
 from test_monitor import DEST, A, observation, settings
 
 
 class APITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.password = "test-panel-password-123"
+        cls.token = "test-integration-key-only-not-a-real-secret"
+
     def setUp(self):
         self.store = Store(":memory:")
         self.collector = Collector(demo_config(), self.store)
-        self.server = Server(("127.0.0.1", 0), self.collector, demo=True)
+        self.auth = Auth("viewer", self.password, self.token, secure_cookies=False)
+        session, _ = self.auth.login("viewer", self.password, "test")
+        self.cookie = f"{self.auth.session_cookie}={session}"
+        self.server = Server(("127.0.0.1", 0), self.collector, self.auth, demo=True)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -28,7 +37,8 @@ class APITests(unittest.TestCase):
         self.store.close()
 
     def get(self, path):
-        return urllib.request.urlopen(self.url + path)
+        headers = {"Authorization": "Bearer " + self.token} if path.startswith("/api/") else {"Cookie": self.cookie}
+        return urllib.request.urlopen(urllib.request.Request(self.url + path, headers=headers))
 
     def fill(self):
         detector = Detector(settings())

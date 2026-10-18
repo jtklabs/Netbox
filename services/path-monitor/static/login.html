@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Path monitor</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <header><div class="brand"><span class="mark" aria-hidden="true">↗</span><div><p class="eyebrow">NETWORK OBSERVABILITY</p><h1>Path monitor</h1></div></div></header>
+  <main class="login"><p class="eyebrow">PRIVATE NETWORK HISTORY</p><h2>Sign in</h2><p>Enter your username and password to view routes and change history.</p>
+    <p class="error-text" role="alert">{{ERROR}}</p>
+    <form method="post" action="login">
+      <input type="hidden" name="csrf" value="{{CSRF}}">
+      <label>Username<input name="username" autocomplete="username" maxlength="100" required autofocus></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" maxlength="1024" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
