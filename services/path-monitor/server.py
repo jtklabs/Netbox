@@ -100,8 +100,6 @@ class Handler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in values.items()}
 
     def valid_origin(self):
-        if self.server.auth.allow_any_origin:
-            return True  # Cookie-bound login challenge / session CSRF still required.
         origin = self.headers.get("Origin")
         if not origin:
             return True  # Signed login challenge / session CSRF token is still required.

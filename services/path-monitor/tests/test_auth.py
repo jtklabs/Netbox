@@ -81,17 +81,12 @@ class AuthTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             auth = Auth.from_env()
         self.assertFalse(auth.secure)
-        self.assertFalse(auth.allow_any_origin)
         self.assertTrue(auth.api_key("Bearer " + TOKEN))
         self.assertIsNotNone(auth.login("reader", PASSWORD, "test")[0])
         for key in ("PATH_MONITOR_USERNAME", "PATH_MONITOR_PASSWORD", "PATH_MONITOR_API_TOKEN"):
             with self.subTest(key=key), patch.dict(os.environ, env | {key: ""}, clear=True), self.assertRaises(ValueError):
                 Auth.from_env()
         with patch.dict(os.environ, env | {"PATH_MONITOR_COOKIE_SECURE": "invalid"}, clear=True), self.assertRaises(ValueError):
-            Auth.from_env()
-        with patch.dict(os.environ, env | {"PATH_MONITOR_ALLOW_ANY_ORIGIN": "TRUE"}, clear=True):
-            self.assertTrue(Auth.from_env().allow_any_origin)
-        with patch.dict(os.environ, env | {"PATH_MONITOR_ALLOW_ANY_ORIGIN": "invalid"}, clear=True), self.assertRaises(ValueError):
             Auth.from_env()
 
     def test_service_fails_closed_without_credentials_including_demo(self):
@@ -193,41 +188,6 @@ class HTTPAuthTests(unittest.TestCase):
         status, headers, _ = self.request("/login")
         self.assertEqual(status, 200)
         self.assertEqual(dict(headers)["Referrer-Policy"], "same-origin")
-
-    def test_any_origin_option_accepts_proxy_mismatches_and_null(self):
-        self.auth.allow_any_origin = True
-        for origin in ("https://192.0.2.10", "https://proxy.example:8443", "null", "https://["):
-            with self.subTest(origin=origin):
-                cookie, csrf = self.challenge()
-                fields = {"username": "reader", "password": PASSWORD, "csrf": csrf}
-                status, headers, _ = self.request("/login", "POST", fields,
-                    {"Cookie": cookie, "Origin": origin, "Host": "internal:8091"})
-                self.assertEqual(status, 303)
-                session = next(v.split(";", 1)[0] for k, v in headers
-                               if k.lower() == "set-cookie" and self.auth.session_cookie in v)
-                self.assertEqual(self.request("/api/status", headers={"Cookie": session})[0], 200)
-                status, _, page = self.request("/", headers={"Cookie": session})
-                self.assertEqual(status, 200)
-                csrf = re.search(r'name="csrf" value="([^"]+)"', page)[1]
-                self.assertEqual(self.request("/logout", "POST", {"csrf": csrf},
-                    {"Cookie": session, "Origin": origin})[0], 303)
-                self.assertEqual(self.request("/api/status", headers={"Cookie": session})[0], 401)
-
-    def test_any_origin_option_still_requires_credentials_and_csrf(self):
-        self.auth.allow_any_origin = True
-        cookie, csrf = self.challenge()
-        headers = {"Cookie": cookie, "Origin": "null"}
-        fields = {"username": "reader", "password": PASSWORD, "csrf": csrf}
-        self.assertEqual(self.request("/login", "POST", fields, {"Origin": "null"})[0], 403)
-        self.assertEqual(self.request("/login", "POST", fields | {"csrf": "bad"}, headers)[0], 403)
-        self.assertEqual(self.request("/login", "POST", fields | {"password": "wrong"}, headers)[0], 401)
-        session = self.login()
-        headers["Cookie"] = session
-        self.assertEqual(self.request("/logout", "POST", {"csrf": "bad"}, headers)[0], 403)
-        self.assertEqual(self.request("/api/status", headers=headers)[0], 200)
-        status, response_headers, _ = self.request("/api/status", headers={"Origin": "https://other.example"})
-        self.assertEqual(status, 401)
-        self.assertNotIn("access-control-allow-origin", {k.lower() for k, _ in response_headers})
 
     def test_https_ip_login_and_logout_behind_tls_proxy(self):
         self.auth = auth_instance(secure=True)
