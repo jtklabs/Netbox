@@ -1,0 +1,14 @@
+{
+  "settings": {
+    "interval_seconds": 1,
+    "learning_samples": 30,
+    "confirmation_samples": 3,
+    "confirmation_window": 10,
+    "multipath_grace_seconds": 300,
+    "trace_retention_hours": 24,
+    "event_retention_days": 90
+  },
+  "destinations": [
+    {"name": "Example destination (replace before deploying)", "address": "192.0.2.80", "expected_hops": {"2": ["198.51.100.10", "198.51.100.11"]}}
+  ]
+}

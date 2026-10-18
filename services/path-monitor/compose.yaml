@@ -1,0 +1,21 @@
+services:
+  path-monitor:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      PATH_MONITOR_HOST: 0.0.0.0
+    ports:
+      - "${PATH_MONITOR_BIND_ADDRESS:-127.0.0.1}:${PATH_MONITOR_PUBLIC_PORT:-8091}:8091"
+    volumes:
+      - ./config:/config:ro
+      - path-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
+
+volumes:
+  path-data:

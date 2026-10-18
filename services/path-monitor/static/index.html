@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Path monitor</title><link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header><div class="brand"><span class="mark" aria-hidden="true">↗</span><div><p class="eyebrow">NETWORK OBSERVABILITY</p><h1>Path monitor</h1></div></div><div id="connection" role="status">Connecting…</div></header>
+  <main>
+    <div id="banner" role="alert" hidden></div>
+    <section class="intro"><div><p class="eyebrow">CONTINUOUS ROUTE HISTORY</p><h2>See where the path changes.</h2><p>Accepted addresses are grouped by hop. Switching between known multipath addresses is normal.</p></div><div id="cadence" class="cadence">1s<span>trace start interval</span></div></section>
+    <section aria-labelledby="destinations-title"><div class="section-title"><h2 id="destinations-title">Destinations</h2><span id="target-count"></span></div><div id="targets" class="targets"></div></section>
+    <section class="history" aria-labelledby="history-title">
+      <div class="section-title"><div><p class="eyebrow">THE RECORD</p><h2 id="history-title">Changes & observations</h2></div><a id="export" class="button" href="api/events.csv?limit=1000">Export events CSV</a></div>
+      <form id="filters"><label>Destination<select id="target"><option value="">All destinations</option></select></label><label>From (local time)<input id="since" type="datetime-local"></label><label>Until (local time)<input id="until" type="datetime-local"></label><button type="submit">Apply filters</button><button type="button" id="reset" class="secondary">Reset</button></form>
+      <div class="tabs" role="group" aria-label="History type"><button id="events-tab" aria-pressed="true">Change events</button><button id="traces-tab" aria-pressed="false">Raw traces</button></div>
+      <p id="history-note" class="muted">Expand an event to compare the accepted path before and after.</p>
+      <div id="records" aria-live="polite"></div><button id="older" class="secondary" hidden>Load older records</button>
+      <p class="muted footnote">CSV exports the newest 1,000 events matching these filters. JSON APIs support pagination for larger reports. Times below use your browser’s timezone.</p>
+    </section>
+    <footer>Path monitor <span>•</span> <span id="retention">Persistent route observations</span><br>Destinations and expected multipath addresses are configured on the server.</footer>
+  </main>
+</body>
+</html>

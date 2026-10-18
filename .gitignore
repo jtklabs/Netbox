@@ -50,6 +50,12 @@ scripts/nornir-netops/collected/
 scripts/nornir-netops/commands.yaml
 scripts/nornir-netops/ucs-backups/
 
+# Local path monitor destinations and observation databases
+services/path-monitor/config/
+services/path-monitor/data/
+services/path-monitor/targets.json
+services/path-monitor/*.sqlite3*
+
 # Import/export drop zone — CSVs carry pricing and quotes
 csv/*
 !csv/.gitkeep
