@@ -9,6 +9,7 @@
     "event_retention_days": 90
   },
   "destinations": [
-    {"name": "Example destination (replace before deploying)", "address": "192.0.2.80", "expected_hops": {"2": ["198.51.100.10", "198.51.100.11"]}}
+    {"name": "Example destination (replace before deploying)", "address": "192.0.2.80", "expected_hops": {"2": ["198.51.100.10", "198.51.100.11"]}},
+    {"name": "Kount TCP example (replace before deploying)", "address": "192.0.2.81", "protocol": "tcp", "port": 443}
   ]
 }
