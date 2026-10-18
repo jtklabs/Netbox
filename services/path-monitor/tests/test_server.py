@@ -73,6 +73,20 @@ class APITests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
         self.assertIn("Path monitor", response.read().decode())
 
+    def test_loss_context_is_available_in_json_and_csv(self):
+        self.fill()
+        last = self.store.rows("traces", DEST, limit=1)[0]
+        detector = Detector(settings(), state=self.store.state(DEST))
+        for i in range(1, 4):
+            self.store.record(DEST, observation([A], last["started"] + i, reached=False), detector)
+        event = json.load(self.get(f"/api/events?target={DEST}&limit=1"))["items"][0]
+        self.assertEqual(event["after"], "no_reply")
+        self.assertEqual(event["last_reached_observation"]["started"], last["started"])
+        response = self.get(f"/api/events.csv?target={DEST}&limit=1")
+        row = next(csv.DictReader(io.StringIO(response.read().decode())))
+        self.assertEqual(json.loads(row["last_reached_observation"])["started"], last["started"])
+        self.assertEqual(json.loads(row["last_responding_hop"])["ttl"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

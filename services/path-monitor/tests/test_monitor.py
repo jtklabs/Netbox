@@ -25,6 +25,13 @@ def settings(**kw):
                        "multipath_grace_seconds": 20} | kw
 
 
+def route(addresses, now, reached=True):
+    return Observation(now, 10, [
+        {"ttl": ttl, "addresses": [ip] if isinstance(ip, str) else list(ip),
+         "rtt_ms": [float(ttl)] if ip else [], "timeouts": 0 if ip else 3, "annotations": []}
+        for ttl, ip in enumerate(addresses, 1)], reached)
+
+
 class ConfigTests(unittest.TestCase):
     def config(self, **overrides):
         data = {"destinations": [{"address": DEST}], **overrides}
@@ -153,6 +160,49 @@ class DetectorTests(unittest.TestCase):
         self.assertNotIn("2", detector.snapshot()["hops"])
         self.assertTrue(self.changes(events))
 
+    def test_inserted_hop_reports_familiar_addresses_at_new_positions(self):
+        detector = Detector(settings())
+        for now in range(1, 5):
+            detector.observe(route([A, B, DEST], now), DEST)
+        for now in (5, 6):
+            self.assertFalse(self.changes(detector.observe(route([C, A, B, DEST], now), DEST)))
+        event = self.changes(detector.observe(route([C, A, B, DEST], 7), DEST))[0]
+        self.assertEqual(event["hop_moves"], [
+            {"address": A, "from_hops": [1], "to_hops": [2], "first_observed_at": 5},
+            {"address": B, "from_hops": [2], "to_hops": [3], "first_observed_at": 5},
+            {"address": DEST, "from_hops": [3], "to_hops": [4], "first_observed_at": 5}])
+
+    def test_return_to_cached_positions_is_still_a_difference(self):
+        detector = Detector(settings())
+        for now in range(1, 5):
+            detector.observe(route([A, B, DEST], now), DEST)
+        for now in range(5, 8):
+            events = detector.observe(route([B, A, DEST], now), DEST)
+        self.assertEqual(len(self.changes(events)[0]["hop_moves"]), 2)
+        # Both addresses are now accepted at both TTLs during the grace period.
+        detector = Detector(settings(), state=json.loads(json.dumps(detector.state)))
+        for now in (8, 9):
+            self.assertFalse(self.changes(detector.observe(route([A, B, DEST], now), DEST)))
+        event = self.changes(detector.observe(route([A, B, DEST], 10), DEST))[0]
+        self.assertEqual(event["before"], event["after"])
+        self.assertEqual(event["hop_moves"][0]["address"], A)
+        self.assertEqual(event["hop_moves"][0]["from_hops"], [2])
+        self.assertEqual(event["hop_moves"][0]["to_hops"], [1])
+
+    def test_missing_reply_at_one_loop_position_is_not_a_move(self):
+        detector = Detector(settings())
+        for now in range(1, 5):
+            detector.observe(route([A, A, DEST], now), DEST)
+        for now in range(5, 10):
+            self.assertFalse(self.changes(detector.observe(route([[], A, DEST], now), DEST)))
+
+    def test_upgrade_seeds_positions_from_actual_recent_observations(self):
+        old_state = self.learned().state
+        del old_state["positions"]
+        restored = Detector(settings(), state=old_state)
+        self.assertEqual(restored.state["positions"][A]["ttls"], [2])
+        self.assertFalse(self.changes(restored.observe(observation([A], 5), DEST)))
+
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
@@ -196,7 +246,28 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(store.rows("traces")), 1)
             store.close()
 
-
+    def test_loss_and_recovery_keep_pre_loss_trace_after_restart_and_pruning(self):
+        for now in range(1, 5):
+            self.store.record(DEST, route([A, B, DEST], now), self.detector)
+        for now in range(5, 8):
+            self.store.record(DEST, route([A, [], []], now, reached=False), self.detector)
+        event = self.store.rows("events", DEST)[0]
+        self.assertEqual(event["after"], "no_reply")
+        self.assertEqual(event["first_observed_at"], 5)
+        self.assertEqual(event["last_reached_observation"]["started"], 4)
+        self.assertEqual(event["last_responding_hop"]["ttl"], 1)
+        self.assertEqual(event["observed"]["hops"][1]["addresses"], [])
+        detector = Detector(settings(), state=self.store.state(DEST))
+        for now in range(8, 11):
+            self.store.record(DEST, route([A, C, DEST], now), detector)
+        recovery = next(e for e in self.store.rows("events", DEST) if e["kind"] == "reachability" and e["before"] == "no_reply")
+        self.assertEqual(recovery["first_observed_at"], 8)
+        self.assertEqual(recovery["no_reply_since"], 5)
+        self.assertEqual(recovery["last_reached_observation"]["started"], 4)
+        self.assertEqual(recovery["observed"]["hops"][1]["addresses"], [C])
+        self.store.prune(settings(trace_retention_hours=1), now=10000)
+        self.assertFalse(self.store.rows("traces"))
+        self.assertEqual(next(e for e in self.store.rows("events") if e["id"] == event["id"])["last_reached_observation"]["started"], 4)
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_cadence_overlaps_slow_probes_but_records_in_order(self):
         store = Store(":memory:")

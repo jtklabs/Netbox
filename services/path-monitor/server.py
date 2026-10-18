@@ -88,10 +88,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith(".csv"):
             result = io.StringIO(newline="")
             writer = csv.writer(result)
-            writer.writerow(["id", "target", "started_utc", "kind", "before", "after", "observed", "evidence_window"])
+            fields = ("before", "after", "observed", "evidence_window", "hop_moves",
+                      "first_observed_at", "last_reached_observation", "last_responding_hop", "accepted_path", "no_reply_since")
+            writer.writerow(["id", "target", "started_utc", "kind", *fields])
             for row in rows:
                 writer.writerow([row["id"], row["target"], time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["started"])), row["kind"],
-                                 *[json.dumps(row.get(k)) for k in ("before", "after", "observed", "evidence_window")]])
+                                 *[json.dumps(row.get(k)) for k in fields]])
             return self.reply(result.getvalue(), "text/csv; charset=utf-8", attachment="path-events.csv")
         self.reply(json.dumps({"items": rows, "next_before_id": cursor}))
 
@@ -110,11 +112,17 @@ def demo_probe():
     async def run(address, settings):
         nonlocal count
         count += 1
-        # A/B is normal multipath. C replaces it during the second half of a cycle.
-        middle = ("198.51.100.10" if count % 2 else "198.51.100.11") if count % 40 < 20 else "203.0.113.20"
+        # Normal multipath, lost replies, an inserted hop, then the original path.
+        middle = "198.51.100.10" if count % 2 else "198.51.100.11"
+        phase = count % 60
+        reached = not 20 <= phase < 30
+        addresses = (["192.0.2.1", None, None] if not reached else
+                     ["192.0.2.1", "203.0.113.20", middle, address] if 30 <= phase < 50 else
+                     ["192.0.2.1", middle, address])
         return Observation(time.time(), 18, [
-            {"ttl": ttl, "addresses": [ip], "rtt_ms": [float(ttl)], "timeouts": 0, "annotations": []}
-            for ttl, ip in enumerate(["192.0.2.1", middle, address], 1)], True)
+            {"ttl": ttl, "addresses": [ip] if ip else [], "rtt_ms": [float(ttl)] if ip else [],
+             "timeouts": 0 if ip else 3, "annotations": []}
+            for ttl, ip in enumerate(addresses, 1)], reached)
     return run
 
 

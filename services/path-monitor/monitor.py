@@ -182,6 +182,41 @@ class Detector:
         self.state = state or {"samples": 0, "accepted": {}, "recent": [], "end_ttl": None,
                                "reachability": None, "last_started": None}
         self.state["recent"] = self.state["recent"][-settings["confirmation_window"]:]
+        if "positions" not in self.state:
+            # Upgrade existing databases from the latest positive observations.
+            self.state["positions"] = {}
+            for sample in reversed(self.state["recent"]):
+                for ip, ttls in self.positions(sample["path"]).items():
+                    self.state["positions"].setdefault(ip, {"ttls": ttls, "confirmed_at": sample["started"]})
+
+    @staticmethod
+    def positions(path):
+        positions = {}
+        for ttl, addresses in path.items():
+            for ip in addresses:
+                positions.setdefault(ip, []).append(int(ttl))
+        return {ip: sorted(ttls) for ip, ttls in positions.items()}
+
+    def moves(self, path, learning, now):
+        moves = []
+        positions = self.state["positions"]
+        recent_positions = [(r["started"], self.positions(r["path"])) for r in self.state["recent"]]
+        for ip, ttls in self.positions(path).items():
+            previous = positions.get(ip)
+            if previous and previous["ttls"] == ttls:
+                continue
+            # A missing reply at one of several positions does not prove a move.
+            if previous and not set(ttls) - set(previous["ttls"]):
+                continue
+            evidence = [started for started, observed in recent_positions
+                        if (not previous or started > previous["confirmed_at"])
+                        and observed.get(ip) == ttls]
+            if learning or len(evidence) >= self.settings["confirmation_samples"]:
+                positions[ip] = {"ttls": ttls, "confirmed_at": now}
+                if previous and not learning:
+                    moves.append({"address": ip, "from_hops": previous["ttls"],
+                                  "to_hops": ttls, "first_observed_at": min(evidence)})
+        return moves
 
     def snapshot(self):
         return {"hops": {ttl: sorted(ips) for ttl, ips in self.state["accepted"].items()},
@@ -207,12 +242,29 @@ class Detector:
         status = "reached" if observation.reached else "no_reply"
         confirmations = recent[-cfg["confirmation_samples"]:]
         if s["reachability"] != status and len(confirmations) == cfg["confirmation_samples"] and all(r["reached"] == observation.reached for r in confirmations):
-            events.append({"kind": "reachability", "before": s["reachability"], "after": status})
+            responding = [h for h in observation.hops if h["addresses"]]
+            context = s.get("reply_loss_context", {}) if status == "reached" else {}
+            last_reached = context.get("last_reached_observation", s.get("last_reached_observation"))
+            events.append({"kind": "reachability", "before": s["reachability"], "after": status,
+                           "first_observed_at": confirmations[0]["started"],
+                           "last_reached_observation": last_reached,
+                           "no_reply_since": context.get("first_observed_at"),
+                           "last_responding_hop": max(responding, key=lambda h: h["ttl"]) if responding else None,
+                           "accepted_path": self.snapshot()})
+            if status == "no_reply":
+                s["reply_loss_context"] = {"last_reached_observation": last_reached,
+                                          "first_observed_at": confirmations[0]["started"]}
+            else:
+                s.pop("reply_loss_context", None)
             s["reachability"] = status
+        if observation.reached:
+            # Retain an actual successful trace independently of raw retention.
+            s["last_reached_observation"] = observation.as_dict()
         if not path:
             return events
         before = self.snapshot()
         learning = s["samples"] < cfg["learning_samples"]
+        moves = self.moves(path, learning, now)
         s["samples"] += 1
         accepted = s["accepted"]
         for ttl, ips in self.expected.items():
@@ -246,9 +298,12 @@ class Detector:
                     del accepted[ttl]
         # Do not expose empty TTL entries created by unconfirmed candidates.
         s["accepted"] = {ttl: ips for ttl, ips in accepted.items() if ips}
+        active_addresses = {ip for ips in s["accepted"].values() for ip in ips}
+        s["positions"] = {ip: position for ip, position in s["positions"].items() if ip in active_addresses}
         after = self.snapshot()
-        if before != after:
-            events.append({"kind": "path_change", "before": before, "after": after})
+        if before != after or moves:
+            events.append({"kind": "path_change", "before": before, "after": after,
+                           "hop_moves": moves})
         return events
 
 
