@@ -1,0 +1,243 @@
+import asyncio
+import json
+from pathlib import Path
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+from monitor import Collector, DEFAULTS, Detector, Observation, Store, load_config, parse_trace, probe, trace_command
+
+DEST = "192.0.2.80"
+A, B, C = "198.51.100.1", "198.51.100.2", "203.0.113.1"
+
+
+def observation(ips=(A,), now=1, reached=True, error=None, end=3):
+    hops = [{"ttl": 1, "addresses": ["192.0.2.1"], "rtt_ms": [1.2], "timeouts": 0, "annotations": []},
+            {"ttl": 2, "addresses": list(ips), "rtt_ms": [2.1], "timeouts": 0, "annotations": []}]
+    if reached:
+        hops.append({"ttl": end, "addresses": [DEST], "rtt_ms": [3.2], "timeouts": 0, "annotations": []})
+    return Observation(now, 30, hops, reached, error)
+
+
+def settings(**kw):
+    return DEFAULTS | {"learning_samples": 4, "confirmation_samples": 3, "confirmation_window": 5,
+                       "multipath_grace_seconds": 20} | kw
+
+
+class ConfigTests(unittest.TestCase):
+    def config(self, **overrides):
+        data = {"destinations": [{"address": DEST}], **overrides}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "targets.json"
+            path.write_text(json.dumps(data))
+            return load_config(path)
+
+    def test_normalizes_ipv6_and_expected_hops(self):
+        result = self.config(destinations=[{"address": "2001:0db8::1", "expected_hops": {"2": ["2001:db8::2", "2001:0db8::2"]}}])
+        self.assertEqual(result["destinations"][0]["address"], "2001:db8::1")
+        self.assertEqual(result["destinations"][0]["expected_hops"], {"2": ["2001:db8::2"]})
+
+    def test_rejects_invalid_config(self):
+        for data in ({"destinations": []}, {"destinations": [{"address": "example.com"}]},
+                     {"destinations": [{"address": "--help"}]}, {"destinations": [{"address": "fe80::1%eth0"}]},
+                     {"destinations": [{"address": "224.0.0.1"}]}, {"destinations": [{"address": DEST}, {"address": DEST}]},
+                     {"settings": {"interval_seconds": True}}, {"settings": {"probe_wait_seconds": float("nan")}},
+                     {"settings": {"max_hops": 2.5}}, {"settings": {"typo": 1}},
+                     {"settings": {"confirmation_samples": 11}},
+                     {"destinations": [{"address": DEST, "expected_hops": {"2": ["::1"]}}]}):
+            with self.subTest(data=data), self.assertRaises((ValueError, KeyError, TypeError)):
+                self.config(**data)
+
+
+class ParserTests(unittest.TestCase):
+    def test_multipath_shorthand_rtt_and_timeouts(self):
+        result = parse_trace(f"traceroute to {DEST} ({DEST}), 30 hops max\n 1 192.0.2.1 1.2 ms 1.3 ms *\n 2 {A} 3.0 ms {B} 4.0 ms 4.1 ms\n 3 {DEST} 5.0 ms 5.1 ms 5.2 ms\n", DEST, 0, 10)
+        self.assertTrue(result.reached)
+        self.assertEqual(result.hops[0]["timeouts"], 1)
+        self.assertEqual(result.hops[0]["rtt_ms"], [1.2, 1.3])
+        self.assertEqual(result.hops[1]["addresses"], [A, B])
+
+    def test_ipv6_stars_and_unreachable(self):
+        result = parse_trace("1 2001:db8::1 1.2 ms\n2 * * *\n3 2001:db8::2 2.4 ms !H", "2001:db8::2", 0, 10)
+        self.assertFalse(result.reached)
+        self.assertEqual(result.hops[1]["addresses"], [])
+        self.assertEqual(result.hops[2]["annotations"], ["!H"])
+
+    def test_empty_output_and_command(self):
+        self.assertIsNotNone(parse_trace("permission denied", DEST, 0, 0).error)
+        command = trace_command(DEST, settings())
+        self.assertIn("-I", command)
+        self.assertIn("-4", command)
+        self.assertEqual(command[-1], DEST)
+        self.assertIn("-6", trace_command("::1", settings()))
+
+
+class DetectorTests(unittest.TestCase):
+    def learned(self):
+        detector = Detector(settings())
+        for i, ip in enumerate((A, B, A, B), 1):
+            detector.observe(observation([ip], i), DEST)
+        return detector
+
+    def changes(self, events):
+        return [e for e in events if e["kind"] == "path_change"]
+
+    def test_known_multipath_does_not_flap(self):
+        detector = self.learned()
+        for i in range(5, 100):
+            self.assertFalse(self.changes(detector.observe(observation([A if i % 2 else B], i), DEST)))
+        self.assertEqual(detector.snapshot()["hops"]["2"], [A, B])
+
+    def test_new_branch_needs_evidence_then_old_branches_age_out(self):
+        detector = self.learned()
+        self.assertFalse(self.changes(detector.observe(observation([C], 5), DEST)))
+        self.assertFalse(self.changes(detector.observe(observation([C], 6), DEST)))
+        event = self.changes(detector.observe(observation([C], 7), DEST))[0]
+        self.assertEqual(event["before"]["hops"]["2"], [A, B])
+        self.assertEqual(event["after"]["hops"]["2"], [A, B, C])
+        for i in range(8, 25):
+            events = self.changes(detector.observe(observation([C], i), DEST))
+        self.assertEqual(detector.snapshot()["hops"]["2"], [C])
+        self.assertTrue(events)
+
+    def test_transient_address_does_not_change_path(self):
+        detector = self.learned()
+        for i, ip in enumerate((C, A, B, A, B, A), 5):
+            self.assertFalse(self.changes(detector.observe(observation([ip], i), DEST)))
+        self.assertEqual(detector.snapshot()["hops"]["2"], [A, B])
+
+    def test_errors_and_nonresponding_hop_never_remove_addresses(self):
+        detector = self.learned()
+        before = detector.snapshot()
+        for i in range(5, 45):
+            self.assertFalse(self.changes(detector.observe(observation([], i, reached=False), DEST)))
+            self.assertFalse(self.changes(detector.observe(observation([C], i + 0.1, error="timeout"), DEST)))
+        self.assertEqual(detector.snapshot(), before)
+
+    def test_expected_alternative_does_not_age_out(self):
+        detector = Detector(settings(learning_samples=1), {"2": [B]})
+        detector.observe(observation([A], 1), DEST)
+        for i in range(2, 40):
+            self.assertFalse(self.changes(detector.observe(observation([A], i), DEST)))
+        self.assertEqual(detector.snapshot()["hops"]["2"], [A, B])
+
+    def test_restart_preserves_learning(self):
+        restored = Detector(settings(), state=json.loads(json.dumps(self.learned().state)))
+        self.assertFalse(self.changes(restored.observe(observation([A], 5), DEST)))
+        self.assertEqual(restored.state["samples"], 5)
+
+    def test_old_evidence_not_reused_after_gap(self):
+        detector = self.learned()
+        detector.observe(observation([C], 5), DEST)
+        detector.observe(observation([C], 6), DEST)
+        detector.observe(observation([C], 100), DEST)
+        self.assertNotIn(C, detector.snapshot()["hops"]["2"])
+
+    def test_reachability_needs_consecutive_results(self):
+        detector = self.learned()
+        events = []
+        for i in range(5, 15):
+            events += detector.observe(observation([A], i, reached=bool(i % 2)), DEST)
+        self.assertFalse([e for e in events if e["kind"] == "reachability"])
+        events = []
+        for i in range(15, 18):
+            events += detector.observe(observation([A], i, reached=False), DEST)
+        self.assertEqual([e["after"] for e in events if e["kind"] == "reachability"], ["no_reply"])
+
+    def test_confirmed_shorter_route_removes_trailing_hops(self):
+        detector = self.learned()
+        for i in range(5, 8):
+            events = detector.observe(Observation(i, 1, [{"ttl": 1, "addresses": [DEST]}], True), DEST)
+        self.assertEqual(detector.snapshot()["destination_ttl"], 1)
+        self.assertNotIn("2", detector.snapshot()["hops"])
+        self.assertTrue(self.changes(events))
+
+
+class StorageTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.detector = Detector(settings())
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_persistence_filter_pagination_and_evidence(self):
+        for i in range(1, 9):
+            self.store.record(DEST, observation([A if i < 5 else C], i), self.detector)
+        self.assertEqual(self.store.state(DEST), self.detector.state)
+        change = next(e for e in self.store.rows("events", DEST) if e["kind"] == "path_change")
+        self.assertIn("evidence_window", change)
+        self.assertEqual(change["observed"]["hops"][1]["addresses"], [C])
+        page = self.store.rows("traces", DEST, since=2, until=6, limit=2)
+        self.assertEqual([r["started"] for r in page], [6, 5])
+        next_page = self.store.rows("traces", DEST, since=2, until=6, limit=2, before_id=page[-1]["id"])
+        self.assertEqual([r["started"] for r in next_page], [4, 3])
+        self.assertFalse(self.store.rows("traces", "192.0.2.99"))
+
+    def test_retention_keeps_state_and_longer_event_history(self):
+        for i in range(1, 5):
+            self.store.record(DEST, observation([A], i), self.detector)
+        self.store.prune(settings(trace_retention_hours=1), now=10000)
+        self.assertFalse(self.store.rows("traces"))
+        self.assertTrue(self.store.rows("events"))
+        self.assertIsNotNone(self.store.state(DEST))
+        self.store.prune(settings(), now=100000000)
+        self.assertFalse(self.store.rows("events"))
+
+    def test_database_survives_reopen(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "paths.sqlite3")
+            store = Store(path)
+            store.record(DEST, observation(), self.detector)
+            store.close()
+            store = Store(path)
+            self.assertEqual(store.state(DEST), self.detector.state)
+            self.assertEqual(len(store.rows("traces")), 1)
+            store.close()
+
+
+class AsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cadence_overlaps_slow_probes_but_records_in_order(self):
+        store = Store(":memory:")
+        calls = []
+        async def slow_probe(address, config):
+            index = len(calls)
+            calls.append(time.monotonic())
+            await asyncio.sleep(1.4 if index == 0 else 0.01)
+            return observation(now=index + 1)
+        config = {"settings": settings(), "destinations": [{"address": DEST, "expected_hops": {}}]}
+        collector = Collector(config, store, slow_probe)
+        task = asyncio.create_task(collector.run())
+        await asyncio.sleep(2.2)
+        collector.stop.set()
+        await task
+        self.assertEqual(len(calls), 3)
+        self.assertAlmostEqual(calls[1] - calls[0], 1, delta=0.15)
+        self.assertEqual([r["started"] for r in store.rows("traces")], [3, 2, 1])
+        store.close()
+
+    async def test_timeout_kills_and_reaps_subprocess(self):
+        class Process:
+            returncode = None
+            killed = False
+            async def communicate(self):
+                while not self.killed:
+                    await asyncio.sleep(0.01)
+                self.returncode = -9
+                return b"1 192.0.2.1 1 ms\n", b""
+            def kill(self):
+                self.killed = True
+        process = Process()
+        async def create(*args, **kwargs):
+            return process
+        with patch("monitor.asyncio.create_subprocess_exec", create):
+            result = await probe(DEST, settings(trace_timeout_seconds=0.02))
+        self.assertTrue(process.killed)
+        self.assertEqual(process.returncode, -9)
+        self.assertIn("exceeded", result.error)
+        self.assertEqual(result.hops[0]["addresses"], ["192.0.2.1"])
+
+
+if __name__ == "__main__":
+    unittest.main()

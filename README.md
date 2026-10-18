@@ -3,6 +3,14 @@
 Env-driven NetBox deployment (dev local / prod on EC2 behind netbox.example.com/netbox).
 See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERSIONS.md) for pins.
 
+Standalone companion services:
+
+- [Path monitor](services/path-monitor/README.md): one-second traceroutes to a
+  configured destination list, persistent path-change history, multipath-aware
+  detection, and a reporting dashboard. Deploy independently of NetBox.
+- [Live job tracker](services/job-tracker/README.md): read-only wallboard for
+  Discovery device jobs.
+
 ## Dev quickstart
 
 On first setup, initialize the environment and set the Python package index.
