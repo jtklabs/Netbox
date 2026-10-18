@@ -6,7 +6,7 @@
   <script src="app.js" defer></script>
 </head>
 <body>
-  <header><div class="brand"><span class="mark" aria-hidden="true">↗</span><div><p class="eyebrow">NETWORK OBSERVABILITY</p><h1>Path monitor</h1></div></div><div id="connection" role="status">Connecting…</div></header>
+  <header><div class="brand"><span class="mark" aria-hidden="true">↗</span><div><p class="eyebrow">NETWORK OBSERVABILITY</p><h1>Path monitor</h1></div></div><div class="account"><div id="connection" role="status">Connecting…</div><form action="logout" method="post"><span>{{USERNAME}}</span><input type="hidden" name="csrf" value="{{CSRF}}"><button type="submit" class="secondary">Sign out</button></form></div></header>
   <main>
     <div id="banner" role="alert" hidden></div>
     <section class="intro"><div><p class="eyebrow">CONTINUOUS ROUTE HISTORY</p><h2>See where the path changes.</h2><p>Accepted addresses are grouped by hop. Switching between known multipath addresses is normal.</p></div><div id="cadence" class="cadence">1s<span>trace start interval</span></div></section>

@@ -27,10 +27,16 @@ mkdir -p config
 cp targets.example.json config/targets.json
 # Replace the documentation IPs with your destination IPs. Remove or replace
 # the example expected_hops entry too.
+cp .env.example .env
+chmod 600 .env
+# Set your username, password and API token in .env.
 docker compose -f compose.yaml up -d --build
 ```
 
-Open `http://127.0.0.1:8091` on that server. For direct LAN access:
+Put your HTTPS reverse proxy in front of `127.0.0.1:8091`, then open its HTTPS
+URL and sign in. Preserve the browser's `Host` header when proxying. Browser
+cookies are Secure by default; plain HTTP is only suitable for local testing
+with `PATH_MONITOR_COOKIE_SECURE=false`. For a different internal bind address:
 
 ```bash
 PATH_MONITOR_BIND_ADDRESS=10.0.0.10 docker compose -f compose.yaml up -d
@@ -50,11 +56,84 @@ The service uses Linux `traceroute -I -n` with only the `NET_RAW` capability;
 it does not need privileged mode, host PID access, or NetBox credentials.
 The container runs as root with all other capabilities removed so it can open
 ICMP raw sockets and write the named data volume. The filesystem is read-only
-apart from that volume. The web interface is **read-only and has no login**.
-Use an authenticated internal reverse proxy or existing internal access
-controls. Route information is visible to anyone who can reach the service.
+apart from that volume. The web interface requires your username and password; all
+data APIs and CSV exports require a browser session or integration key. The
+service refuses to start without the three required credentials, including in demo mode.
+Use HTTPS and your existing internal network access controls.
 Proxy to port 8091 at a hostname root, or strip a subpath prefix and retain its
 trailing slash. There are no external scripts, fonts or CDNs.
+
+## Web and integration authentication
+
+Set these values in `services/path-monitor/.env` (gitignored):
+
+```dotenv
+PATH_MONITOR_USERNAME=jason
+PATH_MONITOR_PASSWORD='your-private-password'
+PATH_MONITOR_API_TOKEN='your-random-token-of-at-least-32-characters'
+PATH_MONITOR_COOKIE_SECURE=true
+```
+
+Use your own password and token; the values above only show the format. A token
+can be generated locally with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+Single-quote values containing `$` or `#` so Compose treats them literally. Compose
+reads `.env` and supplies these three credentials to the container; it does not
+mount the file or copy it into the image. No extra auth file or account setup is
+needed. For native execution, supply the same environment variables through
+your service manager (for example, systemd's `EnvironmentFile`). The Python
+server reads its environment and does not source a dotenv file itself.
+
+To change the login or rotate the token, edit `.env` and run:
+
+```bash
+docker compose -f compose.yaml up -d --force-recreate
+```
+
+Recreating the container loads the new values and invalidates browser sessions;
+`docker compose restart` alone does not load changed environment values. The
+single login and token have read access to all destinations and retained history.
+The server derives a salted password hash and token digest in memory; it never
+returns either credential to the browser, API responses or logs.
+
+Browser sessions last at most eight hours and end on sign-out or server restart.
+Cookies use HttpOnly, Secure and SameSite=Strict. Login/logout have CSRF protection
+and failed logins show a generic error. Login attempts are throttled by source IP.
+Behind a reverse proxy, clients share the proxy's source IP for this limit;
+forwarded-IP headers are not trusted. Use `PATH_MONITOR_COOKIE_SECURE=false` for
+local HTTP testing; keep the default `true` behind HTTPS. Preserve the browser's
+`Host` header when proxying.
+Sign in from the service's normal HTTP(S) browser origin; opaque-origin frames
+or webviews that submit `Origin: null` are rejected.
+
+Integration clients send `Authorization: Bearer KEY` over HTTPS. Missing or
+invalid credentials return JSON HTTP 401 with a Bearer challenge. Keys in URLs
+or query parameters are not accepted. The public `/healthz` endpoint returns
+only `{"healthy": true}` or `{"healthy": false}`, with no destination, path,
+settings or error details. Use authenticated `/api/status` for diagnostics.
+
+The authenticated `GET /api/openapi.json` endpoint provides an OpenAPI 3.0
+description of the data endpoints, filters, response shapes and pagination.
+The existing read-only API is available to any HTTP client; for example:
+
+```python
+import json
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+key = Path("/secure/path/reporting.token").read_text().strip()  # Your configured API token.
+request = Request(
+    "https://paths.example.internal/api/events?target=10.20.30.40&limit=100",
+    headers={"Authorization": f"Bearer {key}"},
+)
+with urlopen(request, timeout=30) as response:
+    page = json.load(response)
+# Read page['items']; pass page['next_before_id'] as before_id for older pages.
+```
+
+Keep the same filters while paging. All stored times are UTC Unix seconds;
+the UI renders local time. Retention still applies to API results. For ongoing
+imports, query overlapping time windows and deduplicate records within retained
+history; pagination IDs are not permanent synchronization offsets.
 
 ## Specify destinations
 
@@ -215,7 +294,9 @@ window, so old samples cannot confirm a newly observed branch after a restart.
 - `GET /api/traces`: raw parsed observations, including errors and timeouts.
 - `GET /api/events.csv`: downloadable event report with JSON before/after paths,
   observed trace and confirmation evidence.
-- `GET /healthz`: 200 while collection is fresh and error-free, otherwise 503.
+- `GET /api/openapi.json`: authenticated OpenAPI integration specification.
+- `GET /healthz`: public boolean only; 200 while collection is fresh and
+  error-free, otherwise 503.
 
 History endpoints accept `target` (IP), `since`/`until` (inclusive Unix timestamps
 in UTC seconds), `limit` (1–1,000, default 100), and `before_id` for pagination.
@@ -224,10 +305,9 @@ the same filters until it is null. CSV exports one page; use `before_id` for
 additional pages or narrow the time range. IDs are ordered by insertion; use
 stored timestamps for temporal analysis across destinations.
 
-```bash
-curl 'http://127.0.0.1:8091/api/events?target=10.20.30.40&limit=100'
-curl 'http://127.0.0.1:8091/api/events.csv?since=1792281600&limit=1000' -o changes.csv
-```
+Use the authenticated client example above with `/api/events.csv` to export
+CSV, or `/api/traces` to retrieve raw history. Browser exports use the current
+session automatically.
 
 Data lives in the Compose `path-data` named volume. To back it up consistently,
 stop the service, copy the **entire** volume including SQLite WAL/SHM files if
@@ -244,18 +324,25 @@ flags differ and are not supported for real collection.
 
 ```bash
 cd services/path-monitor
-python3 server.py --demo
-# Open http://127.0.0.1:8091 — explicitly labeled simulated data.
+# After filling in .env, run a simulated preview using the same login.
+# Stop any instance already using local port 8091 first.
+docker compose -f compose.yaml run --build --rm --no-deps \
+  -p 127.0.0.1:8091:8091 -e PATH_MONITOR_COOKIE_SECURE=false \
+  path-monitor python server.py --demo --database /data/demo.sqlite3
+# Open http://127.0.0.1:8091 and sign in — explicitly labeled simulated data.
 python3 -m unittest discover -s tests -v
 node --check static/app.js
 docker compose -f compose.yaml config --quiet
 docker build -t netbox-path-monitor:test .
 ```
 
-Demo mode needs no raw sockets, credentials or network access. It uses a temporary
+Demo mode needs no raw sockets, NetBox credentials or network access. Local
+authentication is still required. It uses a temporary
 database unless `--database` is explicitly supplied, learns normal alternating
 branches, then simulates lost replies, recovery with an inserted hop, and a
 return to the original path.
+The Docker preview above explicitly uses a separate `demo.sqlite3` in the data
+volume and leaves normal `paths.sqlite3` history untouched.
 The tests exercise multipath, confirmation, missing replies, retirement, pinned
 alternatives, shorter routes, restart persistence, ordered overlapping collection,
 subprocess cleanup, retention and the real HTTP API.

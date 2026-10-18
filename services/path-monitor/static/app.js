@@ -11,6 +11,10 @@ const date = (seconds) => new Date(seconds * 1000).toLocaleString();
 function badge(text, style = "") { return el("span", text, `badge ${style}`); }
 async function fetchJSON(url) {
   const result = await fetch(url, {cache: "no-store"});
+  if (result.status === 401) {
+    window.location.assign("login");
+    throw new Error("Session expired. Sign in again.");
+  }
   if (!result.ok) {
     const body = await result.json().catch(() => ({}));
     throw new Error(body.error || `HTTP ${result.status}`);

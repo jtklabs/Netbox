@@ -409,3 +409,13 @@ footer span {
 [hidden] {
   display:none!important;
 }
+.account {display:flex;align-items:center;gap:18px}
+.account form {background:transparent;border:0;padding:0;color:white;font-size:12px;align-items:center}
+.account .secondary {color:white}
+.login {max-width:480px;margin:60px auto;padding:24px}
+.login h2 {font-size:32px;margin-bottom:12px}
+.login > p {margin-bottom:18px}
+.login form {display:grid;gap:18px}
+.login input {width:100%}
+.login .error-text {padding:0}
+@media(max-width:650px){.account{flex-wrap:wrap;gap:8px}.account form{flex-wrap:nowrap}}
