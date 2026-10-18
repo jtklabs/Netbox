@@ -136,11 +136,32 @@ forwarded-IP headers are not trusted. Use `PATH_MONITOR_COOKIE_SECURE=false` for
 local HTTP testing; keep the default `true` behind HTTPS. Preserve the browser's
 `Host` header when proxying.
 Sign in from the service's normal HTTP(S) browser origin; opaque-origin frames
-or webviews that submit `Origin: null` are rejected.
+or webviews that submit `Origin: null` are rejected by default.
 The app uses `Referrer-Policy: same-origin` so ordinary login/logout forms retain
 their origin. This supports HTTPS access by IP address as well as hostname;
 the proxy must preserve the browser's `Host` header, including a non-default
 port if used. Cross-origin requests do not receive referrer information.
+
+If your production proxy causes `invalid request origin` errors, you can accept
+any Origin for login/logout by adding this to `.env`:
+
+```dotenv
+PATH_MONITOR_ALLOW_ANY_ORIGIN=true
+```
+
+Then rebuild and recreate the service to load both the updated code and setting:
+
+```bash
+docker compose -f compose.yaml up -d --build --force-recreate
+```
+
+This skips Origin matching, including `Origin: null` and mismatched host/scheme
+values. It removes that additional CSRF check; signed cookie-bound login
+challenges, credentials, session CSRF tokens, SameSite=Strict cookies, and API
+authentication remain required. It does not enable cross-origin API reads or
+add permissive CORS headers. Keep `PATH_MONITOR_COOKIE_SECURE=true` behind HTTPS.
+The setting defaults to `false`; set it back to `false` and recreate the service
+to restore strict Origin matching.
 
 Integration clients send `Authorization: Bearer KEY` over HTTPS. Missing or
 invalid credentials return JSON HTTP 401 with a Bearer challenge. Keys in URLs
