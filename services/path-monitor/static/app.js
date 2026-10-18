@@ -17,10 +17,10 @@ async function fetchJSON(url) {
   }
   return result.json();
 }
-function pathTable(before, after) {
+function pathTable(before, after, labels = ["Before", "After"]) {
   const table = el("table", undefined, "path-table");
   const head = el("tr");
-  ["Hop", "Before", "After"].forEach((text) => head.append(el("th", text)));
+  ["Hop", ...labels].forEach((text) => head.append(el("th", text)));
   const thead = el("thead"); thead.append(head); table.append(thead);
   const body = el("tbody");
   const keys = [...new Set([...Object.keys(before?.hops || {}), ...Object.keys(after?.hops || {})])].sort((a,b) => Number(a)-Number(b));
@@ -31,6 +31,9 @@ function pathTable(before, after) {
     body.append(row);
   }
   table.append(body); return table;
+}
+function observedPath(observation) {
+  return {hops: Object.fromEntries((observation?.hops || []).map((hop) => [hop.ttl, hop.addresses]))};
 }
 function renderTargets(snapshot) {
   const selected = $("target").value;
@@ -80,11 +83,22 @@ function renderRecords() {
     summary.append(badge(kind.replaceAll("_", " "), row.kind === "path_change" || row.error ? "warn" : ""), el("code", row.target)); details.append(summary);
     const body = el("div", undefined, "record-body");
     if (row.kind === "path_change" || row.kind === "baseline") {
+      for (const move of row.hop_moves || []) {
+        body.append(el("p", `${move.address} moved from hop ${move.from_hops.join(" / ")} to hop ${move.to_hops.join(" / ")} · first observed ${date(move.first_observed_at)}`));
+      }
       body.append(pathTable(row.before, row.after));
       body.append(el("p", `Destination hop: ${row.before?.destination_ttl ?? "unknown"} → ${row.after?.destination_ttl ?? "unknown"}`, "muted"));
       body.append(el("p", "Accepted sets include alternatives retained during the multipath grace period. The confirming trace and evidence window are below.", "muted"));
     } else if (row.kind === "reachability") {
       body.append(el("p", `${row.before || "Unknown"} → ${row.after}. No reply can mean filtering or rate limiting.`));
+      if (row.first_observed_at != null) body.append(el("p", `First observed ${date(row.first_observed_at)} · confirmed ${date(row.started)}`, "muted"));
+      if (row.no_reply_since != null) body.append(el("p", `Confirmed loss-of-reply interval began with the trace at ${date(row.no_reply_since)}. Collection gaps may fall within this interval.`, "muted"));
+      if (row.last_reached_observation) {
+        body.append(el("p", `Last destination reply before this transition: ${date(row.last_reached_observation.started)}`, "muted"));
+        body.append(pathTable(observedPath(row.last_reached_observation), observedPath(row.observed), ["Last destination reply", "At event"]));
+      }
+      if (row.last_responding_hop) body.append(el("p", `Farthest responding hop in this trace: ${row.last_responding_hop.ttl} · ${row.last_responding_hop.addresses.join(" / ")}`, "muted"));
+      body.append(el("p", "A blank hop is unknown, not proof of the failure location. Raw observations continue while the destination is not replying.", "muted"));
     } else {
       const path = {hops: Object.fromEntries(row.hops.map((h) => [h.ttl, h.addresses]))};
       body.append(pathTable(null, path));

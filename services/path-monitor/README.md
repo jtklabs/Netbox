@@ -121,6 +121,36 @@ per data volume; SQLite is local storage, not a multi-replica shared backend.
    observation of ICMP replies, not a claim that an application is down. Command
    failures break the confirmation sequence and have no topology effect.
 
+An address moving from hop 4 to hop 5 is a difference even when that IP is
+already familiar. Path events explicitly list confirmed address movements,
+including a return to an old position that is still in the accepted multipath
+sets. Movements need 3 observations at the new position after the last confirmed
+position change; they do not wait for the five-minute branch retirement period.
+Both the first observation and confirming trace times are retained. Ordinary
+A/B switching at the same TTL remains normal. Missing one reply from an address
+seen at several TTLs is not enough to infer that it moved.
+
+### Investigating sites that stop replying
+
+Probes and raw recording continue throughout a loss-of-reply interval. Filter
+the destination and time range in the dashboard to examine the traces before,
+during and after it. Each confirmed loss-of-reply event preserves the last actual
+trace that reached the destination, the confirming partial/silent trace, the
+farthest responding hop in that trace, and the accepted path at that point.
+Recovery events compare the pre-loss successful trace with the recovery trace
+and retain the first observed no-reply time. The pre-loss trace survives process
+restarts and is embedded in the events, so it remains available for the event
+retention period even after raw traces expire. Intermediate traces still use
+the configured raw retention period; increase it for investigations covering
+more than 24 hours.
+
+These timestamps describe observed replies and confirmation, not an exact site
+outage boundary. Collection gaps can occur within the interval. A responding
+hop followed by `*` is not proof that the next router failed: ICMP filtering,
+rate limiting and return routing can hide later replies. Correlate this history
+with the site's actual reachability/application monitoring to establish when
+the service was unavailable.
+
 Ordinary A/B switching creates no path events once learned. A branch that first
 appears later produces one addition event after confirmation, then becomes
 normal too. Increase the grace period or pin expected alternatives for branches
@@ -224,7 +254,8 @@ docker build -t netbox-path-monitor:test .
 
 Demo mode needs no raw sockets, credentials or network access. It uses a temporary
 database unless `--database` is explicitly supplied, learns normal alternating
-branches, then periodically introduces a different branch to show change events.
+branches, then simulates lost replies, recovery with an inserted hop, and a
+return to the original path.
 The tests exercise multipath, confirmation, missing replies, retirement, pinned
 alternatives, shorter routes, restart persistence, ordered overlapping collection,
 subprocess cleanup, retention and the real HTTP API.
