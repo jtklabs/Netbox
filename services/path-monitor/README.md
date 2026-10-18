@@ -66,6 +66,36 @@ Use HTTPS and your existing internal network access controls.
 Proxy to port 8091 at a hostname root, or strip a subpath prefix and retain its
 trailing slash. There are no external scripts, fonts or CDNs.
 
+### Apache alongside Checkmk
+
+Include [`apache-path-monitor.conf`](apache-path-monitor.conf) **inside your
+existing HTTPS VirtualHost** that answers requests to the server IP. It proxies
+only `/path-monitor/` to `http://127.0.0.1:8091/` and redirects `/path-monitor`
+to the required trailing slash. Place its ProxyPass rules before any catch-all
+`ProxyPass "/"` rule. Keep existing Checkmk routes and authentication directives.
+The prefix must not already be used as a Checkmk site name.
+If an existing redirect/rewrite sends every URL to Checkmk, exclude
+`/path-monitor` and `/path-monitor/` from that rule. A redirect matching only
+the root URL (`^/$`) can stay as it is.
+
+Enable `alias`, `proxy` and `proxy_http` modules (plus your existing `ssl` module).
+On Debian/Ubuntu, use `sudo a2enmod alias proxy proxy_http`, then validate and
+reload with `sudo apache2ctl configtest && sudo systemctl reload apache2`.
+On RHEL-family systems, validate and reload with
+`sudo httpd -t && sudo systemctl reload httpd`; the proxy modules must be loaded.
+
+Keep `PATH_MONITOR_COOKIE_SECURE=true`. Open `https://SERVER_IP/path-monitor/`;
+the certificate served by that VirtualHost must be trusted and include the IP
+address in its subject alternative names for warning-free IP access. Preserving
+Host is required; X-Forwarded-Proto is not required by this app. Do not rewrite
+the app's cookie Path: secure `__Host-` cookies require `Path=/`. Do not override
+its `Referrer-Policy: same-origin` response with `no-referrer`.
+
+The API is available under the same prefix, for example
+`https://SERVER_IP/path-monitor/api/status`, with the usual Bearer token.
+If Apache runs in a different container/host, replace the upstream address with
+one Apache can reach; `127.0.0.1` refers to Apache's own network namespace.
+
 ## Web and integration authentication
 
 Set these values in `services/path-monitor/.env` (gitignored):
