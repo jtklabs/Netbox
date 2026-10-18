@@ -310,6 +310,11 @@ summary code {
   display:inline-block;
   overflow-wrap:anywhere;
 }
+.record-target-name {
+  font-weight:600;
+  margin-right:10px;
+  overflow-wrap:anywhere;
+}
 .record-body {
   padding:0 18px 18px;
   border-top:1px solid var(--soft-line);
