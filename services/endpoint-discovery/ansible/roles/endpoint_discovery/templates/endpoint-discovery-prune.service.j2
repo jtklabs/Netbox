@@ -1,0 +1,9 @@
+[Unit]
+Description=Expire endpoint discovery history
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory={{ discovery_service_dir }}
+ExecStart=/usr/bin/docker compose -f compose.yaml run --rm --no-deps manage prune

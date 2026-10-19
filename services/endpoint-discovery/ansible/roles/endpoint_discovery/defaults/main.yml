@@ -1,0 +1,17 @@
+---
+discovery_mode: poller
+discovery_repo_root: "{{ playbook_dir }}/../../.."
+discovery_install_dir: /opt/endpoint-discovery
+discovery_service_dir: "{{ discovery_install_dir }}/services/endpoint-discovery"
+discovery_database_url: ""
+discovery_url: ""
+discovery_poller_token: ""
+discovery_snmp_credentials: {}
+discovery_principals: []
+discovery_targets: []
+discovery_poll_seconds: 300
+discovery_stale_seconds: 900
+discovery_retention_days: 90
+discovery_bind_address: 127.0.0.1
+discovery_public_port: 8092
+discovery_ca_file: ""

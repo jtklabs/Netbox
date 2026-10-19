@@ -1,0 +1,15 @@
+ARG DISCOVERY_TEST_IMAGE=endpoint-discovery:test
+FROM ${DISCOVERY_TEST_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends snmpd \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir pytest==9.1.1 PyYAML==6.0.3 ruff==0.17.1 ansible-core==2.21.5
+COPY services/endpoint-discovery/tests /workspace/services/endpoint-discovery/tests
+COPY services/endpoint-discovery/pyproject.toml /workspace/services/endpoint-discovery/pyproject.toml
+COPY services/endpoint-discovery/compose*.yaml /workspace/services/endpoint-discovery/
+COPY services/endpoint-discovery/examples/targets.json services/endpoint-discovery/examples/netbox-sites.json /workspace/services/endpoint-discovery/examples/
+COPY services/endpoint-discovery/ansible/roles /workspace/services/endpoint-discovery/ansible/roles
+COPY services/endpoint-discovery/ansible/deploy.yml services/endpoint-discovery/ansible/inventory.example.ini /workspace/services/endpoint-discovery/ansible/
+COPY scripts/snmp-inventory/tests/emulator /workspace/scripts/snmp-inventory/tests/emulator
+ENV PYTHONPATH=/app
+CMD ["python", "-m", "pytest", "/workspace/services/endpoint-discovery/tests", "-q"]

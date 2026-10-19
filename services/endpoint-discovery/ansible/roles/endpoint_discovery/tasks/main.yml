@@ -1,0 +1,184 @@
+---
+- name: Validate deployment settings
+  ansible.builtin.assert:
+    that:
+      - discovery_mode in ['server', 'poller']
+      - discovery_install_dir is match('^/[a-zA-Z0-9_/-]+$')
+      - discovery_poll_seconds | int >= 30
+      - discovery_mode != 'server' or discovery_database_url | length > 0
+      - discovery_mode != 'server' or discovery_principals | length > 0
+      - discovery_mode != 'poller' or discovery_url is match('^https://')
+      - discovery_mode != 'poller' or discovery_poller_token | length >= 32
+      - discovery_mode != 'poller' or discovery_snmp_credentials | length > 0
+  no_log: true
+
+- name: Verify Docker Compose is installed
+  ansible.builtin.command: docker compose version
+  changed_when: false
+
+- name: Create source and private configuration directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "10001"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ discovery_service_dir }}", mode: '0755'}
+    - {path: "{{ discovery_service_dir }}/config", mode: '0750'}
+    - {path: "{{ discovery_service_dir }}/spool", owner: '10001', mode: '0700'}
+    - {path: "{{ discovery_install_dir }}/scripts/snmp-inventory/snmpinv", mode: '0755'}
+
+- name: Copy service sources
+  ansible.builtin.copy:
+    src: "{{ discovery_repo_root }}/services/endpoint-discovery/{{ item.src }}"
+    dest: "{{ discovery_service_dir }}/{{ item.dest }}"
+    mode: preserve
+  loop:
+    - {src: discovery/, dest: discovery/}
+    - {src: requirements.txt, dest: requirements.txt}
+    - {src: Dockerfile, dest: Dockerfile}
+    - {src: compose.yaml, dest: compose.yaml}
+    - {src: compose.poller.yaml, dest: compose.poller.yaml}
+  register: discovery_sources
+  notify: Restart endpoint discovery
+
+- name: Copy shared read-only SNMP transport
+  ansible.builtin.copy:
+    src: "{{ discovery_repo_root }}/scripts/snmp-inventory/snmpinv/{{ item }}"
+    dest: "{{ discovery_install_dir }}/scripts/snmp-inventory/snmpinv/{{ item }}"
+    mode: '0644'
+  loop: [__init__.py, snmp.py]
+  register: discovery_transport
+  notify: Restart endpoint discovery
+
+- name: Select deployment Compose file
+  ansible.builtin.set_fact:
+    discovery_compose_file: "{{ 'compose.yaml' if discovery_mode == 'server' else 'compose.poller.yaml' }}"
+
+- name: Install private runtime environment
+  ansible.builtin.template:
+    src: environment.j2
+    dest: "{{ discovery_service_dir }}/.env"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  notify: Restart endpoint discovery
+
+- name: Install service access policy
+  ansible.builtin.copy:
+    content: "{{ {'principals': discovery_principals} | to_nice_json }}"
+    dest: "{{ discovery_service_dir }}/config/access.json"
+    owner: root
+    group: '10001'
+    mode: '0640'
+  when: discovery_mode == 'server'
+  no_log: true
+  notify: Restart endpoint discovery
+
+- name: Install server-controlled target inventory
+  ansible.builtin.copy:
+    content: "{{ discovery_targets | to_nice_json }}"
+    dest: "{{ discovery_service_dir }}/config/targets.json"
+    owner: root
+    group: '10001'
+    mode: '0640'
+  when: discovery_mode == 'server'
+  no_log: true
+
+- name: Install poller credentials
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ discovery_service_dir }}/config/{{ item.name }}"
+    owner: root
+    group: '10001'
+    mode: '0640'
+  loop:
+    - {name: poller.token, content: "{{ discovery_poller_token }}"}
+    - {name: snmp.json, content: "{{ discovery_snmp_credentials | to_nice_json }}"}
+  when: discovery_mode == 'poller'
+  no_log: true
+  notify: Restart endpoint discovery
+
+- name: Install internal CA trust bundle
+  ansible.builtin.copy:
+    src: "{{ discovery_ca_file }}"
+    dest: "{{ discovery_service_dir }}/config/ca.pem"
+    owner: root
+    group: '10001'
+    mode: '0640'
+  when: discovery_ca_file | length > 0
+  notify: Restart endpoint discovery
+
+- name: Check whether the service image exists
+  ansible.builtin.command: docker image inspect endpoint-discovery:local
+  register: discovery_image
+  changed_when: false
+  failed_when: false
+
+- name: Build the pinned service release
+  ansible.builtin.command:
+    argv: [docker, compose, -f, "{{ discovery_compose_file }}", build]
+    chdir: "{{ discovery_service_dir }}"
+  when: discovery_sources.changed or discovery_transport.changed or discovery_image.rc != 0
+  changed_when: true
+  notify: Restart endpoint discovery
+
+- name: Apply discovery schema before starting the API
+  ansible.builtin.command:
+    argv: [docker, compose, -f, compose.yaml, run, --rm, --no-deps, manage, migrate]
+    chdir: "{{ discovery_service_dir }}"
+  when: discovery_mode == 'server'
+  changed_when: false
+
+- name: Reconcile assigned discovery targets
+  ansible.builtin.command:
+    argv: [docker, compose, -f, compose.yaml, run, --rm, --no-deps, manage, import-targets, /config/targets.json, --replace]
+    chdir: "{{ discovery_service_dir }}"
+  when: discovery_mode == 'server'
+  changed_when: false
+
+- name: Install boot service
+  ansible.builtin.template:
+    src: endpoint-discovery.service.j2
+    dest: /etc/systemd/system/endpoint-discovery.service
+    mode: '0644'
+  notify: Restart endpoint discovery
+
+- name: Install history maintenance units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: '0644'
+  loop: [endpoint-discovery-prune.service, endpoint-discovery-prune.timer]
+  when: discovery_mode == 'server'
+  register: discovery_prune_units
+
+- name: Enable daily history retention
+  ansible.builtin.systemd_service:
+    name: endpoint-discovery-prune.timer
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: discovery_mode == 'server'
+
+- name: Start service on boot
+  ansible.builtin.systemd_service:
+    name: endpoint-discovery.service
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Apply changed service configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for API database readiness
+  ansible.builtin.uri:
+    url: "http://{{ '127.0.0.1' if discovery_bind_address == '0.0.0.0' else discovery_bind_address }}:{{ discovery_public_port }}/healthz"
+    status_code: 200
+  register: discovery_readiness
+  until: discovery_readiness.status | default(0) == 200
+  retries: 15
+  delay: 2
+  when: discovery_mode == 'server'

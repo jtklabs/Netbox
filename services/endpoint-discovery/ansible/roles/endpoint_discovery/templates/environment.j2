@@ -1,0 +1,13 @@
+{% if discovery_mode == 'server' %}
+DISCOVERY_DATABASE_URL='{{ discovery_database_url | replace("'", "\\'") }}'
+DISCOVERY_BIND_ADDRESS={{ discovery_bind_address }}
+DISCOVERY_PUBLIC_PORT={{ discovery_public_port }}
+DISCOVERY_STALE_SECONDS={{ discovery_stale_seconds }}
+DISCOVERY_RETENTION_DAYS={{ discovery_retention_days }}
+{% else %}
+DISCOVERY_URL={{ discovery_url }}
+DISCOVERY_POLL_SECONDS={{ discovery_poll_seconds }}
+{% if discovery_ca_file | length > 0 %}
+DISCOVERY_CA_FILE=/config/ca.pem
+{% endif %}
+{% endif %}

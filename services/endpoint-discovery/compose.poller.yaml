@@ -1,0 +1,24 @@
+name: endpoint-discovery-poller
+services:
+  poller:
+    image: ${DISCOVERY_IMAGE:-endpoint-discovery:local}
+    build:
+      context: ../..
+      dockerfile: services/endpoint-discovery/Dockerfile
+    restart: unless-stopped
+    entrypoint: [python, -m, discovery.poller]
+    environment:
+      DISCOVERY_URL: ${DISCOVERY_URL:?Set the HTTPS discovery service address}
+      DISCOVERY_TOKEN_FILE: /config/poller.token
+      DISCOVERY_CREDENTIALS_FILE: /config/snmp.json
+      DISCOVERY_SPOOL_DIR: /spool
+      DISCOVERY_POLL_SECONDS: ${DISCOVERY_POLL_SECONDS:-300}
+      DISCOVERY_CA_FILE: ${DISCOVERY_CA_FILE:-}
+    volumes:
+      - ./config:/config:ro
+      - ./spool:/spool
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

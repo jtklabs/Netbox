@@ -1,0 +1,33 @@
+name: endpoint-discovery
+x-app: &app
+  image: ${DISCOVERY_IMAGE:-endpoint-discovery:local}
+  build:
+    context: ../..
+    dockerfile: services/endpoint-discovery/Dockerfile
+  environment: &environment
+    DISCOVERY_DATABASE_URL: ${DISCOVERY_DATABASE_URL:?Set the independent discovery database URL}
+    DISCOVERY_ACCESS_FILE: /config/access.json
+    DISCOVERY_STALE_SECONDS: ${DISCOVERY_STALE_SECONDS:-900}
+    DISCOVERY_RETENTION_DAYS: ${DISCOVERY_RETENTION_DAYS:-90}
+  volumes:
+    - ./config:/config:ro
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+services:
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - '${DISCOVERY_BIND_ADDRESS:-127.0.0.1}:${DISCOVERY_PUBLIC_PORT:-8092}:8092'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  manage:
+    <<: *app
+    profiles: [tools]
+    entrypoint: [python, -m, discovery.cli]

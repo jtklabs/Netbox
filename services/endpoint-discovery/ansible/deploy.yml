@@ -1,0 +1,6 @@
+---
+- name: Deploy independent endpoint discovery
+  hosts: endpoint_discovery
+  become: true
+  roles:
+    - endpoint_discovery

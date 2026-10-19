@@ -1,0 +1,16 @@
+[
+  {
+    "key": "branch-1-access-1",
+    "scope": "example/branch-1",
+    "poller": "branch-1-poller",
+    "address": "192.0.2.10",
+    "name": "branch-1-access-1",
+    "credential": "default",
+    "netbox_device_id": 42,
+    "interface_ids": {"Gi1/0/1": 101},
+    "interface_roles": {"Gi1/0/48": "transit"},
+    "contexts": [
+      {"key": "default", "snmp_context": "", "vrf": "default", "tables": ["fdb", "neighbors"]}
+    ]
+  }
+]

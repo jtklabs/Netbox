@@ -1,0 +1,8 @@
+config/
+spool/
+.pytest_cache/
+.ruff_cache/
+*.sqlite3*
+ansible/host_vars/
+ansible/group_vars/
+ansible/inventory.ini
