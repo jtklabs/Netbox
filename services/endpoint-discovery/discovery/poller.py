@@ -37,7 +37,7 @@ class Outbox:
         self.max_bytes = max_bytes
 
     def check_capacity(self, extra=0):
-        used = self.connection.execute("SELECT COALESCE(SUM(length(payload)),0) FROM reports").fetchone()[0]
+        used = self.connection.execute("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM reports").fetchone()[0]
         if used + extra > self.max_bytes:
             raise RuntimeError("outbox is full; restore delivery or archive rejected reports")
 
@@ -116,7 +116,10 @@ def cycle(client, outbox, credentials):
             report = collect(target, context, profile)
             outbox.put(report)
             failures += sum(table.status == "error" for table in report.tables)
-            delivered = outbox.flush(client) and delivered
+            # Once delivery fails, collect the rest of the site into the
+            # outbox. Do not spend another network timeout on every target.
+            if delivered:
+                delivered = outbox.flush(client)
     rejected = outbox.connection.execute("SELECT COUNT(*) FROM reports WHERE rejected=1").fetchone()[0]
     log.info("cycle completed: %d targets, %d collection errors, %d quarantined reports", len(targets), failures, rejected)
     return delivered and failures == 0 and rejected == 0

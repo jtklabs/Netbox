@@ -73,6 +73,35 @@ def test_cached_assignments_expire_and_rejected_auth_stops_collection(tmp_path):
             cycle(client, box, {})
 
 
+def test_disconnected_cycle_collects_all_targets_without_repeated_upload_timeouts(tmp_path, monkeypatch):
+    from discovery import poller
+    box = Outbox(tmp_path)
+    box.put(payload())
+    targets = [Target(key=key, scope="a", poller="p", address="192.0.2.1", name=key,
+                      revision="0" * 64) for key in ["a", "b", "c"]]
+    calls = []
+
+    def offline(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json={"items": [t.model_dump() for t in targets]})
+        return httpx.Response(503)
+
+    monkeypatch.setattr(poller, "collect", lambda *args: payload())
+    with httpx.Client(base_url="https://test/", transport=httpx.MockTransport(offline)) as client:
+        assert cycle(client, box, {"default": {}}) is False
+    assert calls == ["POST", "GET"]
+    assert box.connection.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 4
+
+
+def test_outbox_capacity_counts_utf8_bytes(tmp_path):
+    box = Outbox(tmp_path, max_bytes=10)
+    with box.connection:
+        box.connection.execute("INSERT INTO reports(payload) VALUES (?)", ("界" * 4,))
+    with pytest.raises(RuntimeError, match="full"):
+        box.check_capacity()
+
+
 @pytest.mark.parametrize("url", ["http://host", "https://user:password@host", "https://host?a=b", "https://host/#x"])
 def test_only_verified_https_without_embedded_credentials_is_accepted(url):
     with pytest.raises(ValueError):
