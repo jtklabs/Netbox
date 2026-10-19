@@ -20,7 +20,7 @@ def openapi():
                                    "next_before_id": {"type": "integer", "nullable": True}}}}}},
                 "400": {"description": "Invalid filters or pagination."}, "401": error}}}
     paths["/api/status"] = {"get": {"operationId": "get_status", "summary": "Current destinations, latest traces, accepted paths, settings and collector health.",
-        "responses": {"200": {"description": "Current collector snapshot.", "content": {"application/json": {"schema": {"type": "object"}}}}, "401": error}}}
+        "responses": {"200": {"description": "Current collector snapshot. Each target's latest observation includes raw_output: original traceroute stdout for clipboard/export, or null until a matching live trace is collected. Command text is held only for the latest trace in memory and is absent from retained history.", "content": {"application/json": {"schema": {"type": "object"}}}}, "401": error}}}
     paths["/api/events.csv"] = {"get": {"operationId": "export_events", "summary": "One page of events as CSV; structured fields are JSON cells.", "parameters": query,
         "responses": {"200": {"description": "CSV report.", "content": {"text/csv": {"schema": {"type": "string"}}}}, "400": {"description": "Invalid filters or pagination."}, "401": error}}}
     paths["/healthz"] = {"get": {"operationId": "health", "security": [], "summary": "Public health boolean only; no route data.",

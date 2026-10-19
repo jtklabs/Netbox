@@ -69,6 +69,17 @@ class APITests(unittest.TestCase):
         self.assertIn("hops", json.loads(rows[0]["after"]))
         self.assertTrue(json.load(self.get("/api/status"))["demo"])
 
+    def test_original_command_output_is_available_only_for_the_matching_live_trace(self):
+        self.fill()
+        latest = self.store.rows("traces", DEST, limit=1)[0]
+        output = f"traceroute to {DEST} ({DEST}), 30 hops max, 60 byte packets\n 1  192.0.2.1  1.200 ms * *\n"
+        self.collector.latest_outputs[DEST] = (latest["started"], output)
+        live = json.load(self.get("/api/status"))["targets"][0]["latest"]
+        self.assertEqual(live["raw_output"], output)
+        self.assertNotIn("raw_output", json.load(self.get("/api/traces"))["items"][0])
+        self.collector.latest_outputs[DEST] = (latest["started"] - 1, output)
+        self.assertIsNone(json.load(self.get("/api/status"))["targets"][0]["latest"]["raw_output"])
+
     def test_validation_and_static_allowlist(self):
         for path in ("/api/events?limit=0", "/api/events?limit=1001", "/api/events?since=nan", "/api/events?until=inf", "/api/events?target=hello", "/api/events?limit=1&limit=2", "/api/events?before_id=-1", "/api/traces?foo=bar"):
             with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as caught:

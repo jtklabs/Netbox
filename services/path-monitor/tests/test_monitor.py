@@ -80,6 +80,12 @@ class ConfigTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_keeps_original_output_for_copying_without_persisting_a_second_copy(self):
+        output = f"traceroute to {DEST} ({DEST}), 30 hops max, 60 byte packets\n 1  192.0.2.1  1.200 ms * {A}  2.300 ms\n 2  {DEST}  4.500 ms  4.600 ms  4.700 ms\n"
+        result = parse_trace(output, DEST, 1, 10)
+        self.assertEqual(result.raw_output, output)
+        self.assertNotIn("raw_output", result.as_dict())
+
     def test_multipath_shorthand_rtt_and_timeouts(self):
         result = parse_trace(f"traceroute to {DEST} ({DEST}), 30 hops max\n 1 192.0.2.1 1.2 ms 1.3 ms *\n 2 {A} 3.0 ms {B} 4.0 ms 4.1 ms\n 3 {DEST} 5.0 ms 5.1 ms 5.2 ms\n", DEST, 0, 10)
         self.assertTrue(result.reached)
@@ -408,7 +414,8 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         async def fake_probe(address, config):
             calls[address] = trace_command(address, config)
             return Observation(time.time(), 5, [{"ttl": 1, "addresses": [address],
-                "rtt_ms": [1.5], "timeouts": 0, "annotations": []}], True)
+                "rtt_ms": [1.5], "timeouts": 0, "annotations": []}], True,
+                raw_output=f"traceroute to {address} ({address}), 30 hops max, 60 byte packets\n 1  {address}  1.500 ms\n")
         global_settings = settings(learning_samples=1)
         config = {"settings": global_settings, "destinations": [
             {"address": DEST, "expected_hops": {}},
@@ -432,6 +439,16 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
             event = store.rows("events", "192.0.2.81")[0]
             self.assertEqual(event["observed"]["protocol"], "tcp")
             self.assertEqual(event["observed"]["port"], 443)
+            live = {t["address"]: t["latest"] for t in collector.snapshot()["targets"]}
+            for address in (DEST, "192.0.2.81"):
+                self.assertIn(f"traceroute to {address}", live[address]["raw_output"])
+                self.assertNotIn("raw_output", store.rows("traces", address)[0])
+                self.assertNotIn("raw_output", json.dumps(store.state(address)))
+                self.assertNotIn("raw_output", json.dumps(store.rows("events", address)))
+            collector.latest_outputs[DEST] = (0, "wrong older trace")
+            self.assertIsNone(collector.snapshot()["targets"][0]["latest"]["raw_output"])
+            restarted = Collector(config, store, fake_probe)
+            self.assertIsNone(restarted.snapshot()["targets"][1]["latest"]["raw_output"])
         finally:
             collector.stop.set()
             await task
@@ -493,6 +510,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.returncode, -9)
         self.assertIn("exceeded", result.error)
         self.assertEqual(result.hops[0]["addresses"], ["192.0.2.1"])
+        self.assertEqual(result.raw_output, "1 192.0.2.1 1 ms\n")
 
 
 if __name__ == "__main__":

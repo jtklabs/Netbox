@@ -107,13 +107,16 @@ class Observation:
     error: str | None = None
     protocol: str = "icmp"
     port: int | None = None
+    raw_output: str | None = None
 
     @property
     def path(self):
         return {str(h["ttl"]): h["addresses"] for h in self.hops if h["addresses"]}
 
     def as_dict(self):
-        return self.__dict__.copy()
+        # Original command text is live-only; do not duplicate it in every
+        # retained trace, event, or learned-state JSON document.
+        return {key: value for key, value in self.__dict__.items() if key != "raw_output"}
 
 
 def parse_trace(output, address, started, duration_ms, error=None):
@@ -149,7 +152,7 @@ def parse_trace(output, address, started, duration_ms, error=None):
     reached = any(address in h["addresses"] and not h["annotations"] for h in hops)
     if not hops and not error:
         error = "traceroute produced no hop records"
-    return Observation(started, duration_ms, hops, reached, error)
+    return Observation(started, duration_ms, hops, reached, error, raw_output=output)
 
 
 def trace_command(address, settings):
@@ -453,6 +456,7 @@ class Collector:
         self.error = None
         self.missed = Counter()
         self.started = time.time()
+        self.latest_outputs = {}
 
     async def target_loop(self, target):
         """Start each second; bounded overlapping probes are consumed in start order."""
@@ -471,7 +475,9 @@ class Collector:
                 task = await queue.get()
                 result = await task
                 result.protocol, result.port = protocol, port
-                self.store.record(address, result, detector)
+                with self.store.lock:
+                    self.store.record(address, result, detector)
+                    self.latest_outputs[address] = (result.started, result.raw_output)
                 queue.task_done()
 
         consumer = asyncio.create_task(consume())
@@ -526,9 +532,13 @@ class Collector:
         targets = []
         for target in self.config["destinations"]:
             address = target["address"]
-            state = self.store.state(address)
-            rows = self.store.rows("traces", address, limit=1)
-            latest = rows[0] if rows else None
+            with self.store.lock:
+                state = self.store.state(address)
+                rows = self.store.rows("traces", address, limit=1)
+                latest = rows[0] if rows else None
+                output = self.latest_outputs.get(address)
+                if latest:
+                    latest["raw_output"] = output[1] if output and output[0] == latest["started"] else None
             stale_after = self.config["settings"]["trace_timeout_seconds"] + 3 * self.config["settings"]["interval_seconds"]
             fresh = bool(latest and time.time() - latest["started"] < stale_after)
             targets.append({**target, "latest": latest, "state": state,
