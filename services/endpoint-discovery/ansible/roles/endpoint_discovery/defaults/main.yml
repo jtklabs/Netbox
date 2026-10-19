@@ -19,3 +19,4 @@ discovery_retention_days: 90
 discovery_bind_address: 127.0.0.1
 discovery_public_port: 8092
 discovery_ca_file: ""
+discovery_database_ca_file: ""
