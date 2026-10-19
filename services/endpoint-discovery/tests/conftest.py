@@ -1,3 +1,4 @@
+# ruff: noqa: E402 -- add the standalone service and shared transport before imports
 import json
 import os
 import sys
