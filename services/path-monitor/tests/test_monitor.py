@@ -191,6 +191,91 @@ class DetectorTests(unittest.TestCase):
         self.assertNotIn("2", detector.snapshot()["hops"])
         self.assertTrue(self.changes(events))
 
+    def test_alternating_destination_ttls_do_not_duplicate_or_flap(self):
+        detector = Detector(settings())
+        def terminal(ttl, now):
+            return Observation(now, 1, [{"ttl": 1, "addresses": [A]},
+                                       {"ttl": ttl, "addresses": [DEST]}], True)
+        for now in range(1, 5):
+            detector.observe(terminal(12, now), DEST)
+        for now in range(5, 45):
+            self.assertFalse(self.changes(detector.observe(terminal(11 if now % 2 else 12, now), DEST)))
+            self.assertEqual(detector.snapshot()["destination_ttl"], 12)
+            self.assertEqual([ttl for ttl, ips in detector.snapshot()["hops"].items() if DEST in ips], ["12"])
+        # A stable change is still reported, in either direction, after fresh
+        # consecutive evidence rather than hits left in the rolling window.
+        for ttl, start in ((11, 45), (12, 48)):
+            for now in (start, start + 1):
+                self.assertFalse(self.changes(detector.observe(terminal(ttl, now), DEST)))
+            change = self.changes(detector.observe(terminal(ttl, start + 2), DEST))
+            self.assertEqual(len(change), 1)
+            self.assertEqual(change[0]["after"]["destination_ttl"], ttl)
+            self.assertEqual([hop for hop, ips in change[0]["after"]["hops"].items() if DEST in ips], [str(ttl)])
+            self.assertEqual(change[0]["hop_moves"][0]["address"], DEST)
+            detector = Detector(settings(), state=json.loads(json.dumps(detector.state)))
+
+    def test_duplicate_terminal_replies_are_ambiguous_not_moves(self):
+        detector = Detector(settings())
+        for now in range(1, 5):
+            detector.observe(route([A, B, DEST], now), DEST)
+        before = detector.snapshot()
+        for now in range(5, 40):
+            self.assertFalse(self.changes(detector.observe(route([A, B, DEST, DEST], now), DEST)))
+            self.assertEqual(detector.snapshot(), before)
+        self.assertEqual(detector.state["positions"][DEST]["ttls"], [3])
+
+    def test_unreachable_annotation_does_not_compete_with_a_valid_terminal_reply(self):
+        detector = Detector(settings())
+        for now in range(1, 5):
+            detector.observe(route([A, B, DEST], now), DEST)
+        for now in range(5, 8):
+            trace = route([A, B, DEST, DEST], now)
+            trace.hops[2]["annotations"] = ["!H"]
+            events = detector.observe(trace, DEST)
+        change = self.changes(events)[0]
+        self.assertEqual(change["after"]["destination_ttl"], 4)
+        self.assertEqual(change["hop_moves"][0]["from_hops"], [3])
+        self.assertEqual(change["hop_moves"][0]["to_hops"], [4])
+
+    def test_ambiguous_timeout_and_error_traces_break_terminal_confirmation(self):
+        detector = self.learned()
+        for now in (5, 6):
+            detector.observe(route([A, B, C, DEST], now), DEST)
+        detector.observe(route([A, B, DEST, DEST], 7), DEST)
+        detector.observe(route([A, B, C, DEST], 8), DEST)
+        detector.observe(route([A, B, [], []], 9, reached=False), DEST)
+        detector.observe(route([A, B, C, DEST], 10), DEST)
+        failed = route([A, B, C, DEST], 11); failed.error = "timeout"
+        detector.observe(failed, DEST)
+        for now in (12, 13):
+            detector.observe(route([A, B, C, DEST], now), DEST)
+            self.assertEqual(detector.snapshot()["destination_ttl"], 3)
+        detector.observe(route([A, B, C, DEST], 14), DEST)
+        self.assertEqual(detector.snapshot()["destination_ttl"], 4)
+
+    def test_legacy_duplicate_destination_state_is_cleaned_without_event(self):
+        detector = self.learned()
+        detector.state["accepted"]["4"] = {DEST: 4}
+        detector.state["positions"][DEST]["ttls"] = [3, 4]
+        restored = Detector(settings(), state=json.loads(json.dumps(detector.state)))
+        events = restored.observe(observation([A], 5), DEST)
+        self.assertFalse(self.changes(events))
+        self.assertNotIn("4", restored.snapshot()["hops"])
+        self.assertEqual(restored.state["positions"][DEST]["ttls"], [3])
+
+    def test_legacy_ambiguous_evidence_cannot_confirm_a_terminal_move(self):
+        detector = self.learned()
+        for now in (5, 6):
+            detector.state["recent"].append({"path": {"1": [A], "3": [DEST], "4": [DEST]},
+                "end": 4, "reached": True, "started": now})
+        detector.state["last_started"] = 6
+        restored = Detector(settings(), state=json.loads(json.dumps(detector.state)))
+        for now in (7, 8):
+            restored.observe(route([A, B, [], DEST], now), DEST)
+            self.assertEqual(restored.snapshot()["destination_ttl"], 3)
+        restored.observe(route([A, B, [], DEST], 9), DEST)
+        self.assertEqual(restored.snapshot()["destination_ttl"], 4)
+
     def test_inserted_hop_reports_familiar_addresses_at_new_positions(self):
         detector = Detector(settings())
         for now in range(1, 5):
@@ -255,6 +340,23 @@ class StorageTests(unittest.TestCase):
         next_page = self.store.rows("traces", DEST, since=2, until=6, limit=2, before_id=page[-1]["id"])
         self.assertEqual([r["started"] for r in next_page], [4, 3])
         self.assertFalse(self.store.rows("traces", "192.0.2.99"))
+
+    def test_ambiguous_terminal_replies_keep_raw_evidence_and_one_accepted_end(self):
+        for now in range(1, 5):
+            self.store.record(DEST, route([A, B, DEST], now), self.detector)
+        old_events = self.store.rows("events", DEST)
+        ambiguous = route([A, B, DEST, DEST], 5)
+        original = json.loads(json.dumps(ambiguous.as_dict()))
+        self.store.record(DEST, ambiguous, self.detector)
+        raw = self.store.rows("traces", DEST)[0]
+        self.assertEqual(raw["hops"], original["hops"])
+        self.assertEqual(ambiguous.as_dict(), original)
+        self.assertEqual(self.store.rows("events", DEST), old_events)
+        restored = Detector(settings(), state=self.store.state(DEST))
+        self.assertEqual([ttl for ttl, ips in restored.snapshot()["hops"].items() if DEST in ips], ["3"])
+        self.assertIsNone(restored.state["recent"][-1]["end"])
+        self.assertEqual(restored.state["recent"][-1]["terminal_ttls"], [3, 4])
+        self.assertEqual(restored.state["recent"][-1]["path"]["4"], [DEST])
 
     def test_retention_keeps_state_and_longer_event_history(self):
         for i in range(1, 5):

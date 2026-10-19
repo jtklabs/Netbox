@@ -214,10 +214,18 @@ class Detector:
                 positions.setdefault(ip, []).append(int(ttl))
         return {ip: sorted(ttls) for ip, ttls in positions.items()}
 
-    def moves(self, path, learning, now):
+    def moves(self, path, learning, now, destination):
         moves = []
         positions = self.state["positions"]
-        recent_positions = [(r["started"], self.positions(r["path"])) for r in self.state["recent"]]
+        recent_positions = []
+        for sample in self.state["recent"]:
+            observed = self.positions(sample["path"])
+            terminal = sample["terminal_ttls"]
+            if sample["reached"] and len(terminal) == 1:
+                observed[destination] = terminal
+            else:
+                observed.pop(destination, None)
+            recent_positions.append((sample["started"], observed))
         for ip, ttls in self.positions(path).items():
             previous = positions.get(ip)
             if previous and previous["ttls"] == ttls:
@@ -239,8 +247,31 @@ class Detector:
         return {"hops": {ttl: sorted(ips) for ttl, ips in self.state["accepted"].items()},
                 "destination_ttl": self.state["end_ttl"]}
 
+    def normalize_destination(self, destination):
+        """Keep one terminal position, including when loading older learned state."""
+        end = self.state["end_ttl"]
+        for sample in self.state["recent"]:
+            terminal_positions = sample.setdefault("terminal_ttls", [int(ttl) for ttl, ips in sample["path"].items() if destination in ips])
+            if len(terminal_positions) != 1:
+                sample["end"] = None
+        accepted = self.state["accepted"]
+        for ttl, known in list(accepted.items()):
+            if int(ttl) != end:
+                known.pop(destination, None)
+            if not known:
+                del accepted[ttl]
+        previous = self.state["positions"].get(destination)
+        if previous:
+            if end is None:
+                del self.state["positions"][destination]
+            else:
+                previous["ttls"] = [end]
+
     def observe(self, observation, destination):
         s, cfg = self.state, self.settings
+        # Repair stale terminal alternatives without manufacturing a new event.
+        # Raw traces and previously stored events remain unchanged.
+        self.normalize_destination(destination)
         now = observation.started
         events = []
         # After a long collection gap, old evidence must not confirm new changes.
@@ -249,9 +280,14 @@ class Detector:
         s["last_started"] = now
         usable = not observation.error
         path = observation.path if usable else {}
-        end = next((int(ttl) for ttl, ips in path.items() if destination in ips), None) if observation.reached and usable else None
+        endings = {h["ttl"] for h in observation.hops
+                   if destination in h["addresses"] and not h.get("annotations")} if observation.reached and usable else set()
+        # Concurrent probes can return the destination at multiple TTLs. Keep
+        # that evidence in raw history, but do not guess which terminal hop won.
+        end = next(iter(endings)) if len(endings) == 1 else None
         recent = s["recent"]
-        recent.append({"path": path, "end": end, "reached": observation.reached if usable else None, "started": now})
+        recent.append({"path": path, "end": end, "terminal_ttls": sorted(endings),
+                       "reached": observation.reached if usable else None, "started": now})
         del recent[:-cfg["confirmation_window"]]
         # Execution failures have no bearing on topology or reachability.
         if not usable:
@@ -281,11 +317,24 @@ class Detector:
             return events
         before = self.snapshot()
         learning = s["samples"] < cfg["learning_samples"]
-        moves = self.moves(path, learning, now)
+        end_confirmed = (end is not None and len(confirmations) == cfg["confirmation_samples"]
+                         and all(r["end"] == end and r["reached"] for r in confirmations))
+        if end is not None and (learning or end_confirmed):
+            s["end_ttl"] = end
+        # The endpoint is not an ordinary router alternative. Until a new end
+        # is confirmed, retain its previous position instead of adding a second
+        # one or reporting movements based on ambiguous duplicate replies.
+        path = {ttl: [ip for ip in ips if ip != destination
+                      or (end is not None and end == s["end_ttl"] and int(ttl) == end)]
+                for ttl, ips in path.items()}
+        path = {ttl: ips for ttl, ips in path.items() if ips}
+        moves = self.moves(path, learning, now, destination)
         s["samples"] += 1
         accepted = s["accepted"]
         for ttl, ips in self.expected.items():
             for ip in ips:
+                if ip == destination and int(ttl) != s["end_ttl"]:
+                    continue
                 accepted.setdefault(ttl, {}).setdefault(ip, now)
         for ttl, ips in path.items():
             for ip in ips:
@@ -293,9 +342,8 @@ class Detector:
                 hits = sum(ip in r["path"].get(ttl, []) for r in recent)
                 if learning or ip in known or hits >= cfg["confirmation_samples"]:
                     known[ip] = now
+        self.normalize_destination(destination)
         if learning:
-            if end is not None:
-                s["end_ttl"] = end
             if s["samples"] == cfg["learning_samples"]:
                 events.append({"kind": "baseline", "before": None, "after": self.snapshot()})
             return events
@@ -306,10 +354,9 @@ class Detector:
             confirmed_alternative = any(ip in known and sum(ip in r["path"].get(ttl, []) for r in recent) >= cfg["confirmation_samples"] for ip in path[ttl])
             if confirmed_alternative:
                 for ip, seen in list(known.items()):
-                    if ip not in self.expected.get(ttl, []) and now - seen >= cfg["multipath_grace_seconds"]:
+                    if ip != destination and ip not in self.expected.get(ttl, []) and now - seen >= cfg["multipath_grace_seconds"]:
                         del known[ip]
-        if end is not None and sum(r["end"] == end for r in recent) >= cfg["confirmation_samples"]:
-            s["end_ttl"] = end
+        if end_confirmed:
             for ttl in list(accepted):
                 if int(ttl) > end and ttl not in self.expected:
                     del accepted[ttl]

@@ -247,17 +247,20 @@ per data volume; SQLite is local storage, not a multi-replica shared backend.
 3. **Retain alternatives:** learned addresses remain accepted for 300 seconds
    after their last observation. When another confirmed address responds at
    the same TTL after that grace period, the old address is retired and another
-   path-change event records the removal. Pinned `expected_hops` never expire.
+   path-change event records the removal. Pinned router `expected_hops` never expire.
    A switch from `{A,B}` to `C` therefore first records `{A,B,C}`, then `{C}`
    once the old branches age out. The exact latest observation is always stored
    separately from the accepted sets.
 4. **Ignore unknowns:** `*`, a silent hop, a command failure, and partial output
    from a killed trace cannot delete an accepted hop. A shorter route removes
    trailing hops only after repeated replies from the destination at its new
-   TTL. Destination-TTL changes use the same 3-of-10 confirmation rule.
+   TTL. Destination-TTL changes require 3 consecutive completed, unambiguous
+   traces reaching the destination at the same new TTL (`confirmation_samples`
+   controls this count). Alternating terminal TTLs, missing replies, duplicate
+   destination replies at different TTLs, and command errors break this sequence.
 5. **Track replies separately:** 3 consecutive completed traces with the same
    destination reply status confirm reached/no-reply transitions. This is an
-   observation of ICMP replies, not a claim that an application is down. Command
+   observation of destination replies, not a claim that an application is down. Command
    failures break the confirmation sequence and have no topology effect.
 
 An address moving from hop 4 to hop 5 is a difference even when that IP is
@@ -268,6 +271,16 @@ position change; they do not wait for the five-minute branch retirement period.
 Both the first observation and confirming trace times are retained. Ordinary
 A/B switching at the same TTL remains normal. Missing one reply from an address
 seen at several TTLs is not enough to infer that it moved.
+
+The destination is handled separately from router alternatives: accepted-path
+comparisons show it only at its single confirmed terminal TTL, rather than
+retaining it at several hops during the multipath grace period. A trace with
+destination replies at multiple TTLs is ambiguous for terminal-hop changes;
+its original hop addresses and RTTs are still recorded. Sustained shorter or
+longer paths still produce a confirmed change, and ordinary router movement
+detection is unchanged. Stored learned state from earlier versions is cleaned
+on the next observation without generating a cleanup event. Previously recorded
+raw traces and events are not rewritten.
 
 ### Investigating sites that stop replying
 
