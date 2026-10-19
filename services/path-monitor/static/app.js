@@ -1,6 +1,6 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = {mode: "events", rows: [], cursor: null, limit: 100, records: new Map(), targets: new Map(), targetNames: new Map(), paged: false, busy: false, revision: 0, filters: new URLSearchParams()};
+const state = {mode: "events", rows: [], cursor: null, limit: 100, records: new Map(), targets: new Map(), targetNames: new Map(), pointerTarget: null, paged: false, busy: false, revision: 0, filters: new URLSearchParams()};
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -40,10 +40,41 @@ function observedPath(observation) {
   return {hops: Object.fromEntries((observation?.hops || []).map((hop) => [hop.ttl, hop.addresses]))};
 }
 const recordKey = (row) => `${state.mode}:${row.id}:${row.started}`;
+function selectionIn(node) {
+  if (state.pointerTarget && node.contains(state.pointerTarget)) return true;
+  const active = document.activeElement;
+  if (active && node.contains(active) && typeof active.selectionStart === "number" && active.selectionStart !== active.selectionEnd) return true;
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return false;
+  for (let i = 0; i < selection.rangeCount; i++) if (selection.getRangeAt(i).intersectsNode(node)) return true;
+  return false;
+}
+async function copyTrace(view) {
+  const text = view.latest?.raw_output;
+  if (!text) return;
+  view.copying = true;
+  view.copyButton.disabled = true;
+  try {
+    await navigator.clipboard.writeText(text);
+    view.copyStatus.textContent = "Trace copied";
+    view.fallback.hidden = true;
+  } catch {
+    view.fallback.hidden = false;
+    view.copyText.value = text;
+    view.copyText.focus();
+    view.copyText.select();
+    view.copyStatus.textContent = "Press Ctrl+C / ⌘C to copy the selected trace.";
+  } finally {
+    view.copying = false;
+    view.copyButton.disabled = !view.latest?.raw_output;
+  }
+}
 function updateRecordName(record, address) {
+  if (selectionIn(record)) return;
   const label = record.querySelector(".record-target-name");
   const name = state.targetNames.get(address);
-  label.textContent = name && name !== address ? name : "";
+  const text = name && name !== address ? name : "";
+  if (label.textContent !== text) label.textContent = text;
   label.hidden = !label.textContent;
 }
 function renderTargets(snapshot) {
@@ -58,7 +89,7 @@ function renderTargets(snapshot) {
   $("target").firstChild.value = "";
   const container = $("targets"), active = new Set(snapshot.targets.map((target) => target.address));
   for (const [address, view] of state.targets) {
-    if (!active.has(address)) {
+    if (!active.has(address) && !selectionIn(view.card)) {
       view.card.remove();
       state.targets.delete(address);
     }
@@ -70,15 +101,36 @@ function renderTargets(snapshot) {
     if (!view) {
       const card = el("article", undefined, "target-card"), header = el("div", undefined, "card-head");
       const hops = el("div", undefined, "hop-list"), error = el("p", undefined, "error-text"), meta = el("div", undefined, "card-meta");
+      const actions = el("div", undefined, "card-actions"), copyButton = el("button", "Copy traceroute", "secondary");
+      const copyStatus = el("span", undefined, "copy-status"), selectionNote = el("span", "Updates paused while selecting text", "selection-note");
+      copyButton.type = "button";
+      copyStatus.setAttribute("role", "status");
+      selectionNote.hidden = true;
+      actions.append(copyButton, copyStatus, selectionNote);
+      const fallback = el("div", undefined, "trace-copy-fallback"), copyText = el("textarea"), closeText = el("button", "Close trace text", "secondary");
+      copyText.readOnly = true;
+      copyText.rows = 8;
+      closeText.type = "button";
+      closeText.addEventListener("click", () => { fallback.hidden = true; copyText.value = ""; copyStatus.textContent = ""; copyButton.focus(); });
+      fallback.append(copyText, closeText);
+      fallback.hidden = true;
       hops.tabIndex = 0;
       hops.setAttribute("role", "region");
-      card.append(header, hops, error, meta);
-      view = {card, header, hops, error, meta};
+      card.append(header, actions, hops, error, meta, fallback);
+      view = {card, header, hops, error, meta, copyButton, copyStatus, selectionNote, fallback, copyText, latest: null, copying: false};
+      copyButton.addEventListener("click", () => copyTrace(view));
       state.targets.set(target.address, view);
     }
+    view.selectionNote.hidden = !selectionIn(view.card);
+    if (!view.selectionNote.hidden) return;
     const {card, header, hops, error, meta} = view;
     const title = el("div"); title.append(el("h3", target.name), el("p", target.address, "address"));
     const latest = target.latest, settings = snapshot.settings, learned = (target.state?.samples || 0) >= settings.learning_samples;
+    view.latest = latest;
+    view.copyButton.disabled = !latest?.raw_output || view.copying;
+    view.copyButton.title = latest?.raw_output ? "Copy the latest displayed traceroute output" : "Waiting for original output from a new trace";
+    view.copyButton.setAttribute("aria-label", `Copy traceroute for ${target.name}`);
+    view.copyText.setAttribute("aria-label", `Traceroute output for ${target.name}`);
     let status = !target.fresh ? "Stale / starting" : latest?.error ? "Probe error" : !learned ? "Learning" : latest.reached ? "Reached" : "No destination reply";
     header.replaceChildren(title, badge(status, !target.fresh || latest?.error ? "error" : !learned || !latest?.reached ? "warn" : ""));
     // Keep the scroll container attached and restore its position after updating
@@ -182,7 +234,10 @@ async function loadRecords(older = false) {
       .sort((a, b) => b.id - a.id || b.started - a.started);
   } else {
     const incoming = new Set(data.items.map(recordKey));
-    const reading = state.rows.filter((row) => !incoming.has(recordKey(row)) && state.records.get(recordKey(row))?.open);
+    const reading = state.rows.filter((row) => {
+      const record = state.records.get(recordKey(row));
+      return !incoming.has(recordKey(row)) && record && (record.open || selectionIn(record));
+    });
     state.rows = data.items.concat(reading);
   }
   state.cursor = data.next_before_id; renderRecords();
@@ -225,4 +280,7 @@ for (const mode of ["events", "traces"]) $(mode + "-tab").addEventListener("clic
   $("history-note").textContent = mode === "events" ? "Expand an event to compare the accepted path before and after." : "Every trace is retained, including timeouts, partial replies and execution errors.";
   resetHistory();
 });
+document.addEventListener("pointerdown", (event) => { state.pointerTarget = event.target; });
+for (const event of ["pointerup", "pointercancel"]) document.addEventListener(event, () => { state.pointerTarget = null; });
+window.addEventListener("blur", () => { state.pointerTarget = null; });
 refresh(); setInterval(() => refresh(), 2000);

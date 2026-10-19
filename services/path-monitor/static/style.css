@@ -144,6 +144,28 @@ main {
 .card-head h3 {
   font-size:16px;
 }
+.card-actions {
+  padding:0 20px 12px;
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px 12px;
+}
+.card-actions button {font-size:11px;padding:6px 10px}
+.copy-status,.selection-note {font-size:11px;color:var(--muted)}
+.selection-note {color:var(--amber)}
+.trace-copy-fallback {padding:0 20px 16px}
+.trace-copy-fallback textarea {
+  width:100%;
+  display:block;
+  margin:0 0 10px;
+  padding:10px;
+  color:var(--ink);
+  background:var(--code);
+  border:1px solid var(--line);
+  font:12px/1.6 ui-monospace,monospace;
+  resize:vertical;
+}
 .address,code,.path-address {
   font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
   font-size:12px;

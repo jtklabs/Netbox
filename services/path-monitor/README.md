@@ -19,6 +19,14 @@ network vantage point you want to measure.
   address, including for existing records. Names are omitted for destinations
   no longer configured or without a distinct name. Live trace panels keep their
   individual scroll positions when observations refresh.
+- Selecting an IP or other panel text pauses that panel's display updates until
+  selection is cleared. Collection and the other panels continue updating.
+  **Copy traceroute** copies the latest displayed trace's original command
+  output, including its header, ordered replies, RTTs, and `*` timeouts. If the
+  browser cannot write the clipboard, selectable trace text is shown instead.
+  Original text is kept only for the latest live trace in memory, so it does
+  not increase retained history storage. After startup, copying becomes available
+  when the next trace completes; historical records keep their parsed data.
 - Dark styling covers the dashboard and sign-in page. Expanded history/JSON
   sections keep their state and scroll position while new observations arrive;
   open records remain visible until closed, even after leaving the latest page.

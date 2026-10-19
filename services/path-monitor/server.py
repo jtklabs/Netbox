@@ -226,10 +226,13 @@ def demo_probe():
         addresses = (["192.0.2.1", None, None] if not reached else
                      ["192.0.2.1", "203.0.113.20", middle, address] if 30 <= phase < 50 else
                      ["192.0.2.1", middle, address])
+        output = f"traceroute to {address} ({address}), {settings['max_hops']} hops max, 60 byte packets\n"
+        output += "".join(f" {ttl:2}  {ip}  {ttl:.3f} ms\n" if ip else f" {ttl:2}  * * *\n"
+                          for ttl, ip in enumerate(addresses, 1))
         return Observation(time.time(), 18, [
             {"ttl": ttl, "addresses": [ip] if ip else [], "rtt_ms": [float(ttl)] if ip else [],
              "timeouts": 0 if ip else 3, "annotations": []}
-            for ttl, ip in enumerate(addresses, 1)], reached)
+            for ttl, ip in enumerate(addresses, 1)], reached, raw_output=output)
     return run
 
 

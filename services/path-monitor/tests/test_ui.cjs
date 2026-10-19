@@ -7,7 +7,10 @@ const vm = require('node:vm');
 // A small DOM model lets the regression checks catch replaced/disconnected
 // disclosures and focus without adding a browser package to the service.
 function harness() {
-  const document = {activeElement: null};
+  const listeners = new Map(), clipboard = [];
+  let selectedNode = null;
+  const document = {activeElement: null, addEventListener: (type, listener) => listeners.set(type, listener)};
+  const navigator = {clipboard: {writeText: async text => { clipboard.push(text); }}};
   class Element {
     constructor(tag) {
       this.tagName = tag;
@@ -18,6 +21,8 @@ function harness() {
       this.open = false;
       this.scrollTop = 0;
       this.scrollLeft = 0;
+      this.value = '';
+      this.listeners = new Map();
     }
     contains(node) { return this === node || this.children.some(child => child.contains(node)); }
     remove() {
@@ -49,9 +54,11 @@ function harness() {
       }
       return null;
     }
-    addEventListener() {}
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    trigger(type) { return this.listeners.get(type)?.({target: this}); }
     setAttribute(name, value) { this[name] = value; }
     focus() { document.activeElement = this; }
+    select() { this.selectionStart = 0; this.selectionEnd = this.value.length; }
   }
   const ids = new Map();
   document.getElementById = id => {
@@ -60,11 +67,15 @@ function harness() {
   };
   document.createElement = tag => new Element(tag);
   document.createTextNode = text => { const node = new Element('#text'); node.textContent = text; return node; };
-  const context = vm.createContext({document, URLSearchParams, setInterval: () => {},
-    fetch: () => new Promise(() => {}), window: {location: {assign() {}}}});
+  const context = vm.createContext({document, navigator, URLSearchParams, setInterval: () => {},
+    fetch: () => new Promise(() => {}), window: {location: {assign() {}}, addEventListener() {},
+      getSelection: () => ({isCollapsed: !selectedNode, rangeCount: selectedNode ? 1 : 0,
+        getRangeAt: () => ({intersectsNode: node => node.contains(selectedNode)})})}});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8'), context);
   const app = vm.runInContext('({state, renderRecords, loadRecords, renderTargets})', context);
-  return {document, app, container: document.getElementById('records'),
+  return {document, navigator, clipboard, app, container: document.getElementById('records'),
+    select: node => { selectedNode = node; },
+    pointer: (type, node) => listeners.get(type)?.({target: node}),
     getNode: document.getElementById,
     reply: items => { context.fetch = async () => ({ok: true, json: async () => ({items, next_before_id: 1})}); }};
 }
@@ -82,6 +93,84 @@ const target = (address = '192.0.2.80', name = 'Primary data center') => ({
 });
 const snapshot = (...targets) => ({targets, settings: {learning_samples: 30, interval_seconds: 1,
   trace_retention_hours: 24, event_retention_days: 90}});
+
+for (const area of ['address', 'path-address']) test(`selected ${area} stays attached across polls, then resumes with fresh data`, () => {
+  const {app, select, clipboard} = harness();
+  const first = target(); first.latest.raw_output = 'original trace\n';
+  app.renderTargets(snapshot(first, target('192.0.2.81', 'Other host')));
+  const view = app.state.targets.get(first.address), selected = view.card.querySelector(`.${area}`);
+  select(selected);
+  for (let n = 0; n < 4; n++) {
+    const fresh = target(); fresh.name = 'Renamed host'; fresh.latest.raw_output = 'new trace\n';
+    fresh.latest.hops[0].addresses = ['203.0.113.10'];
+    const other = target('192.0.2.81', `Other host ${n}`);
+    app.renderTargets(snapshot(fresh, other));
+    assert.equal(view.card.querySelector(`.${area}`), selected);
+    assert.equal(view.latest.raw_output, 'original trace\n');
+    assert.equal(view.selectionNote.hidden, false);
+    assert.equal(app.state.targets.get(other.address).header.querySelector('h3').textContent, `Other host ${n}`);
+  }
+  assert.equal(clipboard.length, 0); // Selecting text never reads or changes the clipboard.
+  select(null);
+  const fresh = target(); fresh.latest.raw_output = 'new trace\n';
+  fresh.latest.hops[0].addresses = ['203.0.113.10'];
+  app.renderTargets(snapshot(fresh));
+  assert.equal(view.selectionNote.hidden, true);
+  assert.equal(view.latest.raw_output, 'new trace\n');
+  assert.equal(view.hops.querySelector('.path-address').textContent, '203.0.113.10 ●');
+});
+
+test('a drag beginning before a selection exists also protects the panel', () => {
+  const {app, pointer} = harness(); app.renderTargets(snapshot(target()));
+  const view = app.state.targets.get('192.0.2.80'), address = view.header.querySelector('.address');
+  pointer('pointerdown', address); app.renderTargets(snapshot(target()));
+  assert.equal(view.header.querySelector('.address'), address);
+  pointer('pointerup', address); app.renderTargets(snapshot(target()));
+  assert.notEqual(view.header.querySelector('.address'), address);
+});
+
+test('copy uses the exact displayed command output and handles clipboard failure with selectable text', async () => {
+  const {app, navigator, clipboard, document} = harness();
+  const first = target(); first.latest.raw_output = 'traceroute to 192.0.2.80 (192.0.2.80), 30 hops max, 60 byte packets\n 1  192.0.2.1  1.200 ms * 198.51.100.1  3.400 ms\n';
+  app.renderTargets(snapshot(first));
+  const view = app.state.targets.get(first.address);
+  assert.equal(view.copyButton.disabled, false);
+  await view.copyButton.trigger('click');
+  assert.equal(clipboard[0], first.latest.raw_output);
+  assert.equal(view.copyStatus.textContent, 'Trace copied');
+  navigator.clipboard.writeText = async () => { throw new Error('denied'); };
+  await view.copyButton.trigger('click');
+  assert.equal(view.fallback.hidden, false);
+  assert.equal(view.copyText.value, first.latest.raw_output);
+  assert.equal(view.copyText.selectionEnd, first.latest.raw_output.length);
+  assert.equal(document.activeElement, view.copyText);
+  assert.match(view.copyStatus.textContent, /Ctrl\+C/);
+  const fresh = target(); fresh.latest.raw_output = 'new trace\n';
+  app.renderTargets(snapshot(fresh));
+  assert.equal(view.latest.raw_output, first.latest.raw_output); // Manual fallback remains stable too.
+  await view.fallback.querySelector('button').trigger('click');
+  app.renderTargets(snapshot(fresh));
+  assert.equal(view.fallback.hidden, true);
+  assert.equal(view.latest.raw_output, 'new trace\n');
+  navigator.clipboard = undefined;
+  await view.copyButton.trigger('click');
+  assert.equal(view.copyText.value, 'new trace\n');
+});
+
+test('copy is disabled until original output is available and selected history stays on the live page', async () => {
+  const {app, select, container, reply} = harness();
+  app.renderTargets(snapshot(target()));
+  assert.equal(app.state.targets.get('192.0.2.80').copyButton.disabled, true);
+  app.state.rows = [event(1)]; app.renderRecords();
+  const reading = container.children[0], ip = reading.querySelector('code');
+  select(ip);
+  app.renderTargets(snapshot(target('192.0.2.80', 'Renamed')));
+  assert.equal(reading.querySelector('.record-target-name').textContent, 'Primary data center');
+  reply([event(2)]); await app.loadRecords();
+  assert.equal(container.children[1], reading);
+  select(null); await app.loadRecords();
+  assert.equal(reading.parentNode, null);
+});
 
 for (const mode of ['events', 'traces']) test(`${mode}: configured names precede IPs and update cached history without closing JSON`, () => {
   const {app, container} = harness();
