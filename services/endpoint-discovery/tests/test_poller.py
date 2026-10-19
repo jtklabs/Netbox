@@ -3,7 +3,8 @@ import json
 import httpx
 import pytest
 
-from discovery.poller import Outbox, cycle
+from discovery.outbox import Outbox
+from discovery.poller import cycle
 from discovery.poller_url import secure_url
 from discovery.schemas import Report, Target
 
@@ -87,7 +88,7 @@ def test_disconnected_cycle_collects_all_targets_without_repeated_upload_timeout
             return httpx.Response(200, json={"items": [t.model_dump() for t in targets]})
         return httpx.Response(503)
 
-    monkeypatch.setattr(poller, "collect", lambda *args: payload())
+    monkeypatch.setattr(poller, "collect", lambda *args, **kwargs: payload())
     with httpx.Client(base_url="https://test/", transport=httpx.MockTransport(offline)) as client:
         assert cycle(client, box, {"default": {}}) is False
     assert calls == ["POST", "GET"]

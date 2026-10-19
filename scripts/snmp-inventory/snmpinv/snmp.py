@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
@@ -192,12 +193,13 @@ class CredentialSession:
     """
 
     def __init__(self, credential: Credential, timeout: int = 5, retries: int = 1,
-                 use_bulk: bool = True, max_repetitions: int = 25):
+                 use_bulk: bool = True, max_repetitions: int = 25, deadline: float | None = None):
         self.credential = credential
         self.timeout = timeout
         self.retries = retries
         self.use_bulk = use_bulk
         self.max_repetitions = max_repetitions
+        self.deadline = deadline
         # Set once anything at all comes back from the host. It is what lets a
         # GETBULK that goes unanswered be told apart from a host that is simply
         # not there — see walk().
@@ -236,6 +238,13 @@ class CredentialSession:
         env["MIBS"] = ""
         return env
 
+    def _budget(self, default: float) -> float:
+        """Optional monotonic deadline shared across all walks for a device."""
+        remaining = default if self.deadline is None else min(default, self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise SnmpTimeoutError("device collection time budget exhausted")
+        return remaining
+
     def _run(self, tool: str, host: str, oid: str, numeric_timeticks: bool = True) -> str:
         if self._dir is None:
             raise RuntimeError("CredentialSession must be used as a context manager")
@@ -268,7 +277,7 @@ class CredentialSession:
                 text=True,
                 # A hung agent should not hang the scan. net-snmp's own -t/-r
                 # bound each request, but this bounds the whole walk.
-                timeout=max(30, self.timeout * (self.retries + 1) * 12),
+                timeout=self._budget(max(30, self.timeout * (self.retries + 1) * 12)),
             )
         except subprocess.TimeoutExpired as exc:
             raise SnmpTimeoutError(f"{tool} against {host} exceeded its overall time budget") from exc
@@ -370,7 +379,7 @@ class CredentialSession:
         argv += oids
         try:
             proc = subprocess.run(argv, env=self._env(), capture_output=True, text=True,
-                                  timeout=max(30, self.timeout * (self.retries + 1) * 4))
+                                  timeout=self._budget(max(30, self.timeout * (self.retries + 1) * 4)))
         except subprocess.TimeoutExpired as exc:
             raise SnmpTimeoutError(f"snmpget against {host} timed out") from exc
         # snmpget returns non-zero when *any* requested OID is absent, which is

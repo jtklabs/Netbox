@@ -36,6 +36,9 @@ During an API outage pollers use cached assignments for up to seven days.
   PostgreSQL device locks, and revision fencing for changed assignments.
 - Persistent local SQLite outbox, retry across restarts, bounded queued payload
   storage, and retained quarantine for rejected reports.
+- Bounded concurrent collection with independent per-device schedules, staggered
+  starts, device-wide deadlines and failure backoff. API uploads and assignment
+  refresh run separately from SNMP collection.
 - Poller heartbeat and per-device/table health, including pending collections.
 - Docker Compose and an Ansible role for Linux systemd hosts.
 
@@ -66,8 +69,10 @@ built-in SNMP collector conservatively reports an entirely empty table as
 `unsupported`: SNMP cannot reliably distinguish no rows from a denied view.
 Prior observations then become stale instead of being reported as absent.
 
-The default stale threshold is 900 seconds; polling defaults to 300 seconds
-**plus cycle duration**. Increase the threshold for slower sites. Raw complete
+The default stale threshold is 900 seconds; polling targets a **60-second
+start-to-start interval per device**. The default is 32 collection workers per
+poller and two independent upload workers. Increase the stale threshold if the
+observed collection times and queue lag require it. Raw complete
 walks are not retained. Daily pruning deletes observation intervals whose last
 sighting is older than 90 days, including abandoned current rows, and delivery
 receipts older than the seven-day replay window plus one day. These defaults
@@ -115,6 +120,11 @@ Poller settings:
 discovery_mode: poller
 discovery_url: https://discovery.example.internal
 discovery_poller_token: "{{ vault_branch_1_token }}"
+discovery_poll_seconds: 60
+discovery_workers: 32
+discovery_upload_workers: 2
+discovery_target_refresh_seconds: 60
+discovery_device_timeout_seconds: 120
 discovery_snmp_credentials:
   default:
     security_name: endpoint-reader
@@ -295,6 +305,84 @@ backend client that verifies TLS, refuses redirects, and iterates history pages.
 The other portal's source is needed to add its own search screen and navigation;
 the discovery API itself has no dependency on that application.
 
+## Concurrent polling and fleet sizing
+
+Each poller maintains a due time for every assigned device. It dispatches up to
+`DISCOVERY_WORKERS` devices concurrently (default 32, range 1–256), without
+waiting for the slowest device to finish a fleet sweep. Contexts on one device
+run serially. Devices sharing a management address and SNMP port also cannot
+overlap on the same poller. Keep one poller process per assignment/spool.
+
+`DISCOVERY_POLL_SECONDS` is now the desired **start-to-start** interval, default
+60 and minimum 30 seconds. Upgrading from an explicit 300-second setting keeps
+that configured interval; change it to 60 to enable the faster cadence. Initial
+starts are distributed across one interval using stable device phases. If
+capacity is insufficient, due devices queue fairly; they do not create an
+unbounded future backlog or overlap an already running device. A poll that
+exceeds its interval resumes after completion rather than spawning a catch-up
+burst. Failed devices back off exponentially, capped at the greater of the
+configured interval or 15 minutes, and reset their backoff after success.
+
+All contexts and walks for a device share `DISCOVERY_DEVICE_TIMEOUT_SECONDS`
+(default 120, range 1–600). The shared transport bounds each child process by
+the remaining monotonic budget. It retains its previous behavior for inventory
+scanner callers that do not supply a deadline. Observation ages include time
+spent collecting a context, not just time since its report finished.
+
+API traffic uses independent workers: `DISCOVERY_UPLOAD_WORKERS` (default 2,
+range 1–16) sends reports over separate HTTPS connections, and assignments refresh
+every `DISCOVERY_TARGET_REFRESH_SECONDS` (default 60, minimum 5). Each uploader
+leases a different durable outbox row. Delivery remains ordered for each device,
+so a newer snapshot cannot overtake buffered movement history. Other devices
+continue uploading while one device's report is in flight or waiting to retry.
+A crash leaves the row for replay after
+the two-minute lease expires; server idempotency handles uncertain deliveries.
+Server errors pause delivery with backoff while collection continues into the
+outbox. Once its cap is reached, new collection admission pauses, completed
+reports stay in a bounded memory queue, and uploads continue trying to free
+space. An explicit rejected authorization pauses new collection, even if cached
+assignments are available. Removed targets stop being scheduled; already running
+work finishes under its old revision and remains subject to server-side checks.
+
+The poller writes `/spool/status.json` and logs a count/timing summary every 30
+seconds. It includes assigned/active/due device counts, maximum queue lag, mean
+and p95 worker duration, interval overruns, failed polls, pending/quarantined
+reports, spool bytes, and whether spool pressure is blocking admission. Worker
+durations include local queue/storage backpressure. No addresses or credentials
+are included. These are local operational metrics; the central collection API
+continues to expose each table's last successful observation and freshness.
+
+For **1,500 devices**, split assignments by reachability and site. A reasonable
+starting configuration to measure is four pollers with roughly 375 devices and
+32 workers each, targeting 60 seconds. This is a sizing example, not a measured
+fleet guarantee. Estimate occupied collection slots with:
+
+```text
+required busy slots ≈ devices per poller × mean device collection seconds / interval seconds
+```
+
+At 375 devices and a measured 3 seconds per device, the estimate is 18.75 slots
+for a 60-second interval, leaving some room within 32 workers. At 10 seconds,
+it becomes 62.5 slots, requiring more workers/pollers or a longer interval.
+Allow headroom for variance, multiple contexts, SNMP device load, poller CPU,
+WAN latency, upload throughput and central database ingestion. Grow concurrency
+gradually against representative devices. Sustained queue lag, interval
+overruns or a growing upload backlog indicate insufficient capacity. Refreshing
+SNMP does not bypass device MAC/ARP aging or prove that a person is present.
+
+For example, inspect local status without exposing credentials:
+
+```bash
+docker compose -f compose.poller.yaml exec -T poller \
+  python -c 'from pathlib import Path; print(Path("/spool/status.json").read_text())'
+```
+
+`--once` polls all assigned devices once in parallel, without startup staggering,
+then drains delivery or returns failure with reports retained during an outage.
+SIGTERM/SIGINT stop new admission and allow running workers to close. The Docker
+deployment allows 150 seconds for shutdown; increase that grace if configuring
+a device budget above 120 seconds. Spool data already committed remains durable.
+
 ## Operations and limits
 
 - Reader and poller policy changes require API recreation. Rotate one identity
@@ -305,10 +393,12 @@ the discovery API itself has no dependency on that application.
   `reports` table (`rejected=1`) and correct the cause. Do not blindly reassign
   old reports to new scopes. Capacity exhaustion stops new collection and logs
   an error; it does not silently discard evidence. Back up/protect spool files.
-- Collection is sequential per poller. Split large fleets across pollers, and
-  measure cycle duration before choosing the freshness threshold. Reports are
+- Split large fleets across pollers and measure queue lag and worker duration
+  before choosing concurrency and the freshness threshold. Reports are
   bounded to 50,000 entries per table and 16 MiB per request; oversized or
-  incomplete tables fail closed. This release has not been fleet load-tested.
+  incomplete tables fail closed. The scheduler is tested with 1,500 simulated
+  devices, including bounded concurrency and blocked uploads. This does not
+  establish real-device throughput or central database capacity.
 - Standard-MIB coverage is tested with emulated devices. Vendor-specific FDB
   contexts, MLAG/EVPN overlays, wireless client APIs, multi-hop endpoint tracing,
   automatic DNS enrichment, and full Netdisco UI parity are outside this release.

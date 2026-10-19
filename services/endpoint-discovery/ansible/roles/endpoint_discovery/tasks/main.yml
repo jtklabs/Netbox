@@ -5,6 +5,10 @@
       - discovery_mode in ['server', 'poller']
       - discovery_install_dir is match('^/[a-zA-Z0-9_/-]+$')
       - discovery_poll_seconds | int >= 30
+      - discovery_workers | int >= 1 and discovery_workers | int <= 256
+      - discovery_upload_workers | int >= 1 and discovery_upload_workers | int <= 16
+      - discovery_target_refresh_seconds | int >= 5
+      - discovery_device_timeout_seconds | int >= 1 and discovery_device_timeout_seconds | int <= 600
       - discovery_mode != 'server' or discovery_database_url | length > 0
       - discovery_mode != 'server' or discovery_principals | length > 0
       - discovery_mode != 'poller' or discovery_url is match('^https://')

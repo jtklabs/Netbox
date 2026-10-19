@@ -184,7 +184,8 @@ def neighbors(session, host, context, names):
     return result
 
 
-def collect(target, context, credentials):
+def collect(target, context, credentials, deadline=None):
+    observed_at = int(time.time())  # include time spent walking this context in the data's age
     credential = Credential(name=target.credential, context=context.snmp_context, **credentials)
     # authPriv only: no authentication/privacy downgrade on fallback.
     if credential.level() != "authPriv":
@@ -193,7 +194,7 @@ def collect(target, context, credentials):
     host = (f"udp6:[{target.address}]:{target.snmp_port}" if ":" in target.address
             else f"udp:{target.address}:{target.snmp_port}")
     try:
-        with CredentialSession(credential, timeout=3, retries=1) as session:
+        with CredentialSession(credential, timeout=3, retries=1, deadline=deadline) as session:
             names = port_names(session, host)
             try:
                 transit = transit_ports(session, host, names)
@@ -212,4 +213,4 @@ def collect(target, context, credentials):
         tables = [Table(kind=kind, status="error", error="SNMP authentication, transport, or interface collection failed")
                   for kind in context.tables]
     return Report(report_id=str(uuid4()), device_key=target.key, target_revision=target.revision, context=context.key,
-                  observed_at=int(time.time()), tables=tables)
+                  observed_at=observed_at, tables=tables)
