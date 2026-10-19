@@ -3,7 +3,6 @@ import argparse
 import json
 import logging
 import os
-import sqlite3
 import ssl
 import time
 from pathlib import Path
@@ -12,85 +11,16 @@ import httpx
 
 from .collector import collect
 from .poller_url import secure_url
+from .runtime import Runtime
+from .scheduler import Scheduler
 from .schemas import Target
 
 log = logging.getLogger("endpoint-poller")
 
 
-class Outbox:
-    def __init__(self, path, max_bytes=512 * 1024 * 1024):
-        directory = Path(path)
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
-        self.connection = sqlite3.connect(directory / "outbox.sqlite3")
-        os.chmod(directory / "outbox.sqlite3", 0o600)
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.executescript("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY, payload TEXT NOT NULL, rejected INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS assignments (
-                id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, fetched_at INTEGER NOT NULL
-            );
-        """)
-        self.max_bytes = max_bytes
 
-    def check_capacity(self, extra=0):
-        used = self.connection.execute("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM reports").fetchone()[0]
-        if used + extra > self.max_bytes:
-            raise RuntimeError("outbox is full; restore delivery or archive rejected reports")
-
-    def put(self, report):
-        payload = report.model_dump_json()
-        self.check_capacity(len(payload.encode()))
-        with self.connection:
-            self.connection.execute("INSERT INTO reports(payload) VALUES (?)", (payload,))
-
-    def save_targets(self, targets):
-        payload = json.dumps([t.model_dump() for t in targets])
-        with self.connection:
-            self.connection.execute("INSERT OR REPLACE INTO assignments VALUES(1,?,?)", (payload, int(time.time())))
-
-    def cached_targets(self, now=None):
-        row = self.connection.execute("SELECT payload,fetched_at FROM assignments WHERE id=1").fetchone()
-        if not row or (int(time.time()) if now is None else now) - row[1] > 7 * 86400:
-            raise RuntimeError("no recent cached assignments; cannot collect")
-        return [Target.model_validate(t) for t in json.loads(row[0])]
-
-    def flush(self, client):
-        cursor = 0
-        while True:
-            row = self.connection.execute(
-                "SELECT id,payload FROM reports WHERE rejected=0 AND id>? ORDER BY id LIMIT 1", (cursor,)).fetchone()
-            if row is None:
-                return True
-            row_id, payload = row
-            cursor = row_id
-            try:
-                response = client.post("v1/reports", content=payload, headers={"Content-Type": "application/json"})
-            except httpx.HTTPError:
-                return False
-            if response.status_code == 200:
-                try:
-                    body = response.json()
-                except ValueError:
-                    return False
-                if not isinstance(body, dict) or body.get("accepted") is not True:
-                    return False
-                with self.connection:
-                    self.connection.execute("DELETE FROM reports WHERE id=?", (row_id,))
-            elif response.status_code in (403, 409, 413, 422):
-                # Preserve rejected evidence for operator inspection. Continue
-                # delivery for other targets instead of wedging the whole site.
-                with self.connection:
-                    self.connection.execute("UPDATE reports SET rejected=1 WHERE id=?", (row_id,))
-                log.error("report %d quarantined (HTTP %d)", row_id, response.status_code)
-            else:
-                return False
-
-
-def cycle(client, outbox, credentials):
+def cycle(client, outbox, credentials, workers=32):
+    """One parallel collection pass for callers that already own an HTTP client."""
     delivered = outbox.flush(client)
     try:
         response = client.get("v1/targets")
@@ -104,25 +34,22 @@ def cycle(client, outbox, credentials):
         targets = outbox.cached_targets()
         delivered = False
         log.warning("using cached target assignments")
-    failures = 0
-    for target in targets:
-        for context in target.contexts:
-            outbox.check_capacity()
-            profile = credentials.get(target.credential)
-            if profile is None:
-                log.error("credential profile missing for target %s", target.key)
-                failures += 1
-                continue
-            report = collect(target, context, profile)
-            outbox.put(report)
-            failures += sum(table.status == "error" for table in report.tables)
-            # Once delivery fails, collect the rest of the site into the
-            # outbox. Do not spend another network timeout on every target.
+    scheduler = Scheduler(credentials, workers=workers, stagger=False, repeat=False, collector=collect)
+    scheduler.update(targets)
+    try:
+        while True:
+            scheduler.step(outbox)
+            if scheduler.blocked:
+                raise RuntimeError("outbox is full")
             if delivered:
                 delivered = outbox.flush(client)
-    rejected = outbox.connection.execute("SELECT COUNT(*) FROM reports WHERE rejected=1").fetchone()[0]
-    log.info("cycle completed: %d targets, %d collection errors, %d quarantined reports", len(targets), failures, rejected)
-    return delivered and failures == 0 and rejected == 0
+            if (all(s.attempts for s in scheduler.states.values()) and not scheduler.running
+                    and scheduler.results.empty() and scheduler.pending is None):
+                break
+            time.sleep(0.01)
+        return delivered and scheduler.errors == 0 and outbox.stats()["quarantined_reports"] == 0
+    finally:
+        scheduler.close()
 
 
 def main():
@@ -130,6 +57,7 @@ def main():
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     os.umask(0o077)
     url = secure_url(os.environ["DISCOVERY_URL"])
     token = Path(os.environ["DISCOVERY_TOKEN_FILE"]).read_text().strip()
@@ -143,22 +71,21 @@ def main():
             raise ValueError("invalid SNMP credential profile")
         if not all(profile.get(k) for k in ("security_name", "auth_passphrase", "priv_passphrase")):
             raise ValueError("SNMPv3 authPriv credentials are required")
-    outbox = Outbox(os.getenv("DISCOVERY_SPOOL_DIR", "/var/lib/endpoint-discovery"))
-    interval = int(os.getenv("DISCOVERY_POLL_SECONDS", "300"))
-    if interval < 30:
-        raise ValueError("poll interval must be at least 30 seconds")
     trust = ssl.create_default_context(cafile=os.getenv("DISCOVERY_CA_FILE"))
-    with httpx.Client(base_url=url + "/", headers={"Authorization": "Bearer " + token},
-                      verify=trust, follow_redirects=False, timeout=60) as client:
-        while True:
-            try:
-                healthy = cycle(client, outbox, credentials)
-            except (RuntimeError, httpx.HTTPError):
-                log.error("cycle failed; inspect connectivity, authorization, and outbox capacity")
-                healthy = False
-            if args.once:
-                return 0 if healthy else 1
-            time.sleep(interval)
+
+    def client_factory():
+        return httpx.Client(base_url=url + "/", headers={"Authorization": "Bearer " + token},
+                            verify=trust, follow_redirects=False, timeout=60)
+
+    runtime = Runtime(
+        os.getenv("DISCOVERY_SPOOL_DIR", "/var/lib/endpoint-discovery"), credentials, client_factory,
+        workers=int(os.getenv("DISCOVERY_WORKERS", "32")),
+        interval=int(os.getenv("DISCOVERY_POLL_SECONDS", "60")),
+        upload_workers=int(os.getenv("DISCOVERY_UPLOAD_WORKERS", "2")),
+        refresh_seconds=int(os.getenv("DISCOVERY_TARGET_REFRESH_SECONDS", "60")),
+        device_timeout=int(os.getenv("DISCOVERY_DEVICE_TIMEOUT_SECONDS", "120")), once=args.once,
+    )
+    return runtime.run()
 
 
 if __name__ == "__main__":

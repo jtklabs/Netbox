@@ -7,6 +7,10 @@ DISCOVERY_RETENTION_DAYS={{ discovery_retention_days }}
 {% else %}
 DISCOVERY_URL={{ discovery_url }}
 DISCOVERY_POLL_SECONDS={{ discovery_poll_seconds }}
+DISCOVERY_WORKERS={{ discovery_workers }}
+DISCOVERY_UPLOAD_WORKERS={{ discovery_upload_workers }}
+DISCOVERY_TARGET_REFRESH_SECONDS={{ discovery_target_refresh_seconds }}
+DISCOVERY_DEVICE_TIMEOUT_SECONDS={{ discovery_device_timeout_seconds }}
 {% if discovery_ca_file | length > 0 %}
 DISCOVERY_CA_FILE=/config/ca.pem
 {% endif %}

@@ -9,7 +9,11 @@ discovery_poller_token: ""
 discovery_snmp_credentials: {}
 discovery_principals: []
 discovery_targets: []
-discovery_poll_seconds: 300
+discovery_poll_seconds: 60
+discovery_workers: 32
+discovery_upload_workers: 2
+discovery_target_refresh_seconds: 60
+discovery_device_timeout_seconds: 120
 discovery_stale_seconds: 900
 discovery_retention_days: 90
 discovery_bind_address: 127.0.0.1

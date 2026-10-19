@@ -6,13 +6,18 @@ services:
       context: ../..
       dockerfile: services/endpoint-discovery/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 150s
     entrypoint: [python, -m, discovery.poller]
     environment:
       DISCOVERY_URL: ${DISCOVERY_URL:?Set the HTTPS discovery service address}
       DISCOVERY_TOKEN_FILE: /config/poller.token
       DISCOVERY_CREDENTIALS_FILE: /config/snmp.json
       DISCOVERY_SPOOL_DIR: /spool
-      DISCOVERY_POLL_SECONDS: ${DISCOVERY_POLL_SECONDS:-300}
+      DISCOVERY_POLL_SECONDS: ${DISCOVERY_POLL_SECONDS:-60}
+      DISCOVERY_WORKERS: ${DISCOVERY_WORKERS:-32}
+      DISCOVERY_UPLOAD_WORKERS: ${DISCOVERY_UPLOAD_WORKERS:-2}
+      DISCOVERY_TARGET_REFRESH_SECONDS: ${DISCOVERY_TARGET_REFRESH_SECONDS:-60}
+      DISCOVERY_DEVICE_TIMEOUT_SECONDS: ${DISCOVERY_DEVICE_TIMEOUT_SECONDS:-120}
       DISCOVERY_CA_FILE: ${DISCOVERY_CA_FILE:-}
     volumes:
       - ./config:/config:ro

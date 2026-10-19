@@ -11,7 +11,7 @@ WorkingDirectory={{ discovery_service_dir }}
 ExecStart=/usr/bin/docker compose -f {{ discovery_compose_file }} up -d --remove-orphans
 ExecStop=/usr/bin/docker compose -f {{ discovery_compose_file }} stop
 TimeoutStartSec=180
-TimeoutStopSec=90
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target
