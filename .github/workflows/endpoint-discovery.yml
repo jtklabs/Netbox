@@ -1,0 +1,49 @@
+name: Endpoint discovery
+on:
+  pull_request:
+    paths:
+      - services/endpoint-discovery/**
+      - scripts/snmp-inventory/snmpinv/snmp.py
+      - scripts/snmp-inventory/tests/emulator/**
+      - .github/workflows/endpoint-discovery.yml
+  push:
+    branches: [main]
+    paths:
+      - services/endpoint-discovery/**
+      - scripts/snmp-inventory/snmpinv/snmp.py
+      - scripts/snmp-inventory/tests/emulator/**
+      - .github/workflows/endpoint-discovery.yml
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: [5432:5432]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime and Linux test images
+        run: |
+          docker build -f services/endpoint-discovery/Dockerfile -t endpoint-discovery:test .
+          docker build -f services/endpoint-discovery/Dockerfile.test -t endpoint-discovery:tests .
+      - name: PostgreSQL and real SNMPv3 tests
+        run: >-
+          docker run --rm --network host
+          -e TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5432/postgres
+          endpoint-discovery:tests
+      - name: Lint
+        run: >-
+          docker run --rm --entrypoint ruff endpoint-discovery:tests check
+          --config /workspace/services/endpoint-discovery/pyproject.toml
+          /app/discovery /workspace/services/endpoint-discovery/tests
+      - name: Ansible syntax
+        run: >-
+          docker run --rm --entrypoint ansible-playbook endpoint-discovery:tests
+          -i /workspace/services/endpoint-discovery/ansible/inventory.example.ini
+          /workspace/services/endpoint-discovery/ansible/deploy.yml --syntax-check

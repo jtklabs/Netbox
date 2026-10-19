@@ -1,0 +1,6 @@
+---
+- name: Restart endpoint discovery
+  ansible.builtin.systemd_service:
+    name: endpoint-discovery.service
+    daemon_reload: true
+    state: restarted

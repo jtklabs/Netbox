@@ -1,0 +1,3 @@
+[
+  {"site_id": 1, "scope": "example/branch-1", "poller": "branch-1-poller", "credential": "default"}
+]

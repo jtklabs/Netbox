@@ -5,6 +5,9 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the gated plan and [VERSIONS.md](VERS
 
 Standalone companion services:
 
+- [Endpoint discovery](services/endpoint-discovery/README.md): read-only remote
+  SNMPv3 collectors, an independent PostgreSQL observation database, and a scoped
+  portal API for MAC/IP-to-port lookup and history. Includes Ansible deployment.
 - [Path monitor](services/path-monitor/README.md): one-second traceroutes to a
   configured destination list, persistent path-change history, multipath-aware
   detection, and a reporting dashboard. Deploy independently of NetBox.
