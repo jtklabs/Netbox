@@ -80,6 +80,12 @@ are configurable. History is bounded evidence, not a permanent audit archive.
 
 ## Deploy using Ansible
 
+For production deployment, give the implementing agent
+[the deployment handoff](DEPLOYMENT-HANDOFF.md). It covers inventory, secrets,
+networking, rollout, validation, and adaptation of the existing role. Follow
+[the RDS setup runbook](RDS-SETUP.md) to create a new logical database and login
+on the existing RDS PostgreSQL instance before deploying the server.
+
 Prerequisites: Linux with systemd, Docker Engine and Compose v2 installed;
 an existing PostgreSQL database; and an HTTPS reverse proxy in front of the API.
 The role builds the service from this checkout on each host, installs protected
@@ -95,6 +101,8 @@ Server settings, with illustrative placeholders replaced:
 ```yaml
 discovery_mode: server
 discovery_database_url: "{{ vault_discovery_database_url }}"
+# Controller-local RDS CA bundle; URL uses sslrootcert=/config/database-ca.pem:
+discovery_database_ca_file: /secure/pki/rds-ca-bundle.pem
 discovery_principals:
   - name: network-portal
     role: reader

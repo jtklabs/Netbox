@@ -115,6 +115,16 @@
   when: discovery_ca_file | length > 0
   notify: Restart endpoint discovery
 
+- name: Install database CA trust bundle
+  ansible.builtin.copy:
+    src: "{{ discovery_database_ca_file }}"
+    dest: "{{ discovery_service_dir }}/config/database-ca.pem"
+    owner: root
+    group: '10001'
+    mode: '0640'
+  when: discovery_mode == 'server' and discovery_database_ca_file | length > 0
+  notify: Restart endpoint discovery
+
 - name: Check whether the service image exists
   ansible.builtin.command: docker image inspect endpoint-discovery:local
   register: discovery_image
