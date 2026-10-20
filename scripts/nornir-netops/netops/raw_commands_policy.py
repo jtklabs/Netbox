@@ -1,4 +1,7 @@
 """Raw command standard validation; keep worker and NetBox copies identical."""
+import re
+
+
 PLATFORMS = {'cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos', 'juniper_junos'}
 BUNDLE_KEYS = {'commands', 'show', 'expect', 'contains', 'reject'}
 SHOW_FILTERS = {'include', 'exclude', 'begin', 'section', 'count', 'match', 'except',
@@ -16,6 +19,23 @@ def validate_raw_commands(settings):
                        or len(line) > 2048 for line in value)):
             raise ValueError(f'{label} must be a list of single-line strings (1–256 entries, at most 2048 characters each).')
 
+    def contains(value, label):
+        if not isinstance(value, list) or len(value) > 256:
+            raise ValueError(f'{label} must be a list of at most 256 literal strings or regex items.')
+        for index, item in enumerate(value):
+            item_label = f'{label}[{index}]'
+            if isinstance(item, str):
+                lines([item], item_label)
+                continue
+            if not isinstance(item, dict) or set(item) != {'regex'}:
+                raise ValueError(f'{item_label} must be a literal string or a mapping with only a regex key.')
+            pattern = item['regex']
+            lines([pattern], item_label + '.regex')
+            try:
+                re.compile(pattern, re.MULTILINE)
+            except (re.error, OverflowError) as exc:
+                raise ValueError(f'{item_label}.regex is invalid: {exc}') from exc
+
     def bundle(value, platform, label):
         mapping(value, BUNDLE_KEYS, label)
         lines(value.get('commands'), label + '.commands')
@@ -30,7 +50,7 @@ def validate_raw_commands(settings):
                            for part in parts[1:])):
                 raise ValueError(f'{label}.show must be one show command with read-only output filters.')
         lines(value.get('expect', []), label + '.expect', False)
-        lines(value.get('contains', []), label + '.contains', False)
+        contains(value.get('contains', []), label + '.contains')
         lines(value.get('reject', []), label + '.reject', False)
         if not any(value.get(key) for key in ('expect', 'contains', 'reject')):
             raise ValueError(f'{label} requires expect, contains or reject checks for audit and verification.')

@@ -71,7 +71,7 @@ def test_checks_are_literal_exact_lines_and_rejected_fragments():
 
 
 @pytest.mark.parametrize('platform', ['cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos'])
-@pytest.mark.parametrize('custom_show', [False, True])
+@pytest.mark.parametrize('custom_show', [False, True, 'regex'])
 def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, monkeypatch, platform, custom_show):
     monkeypatch.setenv('NET_USER', 'operator')
     monkeypatch.setenv('NET_PASS', 'test-password')
@@ -84,6 +84,8 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     if custom_show:
         regional['show'] = 'show interfaces description'
         regional['contains'] = ['{{literal}}']
+        if custom_show == 'regex':
+            regional['contains'] = [{'regex': r'^description \{\{literal\}\}$'}]
         del regional['expect']
         policy['platforms'][platform]['show'] = 'show version'
     policy['platforms'][platform]['regions'] = {'us-east': regional}
@@ -119,6 +121,11 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     assert row['config_before']['show_command'] == regional.get('show', raw.SHOW[platform])
     assert row['read_steps'][0]['command'] == regional.get('show', raw.SHOW[platform])
     assert not state['writes']
+    if custom_show == 'regex':
+        pattern = regional['contains'][0]['regex']
+        assert row['desired'] == ['contains regex: ' + pattern]
+        assert row['config_before']['failed_checks'] == [
+            'missing regex: ' + pattern, 'forbidden text: description old']
     code, row = invoke('--replace', '--apply', '--yes')
     assert code == cli.EXIT_OK and row['verified'] and row['saved']
     assert state['writes'] == [regional['commands']]
@@ -129,6 +136,8 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     code, row = invoke('--replace', '--apply', '--yes')
     assert code == cli.EXIT_FAILED and row['verified'] is False and row['saved'] is False
     assert row['missing_after'] and len(state['saves']) == 1
+    if custom_show == 'regex':
+        assert row['missing_after'][0] == 'missing regex: ' + pattern
     state['output'] = '% Invalid input detected'
     assert invoke('--replace', '--apply', '--yes')[0] == cli.EXIT_FAILED
     state['output'] = ''
@@ -343,3 +352,56 @@ def test_junos_custom_show_does_not_hide_concurrent_config_change(monkeypatch):
     result = run_junos(box, monkeypatch, show='show system information')
     assert result.failed and 'configuration changed' in str(result.exception)
     assert 'set system host-name new' not in box.calls and 'commit' not in box.calls
+
+
+@pytest.mark.parametrize('regional', [False, True])
+def test_contains_mixes_literal_and_regex_checks(regional):
+    policy = settings()
+    checks = {'commands': ['description new'], 'contains': [
+        '[literal].*', {'regex': r'^MACs: hmac-sha2-(?:256|512)$'},
+        {'regex': r'(?i)^hostname: switch\d+$'}]}
+    if regional:
+        policy['platforms']['cisco_ios']['regions'] = {'us': checks}
+    else:
+        policy['platforms']['cisco_ios'] = checks
+    validate_raw_commands(policy)
+    output = 'header\n[literal].*\nMACs: hmac-sha2-512\nHOSTNAME: switch12\nfooter'
+    assert raw.missing(output, checks) == []
+    assert raw.missing(output.replace('512', '512-weak'), checks) == [
+        r'missing regex: ^MACs: hmac-sha2-(?:256|512)$']
+    assert raw.missing(output.replace('[literal].*', 'literal'), checks) == [
+        'missing text: [literal].*']
+    assert raw.missing(output.replace('MACs:', 'macs:'), checks) == [
+        r'missing regex: ^MACs: hmac-sha2-(?:256|512)$']
+
+
+def test_contains_regex_search_and_multiline_semantics():
+    assert raw.missing('prefix hmac-sha2-512 suffix', {'contains': [{'regex': r'\bhmac-sha2-512\b'}]}) == []
+    assert raw.missing('header\nline\nfooter', {'contains': [{'regex': '^line$'}]}) == []
+    assert raw.missing('first\nsecond', {'contains': [{'regex': '^first.*second$'}]})
+    assert raw.missing('first\nsecond', {'contains': [{'regex': '(?s)^first.*second$'}]}) == []
+
+
+@pytest.mark.parametrize('regional', [False, True])
+@pytest.mark.parametrize('item', [
+    {}, {'regex': None}, {'regex': False}, {'regex': []}, {'regex': 123},
+    {'regex': ''}, {'regex': '  '}, {'regex': 'a\nb'}, {'regex': 'a' * 2049},
+    {'regex': '['}, {'regex': r'\q'}, {'regex': r'a{999999999999999999999}'},
+    {'regex': 'ok', 'flags': 'i'}, {'regexp': 'ok'},
+])
+def test_contains_rejects_invalid_regex_items_before_execution(item, regional):
+    policy = settings()
+    checks = {'commands': ['description new'], 'contains': [item]}
+    if regional:
+        policy['platforms']['cisco_ios']['regions'] = {'us': checks}
+    else:
+        policy['platforms']['cisco_ios'] = checks
+    with pytest.raises(ValueError, match=r'contains\[0\]'):
+        raw.build_desired(SimpleNamespace(standards=Standards(document={'raw_commands': policy})))
+
+
+def test_contains_limits_mixed_check_count():
+    policy = settings()
+    policy['platforms']['cisco_ios']['contains'] = [{'regex': '^ok$'}] * 257
+    with pytest.raises(ValueError, match='256'):
+        validate_raw_commands(policy)

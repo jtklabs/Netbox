@@ -19,6 +19,36 @@ from .factories import feature_standards
 
 
 class RevisionTest(GridTest):
+    def test_raw_contains_regex_is_validated_and_pinned(self):
+        text = r"""raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      commands: [description new]
+      contains:
+        - '[literal].*'
+        - regex: '^description new$'
+      regions:
+        us-east:
+          commands: [description regional]
+          contains:
+            - regex: '^description regional\b'
+"""
+        standard = ConfigStandard.objects.create(name='Raw regex', check_type='netops',
+            definition_yaml=text, auto_remediable=True)
+        snapshot = snapshot_for_device(self.user, self.devices['sw1'], ['raw_commands'], 'replace', audit=True)
+        self.assertEqual(snapshot['document'], parse_definition(text))
+        self.assertEqual(standard.revisions.first().definition['settings'], parse_definition(text))
+        standard.definition_yaml = text.replace('^description new$', '^description updated$')
+        standard.save()
+        self.assertEqual(snapshot['document']['raw_commands']['platforms']['cisco_ios']['contains'],
+                         ['[literal].*', {'regex': '^description new$'}])
+        for bad in (text.replace('^description new$', '['),
+                    text.replace('^description regional\\b', '['),
+                    text.replace("regex: '^description new$'", 'regex: false')):
+            with self.subTest(definition=bad), self.assertRaises(ValidationError):
+                parse_definition(bad)
+
     def test_raw_commands_snapshot_policy_and_revision(self):
         text = """raw_commands:
   enabled: true

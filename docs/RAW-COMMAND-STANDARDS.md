@@ -49,9 +49,38 @@ reject:
   - hmac-sha1
 ```
 
-`expect` matches complete lines in the selected show output, ignoring leading and trailing whitespace. `contains` requires literal text anywhere in the output; `reject` forbids it. Substring checks are case-sensitive. None uses regular expressions. Choose checks from the device's actual displayed configuration: spelling and algorithm order may differ from the input commands. All expected lines and required fragments must exist, and every rejected fragment must be absent. A check covers only what it states; it does not infer encryption or MAC security from a command.
+`expect` matches complete lines in the selected show output, ignoring leading and trailing whitespace. `contains` accepts literal strings and explicit `regex` items; `reject` forbids literal text anywhere in the output. Plain strings remain literal and case-sensitive, including strings containing regex punctuation. `expect` and `reject` do not accept regex items. Choose checks from the device's actual displayed configuration: spelling and algorithm order may differ from the input commands. All expected lines, required fragments and regex matches must exist, and every rejected fragment must be absent. A check covers only what it states; it does not infer encryption or MAC security from a command.
 
 By default, the worker reads `show running-config` on IOS, EOS, ASA and NX-OS, and `show configuration | display set` on Junos. Set `show` within a platform or regional bundle to select a different command. Checks are against that command's output; indentation is not a hierarchy selector. Choose sufficiently specific lines, and use the typed feature where its parser is needed to distinguish sections. An empty or rejected read fails instead of being considered compliant. Reports retain failed-check evidence rather than the full configuration.
+
+### Regex checks in contains
+
+Use a `regex` mapping for any `contains` item that needs pattern matching. Literal and regex checks can be mixed in the same list, in platform defaults or regional bundles:
+
+```yaml
+raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      commands:
+        - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
+      show: show running-config | include ^ip ssh server algorithm mac
+      contains:
+        - hmac-sha2-512
+        - regex: '^\s*ip ssh server algorithm mac(?:[ \t]+hmac-sha2-(?:256|512))+[ \t]*\r?$'
+      reject:
+        - hmac-sha1
+```
+
+This pattern requires a complete server MAC configuration line containing only `hmac-sha2-256` and/or `hmac-sha2-512`. The separate literal item also requires `hmac-sha2-512` somewhere in the selected output. Checks describe the displayed output; they do not parse other SSH settings or infer their security.
+
+Patterns use Python regular expression syntax and search the entire show response. Multiline mode is enabled: `^` and `$` anchor to individual lines. Matching is case-sensitive unless the pattern starts with `(?i)`. A dot does not match a newline unless `(?s)` is enabled. Output whitespace is preserved; include indentation or carriage returns in the pattern when needed. Single-quote YAML patterns so backslashes such as `\s` and `\b` reach the regex unchanged.
+
+Every item must pass. Regex matching applies to read-only audits and the readback after remediation. A failed pattern is reported as `missing regex: <pattern>` in `failed_checks` and, after an apply, `missing_after`. Reports label the desired check as `contains regex: <pattern>`. Existing literal failures still use `missing text: <text>`.
+
+A regex item supports only the `regex` key with a nonempty, single-line string up to 2,048 characters. Each `contains` list supports up to 256 items. Invalid regex syntax is rejected when NetBox validates the definition and when the worker loads the standard, before connecting to devices. Use specific patterns; a broad expression such as `.*` can pass without proving the intended setting exists.
+
+Deploy the updated Compliance plugin and netops worker **0.2.17** or newer before using regex entries. No database migration is required. Existing plain-text standards retain their behavior; older workers reject regex items during validation.
 
 ### Audit a show command
 

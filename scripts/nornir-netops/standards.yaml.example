@@ -301,8 +301,11 @@ raw_commands:
         - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
       expect:
         - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
-      # Optional literal substring checks, combined with the exact-line checks.
-      contains: [hmac-sha2-512]
+      # Mix literal text and explicit regex checks; every item must match.
+      # Single quotes preserve regex backslashes. ^/$ match individual lines.
+      contains:
+        - hmac-sha2-512
+        - regex: '^\s*ip ssh server algorithm mac(?:[ \t]+hmac-sha2-(?:256|512))+[ \t]*\r?$'
       reject: [hmac-sha1]
       regions:
         us-east:
