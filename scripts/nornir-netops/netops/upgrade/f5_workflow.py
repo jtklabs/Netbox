@@ -20,7 +20,7 @@ from nornir.core.task import Result
 
 from .. import cancellation
 from .. import f5_waf
-from . import checks, f5, f5_drain, f5_requests
+from . import checks, f5, f5_drain, f5_requests, f5_validation
 from .images import local_image
 from .profile import F5_IMAGE, f5_version
 from .workflow import comparison_report, converge, device_lock, settle
@@ -314,6 +314,7 @@ def upgrade_device(task, profile, options, reporter):
 
     started = time.monotonic()
     phase_step, phase_started = 1, started
+    validation_gate = None
     phases = {"connecting": 1, "saving_config": 1, "precheck": 1, "precheck_complete": 1, "ready": 1,
               "staging": 2, "image_verification": 2, "backing_up": 3, "failing_over": 4, "installing": 4,
               "draining": 4, "rebooting": 5, "reconnecting": 6, "settling": 7,
@@ -331,6 +332,12 @@ def upgrade_device(task, profile, options, reporter):
         phase = {"step": phase_step, "total": 2 if stage_only else 9, "name": labels[phase_step],
                  "elapsed_seconds": int(now - started), "phase_elapsed_seconds": int(now - phase_started)}
         payload["progress_summary"] = {**payload.get("progress_summary", {}), "phase": phase}
+        payload["progress_summary"].setdefault("awaiting_manual_validation", False)
+        payload["progress_summary"]["manual_validation_step"] = (
+            phase_step if validation_gate == phase_step and stage in ('validating', 'converging', 'waf_requests')
+            and cancellation.validation_control() else None)
+        if plan.get('validation_overrides'):
+            payload["progress_summary"]["validation_overrides"] = dict(plan['validation_overrides'])
         message = f"Step {phase_step}/{phase['total']} · {labels[phase_step]} · {int(now - started)}s elapsed: {message}"
         if plan.get('rollback_plan'):
             payload['progress_summary']['rollback_plan'] = dict(plan['rollback_plan'])
@@ -475,12 +482,19 @@ def upgrade_device(task, profile, options, reporter):
                 settle(emit, options)
                 def finish_validation(after, findings):
                     from . import checks
-                    emit('validating', 'WAF and health checks passed twice; restoring traffic',
+                    emit('validating', ('Health validation manually passed; restoring traffic'
+                                       if plan.get('validation_overrides', {}).get('8') else
+                                       'WAF and health checks passed twice; restoring traffic'),
                          {'post_before_restore': after, 'findings_before_restore': findings})
                     try:
                         f5_drain.release_traffic(client, drain, emit)
+                        if plan.get('validation_overrides', {}).get('8'):
+                            restored = {row['name']: row['enabled'] for row in f5_drain.inventory(client)}
+                            if any(restored.get(row['name']) != row['enabled'] for row in drain['virtual_servers']):
+                                raise RuntimeError('Original virtual-server states could not be confirmed after restoration')
                         final = f5.collect(client, lambda path: emit('postcheck', path))
                         final_findings = checks.compare(before, final) + target_findings(final, profile, plan)
+                        final_findings = f5_validation.findings_after_override(final_findings, plan)
                         emit('validating', 'Final collection after restoring original virtual-server states',
                              {'post': final, 'findings': final_findings,
                               'progress_summary': {'counts': final['metrics']['counts'],
@@ -498,18 +512,33 @@ def upgrade_device(task, profile, options, reporter):
                         f5_drain.disable_again(client, drain, emit)
                         raise
                 def finish_upgrade(after, findings):
+                    nonlocal validation_gate
+                    # Close the UI gate before moving on. Its report response
+                    # carries any operator request that won the race with this
+                    # transition, including when checks just passed naturally.
+                    validation_gate = None
+                    emit('validating', 'Health validation gate finished')
+                    f5_validation.forced(plan, 8, emit)
+                    findings = f5_validation.findings_after_override(findings, plan)
                     if drain:
                         after, findings = finish_validation(after, findings)
                     # This gate runs outside restoration's failure handler: a
                     # quiet log must not disable traffic that passed health checks.
+                    validation_gate = 9
                     f5_requests.wait_for_request(client, after, plan, options, emit)
+                    validation_gate = None
+                    emit('waf_requests', 'WAF request-log gate finished')
+                    if f5_validation.forced(plan, 9, emit):
+                        plan['waf_requests']['status'] = 'manually_passed'
                     return after, findings
+                validation_gate = 8
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
                                 lambda after: target_findings(after, profile, plan),
                                 compare_snapshots=(lambda before, after, **kwargs:
                                     f5_drain.compare_while_drained(before, after, drain, **kwargs)) if drain else None,
-                                on_validated=finish_upgrade)
+                                on_validated=finish_upgrade,
+                                validation_override=lambda **kwargs: f5_validation.forced(plan, 8, emit, **kwargs))
             finally:
                 close(client)
     except Exception as exc:

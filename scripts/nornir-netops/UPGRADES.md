@@ -730,6 +730,10 @@ sync status is not what the plan expected, since sync is normally pending
 until both members are upgraded. Configuration text is not compared; the UCS
 is the configuration record.
 
+Nodes whose names contain `_auto` are dynamic and are excluded from normalized
+node tables, counts and baseline comparisons. Their raw API responses remain in
+the private archive. Static node changes still fail validation.
+
 When ASM is provisioned, prechecks also require a complete, paginated WAF
 policy inventory and ASM readiness. Every returned policy is counted, including
 parents, children and other types, even without active or enforcement fields.
@@ -763,7 +767,9 @@ For slow installation and reconnect operations as well, use
 `--install-timeout 7200 --reload-timeout 7200 --validation-timeout 7200`:
 these are separate two-hour windows for installation, reconnect and validation,
 with the configured settling interval before validation. The lab worker uses
-these settings. Timeout produces a failed validation/recovery result, never an
+these settings. For scheduled F5 jobs using worker 0.2.4 and the updated plugin,
+a health validation timeout waits for a manual pass or cancellation as described
+below. Other timeouts produce a failed validation/recovery result, never an
 automatic rollback. The previous boot volume remains recorded in the plan.
 
 After health validation and restoration of the original virtual-server states,
@@ -783,11 +789,37 @@ It does not verify that every application is serving traffic.
 
 This step receives a **fresh** `validation_timeout` window, separate from health
 validation, and polls at `--poll-interval`. Transient HTTP/401 errors are retried
-with the existing token-refresh behavior until that window expires. Timeout
-leaves the job in recovery required and keeps already validated/restored traffic
-enabled. It does not trigger another drain or rollback. Local WAF request
+with the existing token-refresh behavior until that window expires. Scheduled
+jobs using worker 0.2.4 and the updated plugin then wait for a manual pass or
+cancellation; other runs end in recovery required. Already validated/restored
+traffic stays enabled. This does not trigger another drain or rollback. Local WAF request
 logging and incoming requests are required; remote-only logging cannot satisfy
 this check. The worker does not change logging settings or generate traffic.
+
+### Manually passing F5 validation
+
+On the running NetBox job, enter a reason and choose **Force pass step 8** to
+accept health differences and restore the original enabled virtual servers.
+Step 9 remains a separate gate: **Force pass step 9** accepts the missing WAF
+request log and completes the unit with status `completed_with_warnings`, which
+is a successful outcome for scheduling. Restore/save failures still require
+recovery. Prechecks, install, reboot and reconnect cannot be forced through.
+
+Only the current validation step can be overridden. Each request records the
+operator, UTC timestamp and reason in the job; the worker records acceptance in
+its progress log, archive and final comparison report. Observed differences
+remain available rather than being reported as an automatic clean pass.
+
+After either validation window expires, an upgraded scheduled worker stops
+retrying that check and waits for **Force pass** or **Cancel running job**.
+The job retains its worker slot and device reservation. Step 8 keeps drained
+traffic disabled while waiting; step 9 keeps restored traffic enabled.
+Standalone CLI runs and workers connected to an older plugin retain their
+existing timeout behavior.
+
+Deploy the Discovery plugin, migration `0026_f5_validation_overrides`, and worker
+**0.2.4** together. Operators need view, change and apply permissions for the job.
+Already-running older workers and jobs that have ended cannot accept overrides.
 
 NetBox job messages include the current step out of nine, its name and elapsed
 time: prechecks, image staging, UCS backup, drain/install, reboot,

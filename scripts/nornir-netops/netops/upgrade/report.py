@@ -194,6 +194,12 @@ def build(host, before, after, findings, plan, status):
              "", "## Findings", "",
              f"Errors ({len(errors)}):"] + [f"- {checks.describe_finding(f)}" for f in errors] + ["", f"Warnings ({len(warnings)}):"] + [
              f"- {f['check']}: {f.get('message', f.get('interface', ''))}" for f in warnings] + [""]
+    if plan.get('validation_overrides'):
+        lines += ["## Manual validation", "",
+                  "The following checks were accepted by an operator, not automatically validated.", ""]
+        for step, record in plan['validation_overrides'].items():
+            lines.append(f"- Step {step}: {record['username']} at {record['timestamp']} — {record['reason']}")
+        lines.append("")
     lines += software_section(before, after)
     lines += config_section(before, after, plan.get('approved_profile', {}).get('skip_running_config_check', False))
     lines += delta_section("Tables", before.get("tables", {}), after.get("tables", {}))

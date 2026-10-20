@@ -494,7 +494,11 @@ class UpgradeJobView(ObjectView):
         from .upgrade_backups import backup_context
         backup = backup_context(instance, request.user)
         from .f5_job_rollback import context as rollback_context
+        from .f5_job_validation import PERMISSIONS as validation_permissions
         return {'profile_text': json.dumps(instance.profile, indent=2),
+                'manual_validation_step': (instance.manual_validation_step
+                    if request.user.has_perms(validation_permissions) and UpgradeJob.objects.restrict(request.user, 'change')
+                    .restrict(request.user, 'apply').filter(pk=instance.pk).exists() else None),
                 'f5_rollback': rollback_context(instance, request.user),
                 'ucs_backups': [backup] if backup else [],
                 'waiting': waiting_details(instance, request.user),
@@ -526,6 +530,23 @@ class UpgradeRollbackView(PermissionRequiredMixin, View):
         except (queue.QueueError, ValidationError) as exc:
             messages.error(request, str(exc))
             return self.get(request, pk)
+
+
+class UpgradeForceValidationView(PermissionRequiredMixin, View):
+    from .f5_job_validation import PERMISSIONS as permission_required
+    raise_exception = True
+
+    def post(self, request, pk):
+        from .f5_job_validation import force_pass
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'view')
+                                 .restrict(request.user, 'change').restrict(request.user, 'apply'), pk=pk)
+        try:
+            step = int(request.POST.get('step', ''))
+            force_pass(request.user, pk, step, request.POST.get('reason', ''))
+            messages.success(request, f'Step {step} force pass requested; waiting for the worker to continue.')
+        except (queue.QueueError, ValueError) as exc:
+            messages.error(request, str(exc))
+        return redirect(entry.get_absolute_url())
 
 
 class UpgradeCancelView(PermissionRequiredMixin, View):

@@ -52,6 +52,7 @@ class UpgradeJob(PrimaryModel):
     stage = models.CharField(max_length=50, blank=True)
     message = models.CharField(max_length=1000, blank=True)
     summary = models.JSONField(default=dict, blank=True)
+    validation_overrides = models.JSONField(default=dict, blank=True, editable=False)
     events = models.JSONField(default=list, blank=True)
     run_id = models.CharField(max_length=100, blank=True)
     # Frozen at scheduling, like the address and poller: the redundancy groups
@@ -92,6 +93,20 @@ class UpgradeJob(PrimaryModel):
     def can_request_cancel(self):
         return (self.supports_cancellation and self.status in ACTIVE
                 and not self.completed_at and not self.cancel_requested_at)
+
+    @property
+    def manual_validation_step(self):
+        step = self.summary.get('manual_validation_step')
+        phase = self.summary.get('phase', {})
+        if (self.operation == 'upgrade' and str(self.profile.get('image', '')).lower().endswith('.iso')
+                and self.status == 'running' and self.started_at and not self.completed_at
+                and not self.cancel_requested_at and self.supports_cancellation
+                and not self.heartbeat_stale and type(step) is int and step in (8, 9)
+                and isinstance(phase, dict) and phase.get('step') == step
+                and self.stage in ('validating', 'converging', 'waf_requests')
+                and str(step) not in self.validation_overrides):
+            return step
+        return None
 
     @property
     def heartbeat_stale(self):

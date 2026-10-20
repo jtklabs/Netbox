@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import time
 
 from .. import cancellation
-from . import f5
+from . import f5, f5_validation
 from ..errors import DeviceHTTPError
 
 REQUESTS = ("/mgmt/tm/asm/events/requests?$select=id,requestDatetime"
@@ -56,7 +56,15 @@ def skip_reason(after):
 
 def wait_for_request(client, after, plan, options, emit):
     record = plan.setdefault("waf_requests", {})
-    reason = skip_reason(after)
+    try:
+        reason = skip_reason(after)
+    except ValueError:
+        if cancellation.validation_control() is None:
+            raise
+        # A manually accepted health snapshot can have an unreadable policy
+        # count. Require the log check instead of skipping it or preventing the
+        # operator from reaching the separate step-9 gate.
+        reason = None
     if reason:
         record.update(status="skipped", reason=reason)
         emit("waf_requests", f"Skipping WAF request-log check: {reason}")
@@ -68,6 +76,9 @@ def wait_for_request(client, after, plan, options, emit):
     record.update(status="waiting", timeout_seconds=timeout, attempts=0)
     emit("waf_requests", "Waiting for one WAF request logged after the upgrade")
     while time.monotonic() < deadline:
+        if f5_validation.forced(plan, 9, emit):
+            record.update(status="manually_passed")
+            return
         record["attempts"] += 1
         try:
             if not record.get("after"):
@@ -106,6 +117,9 @@ def wait_for_request(client, after, plan, options, emit):
         if remaining:
             _sleep(min(max(options.poll_interval, 0.1), remaining))
     record.update(status="timed_out", seconds_remaining=0)
+    if f5_validation.forced(plan, 9, emit, timed_out=True):
+        record.update(status="manually_passed")
+        return
     raise TimeoutError(f"No post-upgrade WAF request log confirmed within {timeout}s; "
                        "traffic remains in its validated state. Check local WAF logging and incoming traffic.")
 

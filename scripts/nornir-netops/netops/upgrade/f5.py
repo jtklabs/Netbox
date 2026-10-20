@@ -455,6 +455,9 @@ def collect(client, progress):
     for key, (path, mapping, needs_ltm) in STATS.items():
         try:
             snapshot["tables"][key] = rows_from_stats(get(path), mapping)
+            if key == "nodes":
+                snapshot["tables"][key] = [row for row in snapshot["tables"][key]
+                                          if "_auto" not in str(row.get("name", ""))]
         except Exception as exc:
             snapshot["errors" if (ltm or not needs_ltm) else "warnings"][key] = str(exc)
     if any(row.get("name") == "asm" and row.get("level") not in (None, "none")
