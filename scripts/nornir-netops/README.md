@@ -2832,3 +2832,7 @@ Every deployable worker change must increment its numeric version above main.
 The repository's Poller versions CI check covers both workers, including
 templates and dependency files. Documentation and tests alone do not require
 a release bump.
+
+### Raw configuration commands
+
+Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle defines `expect` and/or `reject` checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.

@@ -5,14 +5,16 @@ from copy import deepcopy
 
 import yaml
 from .ssh_mac_policy import validate_ssh_mac
+from .raw_commands_policy import validate_raw_commands
 from django.core.exceptions import ValidationError
 
 FEATURE_SECTIONS = {
     'ntp': 'ntp', 'syslog': 'syslog', 'snmp': 'snmp',
     'snmp_packetsize': 'snmp', 'banner': 'banner', 'acl': 'acls',
-    'users': 'local_accounts', 'ssh_mac': 'ssh_mac',
+    'users': 'local_accounts', 'ssh_mac': 'ssh_mac', 'raw_commands': 'raw_commands',
 }
 SECTION_KEYS = {
+    'raw_commands': {'enabled', 'platforms'},
     'ssh_mac': {'macs', 'ios_scope', 'asa_integrity', 'platforms'},
     'ntp': {'servers', 'regions', 'vrf', 'source', 'prefer', 'iburst', 'authentication', 'aruba', 'clearpass'},
     'syslog': {'destinations', 'severity', 'source', 'vrf', 'facility', 'origin_id'},
@@ -76,6 +78,8 @@ def parse_definition(text):
                 for key, maximum in (('port', 65535), ('timeout', 300)):
                     if key in aruba and (type(aruba[key]) is not int or not 1 <= aruba[key] <= maximum):
                         raise ValueError(f'ntp.aruba.{key} must be an integer from 1 to {maximum}.')
+        if section == 'raw_commands':
+            validate_raw_commands(settings)
         if section == 'ssh_mac':
             validate_ssh_mac(settings)
         if section == 'ntp' and 'clearpass' in settings:

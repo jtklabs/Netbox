@@ -714,19 +714,22 @@ def init_nornir(args, credentials, standards, workers: int):
     InventoryPluginRegister.register("netbox", NetBoxInventory)
 
     settings = settings_from(standards, args)
-    if getattr(getattr(args, "feature", None), "name", None) in ("waf", "nac"):
-        # WAF and NAC do not use NTP/syslog source-interface tags.
+    if getattr(getattr(args, "feature", None), "name", None) in ("waf", "nac", "raw-commands"):
+        # These features do not use NTP/syslog source-interface tags.
         settings["source_tags"] = {}
     elif getattr(args, 'command', None) in ('discover-ntp', 'collect'):
         settings['source_tags'] = {}
     elif getattr(getattr(args, "feature", None), "name", None) == "syslog":
         tag = getattr(args, "syslog_source_tag", None) or settings["source_tags"].get("syslog")
         settings["source_tags"] = {"syslog": tag} if tag else {}
-    # Region ancestry costs two extra queries, so only a regional NTP standard asks for it.
+    # Load ancestry for regional NTP and literal command bundles.
     settings["regions"] = bool(
         (getattr(getattr(args, "feature", None), "name", None) == "ntp"
          or getattr(getattr(args, "check", None), "name", None) == "ntp") and not getattr(args, "servers", None)
         and standards is not None and standards.defined("ntp.regions"))
+    if getattr(getattr(args, 'feature', None), 'name', None) == 'raw-commands':
+        settings['regions'] = any('regions' in policy for policy in
+            (standards.section('raw_commands').get('platforms', {}).values() if standards else []))
     args._netbox_client = Client(settings["url"], settings["token"], settings["verify_tls"])
     settings['clearpass_clusters'] = getattr(getattr(args, 'feature', None), 'name', None) == 'ntp'
     settings['mobility_conductors'] = getattr(getattr(args, 'feature', None), 'name', None) == 'ntp'

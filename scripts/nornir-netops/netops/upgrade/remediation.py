@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize', 'ssh_mac')
+FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize', 'ssh_mac', 'raw_commands')
 MODES = ('add', 'replace')
 CONFIG_OPERATIONS = ('remediate', 'audit_config')
 READ_ONLY_OPERATIONS = ('audit', 'audit_config')
