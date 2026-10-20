@@ -385,7 +385,10 @@ def rows_from_stats(document, mapping):
         if any(value is None for value in row.values()):
             raise ValueError("statistics response has missing object fields")
         rows.append(row)
-    checks.object_delta(rows, rows)
+    # LTM/interface inventories use name; HA statistics use composite keys
+    # (device + group) whose uniqueness is checked by the HA guard.
+    if "name" in mapping:
+        checks.object_delta(rows, rows)
     return rows
 
 

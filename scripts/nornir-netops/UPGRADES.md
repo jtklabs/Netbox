@@ -652,12 +652,14 @@ holding `/shared/images`; it does not clean a separate `/var` filesystem.
 
 Prechecks block on: an unapproved platform, a release outside
 `starting_versions`, an install already in progress on a volume, a device
-group that is not `In Sync`, an active HA member unless `allow_active` is set,
+group that is not `In Sync` unless the guarded second-member handoff is verified,
+an active HA member without `allow_active` and verified standby completion,
 and a license service check date older than `license_check_date`. With
 `allow_active`, the unit runs `failover standby` and waits to become standby
 before installing, so upgrade the standby first and schedule the active unit
-afterwards. Reboots are not coordinated across a pair beyond that check; a
-standalone unit is upgraded with the outage that implies.
+afterwards on the same poller. The guarded handoff described below checks both
+members and their traffic groups before the second reboot. A standalone unit
+is upgraded with the outage that implies.
 
 The explicit BIG-IP response `Can't load license, may not be operational`
 is recorded in the baseline. When no license eligibility date is required by
@@ -879,3 +881,38 @@ before scheduling production units.
 `configure.py upgrade-poll` worker for one-minute cron. It uses these same
 profiles, credentials and validation checks, with frozen targets, start windows,
 per-device claims, heartbeats and results reported back to NetBox.
+
+### Guarded BIG-IP HA handoff
+
+For a two-member active/standby pair, run the standby job first and then the
+original active member with `allow_active: true`, using the same image and the
+same poller. These remain separate device jobs; submitting an active job first
+or concurrently does not automatically reorder the queue. Both members must
+initially be healthy and In Sync, with automatic sync disabled. The worker locks
+both devices locally while either member is upgrading.
+
+After two clean standby health checks, the poller records private handoff
+evidence under `.upgrade-locks/f5-ha`. The second job permits `Changes Pending`
+only when that evidence is less than 24 hours old, the upgraded peer is healthy
+on the exact target version/build, and neither member's recorded configuration
+revision has changed. HA handoff checks always require unchanged inventories,
+even when the local job profile allows a lower percentage. Manual validation
+or threshold-accepted differences can complete the local job with warnings,
+but invalidate its handoff evidence and skip automatic pair synchronization.
+Missing evidence, changes to the pair, or unexpected sync states stop the handoff. Both jobs need management
+API access to both members using the configured device credentials.
+
+After failover, the worker confirms that the upgraded peer owns every floating
+traffic group and passes its health baseline. Immediately before each reboot,
+it rechecks both members' roles, health, boot state and configuration revisions;
+a change during installation or configuration copying cancels the reboot. Once both
+members are healthy on the target release, it performs a normal configuration
+sync and requires both members to report In Sync. The upgraded first member
+remains active. The worker does not force a full-load sync or synchronize mixed
+software versions. Multi-member and active/active groups require a different
+workflow and are rejected by this guard.
+
+UCS backups run as one detached save with a private status/log directory on the
+appliance. The worker requires a successful exit status, downloads the archive,
+and verifies its checksum before continuing. A lost launch response is not
+retried; inspect the reported private log before retrying the job.

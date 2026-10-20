@@ -236,6 +236,15 @@ def options(tmp_path):
 def unit(monkeypatch):
     fake = FakeBigIP()
     monkeypatch.setattr(f5_workflow.f5_waf, "Client", fake)
+    # This fixture isolates the single-device workflow; test_f5_ha exercises
+    # the real two-device guard, evidence and synchronization protocol.
+    def prepare(client, host, settings, before, profile, options, stack):
+        if not before['facts'].get('peers'):
+            return None
+        pair = Mock(second=False)
+        pair.finish.side_effect = lambda client, after, plan, emit: after
+        return pair
+    monkeypatch.setattr(f5_workflow.f5_ha, 'prepare', prepare)
     return fake
 
 
