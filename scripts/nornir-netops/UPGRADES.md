@@ -820,7 +820,12 @@ recovery. Prechecks, install, reboot and reconnect cannot be forced through.
 Only the current validation step can be overridden. Each request records the
 operator, UTC timestamp and reason in the job; the worker records acceptance in
 its progress log, archive and final comparison report. Observed differences
-remain available rather than being reported as an automatic clean pass.
+remain available rather than being reported as an automatic clean pass. After a
+step-8 manual pass, the worker collects fresh health (after traffic restoration
+when draining was enabled). Step 9 uses that current WAF policy count and HA role,
+so a recovered standby is skipped normally. The archive keeps the accepted
+snapshot, and the report separates its original findings from the refreshed
+observation. A failed refresh still requires recovery.
 
 After either validation window expires, an upgraded scheduled worker stops
 retrying that check and waits for **Force pass** or **Cancel running job**.
