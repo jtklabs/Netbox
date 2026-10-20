@@ -447,6 +447,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Converge network device configuration from a CSV of addresses. "
         "Dry run unless --apply is given.",
     )
+    from . import __version__
+    parser.add_argument("--version", action="version", version=f"nornir-netops {__version__}")
     common = _common_arguments()
     subs = parser.add_subparsers(dest="command", metavar="FEATURE", required=True)
 

@@ -13,7 +13,7 @@ from uuid import UUID
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-from .. import archive
+from .. import archive, __version__
 from ..netbox import Client, NetBoxError
 from .profile import Profile
 from . import remediation
@@ -118,6 +118,7 @@ class Outbox:
             body = {key: event[key] for key in ('sequence', 'stage', 'message', 'run_id', 'summary') if key in event}
             body['message'] = body['message'][:1000]
             body['claim_token'] = job['claim_token']
+            body['worker_version'] = __version__
             # Persist before HTTP, so a crash after device success is recoverable.
             # Connection and change authorization are live gates, not deferred actions.
             path = None if body['stage'] in ('queued', 'ready') else self.persist(job['id'], body)
@@ -138,7 +139,7 @@ class Heartbeat:
         while not self.stop.wait(30):
             try:
                 self.client.post(f'{self.job["id"]}/report/',
-                                 {'claim_token': self.job['claim_token'], 'heartbeat': True})
+                                 {'claim_token': self.job['claim_token'], 'heartbeat': True, 'worker_version': __version__})
             except NetBoxError:
                 # Before changes, the ready gate must still succeed. Afterwards,
                 # finish recovery and retain result events for the next tick.
@@ -202,6 +203,7 @@ def execute_job(task, args, client, outbox):
     code = 1
     with Heartbeat(client, job):
         run.prepare()
+        run.document['worker_version'] = __version__
         run.document.update(feature=job['operation'] if job['operation'] in remediation.CONFIG_OPERATIONS else 'upgrade', dry_run=not options.apply,
                             schedule={'job_id': job['id'], 'batch_id': job.get('batch_id'),
                                       'poller': args.poller})
@@ -274,7 +276,8 @@ def run_queue(args, client, outbox, login):
                         if not active:
                             return 1
                     else:
-                        response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply})
+                        response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply,
+                                                             'worker_version': __version__})
                         jobs = response.get('jobs')
                         if not isinstance(jobs, list) or len(jobs) > free or any(not isinstance(j, dict) for j in jobs):
                             raise NetBoxError('Upgrade queue returned an invalid batch')

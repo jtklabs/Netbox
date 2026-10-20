@@ -2805,3 +2805,29 @@ See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruptio
 EOS and Junos, and the `high` integrity preset on ASA. Add `--apply` to remediate;
 add mode only reports drift. NetBox jobs expose **SSH MAC integrity** and pin
 its YAML standard revision. See [setup, scope and platform behavior](../../docs/SSH-MAC-STANDARD.md).
+
+## Checking the deployed worker version
+
+Run `python configure.py --version` in the deployed worker directory using the
+same Python environment as the scheduled job, or `netops --version` for the
+installed command. Both report the release from `netops.__version__`.
+
+NetBox's poller list and detail show **Worker version** separately from
+**Scanner version**. The worker sends its version at queue check-in and during
+active-job heartbeats. Job details show **Job worker version**, captured when
+the job was claimed and retained after later deployments. `Not reported` means
+that the worker has not supplied a version; it does not confirm an update.
+The API exposes `worker_version` on pollers and device jobs, and local scheduled
+job archives include it too.
+
+Version `0.2.0` introduces this reporting and includes the F5 policy count,
+profile validation timeout and 401 reauthentication/retry fixes. Deploy the
+updated NetBox plugin and run migrations to add the version fields. Deploy the
+worker code as usual; package installs must be reinstalled. An already running
+worker keeps its loaded version until it exits. Check a new check-in or job
+after deployment; changing files on disk does not update an active process.
+
+Every deployable worker change must increment its numeric version above main.
+The repository's Poller versions CI check covers both workers, including
+templates and dependency files. Documentation and tests alone do not require
+a release bump.

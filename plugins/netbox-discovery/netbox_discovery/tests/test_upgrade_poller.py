@@ -17,9 +17,9 @@ class UpgradePollerTest(UpgradeFixture, TestCase):
     def setUp(self):
         self.setup_data()
 
-    def check_in(self):
+    def check_in(self, **extra):
         return self.client.post('/api/plugins/discovery/upgrade-jobs/check-in/',
-                                {'name': 'lab', 'apply': True}, format='json')
+                                {'name': 'lab', 'apply': True, **extra}, format='json')
 
     def test_idle_checkin_updates_poller_without_claiming_future_job(self):
         job = self.scheduled(scheduled_at=timezone.now() + timedelta(hours=1))
@@ -98,3 +98,82 @@ class UpgradePollerTest(UpgradeFixture, TestCase):
 
     def test_poller_timestamp_cannot_be_written_through_model_api(self):
         self.assertTrue(DiscoveryPollerSerializer().fields['upgrade_last_seen_at'].read_only)
+
+    def test_worker_version_is_independent_of_scanner_and_visible(self):
+        self.poller.touch(version='1.5.0+abc1234')
+        self.assertEqual(self.check_in(worker_version='0.2.0').status_code, 200)
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '0.2.0')
+        self.assertEqual(self.poller.version, '1.5.0+abc1234')
+        self.poller.touch(version='1.5.1+def5678')
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '0.2.0')
+        self.assertEqual(DiscoveryPollerSerializer(self.poller, context={'request': None}).data['worker_version'], '0.2.0')
+        self.assertTrue(DiscoveryPollerSerializer().fields['worker_version'].read_only)
+        browser = Client()
+        browser.force_login(self.user)
+        for url in (self.poller.get_absolute_url(), reverse('plugins:netbox_discovery:discoverypoller_list')):
+            response = browser.get(url)
+            self.assertContains(response, 'Worker version')
+            self.assertContains(response, '0.2.0')
+
+    def test_old_worker_reports_unknown_instead_of_preserving_new_version(self):
+        self.check_in(worker_version='0.2.0')
+        self.assertEqual(self.check_in().status_code, 200)
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '')
+
+    def test_job_version_is_frozen_across_deployment_and_progress_replay(self):
+        job = self.scheduled()
+        response = self.check_in(worker_version='0.2.0')
+        self.assertEqual(len(response.data['jobs']), 1)
+        job.refresh_from_db()
+        self.assertEqual(job.worker_version, '0.2.0')
+        self.check_in(worker_version='0.2.1')
+        report_url = f'/api/plugins/discovery/upgrade-jobs/{job.pk}/report/'
+        response = self.client.post(report_url, {'claim_token': str(job.claim_token),
+                                    'heartbeat': True, 'worker_version': '0.2.0'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '0.2.0')
+        self.check_in(worker_version='0.2.1')
+        response = self.client.post(report_url, {'claim_token': str(job.claim_token),
+                                    'sequence': 1, 'stage': 'precheck', 'message': 'Baseline',
+                                    'worker_version': '0.2.0'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.poller.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '0.2.1')
+        self.assertEqual(job.worker_version, '0.2.0')
+        response = self.client.get(reverse('plugins-api:netbox_discovery-api:upgradejob-detail', args=[job.pk]))
+        self.assertEqual(response.data['worker_version'], '0.2.0')
+        browser = Client()
+        browser.force_login(self.user)
+        response = browser.get(job.get_absolute_url())
+        self.assertContains(response, 'Job worker version')
+        self.assertContains(response, '0.2.0')
+
+    def test_old_heartbeat_clears_latest_worker_version(self):
+        job = self.scheduled()
+        self.check_in(worker_version='0.2.0')
+        job.refresh_from_db()
+        queue.report(self.user, job.pk, {'claim_token': job.claim_token, 'heartbeat': True})
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '')
+        job.refresh_from_db()
+        self.assertEqual(job.worker_version, '0.2.0')
+
+    def test_invalid_reports_cannot_change_version(self):
+        job = self.scheduled()
+        self.check_in(worker_version='0.2.0')
+        response = self.client.post(f'/api/plugins/discovery/upgrade-jobs/{job.pk}/report/',
+                                    {'claim_token': str(uuid.uuid4()), 'heartbeat': True,
+                                     'worker_version': 'invalid-worker'}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.worker_version, '0.2.0')
+
+    def test_overlong_worker_version_rejected(self):
+        self.assertEqual(self.check_in(worker_version='v' * 51).status_code, 400)
+        self.poller.refresh_from_db()
+        self.assertIsNone(self.poller.upgrade_last_seen_at)

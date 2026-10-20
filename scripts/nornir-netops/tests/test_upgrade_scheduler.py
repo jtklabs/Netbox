@@ -100,6 +100,7 @@ def test_progress_is_persisted_before_delivery_and_replayed_privately(tmp_path, 
     path = next(tmp_path.glob('*.json'))
     assert os.stat(path).st_mode & 0o777 == 0o600
     assert json.loads(path.read_text())['body']['claim_token'] == job['claim_token']
+    assert json.loads(path.read_text())['body']['worker_version'] == scheduler.__version__
     client.post.side_effect = None
     client.post.return_value = {'id': 12, 'sequence': 8, 'status': 'completed'}
     assert outbox.replay()
@@ -200,7 +201,9 @@ def test_idle_tick_never_loads_device_credentials_or_creates_reports(tmp_path, m
     monkeypatch.setattr(cli, '_login', login)
     assert scheduler.run(args, Mock()) == 0
     login.assert_not_called()
-    client.post.assert_called_once_with('check-in/', {'name': 'lab', 'limit': 3, 'apply': False})
+    from netops import __version__
+    client.post.assert_called_once_with('check-in/', {'name': 'lab', 'limit': 3, 'apply': False,
+                                                   'worker_version': __version__})
 
 
 @pytest.mark.parametrize('operation,apply,stage_only', [('audit', False, False), ('stage', True, True), ('upgrade', True, False)])
@@ -225,6 +228,7 @@ def test_each_job_uses_its_operation_and_a_separate_archive(tmp_path, job, monke
     assert not result.failed
     documents = [json.loads(path.read_text()) for path in tmp_path.glob('*.json')]
     assert len(documents) == 1
+    assert documents[0]['worker_version'] == scheduler.__version__
     assert documents[0]['dry_run'] is not apply
     assert documents[0]['schedule']['job_id'] == 12
     assert job['claim_token'] not in json.dumps(documents)
@@ -458,3 +462,25 @@ def test_each_claim_has_isolated_inventory_and_closes_failed_connections(monkeyp
     assert child_args.device_credentials is credentials
     assert not hasattr(args, 'device_credentials')
     nr.close_connections.assert_called_once_with(on_good=True, on_failed=True)
+
+
+def test_heartbeat_reports_the_running_worker_version(job):
+    client = Mock()
+    heartbeat = scheduler.Heartbeat(client, job)
+    heartbeat.stop = Mock()
+    heartbeat.stop.wait.side_effect = [False, True]
+    heartbeat.loop()
+    client.post.assert_called_once_with(f'{job["id"]}/report/', {
+        'claim_token': job['claim_token'], 'heartbeat': True,
+        'worker_version': scheduler.__version__,
+    })
+
+
+def test_replaying_old_progress_keeps_original_version(tmp_path, job):
+    client = Mock()
+    client.post.return_value = {'id': job['id'], 'sequence': 8}
+    outbox = scheduler.Outbox(tmp_path, client)
+    body = {**event(), 'claim_token': job['claim_token'], 'worker_version': '0.1.9'}
+    outbox.persist(job['id'], body)
+    assert outbox.replay()
+    assert client.post.call_args.args[1]['worker_version'] == '0.1.9'

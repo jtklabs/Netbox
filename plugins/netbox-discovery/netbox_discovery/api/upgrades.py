@@ -31,7 +31,7 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
         fields = ('id', 'url', 'display', 'batch_id', 'device', 'device_name', 'poller', 'address',
                   'profile', 'profile_name', 'standards_snapshot', 'operation', 'scheduled_at', 'start_before', 'status', 'stage', 'message',
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
-                  'completed_at', 'last_seen_at', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
+                  'completed_at', 'last_seen_at', 'worker_version', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
                   'audit_run', 'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
@@ -59,12 +59,14 @@ class ScheduleSerializer(serializers.Serializer):
 
 
 class CheckInSerializer(serializers.Serializer):
+    worker_version = serializers.CharField(max_length=50, allow_blank=True, default="")
     name = serializers.RegexField(r'^(?:poller-)?[a-z0-9][a-z0-9_-]*$', max_length=100)
     limit = serializers.IntegerField(min_value=1, max_value=20, default=3)
     apply = serializers.BooleanField(default=False)
 
 
 class ReportSerializer(serializers.Serializer):
+    worker_version = serializers.CharField(max_length=50, allow_blank=True, default="")
     claim_token = serializers.UUIDField()
     heartbeat = serializers.BooleanField(default=False)
     sequence = serializers.IntegerField(min_value=1, max_value=2147483647, required=False)
@@ -135,8 +137,8 @@ class UpgradeCheckInView(QueueView):
     def execute(self, request, data):
         name = data['name'].removeprefix('poller-')
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
-        poller.touch(summary='Upgrade worker checked in', upgrade=True)
-        jobs = queue.claim(request.user, poller, data['limit'], data['apply'])
+        poller.touch(version=data['worker_version'], summary='Upgrade worker checked in', upgrade=True)
+        jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})
 
 

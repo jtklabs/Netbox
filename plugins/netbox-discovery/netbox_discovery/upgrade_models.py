@@ -34,6 +34,10 @@ class UpgradeJob(PrimaryModel):
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+    worker_version = models.CharField(
+        max_length=50, blank=True, editable=False,
+        help_text='Version of the worker that claimed this job',
+    )
     claim_token = models.UUIDField(null=True, blank=True, editable=False)
     sequence = models.PositiveIntegerField(default=0, editable=False)
     stage = models.CharField(max_length=50, blank=True)

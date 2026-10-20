@@ -1,0 +1,24 @@
+name: Poller versions
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test version guard
+        run: python -m unittest discover -s scripts/tests -p 'test_poller_versions.py'
+      - name: Require release bumps against current base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch origin "$BASE_REF"
+          python scripts/check-poller-versions.py --base FETCH_HEAD
