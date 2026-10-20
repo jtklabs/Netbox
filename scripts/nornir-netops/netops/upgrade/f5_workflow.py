@@ -476,6 +476,8 @@ def upgrade_device(task, profile, options, reporter):
                         client, plan["active_volume"], volume, options.install_timeout, poll=options.poll_interval,
                         progress=lambda message: emit("installing", message))
                     emit("installing", f"Configuration copy to {volume} completed successfully", {"upgrade_plan": plan})
+                    if pair:
+                        pair.before_reboot(emit)
                     emit("rebooting", f"Installation complete on {volume}; rebooting the unit to it")
                     accepted = f5.reboot_to(client, volume)
                     reboot_resolved = True  # Includes transport loss: target state must now be validated.

@@ -890,8 +890,10 @@ revision has changed. Missing evidence, manual validation overrides, changes to
 the pair, or unexpected sync states stop the handoff. Both jobs need management
 API access to both members using the configured device credentials.
 
-Before rebooting the second member, the worker confirms that the upgraded peer
-owns every floating traffic group and passes its health baseline. Once both
+After failover, the worker confirms that the upgraded peer owns every floating
+traffic group and passes its health baseline. Immediately before each reboot,
+it rechecks both members' roles, health, boot state and configuration revisions;
+a change during installation or configuration copying cancels the reboot. Once both
 members are healthy on the target release, it performs a normal configuration
 sync and requires both members to report In Sync. The upgraded first member
 remains active. The worker does not force a full-load sync or synchronize mixed

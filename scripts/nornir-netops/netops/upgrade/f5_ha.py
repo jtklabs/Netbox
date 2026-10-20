@@ -165,6 +165,36 @@ class Pair:
                 emit('failing_over', 'Waiting for verified traffic ownership on the upgraded peer')
                 cancellation.sleep(max(1, self.options.poll_interval))
 
+    def before_reboot(self, emit):
+        """Installation/copy can take hours: never rely on the earlier HA role."""
+        local = f5.collect(self.client, lambda _: None)
+        peer = f5.collect(self.peer_client, lambda _: None)
+        own_baseline = self.receipt['active_before' if self.second else 'standby_before']
+        peer_baseline = self.receipt['standby_before' if self.second else 'active_before']
+        require(local['facts'].get('failover_state') == 'standby' and
+                peer['facts'].get('failover_state') == 'active', 'roles changed before reboot; reboot cancelled')
+        healthy(own_baseline, local)
+        healthy(peer_baseline, peer)
+        require(all(local['facts'].get(k) == own_baseline['facts'].get(k)
+                    for k in ('version', 'build', 'active_volume')), 'local boot state changed before reboot')
+        if self.second:
+            require(self.receipt.get('handoff_verified') and exact_target(peer, self.profile),
+                    'upgraded peer handoff is not verified; reboot cancelled')
+        else:
+            require(all(peer['facts'].get(k) == peer_baseline['facts'].get(k)
+                        for k in ('version', 'build', 'active_volume')), 'active peer software changed before reboot')
+        for current in (self.client, self.peer_client):
+            require(groups(current, [self.me, self.peer]) == self.receipt['groups'], 'device-group topology changed before reboot')
+            require(ownership(current, self.peer, self.me) == self.receipt['traffic_groups'], 'traffic ownership changed before reboot')
+        require(revisions(self.client, self.receipt['groups'], self.me) == self.receipt['active_revision'],
+                'local configuration changed before reboot')
+        expected_peer_revision = self.receipt['standby_revision' if self.second else 'active_revision']
+        require(revisions(self.peer_client, self.receipt['groups'], self.peer) == expected_peer_revision,
+                'peer configuration changed before reboot')
+        # Last observation immediately before the caller sends the reboot.
+        require(topology(self.client)[0].get('failoverState') == 'standby', 'local member became active; reboot cancelled')
+        emit('installing', 'Immediate pre-reboot check passed: local standby, peer healthy and active, configuration unchanged')
+
     def finish(self, client, after, plan, emit):
         self.client = client
         require(not plan.get('validation_overrides'), 'manual validation cannot authorize the next HA member')

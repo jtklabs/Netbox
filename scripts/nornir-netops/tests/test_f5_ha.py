@@ -39,14 +39,15 @@ class Unit:
     def get_json(self, path):
         if path == '/mgmt/tm/cm/device':
             return {'items': [{'fullPath': n, 'name': n.rsplit('/', 1)[1], 'selfDevice': str(n == self.name).lower(),
-                               'managementIp': '192.0.2.1' if n == A else '192.0.2.2'} for n in (A, B)]}
+                               'managementIp': '192.0.2.1' if n == A else '192.0.2.2',
+                               'failoverState': self.pair[n].snapshot['facts']['failover_state']} for n in (A, B)]}
         if path == '/mgmt/tm/cm/device-group':
             return {'items': [{'fullPath': n, 'name': n.rsplit('/', 1)[1], 'autoSync': 'disabled',
                                'type': 'sync-failover' if n.endswith('/pair') else 'sync-only'} for n in GROUPS]}
         if path.endswith('/devices'):
             return {'items': [{'fullPath': n} for n in (A, B)]}
         if path.endswith('device-group/stats'):
-            return {'entries': {str(i): next(iter(entries(device=n, devicegroup=g, commitIdOriginator=n,
+            return {'entries': {str(i): next(iter(entries(device=n, devicegroup=g, commitIdOriginator=A if u.revision == 'original' else n,
                      commitIdTime=u.revision)['entries'].values()))
                      for i, (n, u, g) in enumerate((n, u, g) for n, u in self.pair.items() for g in GROUPS)}}
         if path.endswith('traffic-group/stats'):
@@ -235,3 +236,33 @@ def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, optio
     assert timeline == [(B, 'reboot'), (A, 'failover'), (A, 'reboot'), (A, 'sync'), (A, 'sync')]
     assert units[B].failover == 'active' and units[A].failover == 'standby'
     assert all(u.sync == 'In Sync' for u in units.values())
+
+
+@pytest.mark.parametrize('change', ['active', 'peer_offline', 'local_edit', 'peer_edit', 'peer_errors'])
+def test_last_moment_change_prevents_first_reboot(lab, profile, options, change):
+    with ExitStack() as stack:
+        pair = prepare(lab, B, profile, options, stack)
+        pair.before_reboot(Mock())
+        if change == 'active': lab[B].snapshot['facts']['failover_state'] = 'active'
+        elif change == 'peer_offline': lab[A].snapshot['facts']['failover_state'] = 'offline'
+        elif change == 'local_edit': lab[B].revision = 'operator-edit'
+        elif change == 'peer_edit': lab[A].revision = 'operator-edit'
+        elif change == 'peer_errors': lab[A].snapshot['errors']['waf'] = 'unavailable'
+        with pytest.raises(ValueError):
+            pair.before_reboot(Mock())
+        assert not lab[B].calls
+
+
+def test_second_reboot_rechecks_upgraded_peer(lab, profile, options):
+    first_pass(lab, profile, options)
+    with ExitStack() as stack:
+        pair = prepare(lab, A, replace(profile, allow_active=True), options, stack)
+        pair.begin()
+        lab[A].snapshot['facts']['failover_state'] = 'standby'
+        lab[B].snapshot['facts']['failover_state'] = 'active'
+        pair.after_failover(Mock())
+        pair.before_reboot(Mock())
+        lab[B].snapshot['facts']['build'] = 'unexpected'
+        with pytest.raises(ValueError, match='reboot cancelled'):
+            pair.before_reboot(Mock())
+        assert not lab[A].calls
