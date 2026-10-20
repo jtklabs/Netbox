@@ -759,6 +759,7 @@ def selftest() -> int:
             os.environ.setdefault(key, value)
         namespace = sub.parse_args(feature.selftest_args)
         namespace.standards = standards
+        namespace._selftest = True
         desired = feature.build_desired(namespace)
         print(f"### {feature.name}  {' '.join(feature.selftest_args)}")
         print()
