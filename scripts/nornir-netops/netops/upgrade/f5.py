@@ -152,11 +152,48 @@ def prune_images(client, keep, required_free_bytes):
     return removed, failed
 
 
-def save_ucs(client, name, passphrase=""):
-    payload = {"command": "save", "name": name}
+def save_ucs(client, name, passphrase="", timeout=1800, poll=5, progress=lambda message: None):
+    """Launch once outside REST's short server deadline and verify save exit status."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.ucs", name):
+        raise ValueError("invalid UCS archive name")
+    directory = f"/var/tmp/netops-ucs-{uuid.uuid4().hex}"
+    log = directory + "/output.log"
+    tmsh_command = f"save sys ucs {name}"
     if passphrase:
-        payload["options"] = [{"passphrase": passphrase}]
-    client.request("POST", "/mgmt/tm/sys/ucs", payload, timeout=600)
+        # tmsh parses its own quoted arguments, then bash parses the command.
+        escaped = passphrase.replace('\\', '\\\\').replace('"', '\\"')
+        if any(ord(c) < 32 for c in passphrase):
+            raise ValueError('UCS passphrase must not contain control characters')
+        tmsh_command += ' passphrase "' + escaped + '"'
+    command = 'tmsh -c ' + shlex.quote(tmsh_command)
+    script = (f"flock -n /var/run/netops-ucs.lock /bin/bash -c {shlex.quote(command)}; "
+              f"rc=$?; printf '%s\\n' \"$rc\" > {directory}/status.tmp; "
+              f"mv {directory}/status.tmp {directory}/status")
+    launch = (f"umask 077; mkdir {directory} || exit 1; "
+              f"nohup /bin/bash -c {shlex.quote(script)} </dev/null >{log} 2>&1 & "
+              "printf 'NETOPS_UCS_STARTED\\n'")
+    query = (f"if test -f {directory}/status; then printf 'NETOPS_UCS_EXIT='; cat {directory}/status; "
+             f"elif test -d {directory}; then printf 'NETOPS_UCS_RUNNING\\n'; "
+             "else printf 'NETOPS_UCS_MISSING\\n'; fi")
+    def run(command):
+        result = client.request('POST', '/mgmt/tm/util/bash',
+                                {'command': 'run', 'utilCmdArgs': '-c ' + shlex.quote(command)})
+        return str(result.get('commandResult', '')).strip()
+    deadline = time.monotonic() + timeout
+    # Never repeat a launch after an ambiguous response.
+    if run(launch) != 'NETOPS_UCS_STARTED':
+        raise RuntimeError(f'UCS launch not confirmed; inspect private log {log}')
+    while True:
+        output = run(query)
+        if output == 'NETOPS_UCS_EXIT=0':
+            return
+        if output != 'NETOPS_UCS_RUNNING':
+            raise RuntimeError(f'UCS save failed or completion is unknown; inspect private log {log}')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f'UCS save deadline exceeded; it may still be running; inspect private log {log}')
+        progress('UCS save is running; waiting for confirmed completion')
+        _sleep(min(max(poll, 1), remaining))
 
 
 def download_ucs(client, name, destination):

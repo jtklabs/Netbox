@@ -192,7 +192,8 @@ def backup(client, host, profile, options, plan, emit):
         protect([passphrase])
     directory = getattr(options, "ucs_dir", None) or Path(options.lock_dir).parent / "ucs-backups"
     emit("backing_up", f"Saving UCS {name} on the unit" + (" and downloading it" if directory else ""))
-    f5.save_ucs(client, name, passphrase)
+    f5.save_ucs(client, name, passphrase, timeout=options.install_timeout, poll=options.poll_interval,
+                progress=lambda message: emit("backing_up", message))
     record = {"name": name, "on_unit": True, "encrypted": bool(passphrase)}
     if directory:
         destination = Path(directory) / name

@@ -143,6 +143,11 @@ class FakeBigIP:
     def _post(self, path, payload):
         if path == "/mgmt/tm/util/bash":
             command = payload.get("utilCmdArgs", "")
+            if "NETOPS_UCS_STARTED" in command:
+                self.ucs.append(re.search(r"save sys ucs ([A-Za-z0-9._-]+)", command)[1])
+                return {"commandResult": "NETOPS_UCS_STARTED\n"}
+            if "NETOPS_UCS_RUNNING" in command:
+                return {"commandResult": "NETOPS_UCS_EXIT=0\n"}
             if "/sbin/cpcfg" in command:
                 return {"commandResult": "NETOPS_CPCFG_STARTED\n"}
             if "NETOPS_CPCFG_RUNNING" in command:
