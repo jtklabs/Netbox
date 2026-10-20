@@ -229,6 +229,9 @@ def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, optio
         reporter.emit.return_value = True
         result = workflow.upgrade_device(SimpleNamespace(host=host), replace(profile, allow_active=name == A), options, reporter)
         assert not result.failed, [call.args[2] for call in reporter.emit.call_args_list][-3:]
+    final_payload = [c.args[3] for c in reporter.emit.call_args_list if len(c.args) > 3 and 'post' in c.args[3]][-1]
+    assert final_payload['post']['facts']['sync_status'] == 'In Sync'
+    assert final_payload['findings'] == []
     assert timeline == [(B, 'reboot'), (A, 'failover'), (A, 'reboot'), (A, 'sync'), (A, 'sync')]
     assert units[B].failover == 'active' and units[A].failover == 'standby'
     assert all(u.sync == 'In Sync' for u in units.values())

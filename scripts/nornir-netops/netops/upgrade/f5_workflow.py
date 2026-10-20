@@ -542,6 +542,11 @@ def upgrade_device(task, profile, options, reporter):
                     if pair:
                         after = pair.finish(client, after, plan, emit)
                         findings = checks.compare(before, after) + target_findings(after, profile, plan)
+                        emit('validating', 'Final HA health snapshot recorded',
+                             {'post': after, 'findings': findings, 'upgrade_plan': plan,
+                              'progress_summary': {'counts': after['metrics']['counts'],
+                                                   'finding_count': len(findings),
+                                                   'error_count': sum(f['severity'] == 'error' for f in findings)}})
                     # This gate runs outside restoration's failure handler: a
                     # quiet log must not disable traffic that passed health checks.
                     validation_gate = 9
