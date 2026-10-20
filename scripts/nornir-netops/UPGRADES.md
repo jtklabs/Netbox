@@ -730,6 +730,14 @@ sync status is not what the plan expected, since sync is normally pending
 until both members are upgraded. Configuration text is not compared; the UCS
 is the configuration record.
 
+Pool comparisons match the full pool name, including its partition. A pool
+present in both snapshots is reported as **Changed**, with each differing field
+and its before/after value (for example, `active members: 4 → 3`). **Removed**
+means the name is absent from the post-upgrade pool snapshot; **Added** means
+it was absent from the baseline. Changes still fail validation until accepted
+or resolved. Missing collections or ambiguous pool names are reported as
+unavailable rather than as removals.
+
 Nodes whose names contain `_auto` are dynamic and are excluded from normalized
 node tables, counts and baseline comparisons. Their raw API responses remain in
 the private archive. Static node changes still fail validation.

@@ -428,6 +428,40 @@ def health(snapshot):
     return values
 
 
+def pool_delta(old_rows, new_rows):
+    """Match full pool paths before comparing state; a changed row is not a removal."""
+    def indexed(rows):
+        result = {}
+        for row in rows:
+            name = row.get("name")
+            if not isinstance(name, str) or not name or name in result:
+                raise ValueError("Pool names are missing or duplicated; cannot reliably match baseline and post-check pools")
+            result[name] = row
+        return result
+
+    old, new = indexed(old_rows), indexed(new_rows)
+    changed = []
+    for name in sorted(old.keys() & new.keys()):
+        fields = {
+            key: {"before": old[name].get(key, "<not reported>"), "after": new[name].get(key, "<not reported>")}
+            for key in sorted(old[name].keys() | new[name].keys())
+            if key not in old[name] or key not in new[name] or old[name][key] != new[name][key]
+        }
+        if fields:
+            changed.append({"name": name, "fields": fields})
+    return {"unchanged": len(old.keys() & new.keys()) - len(changed), "changed": changed,
+            "removed": [old[name] for name in sorted(old.keys() - new.keys())],
+            "added": [new[name] for name in sorted(new.keys() - old.keys())]}
+
+
+def describe_pool_change(change):
+    def value(item):
+        return "unavailable" if item is None else str(item)
+    fields = "; ".join(f"{key.replace('_', ' ')}: {value(delta['before'])} → {value(delta['after'])}"
+                       for key, delta in change["fields"].items())
+    return f"{change['name']} ({fields})"
+
+
 def compare(before, after, skip_running_config_check=False):
     findings = []
     for key, error in after["errors"].items():
@@ -442,6 +476,16 @@ def compare(before, after, skip_running_config_check=False):
                 if len(old) != len(new):
                     findings.append({"check": key, "severity": "error", "before_count": len(old),
                                      "after_count": len(new), "message": "WAF policy count changed"})
+                continue
+            if category == "tables" and key == "pools":
+                try:
+                    delta = pool_delta(old, new)
+                except ValueError as exc:
+                    findings.append({"check": key, "severity": "error", "message": str(exc)})
+                    continue
+                if delta["removed"] or delta["added"] or delta["changed"]:
+                    findings.append({"check": key, "severity": "error", "before_count": len(old),
+                                     "after_count": len(new), **delta})
                 continue
             a = Counter(canonical(row) for row in old)
             b = Counter(canonical(row) for row in new)
@@ -504,6 +548,10 @@ def describe_finding(finding):
     if "before_count" in finding:
         text = f"{check}: {finding['before_count']}->{finding['after_count']} rows"
         details = []
+        if check == "pools" and finding.get("changed"):
+            changes = finding["changed"]
+            details.append("changed " + ", ".join(describe_pool_change(row) for row in changes[:3])
+                           + (", ..." if len(changes) > 3 else ""))
         for label in ("removed", "added"):
             names = list(dict.fromkeys(name for name in (_identity(row) for row in finding.get(label, [])) if name))
             if names:
