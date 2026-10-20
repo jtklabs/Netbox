@@ -94,8 +94,8 @@ class RevisionTest(GridTest):
         device = self.devices['sw1']
         snapshot = snapshot_for_device(self.user, device, ['raw_commands'], 'replace', audit=True)
         self.assertEqual(snapshot['document'], parse_definition(text))
-        with self.assertRaises(ValidationError):
-            snapshot_for_device(self.user, device, ['raw_commands'], 'replace')
+        self.assertEqual(snapshot_for_device(self.user, device, ['raw_commands'], 'replace')
+                         ['read_only_features'], ['raw_commands'])
         standard.allow_enforce = True
         standard.save()
         self.assertEqual(snapshot_for_device(self.user, device, ['raw_commands'], 'replace')
@@ -269,8 +269,8 @@ class RevisionTest(GridTest):
         ntp.auto_remediable = False
         ntp.allow_enforce = False
         ntp.save()
-        with self.assertRaisesRegex(ValidationError, 'does not permit'):
-            snapshot_for_device(self.user, self.devices['sw1'], ['ntp'], 'add')
+        self.assertEqual(snapshot_for_device(self.user, self.devices['sw1'], ['ntp'], 'add')
+                         ['read_only_features'], ['ntp'])
         with self.assertRaisesRegex(ValidationError, 'no accessible'):
             snapshot_for_device(get_user_model().objects.create_user('no-standards'), self.devices['sw1'], ['ntp'], 'add')
 

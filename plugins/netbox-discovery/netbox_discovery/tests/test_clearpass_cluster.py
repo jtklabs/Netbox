@@ -97,3 +97,19 @@ class ClearPassClusterTest(TestCase):
         self.assertEqual(len(snapshot(user, self.publisher)), 2)
         with self.assertRaisesRegex(queue.QueueError, 'change permission'):
             snapshot(user, self.publisher, apply=True)
+
+    def test_read_only_ntp_in_remediation_job_needs_no_cluster_change_approval(self):
+        from netbox_compliance.models import ConfigStandard
+        standard = ConfigStandard.objects.get(name='NTP')
+        standard.auto_remediable = standard.allow_enforce = False
+        standard.save()
+        data = {**self.data, 'filters': {'id': [self.subscriber.pk]},
+                'profile': {'features': ['ntp', 'syslog'], 'mode': 'replace'}}
+        job = queue.schedule(self.user, data)[0]
+        self.assertEqual(job.standards_snapshot['read_only_features'], ['ntp'])
+        job = queue.claim(self.user, self.poller, 1, True)[0]
+        self.assertEqual(queue.report(self.user, job.pk, {
+            'claim_token': job.claim_token, 'sequence': 1, 'stage': 'ready', 'message': 'Apply syslog',
+            'summary': {'read_only_features': ['ntp'], 'standards_revisions': [
+                {'standard_id': p['standard_id'], 'revision': p['revision']}
+                for p in job.standards_snapshot['revisions']]}}).status, 'running')

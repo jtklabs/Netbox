@@ -69,7 +69,7 @@ def choices_for(user, device):
 
 @transaction.atomic
 def run_now(user, device, selection, action):
-    from netbox_compliance.definitions import snapshot_for_device
+    from netbox_compliance.definitions import execution_checks, snapshot_for_device
 
     if not user.has_perm('netbox_discovery.add_upgradejob'):
         raise queue.QueueError('You do not have permission to run device standards.')
@@ -86,22 +86,16 @@ def run_now(user, device, selection, action):
     if action not in ('auto', 'audit', 'add', 'replace'):
         raise queue.QueueError('Choose standard settings, audit, add missing, or add and remove.')
     plan = dict(choice['plan'])
-    operation = choice['operation']
-    # A profile contains its comparison mode; standards determine whether
-    # remediation is allowed. Read-only standards make an automatic run audit.
+    if action in ('add', 'replace'):
+        plan['mode'] = action
+    # Keep each standard's permissions in the pinned job. A mixed profile can
+    # remediate permitted standards while the remaining checks stay read-only.
     snapshot = snapshot_for_device(user, target, plan['features'], plan['mode'], audit=True,
                                    raw_standard_id=plan.get('raw_standard_id'),
                                    raw_standard_ids=plan.get('raw_standard_ids'))
-    if action == 'auto':
-        if not all(item['auto_remediable'] for item in snapshot['revisions']):
-            operation = 'audit_config'
-        if (selection.startswith('standard:') and plan['mode'] == 'replace'
-                and not all(item['allow_enforce'] for item in snapshot['revisions'])):
-            plan['mode'] = 'add'
-    elif action == 'audit':
-        operation = 'audit_config'
-    else:
-        operation, plan['mode'] = 'remediate', action
+    checks = set(execution_checks(plan['features'], plan.get('raw_standard_ids')))
+    operation = ('audit_config' if action == 'audit' or checks.issubset(snapshot['read_only_features'])
+                 else 'remediate')
     if operation == 'remediate' and not user.has_perm('netbox_discovery.apply_upgradejob'):
         raise queue.QueueError('You do not have permission to apply changes. Select Audit only.')
     now = timezone.now()

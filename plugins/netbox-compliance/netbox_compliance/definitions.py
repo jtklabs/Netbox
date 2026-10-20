@@ -124,6 +124,18 @@ class SnapshotResolver:
             yield standard, revision
 
 
+def execution_checks(features, raw_standard_ids=None):
+    """Names used by worker verdicts; plural raw selections run independently."""
+    return [check for feature in features for check in
+            ([f'raw_commands:{pk}' for pk in sorted(raw_standard_ids)]
+             if feature == 'raw_commands' and raw_standard_ids else [feature])]
+
+
+def raw_has_commands(settings):
+    return any(policy.get('commands') or any(bundle.get('commands') for bundle in policy.get('regions', {}).values())
+               for policy in settings['platforms'].values())
+
+
 def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None, raw_standard_id=None, raw_standard_ids=None):
     resolver = resolver if resolver is not None else SnapshotResolver(user)
     selection = {'features': features}
@@ -155,14 +167,17 @@ def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=N
                           'allow_enforce': standard.allow_enforce})
     if selected and set(raw) != {str(value) for value in selected}:
         raise ValidationError(f'{device}: every selected raw standard must be accessible, in force and in scope.')
+    read_only = []
     for feature in features:
         section = FEATURE_SECTIONS[feature]
         standards = [r for r in revisions if r['section'] == section]
         if not standards:
             raise ValidationError(f'{device}: no accessible, in-force YAML standard for {feature}.')
         for standard in standards:
-            if not audit and (not standard['auto_remediable'] or (mode == 'replace' and not standard['allow_enforce'])):
-                raise ValidationError(f'{device}: {standard["name"]} does not permit {mode} remediation.')
+            if (not standard['auto_remediable'] or (mode == 'replace' and not standard['allow_enforce'])
+                    or (feature == 'raw_commands' and not raw_has_commands(raw[str(standard['standard_id'])]))):
+                read_only.append(f"raw_commands:{standard['standard_id']}"
+                                 if feature == 'raw_commands' and raw_standard_ids is not None else feature)
     if 'snmp' in features or 'snmp_packetsize' in features:
         settings = document['snmp']
         required = ({'snmp_packetsize'} if 'packetsize' in settings else set())
@@ -188,7 +203,7 @@ def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=N
         needed = expanded
     document = {key: value for key, value in document.items() if key in needed}
     revisions = [revision for revision in revisions if revision['section'] in needed]
-    snapshot = {'document': document, 'revisions': revisions}
+    snapshot = {'document': document, 'revisions': revisions, 'read_only_features': sorted(read_only)}
     if raw_standard_ids is not None:
         document.pop('raw_commands', None)
         snapshot['raw_standards'] = {str(value): raw[str(value)] for value in sorted(selected)}

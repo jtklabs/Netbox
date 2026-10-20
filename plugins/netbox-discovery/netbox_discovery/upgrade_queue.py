@@ -308,7 +308,8 @@ def prepare(user, data, *, skipped=None):
                     raise QueueError('; '.join(exc.messages)) from None
                 if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:
                     from .clearpass_cluster import snapshot
-                    applying = data['operation'] == 'remediate'
+                    applying = (data['operation'] == 'remediate'
+                                and 'ntp' not in standards_snapshot.get('read_only_features', []))
                     if applying and not plan.get('allow_clearpass_cluster_changes'):
                         raise QueueError('Enable Allow ClearPass cluster-wide changes on the job/profile before scheduling remediation.')
                     standards_snapshot['clearpass_cluster'] = snapshot(user, device, apply=applying)
@@ -655,9 +656,10 @@ def report(user, pk, data):
             from netbox_compliance.models import ConfigStandard
             if not job.standards_snapshot:
                 raise QueueError('Re-create this job with versioned NetBox standards before applying changes.')
-            if (job.standards_snapshot.get('clearpass_cluster') or
+            if ('ntp' not in job.standards_snapshot.get('read_only_features', []) and
+                    (job.standards_snapshot.get('clearpass_cluster') or
                     (job.device.platform and job.device.platform.slug == 'aruba-clearpass' and
-                     'ntp' in job.profile.get('features', []))):
+                     'ntp' in job.profile.get('features', [])))):
                 from .clearpass_cluster import snapshot
                 pinned_cluster = job.standards_snapshot.get('clearpass_cluster')
                 if (not job.profile.get('allow_clearpass_cluster_changes') or not job.requested_by or
@@ -676,6 +678,9 @@ def report(user, pk, data):
                     raise QueueError('Mobility Conductor assignment changed; create a new schedule.')
                 if data.get('summary', {}).get('mobility_conductor') != pinned_conductor:
                     raise QueueError('Worker did not acknowledge the pinned Mobility Conductor; update the worker.')
+            read_only = job.standards_snapshot.get('read_only_features', [])
+            if read_only and data.get('summary', {}).get('read_only_features') != read_only:
+                raise QueueError('Worker did not acknowledge the read-only standards; update the worker before applying changes.')
             for pinned in job.standards_snapshot['revisions']:
                 standard = ConfigStandard.objects.filter(pk=pinned['standard_id'], revision=pinned['revision']).first()
                 if standard is None or not standard.is_active or not standard.applies_to(job.device):
