@@ -18,6 +18,7 @@
     <table class="table attr-table">
       <tr><th>Device</th><td>{{ object.device|linkify }} ({{ object.address }})</td></tr>
       <tr><th>Poller</th><td>{{ object.poller|linkify }}</td></tr>
+      <tr><th>Job worker version</th><td>{{ object.worker_version|default:'Not reported' }}</td></tr>
       <tr><th>Worker last seen</th><td>{% if object.poller.upgrade_last_seen_at %}{{ object.poller.upgrade_last_seen_at }} ({{ object.poller.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
       <tr><th>Operation</th><td>{{ object.get_operation_display }}</td></tr>
       <tr><th>Profile at scheduling</th><td>{{ object.profile_name|default:'Custom settings' }}</td></tr>

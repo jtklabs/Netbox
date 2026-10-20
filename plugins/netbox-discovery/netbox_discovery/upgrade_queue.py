@@ -525,7 +525,7 @@ def expire(queryset, now):
 
 
 @transaction.atomic
-def claim(user, poller, limit, apply):
+def claim(user, poller, limit, apply, worker_version=""):
     now = timezone.now()
     qs = UpgradeJob.objects.restrict(user, 'run').filter(poller=poller)
     expire(qs, now)
@@ -554,6 +554,7 @@ def claim(user, poller, limit, apply):
         if not capacity_available(job) or not dependencies_done(job) or not exclusion_clear(job):
             continue
         job.claim_token = uuid.uuid4()
+        job.worker_version = worker_version
         job.status, job.claimed_at, job.last_seen_at = 'claimed', now, now
         job.save()
         jobs.append(job)
@@ -585,6 +586,7 @@ def report(user, pk, data):
             return job
         raise QueueError('This job has already ended.')
     if data.get('heartbeat'):
+        DiscoveryPoller.objects.filter(pk=job.poller_id).update(worker_version=data.get('worker_version', ''))
         UpgradeJob.objects.filter(pk=pk).update(last_seen_at=now)
         return job
     # The worker must receive this acknowledgment before opening a device

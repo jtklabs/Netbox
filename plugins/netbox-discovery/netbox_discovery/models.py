@@ -65,6 +65,10 @@ class DiscoveryPoller(PrimaryModel):
     version = models.CharField(
         max_length=50, blank=True, help_text='Scanner version reported at check-in'
     )
+    worker_version = models.CharField(
+        max_length=50, blank=True, editable=False,
+        help_text='Upgrade / standards worker version reported at check-in',
+    )
     last_scan_summary = models.CharField(
         max_length=200, blank=True,
         help_text='What the poller reported doing at its last check-in',
@@ -142,7 +146,10 @@ class DiscoveryPoller(PrimaryModel):
         """
         now = timezone.now()
         fields = {'upgrade_last_seen_at' if upgrade else 'last_seen_at': now}
-        if version and not upgrade:
+        if upgrade:
+            # An older worker checking in must not retain a newer worker's label.
+            fields['worker_version'] = version
+        elif version:
             fields['version'] = version
         if summary and not upgrade:
             fields['last_scan_summary'] = summary

@@ -54,6 +54,8 @@ class OnboardingRequestTable(NetBoxTable):
 
 
 class DiscoveryPollerTable(NetBoxTable):
+    version = tables.Column(verbose_name='Scanner version')
+    worker_version = tables.Column(verbose_name='Worker version', default='Not reported')
     name = tables.Column(linkify=True)
     tenant = tables.Column(linkify=True)
     last_seen_at = columns.DateTimeColumn(verbose_name='Discovery check-in', default='Never checked in')
@@ -71,10 +73,10 @@ class DiscoveryPollerTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DiscoveryPoller
         fields = (
-            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version',
+            'pk', 'id', 'name', 'tenant', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version', 'worker_version',
             'last_scan_summary', 'open_requests', 'description', 'tags',
         )
-        default_columns = ('name', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version',
+        default_columns = ('name', 'last_seen_at', 'upgrade_last_seen_at', 'is_checking_in', 'version', 'worker_version',
                        'last_scan_summary')
 
 

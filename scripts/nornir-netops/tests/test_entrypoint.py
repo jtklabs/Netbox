@@ -81,3 +81,11 @@ def test_python39_preserves_existing_ssl(monkeypatch):
     monkeypatch.setitem(sys.modules, "netops.cli", SimpleNamespace(main=lambda argv: argv))
     assert entrypoint.main(["waf"]) == ["waf"]
     assert ssl.SSLContext is original
+
+
+def test_version_needs_no_site_packages_or_credentials():
+    import netops
+    result = subprocess.run([sys.executable, '-S', 'configure.py', '--version'],
+                            cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f'nornir-netops {netops.__version__}'
