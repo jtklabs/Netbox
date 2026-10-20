@@ -1,0 +1,256 @@
+{
+  "date": "2026-10-20",
+  "result": "FAILED_SECOND_MEMBER_PREFLIGHT",
+  "rolling_pair_sequence_verified": false,
+  "recovery_status": "complete_verified_healthy",
+  "source_commit": "602f9325fde730f1695a2c27c860006f39272783",
+  "worker_version": "0.2.3",
+  "source_files": {
+    "netops/upgrade/f5_workflow.py": "ceae2281ceb162eae02342c338075fc4ed3ffaa9f1e36edcb8734f0073237756",
+    "netops/upgrade/f5.py": "d6e27a1da6adc718eb6c5dcc75aac2b50f027380175de438ced7409f0f265a1c",
+    "netops/upgrade/f5_requests.py": "a2f4f47521c45d35c44adb5c9ea2f8d55850ce949f230862d059c3593476176b",
+    "netops/upgrade/scheduler.py": "24bd7af1d646eb1411107fb03df3c646d2d8de336d85c06905e22248013a1914",
+    "netops/__init__.py": "f654ea0a8675d77e44e3c599c33b56d34900ed3839236211ca4b4e485428e91c"
+  },
+  "source_directory": "scripts/nornir-netops",
+  "source_hashes_verified_after_test": true,
+  "execution": {
+    "method": "Current-at-start worker copied to an isolated lab directory; per-device CLI commands with explicit management targets.",
+    "standby_selection": "Operator selected lab02 using live HA roles; automatic role-based ordering was not tested.",
+    "queue_and_ui_tested": false,
+    "deployment_changed": false,
+    "later_releases_tested": false,
+    "code_changed": false
+  },
+  "initial_state": {
+    "version": "17.5.1.9",
+    "build": "0.0.12",
+    "volume": "HD1.2",
+    "roles": {
+      "f5-lab01": "active",
+      "f5-lab02": "standby"
+    },
+    "sync": "In Sync",
+    "waf_policies_per_member": 20,
+    "asm_ready": true
+  },
+  "profile": {
+    "target_version": "17.5.1.10",
+    "target_build": "0.0.35",
+    "target_volume": "HD1.1",
+    "ucs_backup": true,
+    "drain_connections": false,
+    "validation_timeout_seconds": 7200,
+    "reload_timeout_seconds": 7200,
+    "install_timeout_seconds": 7200,
+    "first_member_allow_active": false,
+    "second_member_allow_active": true,
+    "reused_existing_target_installation": true
+  },
+  "tests": [
+    {
+      "test": "Active member with default profile",
+      "result": "PASS_EXPECTED_REJECTION",
+      "run_id": "128b81a5-dfbb-4206-97ab-1bc08c890608",
+      "reason": "Active member blocked with allow_active false."
+    },
+    {
+      "test": "Standby preflight",
+      "result": "PASS",
+      "run_id": "893dd975-a062-4f03-8b3e-ad62545727f3"
+    },
+    {
+      "test": "First standby apply attempt",
+      "result": "FAILED_UCS_SAVE",
+      "run_id": "d45cf3c0-3726-42da-945c-0e3a7cf19383",
+      "seconds": 132.0,
+      "reason": "HTTP 500 AsyncContext timeout on POST /mgmt/tm/sys/ucs. Appliance logs showed the save child killed; no completed archive existed.",
+      "install_or_reboot_performed": false
+    },
+    {
+      "test": "Operator retry of standby upgrade",
+      "result": "COMPLETED_WITH_WARNINGS",
+      "run_id": "807d4d75-7bbf-45d8-982a-55d2f85ef18b",
+      "started_at": "2026-10-20T05:41:52.003+00:00",
+      "finished_at": "2026-10-20T06:18:13.726+00:00",
+      "seconds": 2181.7,
+      "ucs_download_checksum_verified": true,
+      "configuration_copy_exit_verified": true,
+      "target_version": "17.5.1.10",
+      "target_volume": "HD1.1",
+      "clean_health_comparisons": 2,
+      "waf_policies": "20/20",
+      "asm_ready": true,
+      "final_role": "standby",
+      "waf_request_check": "Skipped because unit was standby.",
+      "findings": [
+        {
+          "check": "sync",
+          "message": "configuration sync is 'Changes Pending'; sync the device group once both members are upgraded",
+          "severity": "warning"
+        }
+      ],
+      "reboot_to_rest_reconnect_seconds": 976.2,
+      "health_validation_seconds": 761.6,
+      "manual_service_restart": false,
+      "validation_override": false
+    },
+    {
+      "test": "Second member preflight after standby passed",
+      "result": "BLOCKED",
+      "run_id": "873a466c-ea82-43c4-ae20-ca46c982c629",
+      "allow_active": true,
+      "reason": "configuration sync is 'Changes Pending'; sync the device group before upgrading",
+      "failover_performed": false,
+      "second_member_upgraded": false
+    }
+  ],
+  "findings": [
+    "The first member's postchecks treat Changes Pending as a warning and recommend syncing after both members upgrade, but the second member's preflight rejects that same sync state.",
+    "The current rolling sequence therefore cannot be considered validated. No poller-driven failover was exercised.",
+    "A transient UCS-save server timeout required an operator retry before the standby upgrade could proceed.",
+    "The long validation window was needed: WAF database migration and policy activation took longer than the previous default ten-minute validation window.",
+    "HTTP probe failures were observed without a commanded failover; their cause was not established."
+  ],
+  "traffic_observation": {
+    "method": "Windows lab client sends short HTTP /health requests through both shared VIPs.",
+    "request_timeout_seconds": 5,
+    "samples": 2172,
+    "failed": 6,
+    "first_utc": "2026-10-20T05:36:29.2687645Z",
+    "last_utc": "2026-10-20T06:48:20.2673939Z",
+    "failures": [
+      {
+        "time": "2026-10-20T06:15:21.8514010Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5087,
+        "next_success_at": "2026-10-20T06:15:25.6989769Z"
+      },
+      {
+        "time": "2026-10-20T06:21:07.7727172Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5036,
+        "next_success_at": "2026-10-20T06:21:11.5828011Z"
+      },
+      {
+        "time": "2026-10-20T06:21:24.4503968Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5034,
+        "next_success_at": "2026-10-20T06:21:28.3122985Z"
+      },
+      {
+        "time": "2026-10-20T06:25:48.2101128Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5041,
+        "next_success_at": "2026-10-20T06:25:52.1073494Z"
+      },
+      {
+        "time": "2026-10-20T06:26:08.8951376Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5020,
+        "next_success_at": "2026-10-20T06:26:12.5800501Z"
+      },
+      {
+        "time": "2026-10-20T06:28:24.2702909Z",
+        "target": "VIP 2",
+        "status": 0,
+        "error": "WebException",
+        "elapsed_ms": 5041,
+        "next_success_at": "2026-10-20T06:28:27.9732000Z"
+      }
+    ],
+    "limitations": "Sampled short requests do not prove uninterrupted traffic, long-lived connection preservation, or WAF attack blocking.",
+    "generator_settings_changed": false
+  },
+  "recovery": {
+    "method": "One manual cleanup reboot of standby lab02 to its recorded original HD1.2, after confirming lab01 remained active and original version/build matched.",
+    "standby_boot_and_health_verified_twice": true,
+    "final_members": [
+      {
+        "device": "f5-lab01",
+        "facts": {
+          "version": "17.5.1.9",
+          "build": "0.0.12",
+          "active_volume": "HD1.2",
+          "failover_state": "active",
+          "sync_status": "In Sync",
+          "peers": [
+            "f5-lab02.home.arpa"
+          ]
+        },
+        "waf": {
+          "provisioned": true,
+          "ready": true,
+          "policy_count": 20
+        },
+        "counts": {
+          "provision": 15,
+          "vlans": 2,
+          "self_ips": 2,
+          "routes": 0,
+          "trunks": 0,
+          "irules": 15,
+          "certificates": 4,
+          "virtual_servers": 2,
+          "pools": 1,
+          "nodes": 1,
+          "interfaces": 3,
+          "waf_policies": 20
+        },
+        "errors": {},
+        "baseline_errors": []
+      },
+      {
+        "device": "f5-lab02",
+        "facts": {
+          "version": "17.5.1.9",
+          "build": "0.0.12",
+          "active_volume": "HD1.2",
+          "failover_state": "standby",
+          "sync_status": "In Sync",
+          "peers": [
+            "f5-lab01.home.arpa"
+          ]
+        },
+        "waf": {
+          "provisioned": true,
+          "ready": true,
+          "policy_count": 20
+        },
+        "counts": {
+          "provision": 15,
+          "vlans": 2,
+          "self_ips": 2,
+          "routes": 0,
+          "trunks": 0,
+          "irules": 15,
+          "certificates": 4,
+          "virtual_servers": 2,
+          "pools": 1,
+          "nodes": 1,
+          "interfaces": 3,
+          "waf_policies": 20
+        },
+        "errors": {},
+        "baseline_errors": []
+      }
+    ],
+    "synchronization": "Normal config-sync from restored lab02 to lab-ha and datasync-global-dg, as recommended by the appliance. Restored and verified on both members after both were healthy on the same original release."
+  },
+  "engineering_follow_up": [
+    "Add pair context and verify the upgraded peer's exact release, health and traffic-group readiness before admitting a mixed-version handoff; do not blanket-ignore configuration-sync failures.",
+    "Verify standby-first ordering against live roles, failover traffic ownership, both upgraded members and final synchronization.",
+    "Handle long UCS-save operations with verified completion rather than relying solely on a synchronous REST response."
+  ],
+  "publication_note": "Historical evidence for worker 0.2.3 at the recorded commit. Private management/VIP addresses, configuration snapshots, credentials and archive locations are omitted."
+}

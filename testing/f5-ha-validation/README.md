@@ -15,3 +15,19 @@ passed. Those recovery results do not turn the automated upgrade into a pass.
 The report retains the limitations, interventions, observations and engineering
 follow-up from that run. Its follow-up list describes findings at the recorded
 revision; it does not assert that later releases still have those limitations.
+
+## October 20 retest
+
+[`results-2026-10-20.json`](results-2026-10-20.json) records a live retest of
+worker **0.2.3**, pinned to commit
+`602f9325fde730f1695a2c27c860006f39272783`. The standby completed the upgrade
+after an operator retry of a failed UCS save. The active member's subsequent
+preflight rejected `Changes Pending`, so no failover or second-member upgrade
+was performed. The rolling HA sequence remains unverified.
+
+This run used per-device CLI commands with explicitly selected lab targets. It
+did not validate automatic pair selection, queue ordering, or the UI. The exact
+target installation already existed on the inactive volume, so fresh software
+installation was not exercised. The report includes readiness timings, HTTP
+probe failures and final recovery verification. Later worker releases are not
+covered by this evidence.
