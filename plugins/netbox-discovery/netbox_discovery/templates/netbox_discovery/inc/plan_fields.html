@@ -26,6 +26,7 @@
       drain_window_seconds: !remediate && drain && drain.checked,
       drain_timeout_seconds: !remediate && drain && drain.checked,
       features: custom && remediate,
+      raw_standard: custom && remediate,
       remediation_mode: custom && remediate,
       allow_clearpass_cluster_changes: custom && operation && operation.value === 'remediate',
       saved_profile: source && source.value === 'saved'

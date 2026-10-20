@@ -42,7 +42,7 @@ EXIT_OK, EXIT_FAILED, EXIT_DIFF = 0, 1, 2
 def validate(profile):
     """The features and mode a remediation job asks for; nothing else is accepted."""
     if (not isinstance(profile, dict) or not {'features', 'mode'}.issubset(profile) or
-            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes'}):
+            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes', 'raw_standard_id'}):
         raise ValueError('Remediation job must name features, mode and optional ClearPass cluster-change approval')
     if type(profile.get('allow_clearpass_cluster_changes', False)) is not bool:
         raise ValueError('ClearPass cluster-change approval must be true or false')
@@ -52,6 +52,11 @@ def validate(profile):
         raise ValueError(f'Remediation features must be a nonempty list from: {", ".join(FEATURES)}')
     if mode not in MODES:
         raise ValueError('Remediation mode must be add or replace')
+    if 'raw_standard_id' in profile:
+        if type(profile['raw_standard_id']) is not int or profile['raw_standard_id'] < 1:
+            raise ValueError('raw_standard_id must be a positive integer.')
+        if 'raw_commands' not in features:
+            raise ValueError('A raw standard selection requires the raw_commands feature.')
     if profile.get('allow_clearpass_cluster_changes') and 'ntp' not in features:
         raise ValueError('ClearPass cluster-change approval requires NTP')
     return features, mode
@@ -201,6 +206,13 @@ def run_job(task, job, args, emit):
     snapshot = job.get('standards_snapshot')
     if not isinstance(snapshot, dict) or not snapshot.get('document') or not snapshot.get('revisions'):
         raise ValueError('Job has no versioned NetBox standards; re-create it before execution')
+    validate(job['profile'])
+    selected = job['profile'].get('raw_standard_id')
+    if selected is not None:
+        pinned = [item for item in snapshot['revisions'] if item.get('section') == 'raw_commands']
+        if (len(pinned) != 1 or pinned[0]['standard_id'] != selected
+                or 'raw_commands' not in snapshot['document']):
+            raise ValueError('Selected raw standard does not match the pinned job snapshot; re-create the job')
     options = copy.copy(args) if args is not None else SimpleNamespace()
     options.compliance_details = {}
     # Both the dry run and apply read the same private snapshot, never a local fallback.

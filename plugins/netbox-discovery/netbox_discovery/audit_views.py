@@ -25,6 +25,7 @@ from utilities.htmx import htmx_partial
 
 from .models import AuditSchedule, AuditRun, JobProfile, UpgradeJob
 from .profile_views import RemediationWidget
+from .raw_standard_selection import raw_standard_field, configure_raw_standard
 from .upgrade_choices import REMEDIATION_FEATURES
 from . import upgrade_queue as queue
 from .audit_scheduling import validate_profile_access
@@ -52,6 +53,7 @@ class AuditScheduleForm(NetBoxModelForm):
                                             query_params={'kind': 'remediate'})
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, widget=RemediationWidget,
                                          required=False, label='Standards')
+    raw_standard = raw_standard_field()
     comparison = forms.ChoiceField(choices=(('replace', 'Exact match'), ('add', 'Required entries present')), required=False)
     time_zone = forms.ChoiceField(choices=[(zone, zone) for zone in sorted(available_timezones())], required=False)
     local_time = forms.TimeField(widget=forms.TimeInput(attrs={'type': 'time'}), label='Start time', required=False)
@@ -62,7 +64,7 @@ class AuditScheduleForm(NetBoxModelForm):
         FieldSet('name', 'enabled', 'description', name='Audit schedule'),
         FieldSet('frequency', 'weekday', 'local_time', 'time_zone', 'window_hours', name='Timing'),
         FieldSet('all_active', 'regions', 'tenants', 'sites', 'platforms', 'models', 'device_tags', 'devices', name='Device scope'),
-        FieldSet('remediate', 'profile_source', 'saved_profile', 'features', 'comparison',
+        FieldSet('remediate', 'profile_source', 'saved_profile', 'features', 'raw_standard', 'comparison',
                  'allow_clearpass_cluster_changes', name='Standards'),
         FieldSet('tags', name='Tags'),
     )
@@ -74,6 +76,8 @@ class AuditScheduleForm(NetBoxModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        configure_raw_standard(self, getattr(self.instance, 'run_as', None))
+        self.initial['raw_standard'] = self.instance.profile.get('raw_standard_id')
         self.fields['weekday'].required = False
         self.initial.setdefault('time_zone', settings.TIME_ZONE)
         self.initial['comparison'] = self.instance.profile.get('mode', 'replace')
@@ -108,6 +112,8 @@ class AuditScheduleForm(NetBoxModelForm):
         data['filters'] = self.instance.filters = filters
         source = data.get('profile_source')
         profile = {'features': data.get('features', []), 'mode': data.get('comparison') or 'replace'} if source == 'custom' else {}
+        if source == 'custom' and data.get('raw_standard'):
+            profile['raw_standard_id'] = data['raw_standard']
         if source == 'custom' and data.get('remediate') and data.get('allow_clearpass_cluster_changes'):
             profile['allow_clearpass_cluster_changes'] = True
         if source == 'custom' and not profile['features']:

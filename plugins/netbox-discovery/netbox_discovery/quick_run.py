@@ -53,6 +53,8 @@ def choices_for(user, device):
             mode = 'add'
         operation = 'remediate' if standard.auto_remediable else 'audit_config'
         plan = {'features': features, 'mode': mode}
+        if section == 'raw_commands':
+            plan['raw_standard_id'] = standard.pk
         if assigned and assigned.plan.get('allow_clearpass_cluster_changes') and 'ntp' in features:
             plan['allow_clearpass_cluster_changes'] = True
         choices.append({'value': f'standard:{standard.pk}', 'label': standard.name,
@@ -87,7 +89,8 @@ def run_now(user, device, selection, action):
     operation = choice['operation']
     # A profile contains its comparison mode; standards determine whether
     # remediation is allowed. Read-only standards make an automatic run audit.
-    snapshot = snapshot_for_device(user, target, plan['features'], plan['mode'], audit=True)
+    snapshot = snapshot_for_device(user, target, plan['features'], plan['mode'], audit=True,
+                                   raw_standard_id=plan.get('raw_standard_id'))
     if action == 'auto':
         if not all(item['auto_remediable'] for item in snapshot['revisions']):
             operation = 'audit_config'

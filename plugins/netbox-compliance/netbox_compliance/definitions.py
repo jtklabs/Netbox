@@ -128,13 +128,21 @@ class SnapshotResolver:
             yield standard, revision
 
 
-def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None):
+def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None, raw_standard_id=None):
     resolver = resolver if resolver is not None else SnapshotResolver(user)
+    if raw_standard_id is not None and (type(raw_standard_id) is not int or raw_standard_id < 1
+                                        or 'raw_commands' not in features):
+        raise ValidationError('A raw standard selection requires raw_commands and a positive standard ID.')
     document, revisions = {}, []
     for standard, revision in resolver.for_device(device):
         section, settings = next(iter(revision.definition['settings'].items()))
+        if section == 'raw_commands' and ('raw_commands' not in features or
+                (raw_standard_id is not None and standard.pk != raw_standard_id)):
+            continue
         if section in document:
-            raise ValidationError(f'{device}: multiple YAML standards define {section}; narrow their scopes.')
+            raise ValidationError(f'{device}: multiple YAML standards define {section}; select a Raw command standard in the profile or narrow their scopes.'
+                                  if section == 'raw_commands' else
+                                  f'{device}: multiple YAML standards define {section}; narrow their scopes.')
         document[section] = deepcopy(settings)
         revisions.append({'standard_id': standard.pk, 'revision': revision.number,
                           'name': standard.name, 'section': section,

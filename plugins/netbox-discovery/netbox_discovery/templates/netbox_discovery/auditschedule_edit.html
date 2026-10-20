@@ -16,6 +16,7 @@
     show('id_time_zone', frequency.value !== 'now');
     show('id_saved_profile', source.value === 'saved');
     show('id_features', source.value === 'custom');
+    show('id_raw_standard', source.value === 'custom');
     show('id_comparison', source.value === 'custom');
     show('id_allow_clearpass_cluster_changes', source.value === 'custom' && remediate.checked);
   };

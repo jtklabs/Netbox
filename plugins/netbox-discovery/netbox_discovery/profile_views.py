@@ -14,6 +14,7 @@ from utilities.views import register_model_view
 from utilities.exceptions import AbortRequest
 
 from .models import JobProfile, DeviceTypeProfile, PlatformProfile
+from .raw_standard_selection import raw_standard_field, configure_raw_standard
 from .profile_filtersets import JobProfileFilterSet, DeviceTypeProfileFilterSet, PlatformProfileFilterSet
 from .upgrade_choices import REMEDIATION_FEATURES, REMEDIATION_MODES
 from .upgrade_queue import validate_profile
@@ -86,6 +87,7 @@ class JobProfileForm(NetBoxModelForm):
         help_text='If connections keep falling or increase until this limit, restore VIPs and cancel the reboot.')
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, required=False,
                                          widget=RemediationWidget, label='Remediate')
+    raw_standard = raw_standard_field()
     remediation_mode = forms.ChoiceField(choices=REMEDIATION_MODES, required=False, initial='add')
     allow_clearpass_cluster_changes = forms.BooleanField(
         label='Allow ClearPass cluster-wide changes', required=False)
@@ -95,12 +97,13 @@ class JobProfileForm(NetBoxModelForm):
         fields = ('name', 'kind', 'device_types', 'replace_existing', 'assignment_confirmation',
                   'upgrade_yaml', 'validation_timeout', 'skip_running_config_check', 'drain_connections', 'drain_min_reduction_percent',
                   'drain_window_seconds', 'drain_timeout_seconds', 'features',
-                  'remediation_mode', 'allow_clearpass_cluster_changes', 'description', 'comments', 'tags')
+                  'remediation_mode', 'raw_standard', 'allow_clearpass_cluster_changes', 'description', 'comments', 'tags')
 
     def __init__(self, *args, **kwargs):
         self.user = kwargs.pop('user', None)
         super().__init__(*args, **kwargs)
         self.user = self.user or getattr(self.instance, '_assignment_user', None)
+        configure_raw_standard(self, self.user)
         if not self.instance.pk and not self.is_bound:
             self.initial.setdefault('upgrade_yaml', UPGRADE_TEMPLATE)
         if self.instance.pk:
@@ -108,6 +111,7 @@ class JobProfileForm(NetBoxModelForm):
             if self.instance.kind == 'remediate':
                 self.initial.update(features=self.instance.plan['features'],
                                     remediation_mode=self.instance.plan['mode'],
+                                    raw_standard=self.instance.plan.get('raw_standard_id'),
                                     allow_clearpass_cluster_changes=self.instance.plan.get(
                                         'allow_clearpass_cluster_changes', False))
             else:
@@ -128,6 +132,8 @@ class JobProfileForm(NetBoxModelForm):
         try:
             plan = ({'features': data.get('features', []), 'mode': data.get('remediation_mode') or 'add'}
                     if kind == 'remediate' else yaml.safe_load(data.get('upgrade_yaml', '')))
+            if kind == 'remediate' and data.get('raw_standard'):
+                plan['raw_standard_id'] = data['raw_standard']
             if kind == 'remediate' and data.get('allow_clearpass_cluster_changes'):
                 plan['allow_clearpass_cluster_changes'] = True
             if kind == 'upgrade' and isinstance(plan, dict):
@@ -257,7 +263,13 @@ class JobProfileView(ObjectView):
 
     def get_extra_context(self, request, instance):
         from django.db.models import Q
-        return {'plan_yaml': profile_yaml(instance.resolved_plan()),
+        from django.apps import apps
+        raw_standard = None
+        if instance.plan.get('raw_standard_id') and apps.is_installed('netbox_compliance'):
+            from netbox_compliance.models import ConfigStandard
+            raw_standard = ConfigStandard.objects.restrict(request.user, 'view').filter(
+                pk=instance.plan['raw_standard_id']).first()
+        return {'raw_standard': raw_standard, 'plan_yaml': profile_yaml(instance.resolved_plan()),
                 'platform_assignments': PlatformProfile.objects.restrict(request.user, 'view').filter(
                     remediation_profile=instance).select_related('platform'),
                 'assignments': DeviceTypeProfile.objects.restrict(request.user, 'view').filter(
