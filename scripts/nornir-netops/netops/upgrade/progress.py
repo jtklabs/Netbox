@@ -5,6 +5,7 @@ import os
 import threading
 import time
 
+from .. import cancellation
 from .. import archive, webhook
 
 
@@ -35,6 +36,7 @@ class Reporter:
 
     def emit(self, host, stage, message, payload=None, changed=False, attachment=None):
         """Record and deliver one event. An attachment goes only to the webhook body."""
+        cancellation.checkpoint()
         with self.lock:
             sequence = self.sequences.get(host.name, 0) + 1
             self.sequences[host.name] = sequence
@@ -69,7 +71,7 @@ class Reporter:
                     break
                 except webhook.WebhookError:
                     if attempt + 1 < self.retries:
-                        time.sleep(2 ** attempt)
+                        _sleep(2 ** attempt)
             with self.run.lock:
                 events = self.run.records[host.name]["upgrade_events"]
                 for stored in events:
@@ -92,4 +94,9 @@ class Reporter:
                     "delivered" if acknowledged else "failed")
                 self.run.write()
             delivered = delivered and acknowledged
+        cancellation.checkpoint()
         return delivered
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

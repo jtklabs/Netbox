@@ -1,5 +1,6 @@
 """BIG-IP drain, persisted disabled boot state, and validated restoration."""
 
+from .. import cancellation
 import time
 from copy import deepcopy
 from urllib.parse import quote, urlsplit
@@ -202,5 +203,9 @@ def drain(client, profile, record, emit):
             return
         if record["status"] == "timed_out":
             raise TimeoutError("connection drain did not settle before the maximum wait; reboot cancelled")
-        time.sleep(min(5, profile.drain_window_seconds - (now - window_start),
+        _sleep(min(5, profile.drain_window_seconds - (now - window_start),
                        profile.drain_timeout_seconds - (now - start)))
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

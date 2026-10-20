@@ -13,6 +13,13 @@
 {% if object.status == 'failed' or object.status == 'recovery_required' %}
 <div class="alert alert-danger" role="alert"><strong>{{ object.get_status_display }}:</strong> {{ object.message|default:'No failure detail was reported by the worker.' }}</div>
 {% endif %}
+{% if object.cancellation_pending %}
+<div class="alert alert-warning" role="status"><strong>Cancellation requested.</strong> Waiting for this job's worker to confirm it stopped. Other jobs on the poller continue. Refresh for confirmation.
+  <div>{{ object.cancel_requested_at }} by {{ object.cancel_requested_by|default:'Deleted user' }}{% if object.cancel_reason %}: {{ object.cancel_reason }}{% endif %}</div>
+</div>
+{% elif object.cancel_acknowledged_at %}
+<div class="alert alert-info" role="status">Worker stopped at {{ object.cancel_acknowledged_at }}. {% if object.needs_recovery %}Changes had already been authorized; verify the device state and record recovery below before scheduling more work.{% endif %}</div>
+{% endif %}
 <div class="row"><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Scheduled work</h5><div class="card-body">
     <table class="table attr-table">
@@ -38,6 +45,17 @@
     <p><strong>{{ object.stage }}</strong> {{ object.message }}</p>
     {% if object.heartbeat_stale %}<p class="text-danger">This worker has not sent a heartbeat for over five minutes. Check the remote and the switch before taking further action.</p>{% endif %}
     {% if perms.netbox_discovery.change_upgradejob %}
+      {% if object.can_request_cancel %}
+      <p>Cancel stops this job at its next checkpoint, usually within 30 seconds plus any in-flight request. An install or reboot already sent to the device may continue. Changes are not rolled back.</p>
+      <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_cancel' pk=object.pk %}" class="mb-2">{% csrf_token %}
+        <input name="reason" class="form-control" maxlength="1000" placeholder="Reason for cancellation (optional)" aria-label="Reason for cancellation">
+        <button class="btn btn-danger mt-2">Cancel running job</button>
+      </form>
+      {% elif not object.supports_cancellation %}
+        {% if object.status == 'claimed' or object.status == 'running' %}
+        <p class="text-warning">This job's worker cannot accept per-job cancellation. Deploy worker 0.2.2 or newer for new jobs. Updating files does not upgrade an already-running worker.</p>
+        {% endif %}
+      {% endif %}
       {% if object.status == 'held' %}
       <p class="text-warning">This job is held. Check the device named above, then release it with a reason; it returns to the schedule and the normal gates still apply.</p>
       <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_release' pk=object.pk %}" class="mb-2">{% csrf_token %}

@@ -24,6 +24,8 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(view_name='plugins-api:netbox_discovery-api:upgradejob-detail')
     heartbeat_stale = serializers.BooleanField(read_only=True)
     needs_recovery = serializers.BooleanField(read_only=True)
+    cancellation_pending = serializers.BooleanField(read_only=True)
+    can_request_cancel = serializers.BooleanField(read_only=True)
     poller_last_seen_at = serializers.DateTimeField(source='poller.upgrade_last_seen_at', read_only=True)
 
     class Meta:
@@ -33,6 +35,8 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
                   'completed_at', 'last_seen_at', 'worker_version', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
+                  'supports_cancellation', 'cancel_requested_at', 'cancel_requested_by', 'cancel_reason',
+                  'cancel_acknowledged_at', 'cancellation_pending', 'can_request_cancel',
                   'audit_run', 'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
         read_only_fields = fields
@@ -59,6 +63,7 @@ class ScheduleSerializer(serializers.Serializer):
 
 
 class CheckInSerializer(serializers.Serializer):
+    supports_cancellation = serializers.BooleanField(default=False)
     worker_version = serializers.CharField(max_length=50, allow_blank=True, default="")
     name = serializers.RegexField(r'^(?:poller-)?[a-z0-9][a-z0-9_-]*$', max_length=100)
     limit = serializers.IntegerField(min_value=1, max_value=20, default=3)
@@ -138,7 +143,8 @@ class UpgradeCheckInView(QueueView):
         name = data['name'].removeprefix('poller-')
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
         poller.touch(version=data['worker_version'], summary='Upgrade worker checked in', upgrade=True)
-        jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'])
+        jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'],
+                           supports_cancellation=data['supports_cancellation'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})
 
 
@@ -148,7 +154,8 @@ class UpgradeReportView(QueueView):
 
     def execute(self, request, data, pk):
         job = queue.report(request.user, pk, data)
-        return Response({'id': job.pk, 'status': job.status, 'sequence': job.sequence})
+        return Response({'id': job.pk, 'status': job.status, 'sequence': job.sequence,
+                         'cancel_requested': job.cancellation_pending})
 
 
 class CancelSerializer(serializers.Serializer):
@@ -162,7 +169,7 @@ class UpgradeCancelView(QueueView):
 
     def execute(self, request, data, pk):
         job = queue.cancel(request.user, pk, **data)
-        return Response({'id': job.pk, 'status': job.status})
+        return Response({'id': job.pk, 'status': job.status, 'cancel_requested': job.cancellation_pending})
 
 
 class UpgradeRequeueView(QueueView):

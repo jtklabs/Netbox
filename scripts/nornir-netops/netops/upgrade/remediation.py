@@ -20,6 +20,8 @@ import copy
 import json
 import os
 import re
+from .. import cancellation
+
 import subprocess
 import sys
 import tempfile
@@ -116,7 +118,7 @@ def invoke(feature, device_id, mode, apply, args):
     report = directory / f'queued-{device_id}-{feature}-{uuid.uuid4().hex}.json'
     args.compliance_details[feature] = {}
     try:
-        done = subprocess.run(command(feature, device_id, mode, apply, args) + ['--report', str(report)], capture_output=True, text=True,
+        done = cancellation.run(command(feature, device_id, mode, apply, args) + ['--report', str(report)], capture_output=True, text=True,
                               timeout=TIMEOUT, cwd=project_root(), stdin=subprocess.DEVNULL,
                               env=child_environment(args))
     except subprocess.TimeoutExpired:

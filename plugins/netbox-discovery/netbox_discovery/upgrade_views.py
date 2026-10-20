@@ -509,9 +509,10 @@ class UpgradeCancelView(PermissionRequiredMixin, View):
         from django.shortcuts import get_object_or_404
         entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'change'), pk=pk)
         try:
-            queue.cancel(request.user, pk, request.POST.get('reason', '')[:1000],
+            job = queue.cancel(request.user, pk, request.POST.get('reason', '')[:1000],
                          recovered=request.POST.get('recovered') == 'yes')
-            messages.success(request, 'Job closed.')
+            messages.success(request, 'Cancellation requested; waiting for this worker to stop.'
+                             if job.cancellation_pending else 'Job closed.')
         except queue.QueueError as exc:
             messages.error(request, str(exc))
         return redirect(entry.get_absolute_url())

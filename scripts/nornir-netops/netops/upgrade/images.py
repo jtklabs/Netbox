@@ -4,6 +4,8 @@ BIG-IP uploads always go through here; IOS XE and EOS use it only when the
 switch could not fetch the image itself and the worker pushes it over SCP.
 """
 
+from .. import cancellation
+
 import hashlib
 import os
 import re
@@ -14,12 +16,14 @@ def local_md5(path):
     digest = hashlib.md5()
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            cancellation.checkpoint()
             digest.update(block)
     return digest.hexdigest()
 
 
 def download(url, destination):
     """Stream an image from the distribution server into the worker cache."""
+    cancellation.checkpoint()
     import requests
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = destination.with_name(destination.name + ".part")
@@ -29,6 +33,7 @@ def download(url, destination):
                 raise RuntimeError(f"image download returned HTTP {response.status_code}")
             with open(temporary, "wb") as handle:
                 for block in response.iter_content(chunk_size=4 * 1024 * 1024):
+                    cancellation.checkpoint()
                     handle.write(block)
         os.replace(temporary, destination)
     except requests.RequestException as exc:

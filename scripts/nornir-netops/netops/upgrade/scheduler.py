@@ -13,7 +13,7 @@ from uuid import UUID
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-from .. import archive, __version__
+from .. import archive, cancellation, __version__
 from ..netbox import Client, NetBoxError
 from .profile import Profile
 from . import remediation
@@ -81,12 +81,16 @@ class Outbox:
                 os.unlink(temporary)
         return path
 
-    def send(self, job_id, body, retry=True):
+    def send(self, job_id, body, retry=True, control=None):
         for attempt in range(3 if retry else 1):
             try:
                 result = self.client.post(f'{job_id}/report/', body)
                 if result.get('id') != job_id or result.get('sequence', 0) < body['sequence']:
                     raise NetBoxError('NetBox did not acknowledge the progress sequence')
+                if control is not None:
+                    control.observe(result)
+                    if result.get('cancel_requested') is True:
+                        return True
                 if body['stage'] == 'ready' and result.get('status') != 'running':
                     raise NetBoxError('NetBox did not authorize device changes')
                 if body['stage'] == 'queued' and result.get('status') != 'claimed':
@@ -113,7 +117,7 @@ class Outbox:
                 return False
         return True
 
-    def sink(self, job):
+    def sink(self, job, control=None):
         def deliver(event):
             body = {key: event[key] for key in ('sequence', 'stage', 'message', 'run_id', 'summary') if key in event}
             body['message'] = body['message'][:1000]
@@ -122,7 +126,7 @@ class Outbox:
             # Persist before HTTP, so a crash after device success is recoverable.
             # Connection and change authorization are live gates, not deferred actions.
             path = None if body['stage'] in ('queued', 'ready') else self.persist(job['id'], body)
-            delivered = self.send(job['id'], body)
+            delivered = self.send(job['id'], body, control=control)
             if delivered and path:
                 path.unlink()
             return delivered
@@ -130,16 +134,19 @@ class Outbox:
 
 
 class Heartbeat:
-    def __init__(self, client, job):
+    def __init__(self, client, job, control=None):
         self.client, self.job = client, job
+        self.control = control
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.loop, daemon=True)
 
     def loop(self):
         while not self.stop.wait(30):
             try:
-                self.client.post(f'{self.job["id"]}/report/',
+                response = self.client.post(f'{self.job["id"]}/report/',
                                  {'claim_token': self.job['claim_token'], 'heartbeat': True, 'worker_version': __version__})
+                if self.control is not None:
+                    self.control.observe(response)
             except NetBoxError:
                 # Before changes, the ready gate must still succeed. Afterwards,
                 # finish recovery and retain result events for the next tick.
@@ -201,29 +208,38 @@ def execute_job(task, args, client, outbox):
                       (['--report-dir', args.report_dir] if args.report_dir else []), PROJECT_ROOT)
     run.args = options
     code = 1
-    with Heartbeat(client, job):
+    control = cancellation.Control()
+    with cancellation.bind(control), Heartbeat(client, job, control):
         run.prepare()
         run.document['worker_version'] = __version__
         run.document.update(feature=job['operation'] if job['operation'] in remediation.CONFIG_OPERATIONS else 'upgrade', dry_run=not options.apply,
                             schedule={'job_id': job['id'], 'batch_id': job.get('batch_id'),
                                       'poller': args.poller})
-        reporter = Reporter(run, settings_from_env(), event_sink=outbox.sink(job))
+        reporter = Reporter(run, settings_from_env(), event_sink=outbox.sink(job, control=control))
         try:
-            profile = validate_assignment(job, args.apply)
-            if not reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox'):
-                raise ValueError('NetBox did not authorize the device connection; no device work started')
-            if job['operation'] in remediation.CONFIG_OPERATIONS:
-                failed, changed, outcome = remediation.run_job(
-                    task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))
-                code = 1 if failed or reporter.delivery_failed else 0
-                return Result(host=task.host, result=outcome, failed=bool(code), changed=changed)
-            result = upgrade_device(task, profile, options, reporter)
-            code = 1 if result.failed or reporter.delivery_failed else 0
-            return Result(host=task.host, result=result.result, failed=bool(code), changed=result.changed)
-        except Exception as exc:
-            from ..errors import summarize
-            reporter.emit(task.host, 'failed', redact(summarize(exc)))
-            return Result(host=task.host, result='Scheduled job could not run', failed=True)
+            try:
+                profile = validate_assignment(job, args.apply)
+                if not reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox'):
+                    raise ValueError('NetBox did not authorize the device connection; no device work started')
+                if job['operation'] in remediation.CONFIG_OPERATIONS:
+                    failed, changed, outcome = remediation.run_job(
+                        task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))
+                    code = 1 if failed or reporter.delivery_failed else 0
+                    return Result(host=task.host, result=outcome, failed=bool(code), changed=changed)
+                result = upgrade_device(task, profile, options, reporter)
+                code = 1 if result.failed or reporter.delivery_failed else 0
+                return Result(host=task.host, result=result.result, failed=bool(code), changed=result.changed)
+            except Exception as exc:
+                from ..errors import summarize
+                reporter.emit(task.host, 'failed', redact(summarize(exc)))
+                return Result(host=task.host, result='Scheduled job could not run', failed=True)
+        except cancellation.Cancelled:
+            # Device contexts have exited. Persist the stop acknowledgment even
+            # if NetBox is offline; outbox replay will deliver it on a later tick.
+            message = 'Worker stopped after cancellation; inspect device state before retrying.'
+            with cancellation.bind(None):
+                reporter.emit(task.host, 'cancelled', message)
+            return Result(host=task.host, result=message, failed=True)
         finally:
             run.finish(code)
             print(f'{task.host.name}: report written to {run.path}', flush=True)
@@ -277,7 +293,7 @@ def run_queue(args, client, outbox, login):
                             return 1
                     else:
                         response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply,
-                                                             'worker_version': __version__})
+                                                             'worker_version': __version__, 'supports_cancellation': True})
                         jobs = response.get('jobs')
                         if not isinstance(jobs, list) or len(jobs) > free or any(not isinstance(j, dict) for j in jobs):
                             raise NetBoxError('Upgrade queue returned an invalid batch')
