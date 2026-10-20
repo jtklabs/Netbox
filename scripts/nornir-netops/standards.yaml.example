@@ -271,11 +271,20 @@ local_accounts:
 #    syslog: service-source
 
 # SSH MAC integrity -> configure.py ssh-mac --replace
-# Exact SHA-512 MAC list on IOS/IOS-XE, EOS and Junos. ASA uses its high
-# integrity preset, whose algorithms depend on the release (not SHA-512).
-# Add mode reports drift without changing SSH. --replace is still a dry run
-# unless --apply is given. Encryption ciphers and key exchange are separate.
+# Edit these lists to define the complete allowed set for each platform.
+# This example excludes SHA-1 MACs while retaining SHA-256 and SHA-512 where
+# supported. Check algorithm availability on your software releases.
+# ASA macs renders an explicit custom integrity list, not the high preset.
+# Add mode reports only; replace mode writes only with --apply.
+# Encryption ciphers and key exchange are separate settings.
 ssh_mac:
-  macs: [hmac-sha2-512]
-  ios_scope: both       # both | client | server; IOS/IOS-XE only
-  asa_integrity: high
+  ios_scope: both
+  platforms:
+    cisco_ios:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    arista_eos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    cisco_asa:
+      macs: [hmac-sha2-256]
+    juniper_junos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
