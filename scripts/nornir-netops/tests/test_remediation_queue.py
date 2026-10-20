@@ -434,3 +434,45 @@ def test_revision_acknowledgment_and_verdict_reach_the_queue_reporter(tmp_path, 
     ready = next(event for event in events if event['stage'] == 'ready')
     assert ready['summary']['standards_revisions'] == [{'standard_id': 1, 'revision': 2}]
     assert events[-1]['summary']['compliance_results'] == {'ntp': 'compliant'}
+
+
+@pytest.mark.parametrize('value', [True, 0, -1, '1', None, []])
+def test_raw_standard_id_must_be_positive_integer(value):
+    with pytest.raises(ValueError, match='raw_standard_id'):
+        remediation.validate({'features': ['raw_commands'], 'mode': 'replace', 'raw_standard_id': value})
+
+
+def test_raw_selection_requires_raw_feature():
+    with pytest.raises(ValueError, match='raw_commands'):
+        remediation.validate({'features': ['ntp'], 'mode': 'add', 'raw_standard_id': 12})
+
+
+@pytest.mark.parametrize('mismatch', ['wrong_id', 'missing', 'duplicate', 'missing_document', None])
+def test_raw_worker_runs_only_the_pinned_selection(monkeypatch, mismatch):
+    chosen = job(['raw_commands'])
+    chosen['profile']['raw_standard_id'] = 12
+    chosen['operation'] = 'audit_config'
+    snapshot = chosen['standards_snapshot']
+    snapshot['document'] = {'raw_commands': {'enabled': True, 'platforms': {}}}
+    snapshot['revisions'] = [{'standard_id': 12, 'revision': 1, 'section': 'raw_commands'}]
+    if mismatch == 'wrong_id':
+        snapshot['revisions'][0]['standard_id'] = 13
+    elif mismatch == 'missing':
+        snapshot['revisions'][0]['section'] = 'ntp'
+    elif mismatch == 'duplicate':
+        snapshot['revisions'] *= 2
+    elif mismatch == 'missing_document':
+        snapshot['document'] = {'ntp': {'servers': ['192.0.2.1']}}
+    calls = []
+    def invoke(feature, device_id, mode, apply, args):
+        calls.append((feature, apply))
+        assert json.loads(args.standards.path.read_text()) == snapshot['document']
+        return 0, ONE
+    monkeypatch.setattr(remediation, 'invoke', invoke)
+    if mismatch:
+        with pytest.raises(ValueError, match='pinned job snapshot'):
+            remediation.run_job(None, chosen, None, Recorder())
+        assert not calls
+    else:
+        remediation.run_job(None, chosen, None, Recorder())
+        assert calls == [('raw_commands', False)]

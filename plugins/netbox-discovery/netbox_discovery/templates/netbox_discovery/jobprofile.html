@@ -4,6 +4,7 @@
 <div class="row"><div class="col-lg-7">
   <h2>{{ object.get_kind_display }} profile</h2>
   <p>{{ object.description }}</p>
+  {% if raw_standard %}<p><strong>Raw command standard:</strong> {{ raw_standard|linkify }}</p>{% endif %}
   <pre class="p-3 bg-body-tertiary border rounded">{{ plan_yaml }}</pre>
 </div><div class="col-lg-5">
   <h2>Assigned models</h2>

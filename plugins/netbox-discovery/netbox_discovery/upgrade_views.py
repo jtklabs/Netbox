@@ -27,6 +27,7 @@ from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultiple
 from utilities.views import register_model_view
 
 from .models import JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
+from .raw_standard_selection import raw_standard_field, configure_raw_standard
 from .profile_views import RemediationWidget
 from . import upgrade_groups, upgrade_prestage
 from .upgrade_choices import (CONFIG_OPERATIONS, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
@@ -78,6 +79,7 @@ class UpgradePlanForm(forms.Form):
     features = forms.MultipleChoiceField(
         choices=REMEDIATION_FEATURES, required=False, widget=RemediationWidget,
         label='Standards', help_text='Uses the applicable versioned YAML standards stored in NetBox.')
+    raw_standard = raw_standard_field()
     remediation_mode = forms.ChoiceField(
         choices=REMEDIATION_MODES, initial='add', required=False, label='Comparison mode',
         help_text='Replace also checks for extra entries. Only remediation jobs apply changes.')
@@ -87,6 +89,7 @@ class UpgradePlanForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        configure_raw_standard(self)
         self.initial.setdefault('time_zone', self.default_time_zone or settings.TIME_ZONE)
         zone = ZoneInfo(self.initial['time_zone'])
         for field in ('scheduled_at', 'start_before'):
@@ -134,6 +137,8 @@ class UpgradePlanForm(forms.Form):
             # Keep the checkbox order, so the same choice always makes the same job.
             chosen = [value for value, _ in REMEDIATION_FEATURES if value in (data.get('features') or [])]
             data['profile'] = {'features': chosen, 'mode': data.get('remediation_mode') or 'add'}
+            if data.get('raw_standard'):
+                data['profile']['raw_standard_id'] = data['raw_standard']
             if data.get('operation') == 'remediate' and data.get('allow_clearpass_cluster_changes'):
                 data['profile']['allow_clearpass_cluster_changes'] = True
             try:
@@ -149,6 +154,7 @@ def plan_initial(job):
     if job.operation in CONFIG_OPERATIONS:
         return {'profile_source': 'custom', 'features': job.profile.get('features', []),
                 'remediation_mode': job.profile.get('mode', 'add'),
+                'raw_standard': job.profile.get('raw_standard_id'),
                 'allow_clearpass_cluster_changes': job.profile.get('allow_clearpass_cluster_changes', False)}
     return {'profile_source': 'custom', 'profile': yaml.safe_dump(job.profile, sort_keys=False)}
 
@@ -173,7 +179,7 @@ class ScheduleForm(UpgradePlanForm):
                                     help_text='Normally automatic; choose one when devices have multiple poller tags.')
     field_order = ('all_active', 'regions', 'tenants', 'sites', 'roles', 'platforms', 'models', 'device_tags',
                    'devices', 'poller', 'operation', 'time_zone', 'scheduled_at', 'start_before', 'profile_source', 'saved_profile', 'profile',
-                   'features', 'remediation_mode', 'allow_clearpass_cluster_changes', 'description')
+                   'features', 'raw_standard', 'remediation_mode', 'allow_clearpass_cluster_changes', 'description')
 
     scope_fields = {'regions': 'region_id', 'tenants': 'tenant_id', 'sites': 'site_id', 'roles': 'role_id',
                     'platforms': 'platform_id', 'models': 'device_type_id', 'device_tags': 'tag_id', 'devices': 'id'}
@@ -202,7 +208,7 @@ class ScheduleForm(UpgradePlanForm):
                                             if value not in CONFIG_OPERATIONS and value != 'f5_rollback']
         self.fields['profile_source'].choices = (
             ('model', 'Model defaults'), ('saved', 'Saved profile'), ('custom', 'Custom settings'))
-        for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
+        for name in ('features', 'raw_standard', 'remediation_mode', 'allow_clearpass_cluster_changes'):
             self.fields.pop(name)
 
     def clean(self):
@@ -233,7 +239,7 @@ class UpgradeJobEditForm(UpgradePlanForm):
                 if value != 'f5_rollback' and (value in CONFIG_OPERATIONS) == is_config and (not job.audit_run_id or value == job.operation)]
             self.fields['saved_profile'].queryset = JobProfile.objects.filter(kind='remediate' if is_config else 'upgrade')
             if not is_config:
-                for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
+                for name in ('features', 'raw_standard', 'remediation_mode', 'allow_clearpass_cluster_changes'):
                     self.fields.pop(name)
 
 

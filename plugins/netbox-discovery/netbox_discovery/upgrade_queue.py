@@ -149,7 +149,7 @@ def validate_remediation(profile):
     """Features and a mode; the queue pins the applicable NetBox standards separately."""
     features = {value for value, _ in REMEDIATION_FEATURES}
     if (not isinstance(profile, dict) or not {'features', 'mode'}.issubset(profile) or
-            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes'}):
+            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes', 'raw_standard_id'}):
         raise QueueError('A remediation names its features, mode and optional ClearPass cluster-change approval.')
     if type(profile.get('allow_clearpass_cluster_changes', False)) is not bool:
         raise QueueError('ClearPass cluster-change approval must be true or false.')
@@ -160,6 +160,11 @@ def validate_remediation(profile):
         raise QueueError('Choose at least one remediation feature.')
     if not isinstance(profile['mode'], str) or profile['mode'] not in {value for value, _ in REMEDIATION_MODES}:
         raise QueueError('Remediation mode must be add or replace.')
+    if 'raw_standard_id' in profile:
+        if type(profile['raw_standard_id']) is not int or profile['raw_standard_id'] < 1:
+            raise QueueError('raw_standard_id must be a positive integer.')
+        if 'raw_commands' not in chosen:
+            raise QueueError('A raw standard selection requires the raw_commands feature.')
     if profile.get('allow_clearpass_cluster_changes') and 'ntp' not in chosen:
         raise QueueError('ClearPass cluster-change approval requires the NTP standard.')
 
@@ -297,7 +302,7 @@ def prepare(user, data, *, skipped=None):
                 try:
                     standards_snapshot = snapshot_for_device(user, device, plan['features'], plan['mode'],
                                                              audit=data['operation'] == 'audit_config',
-                                                             resolver=snapshot_resolver)
+                                                             resolver=snapshot_resolver, raw_standard_id=plan.get('raw_standard_id'))
                 except ValidationError as exc:
                     raise QueueError('; '.join(exc.messages)) from None
                 if device.platform and device.platform.slug == 'aruba-clearpass' and 'ntp' in plan['features']:

@@ -104,3 +104,28 @@ python configure.py raw-commands --standards standards.yaml --csv devices.csv --
 For NetBox, create a standard with check type **Feature settings (YAML)**, paste the section above, scope it to the intended devices and platforms, and select **Raw configuration commands** in the profile. Use replace mode for remediation. Queued jobs pin the complete YAML revision; subsequent edits affect later jobs.
 
 This is independent of `ssh_mac`, NTP and other typed features. Avoid selecting competing standards for the same setting in one job. Raw commands do not change the typed SSH MAC policy or its parser.
+
+## Select one raw standard in a job profile
+
+Create separate NetBox YAML standards for separate raw bundles, such as **SSH integrity** and **Disable HTTP**. They can apply to the same devices.
+
+1. Open **Job Profiles** and create or edit a **Remediation** profile.
+2. Select **Raw configuration commands** in the feature list.
+3. Choose the named standard in **Raw command standard**, for example **SSH integrity**.
+4. Save the profile and use it in an audit or remediation schedule. Audit-only scheduling does not send its configuration commands.
+
+Only that raw standard is included. The same picker is available for custom audit schedules and configuration-job edits. On the device page, choosing a named raw standard in **Run standards now** also selects that exact standard.
+
+Leaving the picker blank preserves automatic selection: exactly one visible, in-force raw standard must apply to each device. Multiple matches block scheduling; they are never combined or all executed. Unrelated NTP or other feature jobs ignore raw standards. Selected standards still must be visible to the scheduling user, active, in device scope, and permitted for the requested operation. A missing, deleted, inaccessible or out-of-scope selection fails rather than falling back to another standard.
+
+The API profile stores the selection by standard ID:
+
+```yaml
+features: [raw_commands]
+mode: replace
+raw_standard_id: 42  # ID of the selected NetBox standard
+```
+
+A profile may also list typed features such as `ntp`; those use their own applicable standards. Each profile selects at most one raw standard. Use separate profiles/jobs to run different raw standards independently.
+
+Scheduling pins the selected standard's current revision and YAML. The worker checks that the selected ID matches that snapshot. Applying changes retains the existing start-time revision check; if the selected standard changes after scheduling, recreate the job. Changes to an unselected raw standard do not add it to the job.
