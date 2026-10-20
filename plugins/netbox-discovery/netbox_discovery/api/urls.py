@@ -19,7 +19,7 @@ router.register('stripped-domains', StrippedDomainViewSet)
 urlpatterns = router.urls
 
 from django.urls import path
-from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, UpgradeReportView, UpgradeCancelView,
+from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, UpgradeReportView, UpgradeCancelView, UpgradeRollbackView,
                        UpgradeGroupViewSet, UpgradeDependencyViewSet, UpgradeHoldView, UpgradeReleaseView,
                        UpgradeReleaseBatchView, UpgradeRefreshGroupsView, UpgradeRequeueView, PrestagePolicyViewSet,
                        PrestageRunView)
@@ -43,6 +43,7 @@ urlpatterns = [
     path('upgrade-jobs/check-in/', UpgradeCheckInView.as_view(), name='upgradejob-check-in'),
     path('upgrade-jobs/release-batch/', UpgradeReleaseBatchView.as_view(), name='upgradejob-release-batch'),
     path('upgrade-jobs/<int:pk>/report/', UpgradeReportView.as_view(), name='upgradejob-report'),
+    path('upgrade-jobs/<int:pk>/rollback/', UpgradeRollbackView.as_view(), name='upgradejob-rollback'),
     path('upgrade-jobs/<int:pk>/cancel/', UpgradeCancelView.as_view(), name='upgradejob-cancel'),
     path('upgrade-jobs/<int:pk>/hold/', UpgradeHoldView.as_view(), name='upgradejob-hold'),
     path('upgrade-jobs/<int:pk>/release/', UpgradeReleaseView.as_view(), name='upgradejob-release'),

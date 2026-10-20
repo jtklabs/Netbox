@@ -59,7 +59,8 @@ class ScheduleNowWidget(forms.DateTimeInput):
 
 class UpgradePlanForm(forms.Form):
     default_time_zone = None
-    operation = forms.ChoiceField(choices=UpgradeOperationChoices, initial='audit')
+    operation = forms.ChoiceField(choices=[(value, label) for value, label in UpgradeOperationChoices
+                                         if value != 'f5_rollback'], initial='audit')
     time_zone = forms.ChoiceField(choices=[(zone, zone) for zone in sorted(available_timezones())], required=False)
     scheduled_at = LocalScheduleDateTimeField(label='Scheduled start', widget=forms.DateTimeInput(
         format='%Y-%m-%dT%H:%M:%S', attrs={'type': 'datetime-local', 'step': '1'}))
@@ -198,7 +199,7 @@ class ScheduleForm(UpgradePlanForm):
         self.browser_time_zone_default = not self.is_bound and not explicit_zone and not any(
             self.initial.get(field) for field in ('scheduled_at', 'start_before'))
         self.fields['operation'].choices = [(value, label) for value, label in UpgradeOperationChoices
-                                            if value not in CONFIG_OPERATIONS]
+                                            if value not in CONFIG_OPERATIONS and value != 'f5_rollback']
         self.fields['profile_source'].choices = (
             ('model', 'Model defaults'), ('saved', 'Saved profile'), ('custom', 'Custom settings'))
         for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
@@ -229,7 +230,7 @@ class UpgradeJobEditForm(UpgradePlanForm):
         if job is not None:
             is_config = job.operation in CONFIG_OPERATIONS
             self.fields['operation'].choices = [(value, label) for value, label in UpgradeOperationChoices
-                if (value in CONFIG_OPERATIONS) == is_config and (not job.audit_run_id or value == job.operation)]
+                if value != 'f5_rollback' and (value in CONFIG_OPERATIONS) == is_config and (not job.audit_run_id or value == job.operation)]
             self.fields['saved_profile'].queryset = JobProfile.objects.filter(kind='remediate' if is_config else 'upgrade')
             if not is_config:
                 for name in ('features', 'remediation_mode', 'allow_clearpass_cluster_changes'):
@@ -245,7 +246,7 @@ class UpgradeJobEditView(PermissionRequiredMixin, View):
 
     def get(self, request, pk):
         job = self.get_job(request, pk)
-        if job.status != 'pending':
+        if job.operation == 'f5_rollback' or job.status != 'pending':
             messages.error(request, 'Only pending jobs can be edited. This job has already been claimed or closed.')
             return redirect(job.get_absolute_url())
         form = UpgradeJobEditForm(job=job, initial={
@@ -484,7 +485,7 @@ class UpgradeJobView(ObjectView):
     actions = (EditObject,)
 
     def get_permitted_actions(self, user, model=None):
-        if model.status != 'pending' or not UpgradeJob.objects.restrict(user, 'change').filter(pk=model.pk).exists():
+        if model.operation == 'f5_rollback' or model.status != 'pending' or not UpgradeJob.objects.restrict(user, 'change').filter(pk=model.pk).exists():
             return ()
         return super().get_permitted_actions(user, model)
 
@@ -492,13 +493,39 @@ class UpgradeJobView(ObjectView):
         import json
         from .upgrade_backups import backup_context
         backup = backup_context(instance, request.user)
+        from .f5_job_rollback import context as rollback_context
         return {'profile_text': json.dumps(instance.profile, indent=2),
+                'f5_rollback': rollback_context(instance, request.user),
                 'ucs_backups': [backup] if backup else [],
                 'waiting': waiting_details(instance, request.user),
                 'summary_text': json.dumps(instance.summary, indent=2),
-                'requeueable': instance.status in TERMINAL,
+                'requeueable': instance.status in TERMINAL and instance.operation != 'f5_rollback',
                 'waits_for_devices': Device.objects.filter(pk__in=instance.waits_for),
                 'held_in_batch': UpgradeJob.objects.filter(batch_id=instance.batch_id, status='held').count()}
+
+
+class UpgradeRollbackView(PermissionRequiredMixin, View):
+    from .f5_job_rollback import PERMISSIONS as permission_required
+    raise_exception = True
+
+    def get(self, request, pk):
+        from .f5_job_rollback import context
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'view').restrict(request.user, 'change')
+                                 .restrict(request.user, 'apply'), pk=pk)
+        return render(request, 'netbox_discovery/upgradejob_rollback.html',
+                      {'object': entry, 'rollback': context(entry, request.user)})
+
+    def post(self, request, pk):
+        from .f5_job_rollback import request as request_rollback
+        entry = get_object_or_404(UpgradeJob.objects.restrict(request.user, 'view').restrict(request.user, 'change')
+                                 .restrict(request.user, 'apply'), pk=pk)
+        try:
+            job = request_rollback(request.user, pk, request.POST.get('device_name', ''))
+            messages.success(request, 'Rollback confirmed. The poller will reboot directly to the old partition without draining traffic.')
+            return redirect(job.get_absolute_url())
+        except (queue.QueueError, ValidationError) as exc:
+            messages.error(request, str(exc))
+            return self.get(request, pk)
 
 
 class UpgradeCancelView(PermissionRequiredMixin, View):

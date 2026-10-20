@@ -35,7 +35,7 @@ class UpgradeJobSerializer(NetBoxModelSerializer):
                   'summary', 'events', 'sequence', 'run_id', 'requested_by', 'claimed_at', 'started_at',
                   'completed_at', 'last_seen_at', 'worker_version', 'poller_last_seen_at', 'heartbeat_stale', 'needs_recovery',
                   'groups', 'waits_for', 'held_reason', 'planned_wave', 'acknowledged',
-                  'supports_cancellation', 'cancel_requested_at', 'cancel_requested_by', 'cancel_reason',
+                  'rollback_of', 'rollback_plan', 'supports_cancellation', 'cancel_requested_at', 'cancel_requested_by', 'cancel_reason',
                   'cancel_acknowledged_at', 'cancellation_pending', 'can_request_cancel',
                   'audit_run', 'description', 'created', 'last_updated')
         brief_fields = ('id', 'url', 'display', 'status', 'stage')
@@ -54,7 +54,8 @@ class ScheduleSerializer(serializers.Serializer):
     profile = serializers.JSONField(required=False)
     profile_source = serializers.ChoiceField(choices=('model', 'saved', 'custom'), required=False)
     saved_profile = serializers.IntegerField(min_value=1, required=False)
-    operation = serializers.ChoiceField(choices=UpgradeOperationChoices, default='audit')
+    operation = serializers.ChoiceField(choices=[(value, label) for value, label in UpgradeOperationChoices
+                                                if value != 'f5_rollback'], default='audit')
     scheduled_at = serializers.DateTimeField()
     start_before = serializers.DateTimeField()
     poller = serializers.RegexField(r'^(?:poller-)?[a-z0-9][a-z0-9_-]*$', required=False, allow_blank=True)
@@ -63,6 +64,7 @@ class ScheduleSerializer(serializers.Serializer):
 
 
 class CheckInSerializer(serializers.Serializer):
+    supports_f5_rollback = serializers.BooleanField(default=False)
     supports_cancellation = serializers.BooleanField(default=False)
     worker_version = serializers.CharField(max_length=50, allow_blank=True, default="")
     name = serializers.RegexField(r'^(?:poller-)?[a-z0-9][a-z0-9_-]*$', max_length=100)
@@ -144,7 +146,7 @@ class UpgradeCheckInView(QueueView):
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
         poller.touch(version=data['worker_version'], summary='Upgrade worker checked in', upgrade=True)
         jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'],
-                           supports_cancellation=data['supports_cancellation'])
+                           supports_cancellation=data['supports_cancellation'], supports_f5_rollback=data['supports_f5_rollback'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})
 
 
@@ -156,6 +158,20 @@ class UpgradeReportView(QueueView):
         job = queue.report(request.user, pk, data)
         return Response({'id': job.pk, 'status': job.status, 'sequence': job.sequence,
                          'cancel_requested': job.cancellation_pending})
+
+
+class RollbackSerializer(serializers.Serializer):
+    device_name = serializers.CharField(max_length=64, trim_whitespace=False)
+
+
+class UpgradeRollbackView(QueueView):
+    permission = 'apply_upgradejob'
+    serializer_class = RollbackSerializer
+
+    def execute(self, request, data, pk):
+        from ..f5_job_rollback import request as request_rollback
+        job = request_rollback(request.user, pk, data['device_name'])
+        return Response({'id': job.pk, 'status': job.status, 'rollback_of': job.rollback_of_id})
 
 
 class CancelSerializer(serializers.Serializer):

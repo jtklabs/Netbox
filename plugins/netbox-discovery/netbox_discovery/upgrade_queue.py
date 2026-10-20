@@ -369,6 +369,8 @@ def requeue(user, pk):
     single-device schedule in its own batch.
     """
     job = UpgradeJob.objects.restrict(user, 'view').get(pk=pk)
+    if job.operation == 'f5_rollback':
+        raise QueueError('Confirm rollback again from the original upgrade job; rollback cannot be re-queued directly.')
     if job.status not in TERMINAL:
         raise QueueError('Only a closed job can be re-queued; cancel or recover this one first.')
     if UpgradeJob.objects.filter(device_id=job.device_id, status__in=ACTIVE + WAITING).exists():
@@ -395,6 +397,8 @@ def check_target(job):
 def edit_pending(user, pk, data):
     # Serialize edits with claims so a worker's captured assignment cannot change.
     job = UpgradeJob.objects.restrict(user, 'change').select_for_update().get(pk=pk)
+    if job.operation == 'f5_rollback':
+        raise QueueError('A confirmed rollback cannot be edited. Cancel it and confirm again from the source job.')
     if job.audit_run_id and data['operation'] != job.operation:
         raise QueueError('Scheduled standards jobs must retain their audit or remediation mode. Create a new schedule to change it.')
     if job.status != 'pending':
@@ -518,16 +522,18 @@ def expire(queryset, now):
     queryset.filter(status__in=('pending', 'held'), start_before__lte=now).update(
         status='expired', completed_at=now, message='Start window missed; no work dispatched.')
     stale = now - timedelta(minutes=5)
-    queryset.filter(status='claimed', cancel_requested_at__isnull=True, last_seen_at__lt=stale).update(
+    queryset.filter(status='claimed', cancel_requested_at__isnull=True, last_seen_at__lt=stale).exclude(operation='f5_rollback').update(
         status='failed', completed_at=now, message='Worker lost before apply authorization; schedule again after checking the poller.')
     queryset.filter(status='claimed', cancel_requested_at__isnull=False, last_seen_at__lt=stale).update(
         status='recovery_required', message='Cancellation not acknowledged; device remains locked until the worker stops.')
+    queryset.filter(status='claimed', operation='f5_rollback', last_seen_at__lt=stale).update(
+        status='recovery_required', message='Rollback worker lost; recovery reservation retained.')
     queryset.filter(status='running', last_seen_at__lt=stale).update(
         status='recovery_required', message='Worker heartbeat lost after apply authorization. Device remains locked.')
 
 
 @transaction.atomic
-def claim(user, poller, limit, apply, worker_version="", supports_cancellation=False):
+def claim(user, poller, limit, apply, worker_version="", supports_cancellation=False, supports_f5_rollback=False):
     now = timezone.now()
     qs = UpgradeJob.objects.restrict(user, 'run').filter(poller=poller)
     expire(qs, now)
@@ -535,11 +541,21 @@ def claim(user, poller, limit, apply, worker_version="", supports_cancellation=F
     candidates = qs.filter(status='pending', scheduled_at__lte=now, start_before__gt=now)
     if not apply:
         candidates = candidates.filter(operation__in=READ_ONLY_OPERATIONS)
+    if not supports_f5_rollback:
+        candidates = candidates.exclude(operation='f5_rollback')
     # Per-device locks also serialize separate schedules for the same switch.
     # skip_locked keeps an overlapping minute check-in cheap.
-    for job in candidates.select_for_update(of=('self',), skip_locked=True).order_by('scheduled_at', 'pk')[:1000]:
+    for job in candidates.select_for_update(of=('self',), skip_locked=True).order_by(Case(When(operation='f5_rollback', then=0), default=1), 'scheduled_at', 'pk')[:1000]:
+        source = None
+        if job.operation == 'f5_rollback':
+            source = UpgradeJob.objects.select_for_update().get(pk=job.rollback_of_id)
         locked = Device.objects.select_for_update(skip_locked=True).filter(pk=job.device_id).first()
-        if locked is None or UpgradeJob.objects.filter(device_id=job.device_id, status__in=ACTIVE).exists():
+        active = UpgradeJob.objects.filter(device_id=job.device_id, status__in=ACTIVE)
+        if source is not None:
+            active = active.exclude(pk=source.pk)
+        elif UpgradeJob.objects.filter(device_id=job.device_id, operation='f5_rollback', status__in=WAITING).exists():
+            continue
+        if locked is None or active.exists():
             continue
         job.device = locked
         try:
@@ -548,13 +564,21 @@ def claim(user, poller, limit, apply, worker_version="", supports_cancellation=F
             job.status, job.message, job.completed_at = 'failed', str(exc), now
             job.save()
             continue
-        reason = hold_reason(job)
+        reason = '' if source is not None else hold_reason(job)
         if reason:
             job.status, job.held_reason, job.message = 'held', reason, f'Held: {reason}'
             job.save()
             continue
-        if not capacity_available(job) or not dependencies_done(job) or not exclusion_clear(job):
+        if source is None and (not capacity_available(job) or not dependencies_done(job) or not exclusion_clear(job)):
             continue
+        if source is not None:
+            from .f5_job_rollback import transfer_reservation
+            try:
+                transfer_reservation(source, job)
+            except QueueError as exc:
+                job.status, job.message, job.completed_at = 'failed', str(exc), now
+                job.save()
+                continue
         job.claim_token = uuid.uuid4()
         job.worker_version = worker_version
         job.supports_cancellation = supports_cancellation
@@ -570,6 +594,7 @@ def assignment(job):
     return {'id': job.pk, 'device_id': job.device_id, 'device': job.device_name,
             'hostname': job.address, 'profile': job.profile, 'operation': job.operation,
             'standards_snapshot': job.standards_snapshot,
+            'rollback_plan': job.rollback_plan, 'rollback_of': job.rollback_of_id,
             'claim_token': str(job.claim_token), 'batch_id': str(job.batch_id),
             'scheduled_at': job.scheduled_at.isoformat(), 'start_before': job.start_before.isoformat()}
 
@@ -660,10 +685,10 @@ def report(user, pk, data):
         outcome = None
     if stage == 'cancelled':
         job.cancel_acknowledged_at = now
-        outcome = 'recovery_required' if job.started_at else 'cancelled'
+        outcome = 'recovery_required' if job.started_at or job.operation == 'f5_rollback' else 'cancelled'
     if outcome:
         # A post-authorization error must not unlock a potentially changed device.
-        if outcome == 'failed' and job.started_at:
+        if outcome == 'failed' and (job.started_at or job.operation == 'f5_rollback'):
             outcome = 'recovery_required'
         job.status = outcome
         job.completed_at = now

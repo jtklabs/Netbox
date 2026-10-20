@@ -332,6 +332,8 @@ def upgrade_device(task, profile, options, reporter):
                  "elapsed_seconds": int(now - started), "phase_elapsed_seconds": int(now - phase_started)}
         payload["progress_summary"] = {**payload.get("progress_summary", {}), "phase": phase}
         message = f"Step {phase_step}/{phase['total']} · {labels[phase_step]} · {int(now - started)}s elapsed: {message}"
+        if plan.get('rollback_plan'):
+            payload['progress_summary']['rollback_plan'] = dict(plan['rollback_plan'])
         if plan.get("waf_requests"):
             payload["progress_summary"]["waf_requests"] = dict(plan["waf_requests"])
         if plan.get("connection_drain"):
@@ -368,6 +370,12 @@ def upgrade_device(task, profile, options, reporter):
                     configuration_saved = True
                 before = f5.collect(client, lambda path: emit("precheck", path))
                 plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved, allow_mismatch=allow_mismatch)
+                if not stage_only and plan.get('active_volume') and plan.get('volume'):
+                    plan['rollback_plan'] = {
+                        'volume': plan['active_volume'], 'from_volume': plan['volume']['name'],
+                        'previous_version': before.get('facts', {}).get('version'),
+                        'previous_build': before.get('facts', {}).get('build'),
+                    }
                 if profile.drain_connections and not stage_only and not plan["already_current"] and not plan["blockers"]:
                     try:
                         plan["connection_drain"] = f5_drain.prepare(client, profile)
