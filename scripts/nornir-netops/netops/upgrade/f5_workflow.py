@@ -519,10 +519,38 @@ def upgrade_device(task, profile, options, reporter):
                     # transition, including when checks just passed naturally.
                     validation_gate = None
                     emit('validating', 'Health validation gate finished')
-                    f5_validation.forced(plan, 8, emit)
+                    manually_passed = f5_validation.forced(plan, 8, emit)
+                    if manually_passed:
+                        # The operator may have waited through service startup.
+                        # Keep the accepted observation, but never use its stale
+                        # WAF count/role to choose the next gate.
+                        plan['validation_before_override'] = {
+                            'findings': findings, 'waf': after.get('waf', {}),
+                            'failover_state': after.get('facts', {}).get('failover_state'),
+                        }
+                        emit('validating', 'Refreshing health after manual acceptance',
+                             {'post_before_override': after, 'upgrade_plan': plan})
+                        if not drain:
+                            after = f5.collect(client, lambda path: emit('postcheck', path))
+                            findings = compare_health(before, after) + target_findings(after, profile, plan)
                     findings = f5_validation.findings_after_override(findings, plan)
                     if drain:
                         after, findings = finish_validation(after, findings)
+                    if manually_passed:
+                        emit('validating', 'Fresh health snapshot recorded after manual acceptance',
+                             {'post': after, 'findings': findings,
+                              'progress_summary': {
+                                  'counts': after['metrics']['counts'],
+                                  'finding_count': len(findings),
+                                  'error_count': sum(f['severity'] == 'error' for f in findings),
+                                  'pending': [checks.describe_finding(f) for f in findings
+                                              if f['severity'] == 'error'],
+                                  'object_comparisons': checks.threshold_summary(before, after, thresholds),
+                                  **({'waf': {'expected_policies': before['waf'].get('policy_count'),
+                                              'observed_policies': after.get('waf', {}).get('policy_count'),
+                                              'ready': after.get('waf', {}).get('ready')}}
+                                     if before.get('waf', {}).get('provisioned') else {}),
+                              }})
                     # This gate runs outside restoration's failure handler: a
                     # quiet log must not disable traffic that passed health checks.
                     validation_gate = 9

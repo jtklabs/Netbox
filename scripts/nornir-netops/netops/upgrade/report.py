@@ -222,6 +222,12 @@ def build(host, before, after, findings, plan, status):
                   "The following checks were accepted by an operator, not automatically validated.", ""]
         for step, record in plan['validation_overrides'].items():
             lines.append(f"- Step {step}: {record['username']} at {record['timestamp']} — {record['reason']}")
+        previous = plan.get('validation_before_override')
+        if previous:
+            lines += ['', '### Observation accepted at step 8', '',
+                      'These findings precede the fresh snapshot collected after manual acceptance. '
+                      'The current tables and WAF state below use the refreshed observation.', '']
+            lines += [f"- {f['severity']}: {checks.describe_finding(f)}" for f in previous['findings']]
         lines.append("")
     lines += software_section(before, after)
     lines += config_section(before, after, plan.get('approved_profile', {}).get('skip_running_config_check', False))
