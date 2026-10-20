@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import yaml
 from .ssh_mac_policy import validate_ssh_mac
-from .raw_commands_policy import validate_raw_commands
+from .raw_commands_policy import validate_raw_commands, selected_standard_ids
 from django.core.exceptions import ValidationError
 
 FEATURE_SECTIONS = {
@@ -128,33 +128,45 @@ class SnapshotResolver:
             yield standard, revision
 
 
-def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None, raw_standard_id=None):
+def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=None, raw_standard_id=None, raw_standard_ids=None):
     resolver = resolver if resolver is not None else SnapshotResolver(user)
-    if raw_standard_id is not None and (type(raw_standard_id) is not int or raw_standard_id < 1
-                                        or 'raw_commands' not in features):
-        raise ValidationError('A raw standard selection requires raw_commands and a positive standard ID.')
+    selection = {'features': features}
+    if raw_standard_id is not None:
+        selection['raw_standard_id'] = raw_standard_id
+    if raw_standard_ids is not None:
+        selection['raw_standard_ids'] = raw_standard_ids
+    try:
+        selected = selected_standard_ids(selection)
+    except ValueError as error:
+        raise ValidationError(str(error)) from None
+    raw = {}
     document, revisions = {}, []
     for standard, revision in resolver.for_device(device):
         section, settings = next(iter(revision.definition['settings'].items()))
         if section == 'raw_commands' and ('raw_commands' not in features or
-                (raw_standard_id is not None and standard.pk != raw_standard_id)):
+                (selected and standard.pk not in selected)):
             continue
-        if section in document:
+        if section in document and not (section == 'raw_commands' and raw_standard_ids is not None):
             raise ValidationError(f'{device}: multiple YAML standards define {section}; select a Raw command standard in the profile or narrow their scopes.'
                                   if section == 'raw_commands' else
                                   f'{device}: multiple YAML standards define {section}; narrow their scopes.')
         document[section] = deepcopy(settings)
+        if section == 'raw_commands':
+            raw[str(standard.pk)] = deepcopy(settings)
         revisions.append({'standard_id': standard.pk, 'revision': revision.number,
                           'name': standard.name, 'section': section,
                           'auto_remediable': standard.auto_remediable,
                           'allow_enforce': standard.allow_enforce})
+    if selected and set(raw) != {str(value) for value in selected}:
+        raise ValidationError(f'{device}: every selected raw standard must be accessible, in force and in scope.')
     for feature in features:
         section = FEATURE_SECTIONS[feature]
-        standard = next((r for r in revisions if r['section'] == section), None)
-        if standard is None:
+        standards = [r for r in revisions if r['section'] == section]
+        if not standards:
             raise ValidationError(f'{device}: no accessible, in-force YAML standard for {feature}.')
-        if not audit and (not standard['auto_remediable'] or (mode == 'replace' and not standard['allow_enforce'])):
-            raise ValidationError(f'{device}: {standard["name"]} does not permit {mode} remediation.')
+        for standard in standards:
+            if not audit and (not standard['auto_remediable'] or (mode == 'replace' and not standard['allow_enforce'])):
+                raise ValidationError(f'{device}: {standard["name"]} does not permit {mode} remediation.')
     if 'snmp' in features or 'snmp_packetsize' in features:
         settings = document['snmp']
         required = ({'snmp_packetsize'} if 'packetsize' in settings else set())
@@ -180,4 +192,8 @@ def snapshot_for_device(user, device, features, mode, *, audit=False, resolver=N
         needed = expanded
     document = {key: value for key, value in document.items() if key in needed}
     revisions = [revision for revision in revisions if revision['section'] in needed]
-    return {'document': document, 'revisions': revisions}
+    snapshot = {'document': document, 'revisions': revisions}
+    if raw_standard_ids is not None:
+        document.pop('raw_commands', None)
+        snapshot['raw_standards'] = {str(value): raw[str(value)] for value in sorted(selected)}
+    return snapshot

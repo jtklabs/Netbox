@@ -2841,4 +2841,4 @@ a release bump.
 
 Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle can select a `show` command and define `expect` (complete lines), `contains` (required text), and/or `reject` (forbidden text) checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
 
-NetBox job profiles can choose a named **Raw command standard**. Only that standard is pinned to each job; overlapping raw standards are not combined. Blank selection requires exactly one applicable raw standard.
+NetBox job profiles can choose up to eight named **Raw command standards**. Each selected standard is pinned and executed separately with its own checks and compliance result. Blank selection requires exactly one applicable raw standard. Multiple selections require worker 0.2.16 or newer and the matching Discovery and Compliance plugins.

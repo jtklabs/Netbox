@@ -42,7 +42,7 @@ EXIT_OK, EXIT_FAILED, EXIT_DIFF = 0, 1, 2
 def validate(profile):
     """The features and mode a remediation job asks for; nothing else is accepted."""
     if (not isinstance(profile, dict) or not {'features', 'mode'}.issubset(profile) or
-            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes', 'raw_standard_id'}):
+            set(profile) - {'features', 'mode', 'allow_clearpass_cluster_changes', 'raw_standard_id', 'raw_standard_ids'}):
         raise ValueError('Remediation job must name features, mode and optional ClearPass cluster-change approval')
     if type(profile.get('allow_clearpass_cluster_changes', False)) is not bool:
         raise ValueError('ClearPass cluster-change approval must be true or false')
@@ -52,18 +52,16 @@ def validate(profile):
         raise ValueError(f'Remediation features must be a nonempty list from: {", ".join(FEATURES)}')
     if mode not in MODES:
         raise ValueError('Remediation mode must be add or replace')
-    if 'raw_standard_id' in profile:
-        if type(profile['raw_standard_id']) is not int or profile['raw_standard_id'] < 1:
-            raise ValueError('raw_standard_id must be a positive integer.')
-        if 'raw_commands' not in features:
-            raise ValueError('A raw standard selection requires the raw_commands feature.')
+    from ..raw_commands_policy import selected_standard_ids
+    selected_standard_ids(profile)
     if profile.get('allow_clearpass_cluster_changes') and 'ntp' not in features:
         raise ValueError('ClearPass cluster-change approval requires NTP')
     return features, mode
 
 
 def command(feature, device_id, mode, apply, args):
-    argv = [sys.executable, str(project_root() / 'configure.py'), feature.replace('_', '-'),
+    cli_feature = feature.split(':', 1)[0]
+    argv = [sys.executable, str(project_root() / 'configure.py'), cli_feature.replace('_', '-'),
             '--netbox', '--netbox-filter', f'id={int(device_id)}', '--no-netbox-autofilter', f'--{mode}']
     # The dry run exits 2 when changes are pending, so "compliant" and "would change" differ.
     argv += ['--apply', '--yes'] if apply else ['--fail-on-diff']
@@ -118,6 +116,9 @@ def project_root():
 
 def invoke(feature, device_id, mode, apply, args):
     """Run one feature; returns (exit code, output). A timeout is a failure."""
+    if feature in getattr(args, 'raw_standard_paths', {}):
+        args = copy.copy(args)
+        args.standards = SimpleNamespace(path=args.raw_standard_paths[feature])
     directory = Path(getattr(args, 'report_dir', None) or os.environ.get('NETOPS_REPORT_DIR')
                      or project_root() / 'reports').expanduser().resolve()
     report = directory / f'queued-{device_id}-{feature}-{uuid.uuid4().hex}.json'
@@ -204,15 +205,24 @@ def failure_reason(feature, args, output, code):
 
 def run_job(task, job, args, emit):
     snapshot = job.get('standards_snapshot')
-    if not isinstance(snapshot, dict) or not snapshot.get('document') or not snapshot.get('revisions'):
+    if (not isinstance(snapshot, dict) or not isinstance(snapshot.get('document'), dict)
+            or not (snapshot['document'] or snapshot.get('raw_standards')) or not snapshot.get('revisions')):
         raise ValueError('Job has no versioned NetBox standards; re-create it before execution')
     validate(job['profile'])
-    selected = job['profile'].get('raw_standard_id')
-    if selected is not None:
-        pinned = [item for item in snapshot['revisions'] if item.get('section') == 'raw_commands']
-        if (len(pinned) != 1 or pinned[0]['standard_id'] != selected
-                or 'raw_commands' not in snapshot['document']):
-            raise ValueError('Selected raw standard does not match the pinned job snapshot; re-create the job')
+    from ..raw_commands_policy import selected_standard_ids, validate_raw_commands
+    selected = selected_standard_ids(job['profile'])
+    pinned = [item for item in snapshot['revisions'] if item.get('section') == 'raw_commands']
+    if selected and sorted(item['standard_id'] for item in pinned) != sorted(selected):
+        raise ValueError('Selected raw standards do not match the pinned job snapshot; re-create the job')
+    raw = snapshot.get('raw_standards')
+    if 'raw_standard_ids' in job['profile']:
+        if (not isinstance(raw, dict) or set(raw) != {str(value) for value in selected}
+                or 'raw_commands' in snapshot['document']):
+            raise ValueError('Selected raw standards do not match the pinned job snapshot; re-create the job')
+        for settings in raw.values():
+            validate_raw_commands(settings)
+    elif raw is not None or (selected and 'raw_commands' not in snapshot['document']):
+        raise ValueError('Selected raw standard does not match the pinned job snapshot; re-create the job')
     options = copy.copy(args) if args is not None else SimpleNamespace()
     options.compliance_details = {}
     # Both the dry run and apply read the same private snapshot, never a local fallback.
@@ -220,6 +230,13 @@ def run_job(task, job, args, emit):
         path = Path(directory) / 'standards.json'
         path.write_text(json.dumps(snapshot['document']), encoding='utf-8')
         options.standards = SimpleNamespace(path=path)
+        options.raw_standard_paths = {}
+        if raw is not None:
+            for standard_id in sorted(selected):
+                raw_path = Path(directory) / f'raw-{standard_id}.json'
+                raw_path.write_text(json.dumps({**snapshot['document'],
+                                               'raw_commands': raw[str(standard_id)]}), encoding='utf-8')
+                options.raw_standard_paths[f'raw_commands:{standard_id}'] = raw_path
         options.allow_clearpass_cluster_changes = (job.get('operation') == 'remediate' and
                                                     job['profile'].get('allow_clearpass_cluster_changes') is True)
         options.clearpass_cluster_snapshot = None
@@ -263,6 +280,9 @@ def run_job(task, job, args, emit):
 def _run_job(task, job, args, emit):
     """Dry run, gate, apply. Returns (failed, changed, result) for the Nornir Result."""
     features, mode = validate(job['profile'])
+    if getattr(args, 'raw_standard_paths', None):
+        features = [check for feature in features for check in
+                    (list(args.raw_standard_paths) if feature == 'raw_commands' else [feature])]
     if job.get('operation') not in CONFIG_OPERATIONS:
         raise ValueError('Not a configuration audit or remediation job')
     device_id = job['device_id']
@@ -326,15 +346,30 @@ def _run_job(task, job, args, emit):
             results[feature] = 'failed'
             verdicts[feature] = 'error'
             results[f'{feature}_error'] = failure_reason(feature, args, output, code)
+    # A later raw bundle can undo an earlier bundle (even one initially compliant).
+    # Re-audit all selected raw standards after the whole apply pass.
+    if getattr(args, 'raw_standard_paths', None):
+        for feature in args.raw_standard_paths:
+            if results[feature] == 'failed':
+                continue
+            code, output = invoke(feature, device_id, mode, False, args)
+            if code == EXIT_OK and one_device(output):
+                results[feature] = 'changed' if feature in pending and mode == 'replace' else 'compliant'
+                verdicts[feature] = 'compliant'
+            elif code == EXIT_DIFF and one_device(output):
+                results[feature], verdicts[feature] = 'attention', 'non-compliant'
+            else:
+                results[feature], verdicts[feature] = 'failed', 'error'
+                results[f'{feature}_error'] = failure_reason(feature, args, output, code)
     summary = {'progress_summary': {'mode': mode, 'features': dict(results), 'rollback': journals},
                'compliance_results': verdicts}
-    failed = [f for f in pending if results[f] == 'failed']
+    failed = [f for f in features if results[f] == 'failed']
     if failed:
         undo = f'; undo with configure.py rollback {journals[-1]}' if journals else ''
         emit('failed', f'{", ".join(failed)} failed after changes were authorized: '
                        f'{results[failed[0] + "_error"]}{undo}', summary)
         return True, changed, results
-    attention = [f for f in pending if results[f] == 'attention']
+    attention = [f for f in features if results[f] == 'attention']
     if attention:
         emit('completed_with_warnings', f'Applied; still needs a person: {", ".join(attention)}', summary)
     else:

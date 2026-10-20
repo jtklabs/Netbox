@@ -476,3 +476,87 @@ def test_raw_worker_runs_only_the_pinned_selection(monkeypatch, mismatch):
     else:
         remediation.run_job(None, chosen, None, Recorder())
         assert calls == [('raw_commands', False)]
+
+
+
+def multi_raw_job(operation='audit_config'):
+    chosen = job(['raw_commands'], mode='replace')
+    chosen['operation'] = operation
+    chosen['profile']['raw_standard_ids'] = [12, 13]
+    chosen['standards_snapshot'] = {'document': {},
+        'revisions': [{'standard_id': i, 'revision': 1, 'section': 'raw_commands'} for i in [12, 13]],
+        'raw_standards': {str(i): {'enabled': True, 'platforms': {'cisco_ios': {
+            'commands': [f'command {i}'], 'show': f'show check {i}', 'expect': [f'expected {i}']}}}
+            for i in [12, 13]}}
+    return chosen
+
+
+@pytest.mark.parametrize('values', [[], [1, 1], [True], [0], ['1'], list(range(1, 10)), None])
+def test_multiple_raw_ids_validated(values):
+    with pytest.raises(ValueError, match='raw_standard_ids'):
+        remediation.validate({'features': ['raw_commands'], 'mode': 'replace', 'raw_standard_ids': values})
+
+
+@pytest.mark.parametrize('mismatch', ['missing_bundle', 'extra_bundle', 'wrong_revision', 'legacy_document'])
+def test_multiple_raw_snapshot_mismatch_blocks_execution(monkeypatch, mismatch):
+    chosen = multi_raw_job()
+    snap = chosen['standards_snapshot']
+    if mismatch == 'missing_bundle':
+        del snap['raw_standards']['12']
+    elif mismatch == 'extra_bundle':
+        snap['raw_standards']['14'] = snap['raw_standards']['12']
+    elif mismatch == 'wrong_revision':
+        snap['revisions'][0]['standard_id'] = 14
+    else:
+        snap['document']['raw_commands'] = snap['raw_standards']['12']
+    def unexpected(*a, **kw):
+        pytest.fail('Invalid snapshot must not execute')
+    monkeypatch.setattr(remediation, 'invoke', unexpected)
+    with pytest.raises(ValueError, match='pinned job snapshot'):
+        remediation.run_job(None, chosen, None, Recorder())
+
+
+def test_multi_raw_audit_uses_separate_commands_and_reports(monkeypatch, tmp_path):
+    monkeypatch.setenv('NETOPS_REPORT_DIR', str(tmp_path))
+    seen = []
+    def execute(argv, **kwargs):
+        assert argv[2] == 'raw-commands'
+        assert '--apply' not in argv
+        raw = json.loads(Path(argv[argv.index('--standards') + 1]).read_text())['raw_commands']
+        policy = raw['platforms']['cisco_ios']
+        seen.append(policy)
+        number = policy['show'].split()[-1]
+        Path(argv[argv.index('--report') + 1]).write_text(json.dumps({'devices': {'sw1': {
+            'current': [f'evidence {number}'], 'add': policy['commands']}}}))
+        return SimpleNamespace(returncode=0 if number == '12' else 2, stdout=ONE, stderr='')
+    monkeypatch.setattr(remediation.cancellation, 'run', execute)
+    emit = Recorder()
+    failed, changed, _ = remediation.run_job(None, multi_raw_job(), None, emit)
+    assert not failed and not changed
+    assert [p['commands'] for p in seen] == [['command 12'], ['command 13']]
+    summary = emit.events[-1][2]['progress_summary']
+    assert summary['compliance_results'] == {'raw_commands:12': 'compliant', 'raw_commands:13': 'non-compliant'}
+    assert summary['compliance_details']['raw_commands:12']['current'] == ['evidence 12']
+    assert summary['compliance_details']['raw_commands:13']['current'] == ['evidence 13']
+    assert not any(stage == 'ready' for stage, _, _ in emit.events)
+
+
+def test_later_raw_apply_cannot_hide_conflict_with_initially_compliant_standard(monkeypatch):
+    applied = False
+    calls = []
+    def invoke(feature, device_id, mode, apply, args):
+        nonlocal applied
+        calls.append((feature, apply))
+        if apply:
+            assert feature == 'raw_commands:13'
+            applied = True
+            return 0, ONE
+        return (2 if (feature == 'raw_commands:12') == applied else 0), ONE
+    monkeypatch.setattr(remediation, 'invoke', invoke)
+    emit = Recorder()
+    failed, changed, _ = remediation.run_job(None, multi_raw_job('remediate'), None, emit)
+    assert changed and not failed
+    assert emit.events[-1][0] == 'completed_with_warnings'
+    assert emit.events[-1][2]['compliance_results'] == {
+        'raw_commands:12': 'non-compliant', 'raw_commands:13': 'compliant'}
+    assert calls[-2:] == [('raw_commands:12', False), ('raw_commands:13', False)]

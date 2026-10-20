@@ -90,7 +90,8 @@ def run_now(user, device, selection, action):
     # A profile contains its comparison mode; standards determine whether
     # remediation is allowed. Read-only standards make an automatic run audit.
     snapshot = snapshot_for_device(user, target, plan['features'], plan['mode'], audit=True,
-                                   raw_standard_id=plan.get('raw_standard_id'))
+                                   raw_standard_id=plan.get('raw_standard_id'),
+                                   raw_standard_ids=plan.get('raw_standard_ids'))
     if action == 'auto':
         if not all(item['auto_remediable'] for item in snapshot['revisions']):
             operation = 'audit_config'

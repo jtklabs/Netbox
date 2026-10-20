@@ -27,7 +27,7 @@ from utilities.forms.fields import DynamicModelChoiceField, DynamicModelMultiple
 from utilities.views import register_model_view
 
 from .models import JobProfile, PrestagePolicy, UpgradeDependency, UpgradeGroup, UpgradeJob, DiscoveryPoller
-from .raw_standard_selection import raw_standard_field, configure_raw_standard
+from .raw_standard_selection import raw_standard_field, configure_raw_standard, selected_standard_ids, store_selection
 from .profile_views import RemediationWidget
 from . import upgrade_groups, upgrade_prestage
 from .upgrade_choices import (CONFIG_OPERATIONS, REMEDIATION_FEATURES, REMEDIATION_MODES, TERMINAL, UpgradeOperationChoices,
@@ -138,7 +138,7 @@ class UpgradePlanForm(forms.Form):
             chosen = [value for value, _ in REMEDIATION_FEATURES if value in (data.get('features') or [])]
             data['profile'] = {'features': chosen, 'mode': data.get('remediation_mode') or 'add'}
             if data.get('raw_standard'):
-                data['profile']['raw_standard_id'] = data['raw_standard']
+                store_selection(data['profile'], data['raw_standard'])
             if data.get('operation') == 'remediate' and data.get('allow_clearpass_cluster_changes'):
                 data['profile']['allow_clearpass_cluster_changes'] = True
             try:
@@ -154,7 +154,7 @@ def plan_initial(job):
     if job.operation in CONFIG_OPERATIONS:
         return {'profile_source': 'custom', 'features': job.profile.get('features', []),
                 'remediation_mode': job.profile.get('mode', 'add'),
-                'raw_standard': job.profile.get('raw_standard_id'),
+                'raw_standard': selected_standard_ids(job.profile),
                 'allow_clearpass_cluster_changes': job.profile.get('allow_clearpass_cluster_changes', False)}
     return {'profile_source': 'custom', 'profile': yaml.safe_dump(job.profile, sort_keys=False)}
 
