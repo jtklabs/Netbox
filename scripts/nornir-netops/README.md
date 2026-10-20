@@ -2801,8 +2801,9 @@ See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruptio
 
 ## SSH MAC integrity
 
-`configure.py ssh-mac --replace` audits the SHA-512 MAC policy on IOS/IOS-XE,
-EOS and Junos, and the `high` integrity preset on ASA. Add `--apply` to remediate;
+`configure.py ssh-mac --replace` audits the MAC lists defined in `ssh_mac`
+YAML on IOS/IOS-XE, EOS, ASA and Junos. Shared values and per-platform overrides
+are supported, including explicit ASA custom lists. Add `--apply` to remediate;
 add mode only reports drift. NetBox jobs expose **SSH MAC integrity** and pin
 its YAML standard revision. See [setup, scope and platform behavior](../../docs/SSH-MAC-STANDARD.md).
 

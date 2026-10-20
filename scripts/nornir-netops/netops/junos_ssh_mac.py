@@ -6,7 +6,6 @@ from .core import MODE_REPLACE
 from .junos_ntp import checked, commit, xml
 
 SHOW = 'show configuration system services ssh | display inheritance | display xml groups'
-MAC = 'hmac-sha2-512'
 
 
 def parse(output):
@@ -32,19 +31,22 @@ def parse(output):
     return {'macs': sorted(macs), 'enabled': ssh is not None, 'protected': protected}
 
 
-def commands_for(before):
-    if before['enabled'] and before['macs'] == [MAC]:
+def commands_for(before, macs):
+    if before['enabled'] and before['macs'] == sorted(macs):
         return []
     # Junos leaf-lists append on set. Delete only this leaf in the private
     # candidate, then set the complete list before committing either change.
     return (['delete system services ssh macs'] if before['macs'] else []) + [
-        'set system services ssh macs ' + MAC]
+        'set system services ssh macs ' + mac for mac in macs]
 
 
 def run(task, desired, variables, mode, dry_run, save, verify):
     from nornir.core.task import Result
+    from .features.ssh_mac import policy_for
 
-    payload = dict(platform='juniper_junos', mode=mode, current=[], desired=[MAC],
+    macs = policy_for('juniper_junos', variables)['macs']
+
+    payload = dict(platform='juniper_junos', mode=mode, current=[], desired=list(macs),
                    add=[], remove=[], commands=[], compliant=False, advisories=[], notes=[],
                    rollback=[], rollback_unsupported=[], applied=False, saved=None,
                    verified=None, missing_after=[], save_command=None, skipped=False, skip_reason=None)
@@ -60,7 +62,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             return checked(connection.send_command(('run ' if locked else '') + command, read_timeout=60))
 
         before = parse(read(SHOW))
-        commands = commands_for(before)
+        commands = commands_for(before, macs)
         payload.update(config_before=before, current=before['macs'], compliant=not commands)
         if commands and mode != MODE_REPLACE:
             payload['advisories'].append('SSH MAC integrity differs; use replace mode to change the algorithm allow-list.')
@@ -102,7 +104,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 payload.update(applied=True, saved=False, verified=False)
                 after = parse(read(SHOW))
                 stage = 'verifying SSH MAC configuration'
-                remaining = commands_for(after)
+                remaining = commands_for(after, macs)
                 payload.update(config_after=after, missing_after=remaining)
                 if remaining:
                     raise ValueError('Junos SSH MAC verification failed; the unconfirmed commit will roll back')

@@ -13,9 +13,16 @@ PLATFORMS = {
     'junos', 'juniper-junos', 'juniper_junos', 'juniper-srx', 'juniper-mx',
 }
 DEFINITION = '''ssh_mac:
-  macs: [hmac-sha2-512]
   ios_scope: both
-  asa_integrity: high
+  platforms:
+    cisco_ios:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    arista_eos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    cisco_asa:
+      macs: [hmac-sha2-256]
+    juniper_junos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
 '''
 
 
@@ -53,8 +60,8 @@ class Command(BaseCommand):
             auto_remediable=False, allow_enforce=False,
             remediation_notes=(
                 'IOS/IOS-XE: client and server MAC lists by default; EOS/Junos: SSH MAC list. '
-                'Require only hmac-sha2-512. ASA: ssh cipher integrity high, a release-dependent '
-                'preset, not a SHA-512 equivalence. Encryption and key exchange are separate. '
+                'Edit the YAML to choose allowed MACs per platform; ASA lists use custom integrity. '
+                'Encryption and key exchange are separate. '
                 'Audit first and check peer compatibility. To apply, enable automatic remediation '
                 'and Allow enforce, then use replace mode. Add mode only reports drift.'),
         )
