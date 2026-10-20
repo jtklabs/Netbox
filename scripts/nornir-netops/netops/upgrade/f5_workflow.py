@@ -14,13 +14,14 @@ import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import asdict
+from contextlib import ExitStack
 from pathlib import Path
 
 from nornir.core.task import Result
 
 from .. import cancellation
 from .. import f5_waf
-from . import checks, f5, f5_drain, f5_requests, f5_validation
+from . import checks, f5, f5_drain, f5_requests, f5_validation, f5_ha
 from .images import local_image
 from .profile import F5_IMAGE, f5_version
 from .workflow import comparison_report, converge, device_lock, settle
@@ -94,7 +95,7 @@ def planned_commands(profile, plan, host):
         install["options"] = [{"create-volume": True}]
     commands = ['POST /mgmt/tm/sys/config {"command": "save"}']
     if profile.ucs_backup:
-        commands.append(f'POST /mgmt/tm/sys/ucs {json.dumps({"command": "save", "name": plan.setdefault("ucs_name", ucs_name(host, profile))})}')
+        commands.append(f"POST /mgmt/tm/util/bash (detached save sys ucs {plan.setdefault('ucs_name', ucs_name(host, profile))}; require exit 0 and verified download)")
     if plan.get("failover_first"):
         commands.append('POST /mgmt/tm/sys/failover {"command": "run", "standby": true}')
     if profile.drain_connections:
@@ -192,7 +193,8 @@ def backup(client, host, profile, options, plan, emit):
         protect([passphrase])
     directory = getattr(options, "ucs_dir", None) or Path(options.lock_dir).parent / "ucs-backups"
     emit("backing_up", f"Saving UCS {name} on the unit" + (" and downloading it" if directory else ""))
-    f5.save_ucs(client, name, passphrase)
+    f5.save_ucs(client, name, passphrase, timeout=options.install_timeout, poll=options.poll_interval,
+                progress=lambda message: emit("backing_up", message))
     record = {"name": name, "on_unit": True, "encrypted": bool(passphrase)}
     if directory:
         destination = Path(directory) / name
@@ -358,7 +360,8 @@ def upgrade_device(task, profile, options, reporter):
         return reporter.emit(host, stage, message, payload, changed=changed, attachment=attachment)
 
     try:
-        with device_lock(options.lock_dir, f"{host.hostname}:{settings.get('port', 443)}"):
+        with ExitStack() as stack:
+            stack.enter_context(device_lock(options.lock_dir, f"{host.hostname}:{settings.get('port', 443)}"))
             if host.platform not in {None, "", "f5_tmsh"}:
                 raise ValueError("a BIG-IP profile requires an f5_tmsh device")
             host.platform = "f5_tmsh"
@@ -377,6 +380,16 @@ def upgrade_device(task, profile, options, reporter):
                     configuration_saved = True
                 before = f5.collect(client, lambda path: emit("precheck", path))
                 plan = preflight(before, profile, stage_only=stage_only, saved=configuration_saved, allow_mismatch=allow_mismatch)
+                pair = None
+                if not stage_only and not plan['already_current'] and before['facts'].get('peers'):
+                    try:
+                        pair = f5_ha.prepare(client, host, settings, before, profile, options, stack)
+                        if pair.second:
+                            sync_blocker = f"configuration sync is '{before['facts']['sync_status']}'; sync the device group before upgrading"
+                            plan['blockers'] = [b for b in plan['blockers'] if b != sync_blocker]
+                            plan['ha'] = {'phase': 'handoff_verified', 'peer': pair.peer}
+                    except Exception as exc:
+                        plan['blockers'].append(str(exc))
                 if not stage_only and plan.get('active_volume') and plan.get('volume'):
                     plan['rollback_plan'] = {
                         'volume': plan['active_volume'], 'from_volume': plan['volume']['name'],
@@ -430,13 +443,17 @@ def upgrade_device(task, profile, options, reporter):
                 if stage_only:
                     emit("staged", "Image ready in /shared/images and checksum verified", {"upgrade_plan": plan})
                     return Result(host=host, result=plan, changed=changed)
+                if pair:
+                    pair.begin()
                 if profile.ucs_backup:
                     backup(client, host, profile, options, plan, emit)
                 if plan.get("failover_first"):
+                    pair.before_failover()
                     emit("failing_over", "Active member: failing over to the peer before installing")
+                    changed = True  # A lost failover response also requires role verification/recovery.
                     f5.failover_to_standby(client)
                     wait_for_state(client, "standby", options, emit)
-                    changed = True
+                    pair.after_failover(emit)
                 volume = plan["volume"]["name"]
                 changed = True
                 reboot_resolved = False
@@ -522,6 +539,9 @@ def upgrade_device(task, profile, options, reporter):
                     findings = f5_validation.findings_after_override(findings, plan)
                     if drain:
                         after, findings = finish_validation(after, findings)
+                    if pair:
+                        after = pair.finish(client, after, plan, emit)
+                        findings = checks.compare(before, after) + target_findings(after, profile, plan)
                     # This gate runs outside restoration's failure handler: a
                     # quiet log must not disable traffic that passed health checks.
                     validation_gate = 9

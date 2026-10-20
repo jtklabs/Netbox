@@ -143,6 +143,11 @@ class FakeBigIP:
     def _post(self, path, payload):
         if path == "/mgmt/tm/util/bash":
             command = payload.get("utilCmdArgs", "")
+            if "NETOPS_UCS_STARTED" in command:
+                self.ucs.append(re.search(r"save sys ucs ([A-Za-z0-9._-]+)", command)[1])
+                return {"commandResult": "NETOPS_UCS_STARTED\n"}
+            if "NETOPS_UCS_RUNNING" in command:
+                return {"commandResult": "NETOPS_UCS_EXIT=0\n"}
             if "/sbin/cpcfg" in command:
                 return {"commandResult": "NETOPS_CPCFG_STARTED\n"}
             if "NETOPS_CPCFG_RUNNING" in command:
@@ -231,6 +236,15 @@ def options(tmp_path):
 def unit(monkeypatch):
     fake = FakeBigIP()
     monkeypatch.setattr(f5_workflow.f5_waf, "Client", fake)
+    # This fixture isolates the single-device workflow; test_f5_ha exercises
+    # the real two-device guard, evidence and synchronization protocol.
+    def prepare(client, host, settings, before, profile, options, stack):
+        if not before['facts'].get('peers'):
+            return None
+        pair = Mock(second=False)
+        pair.finish.side_effect = lambda client, after, plan, emit: after
+        return pair
+    monkeypatch.setattr(f5_workflow.f5_ha, 'prepare', prepare)
     return fake
 
 
