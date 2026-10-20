@@ -492,6 +492,9 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
             waf_message = (f"; WAF policies {waf_summary['observed_policies'] if waf_summary['observed_policies'] is not None else 'unknown'}"
                            f"/{waf_summary['expected_policies']}, ASM ready: {waf_summary['ready']}; {seconds_left}s left")
         clean_message = "enabled checks match baseline; running-config matching skipped" if skip_running_config else "no differences from baseline"
+        tolerated = any(f.get("threshold_passed") for f in findings)
+        if tolerated:
+            clean_message = "profile thresholds met; accepted differences retained as warnings"
         emit("validating", f"Comparison {attempt}: " + (clean_message if not errors
                                                         else f"{len(errors)} check(s) differ from baseline") + waf_message,
              {"post": after, "findings": findings,
@@ -499,6 +502,9 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
                                    "error_count": len(errors), "attempt": attempt, "consecutive_clean": consecutive,
                                    "seconds_remaining": seconds_left,
                                    "validation_timeout": validation_timeout,
+                                   "object_comparisons": checks.threshold_summary(
+                                       before, after, plan.get("approved_profile", {}),
+                                       plan.get("connection_drain", {}).get("restore_pending", [])),
                                    **({"waf": waf_summary} if waf_summary else {}),
                                    "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})
@@ -513,6 +519,8 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
                        if skip_running_config else "Target installed and baseline restored")
             if plan.get("validation_overrides"):
                 message = "Target installed; validation manually passed for step(s) " + ", ".join(plan["validation_overrides"])
+            elif any(f.get("threshold_passed") for f in findings):
+                message = "Target installed; profile thresholds met with accepted object differences"
             emit(status, message, {"upgrade_plan": plan, **fields}, attachment)
             return Result(host=host, result={"status": status, "findings": findings}, changed=True)
         if time.monotonic() >= deadline:
@@ -525,7 +533,9 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
             emit("converging", f"Still differs from baseline after comparison {attempt}: {reasons}. "
                                f"Needs 2 consecutive clean comparisons; {seconds_left}s left before validation fails" + waf_message)
         else:
-            emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
+            passed_message = ("met profile thresholds; one more passing comparison needed" if tolerated
+                              else "matched the baseline; one more clean comparison needed")
+            emit("converging", f"Comparison {attempt} {passed_message} "
                                f"({seconds_left}s left)" + waf_message)
         _sleep(options.poll_interval)
 

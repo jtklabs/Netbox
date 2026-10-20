@@ -33,6 +33,9 @@ minimum_free_bytes: 1500000000
 # Optional source URL; empty if already staged.
 image_source: ""
 bundle_conversion_validated: false
+# BIG-IP only; minimum unchanged percentage in each inventory category.
+# f5_ltm_min_unchanged_percent: 100
+# f5_waf_min_unchanged_percent: 100
 '''
 
 

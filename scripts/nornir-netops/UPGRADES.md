@@ -740,19 +740,23 @@ unavailable rather than as removals.
 
 Nodes whose names contain `_auto` are dynamic and are excluded from normalized
 node tables, counts and baseline comparisons. Their raw API responses remain in
-the private archive. Static node changes still fail validation.
+the private archive. Static node changes are subject to the profile threshold.
 
 When ASM is provisioned, prechecks also require a complete, paginated WAF
 policy inventory and ASM readiness. Every returned policy is counted, including
 parents, children and other types, even without active or enforcement fields.
-Postchecks compare only the total policy count; policy identities and enforcement
-states are informational and do not block the job. A readable REST API
+Postchecks compare policy full paths and collected type, active and enforcement
+fields. Both `f5_ltm_min_unchanged_percent` and `f5_waf_min_unchanged_percent`
+default to `100`; set these directly in the job profile YAML. The LTM minimum
+applies separately to nodes, pools and virtual servers. See
+[profile examples](PROFILE_EXAMPLES.md) for percentage calculation and limits.
+Accepted differences remain warnings. A readable REST API
 or matching count alone is insufficient: F5's `F5::ASMReady::is_asm_ready()`
 signal must also return ready. Missing/failed queries block preflight or keep
 postchecks pending. The automation account needs access to the policy inventory
 and `util/bash` for the read-only readiness query. F5 documents this readiness
 function in its [ASM startup workaround](https://techdocs.f5.com/kb/en-us/products/big-ip_ltm/releasenotes/related/relnote-supplement-bigip-12-1-3-4.html).
-This checks inventory count and ASM service readiness; it does not
+This checks collected inventory fields and ASM service readiness; it does not
 replace a synthetic request that exercises each application's WAF enforcement.
 
 Two consecutive clean comparisons are required. Set `validation_timeout` in

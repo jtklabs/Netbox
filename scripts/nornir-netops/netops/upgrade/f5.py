@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .. import cancellation
+from . import checks
 from .images import download, local_md5  # noqa: F401  (BIG-IP callers use f5.download/f5.local_md5)
 
 MAX_CHUNK = 1024 * 1024        # iControl REST rejects larger upload chunks.
@@ -338,10 +339,16 @@ def facts(get):
 
 
 def rows_from_stats(document, mapping):
+    if not isinstance(document.get("entries"), dict):
+        raise ValueError("statistics response is missing its entries collection")
     rows = []
     for entry in document.get("entries", {}).values():
         values = entry.get("nestedStats", {}).get("entries", {})
-        rows.append({key: describe(values.get(source)) for key, source in mapping.items()})
+        row = {key: describe(values.get(source)) for key, source in mapping.items()}
+        if any(value is None for value in row.values()):
+            raise ValueError("statistics response has missing object fields")
+        rows.append(row)
+    checks.object_delta(rows, rows)
     return rows
 
 
@@ -391,7 +398,7 @@ def waf_policies(get):
             if not isinstance(item, dict):
                 raise ValueError("WAF policy response contains a non-object item")
             # All policy types count, including parents without enforcement fields.
-            # Metadata is informational; comparison uses only the collection size.
+            # These stable fields participate in the policy comparison.
             rows.append({key: item[key] for key in ("fullPath", "type", "active", "enforcementMode") if key in item})
         link = document.get("nextLink")
         if link:
@@ -404,6 +411,7 @@ def waf_policies(get):
             path = None
     if expected is not None and len(rows) != expected:
         raise ValueError(f"WAF policy collection incomplete: {len(rows)} of {expected}")
+    checks.object_delta(rows, rows, identity="fullPath", label="WAF policy")
     return rows
 
 
