@@ -51,10 +51,17 @@ def checked_cli(command, output):
 
 def missing(output, policy):
     # Exact lines ignore indentation; rejected fragments match anywhere in the
-    # selected show output. Strings remain literal: no regex or templating.
+    # selected show output. Regex matching is explicit and uses line anchors.
     lines = {line.strip() for line in output.splitlines()}
+    contains_failures = []
+    for item in policy.get('contains', []):
+        if isinstance(item, str):
+            if item not in output:
+                contains_failures.append(f'missing text: {item}')
+        elif re.search(item['regex'], output, re.MULTILINE) is None:
+            contains_failures.append(f"missing regex: {item['regex']}")
     return ([f'missing line: {line}' for line in policy.get('expect', []) if line.strip() not in lines]
-            + [f'missing text: {text}' for text in policy.get('contains', []) if text not in output]
+            + contains_failures
             + [f'forbidden text: {text}' for text in policy.get('reject', []) if text in output])
 
 
@@ -74,7 +81,8 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         policy, region = select(variables['raw_commands'], task.host)
         show = policy.get('show', SHOW[platform])
         payload.update(desired=list(policy.get('expect', [])) + [
-            'contains: ' + text for text in policy.get('contains', [])], selected_region=region,
+            ('contains: ' + item if isinstance(item, str) else 'contains regex: ' + item['regex'])
+            for item in policy.get('contains', [])], selected_region=region,
             read_steps=[{'transport': 'ssh', 'command': show, 'purpose': 'read_config'}])
         junos = platform == 'juniper_junos'
         if junos:
