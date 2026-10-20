@@ -16,6 +16,7 @@ from dataclasses import asdict
 
 from nornir.core.task import Result
 
+from .. import cancellation
 from . import checks, eos_checks
 from .profile import eos_version
 from .workflow import Device, comparison_report, converge, device_lock, settle, stage_image
@@ -61,7 +62,7 @@ class EosDevice(Device):
             except Exception as exc:
                 last_error = type(exc).__name__
             self.close()
-            time.sleep(self.options.poll_interval)
+            _sleep(self.options.poll_interval)
         raise TimeoutError(f"reload deadline exceeded: {last_error}; manual recovery required")
 
 
@@ -275,3 +276,7 @@ def upgrade_device(task, profile, options, reporter):
         return Result(host=host, result={"error": message}, failed=True, changed=changed)
     finally:
         device.close()
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

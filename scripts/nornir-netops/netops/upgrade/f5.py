@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from .. import cancellation
 from .images import download, local_md5  # noqa: F401  (BIG-IP callers use f5.download/f5.local_md5)
 
 MAX_CHUNK = 1024 * 1024        # iControl REST rejects larger upload chunks.
@@ -26,6 +27,7 @@ UCS_DIR = "/var/local/ucs"
 
 
 def _raw(client, method, path, **kwargs):
+    cancellation.checkpoint()
     import requests
     try:
         return client.session.request(method, client.base + path, verify=client.verify_tls,
@@ -104,7 +106,7 @@ def upload_image(client, path, progress=lambda percent: None):
                     break
                 if attempt == 3:
                     raise RuntimeError(f"image upload failed (HTTP {response.status_code}) at byte {sent}")
-                time.sleep(2 * attempt)
+                _sleep(2 * attempt)
             sent += len(chunk)
             percent = sent * 100 // total
             if percent >= next_report:
@@ -126,7 +128,7 @@ def wait_verified(client, filename, expected_md5, timeout, poll=5):
             return entry, "md5 verified on the unit"
         if time.monotonic() >= deadline:
             raise TimeoutError(f"image not verified by the unit within {int(timeout)}s")
-        time.sleep(poll)
+        _sleep(poll)
 
 
 def prune_images(client, keep, required_free_bytes):
@@ -272,7 +274,7 @@ def copy_configuration(client, source, destination, timeout, poll=5, progress=la
             raise TimeoutError(f"configuration copy to {destination} exceeded {int(timeout)}s; "
                                f"it may still be running, reboot cancelled; inspect {log}")
         progress(f"Configuration copy to {destination} still running; waiting for confirmed completion")
-        time.sleep(min(max(poll, 1), remaining))
+        _sleep(min(max(poll, 1), remaining))
 
 
 def reboot_to(client, volume):
@@ -463,3 +465,7 @@ def collect(client, progress):
     snapshot["health"] = {"alarms": [], "interface_errors": {}, "failover_state": info.get("failover_state"),
                           "sync_status": info.get("sync_status"), "license_service_check_date": info.get("license_service_check_date")}
     return snapshot
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

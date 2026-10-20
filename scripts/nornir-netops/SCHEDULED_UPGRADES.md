@@ -305,11 +305,10 @@ The device page's **Run now** action allows another run after a **Failed** job.
 If another job blocks it, the action opens that job (when you have permission)
 and identifies its status. A **Recovery required** job still blocks retries
 until you verify the device and use **Record recovery and release device**.
-A pending or held job can be cancelled. Pending/held jobs whose start windows
+A pending or held job can be cancelled immediately. Running jobs on worker 0.2.2 or newer support the cancellation handshake described below. Pending/held jobs whose start windows
 have elapsed are expired when scheduling a new immediate run, even if the
 poller has not checked in. Install the Device Operations plugin update on
-NetBox as well as the worker update to get this behavior; these changes do not
-require a database migration.
+NetBox as well as the worker update to get this behavior. Running-job cancellation requires the plugin migration `0024_job_cancellation`.
 
 Remediation ignores redundancy groups and dependencies, since a
 configuration push takes nothing out of service, and a failed staging or
@@ -519,7 +518,7 @@ works.
 
 Use NetBox Object Permissions on the `netbox_discovery.UpgradeJob` object type:
 
-- Operators: `view`, `add` to schedule audits; also `apply` to schedule staging/upgrades. `change` permits cancelling pending jobs and recording recovery. Apply is a separate permission so audit schedulers cannot authorize reloads.
+- Operators: `view`, `add` to schedule audits; also `apply` to schedule staging/upgrades. `change` permits cancelling pending or running jobs and recording recovery. Apply is a separate permission so audit schedulers cannot authorize reloads.
 - Workers: `run` to claim jobs and report/heartbeat. They do not need add, apply, change, or delete permission on upgrade jobs. Give the token write capability; read-only tokens cannot claim work.
 - Operators need view access to the selected DCIM devices. Optional filters use NetBox's own device filterset. Add/apply/run/change object constraints are enforced, including for batch creation.
 
@@ -646,7 +645,10 @@ There is **no automatic replay of a claimed upgrade**:
 - A worker lost during prechecks is marked failed at the next check-in after five minutes without a heartbeat. No start authorization was issued. Create a new schedule after inspecting the failure.
 - A worker lost after NetBox authorizes changes is marked **Recovery required**. Its device remains locked against further scheduled work. An original worker that merely lost NetBox connectivity may still finish and report its outcome.
 - Failed post-validation, ambiguous install outcomes, and errors after apply authorization also require recovery. Inspect the switch and its archive, stop any surviving worker, then use **Record recovery and release device**, describing the verified state. This releases the scheduling lock; it sends no rollback command.
-- Pending and held jobs can be cancelled. Active installs are not interrupted by a UI cancellation.
+- Pending and held jobs can be cancelled immediately. For a claimed/running job on worker **0.2.2 or newer**, open its detail page and choose **Cancel running job**. The page shows **Cancellation requested** until that specific worker acknowledges it stopped. Other jobs on the poller continue.
+- The worker receives cancellation on its next progress response or 30-second heartbeat. Long validation waits wake immediately once the request arrives; an in-flight HTTP/SSH request must return or time out first. Cancellation stops future worker actions, closes its connections and terminates/reaps only its own standards feature process group. It cannot undo commands already sent, an appliance install, or a reboot.
+- A stopped job becomes **Cancelled** if changes were not authorized. After apply authorization it becomes **Recovery required**, retaining the device reservation until you verify the device and use **Record recovery and release device**. Cancellation does not restore VIPs or change the traffic state; inspect the device if cancellation interrupted draining/restoration.
+- If the poller cannot reach NetBox, the request remains pending. A stale cancellation request keeps the device reserved. Stop acknowledgments are saved in the worker outbox for later delivery. The button is unavailable for jobs claimed by older workers: updating files cannot retrofit an already-running worker. Deploy the NetBox plugin (including migration `0024_job_cancellation`) and worker together before starting new jobs.
 
 Before changes, the NetBox ready acknowledgement and any configured webhook must succeed. Afterwards, the upgrade engine continues recovery through a callback outage. Progress is saved locally before delivery and retried on a later queue check after the job finishes, using the same job/sequence for deduplication. A start authorization is never put in the deferred-delivery spool. Jobs from a lost claim response are never started or replayed; those claims expire without device changes.
 
@@ -657,9 +659,9 @@ If progress remains undeliverable, the poller reports an error and claims no add
 All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the normal NetBox API token. The optional UI webhook has its own bearer token and URL; it is not used for queue authentication.
 
 - `POST schedule/`: `{filters, operation, scheduled_at, start_before, profile_source?, saved_profile?, profile?, poller?, description?, preview?}`. `profile_source: "model"` resolves device-type defaults; `"saved"` requires a `saved_profile` ID; `"custom"` requires a `profile` JSON object. Omitting the source preserves older callers: a supplied `profile` means custom, otherwise model defaults. Do not send an inline profile with model/saved sources. For `"operation": "remediate"`, a custom `profile` is `{"features": ["ntp", "syslog"], "mode": "add"}`; features are `ntp`, `syslog`, `banner`, `acl`, `users`, `snmp` and `snmp_packetsize`, and mode is `add` or `replace`. `filters` accepts the same fields as `/api/dcim/devices/`, such as `{"site": ["atl"], "role": ["access"]}`. `preview: true` returns targets and resolved plans without creating jobs. Default operation is `audit`. Successful creation returns `batch_id` and `jobs`. Do not blindly retry schedule creation after a lost response; check the queue first.
-- `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true}`. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
-- `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state.
-- `POST {id}/cancel/`: cancel a pending job; or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
+- `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true,"worker_version":"0.2.2","supports_cancellation":true}`. Only workers implementing the stop handshake should advertise `supports_cancellation`; the capability is frozen per claim. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
+- `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state. Responses include `cancel_requested`; a capable worker must stop before doing more device work and emit `cancelled` only after its workflow has unwound. A pending cancellation prevents `ready` from authorizing changes and prevents an in-flight completion from releasing the device.
+- `POST {id}/cancel/`: cancel a pending/held job or request cancellation of an active job (optional `reason`); or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
 - `POST {id}/requeue/` with an empty body: a new pending job for a closed job's device, profile and operation, due now with the same window length, in a new batch. Returns `201` with the new `id`, `batch_id` and window; `409` when the job is not closed or the device already has a queued or active job. Needs `add` (and `apply` for staging/upgrades) like `schedule/`.
 - `GET /` and `GET {id}/`: current queue and progress for a dashboard. These endpoints never expose claim tokens and reject ordinary PATCH/DELETE operations.
 

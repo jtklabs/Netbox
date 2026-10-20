@@ -518,14 +518,16 @@ def expire(queryset, now):
     queryset.filter(status__in=('pending', 'held'), start_before__lte=now).update(
         status='expired', completed_at=now, message='Start window missed; no work dispatched.')
     stale = now - timedelta(minutes=5)
-    queryset.filter(status='claimed', last_seen_at__lt=stale).update(
+    queryset.filter(status='claimed', cancel_requested_at__isnull=True, last_seen_at__lt=stale).update(
         status='failed', completed_at=now, message='Worker lost before apply authorization; schedule again after checking the poller.')
+    queryset.filter(status='claimed', cancel_requested_at__isnull=False, last_seen_at__lt=stale).update(
+        status='recovery_required', message='Cancellation not acknowledged; device remains locked until the worker stops.')
     queryset.filter(status='running', last_seen_at__lt=stale).update(
         status='recovery_required', message='Worker heartbeat lost after apply authorization. Device remains locked.')
 
 
 @transaction.atomic
-def claim(user, poller, limit, apply, worker_version=""):
+def claim(user, poller, limit, apply, worker_version="", supports_cancellation=False):
     now = timezone.now()
     qs = UpgradeJob.objects.restrict(user, 'run').filter(poller=poller)
     expire(qs, now)
@@ -555,6 +557,7 @@ def claim(user, poller, limit, apply, worker_version=""):
             continue
         job.claim_token = uuid.uuid4()
         job.worker_version = worker_version
+        job.supports_cancellation = supports_cancellation
         job.status, job.claimed_at, job.last_seen_at = 'claimed', now, now
         job.save()
         jobs.append(job)
@@ -585,13 +588,17 @@ def report(user, pk, data):
         if data.get('sequence', 0) and data['sequence'] <= job.sequence:
             return job
         raise QueueError('This job has already ended.')
+    if job.cancel_acknowledged_at and not data.get('heartbeat'):
+        if data['sequence'] <= job.sequence:
+            return job
+        raise QueueError('The worker already acknowledged cancellation.')
     if data.get('heartbeat'):
         DiscoveryPoller.objects.filter(pk=job.poller_id).update(worker_version=data.get('worker_version', ''))
         UpgradeJob.objects.filter(pk=pk).update(last_seen_at=now)
         return job
     # The worker must receive this acknowledgment before opening a device
     # connection. Revalidate retries too, in case the IP changed after pickup.
-    if data['stage'] == 'queued' and job.started_at is None:
+    if data['stage'] == 'queued' and job.started_at is None and not job.cancellation_pending:
         if job.status != 'claimed' or not job.scheduled_at <= now < job.start_before:
             raise QueueError('Start window closed or claim is no longer active.')
         check_target(job)
@@ -599,7 +606,9 @@ def report(user, pk, data):
     if sequence <= job.sequence:
         return job
     stage = data['stage']
-    if stage == 'ready' and job.started_at is None:
+    if stage == 'cancelled' and not job.cancel_requested_at:
+        raise QueueError('No cancellation was requested for this job.')
+    if stage == 'ready' and job.started_at is None and not job.cancellation_pending:
         if job.operation in READ_ONLY_OPERATIONS:
             raise QueueError('An audit cannot authorize changes.')
         if job.status != 'claimed' or not job.scheduled_at <= now < job.start_before:
@@ -645,6 +654,13 @@ def report(user, pk, data):
         'failed': 'failed', 'blocked': 'failed', 'staging_failed': 'recovery_required',
         'validation_failed': 'recovery_required', 'recovery_required': 'recovery_required',
     }.get(stage)
+    if job.cancellation_pending:
+        # A request racing with ready/completed wins until the worker has unwound.
+        # Acknowledge progress sequences so the worker can receive the stop signal.
+        outcome = None
+    if stage == 'cancelled':
+        job.cancel_acknowledged_at = now
+        outcome = 'recovery_required' if job.started_at else 'cancelled'
     if outcome:
         # A post-authorization error must not unlock a potentially changed device.
         if outcome == 'failed' and job.started_at:
@@ -677,8 +693,19 @@ def cancel(user, pk, reason='', recovered=False):
     if recovered:
         if not job.needs_recovery or not reason.strip():
             raise QueueError('Only recovery-required jobs can be released; describe the verified device state.')
+    elif job.status in ACTIVE:
+        if job.completed_at and not job.cancellation_pending:
+            raise QueueError('This worker has finished; verify the device and record recovery.')
+        if not job.supports_cancellation:
+            raise QueueError('This worker does not support per-job cancellation. Deploy worker 0.2.2 or newer for new jobs; verify recovery for this job.')
+        if not job.cancel_requested_at:
+            job.cancel_requested_at = timezone.now()
+            job.cancel_requested_by = user
+            job.cancel_reason = reason.strip()[:1000]
+            job.save()
+        return job
     elif job.status not in ('pending', 'held'):
-        raise QueueError('Only a pending or held job can be cancelled. An active upgrade must finish recovery.')
+        raise QueueError('This job has already ended.')
     job.status, job.completed_at, job.claim_token = 'cancelled', timezone.now(), None
     job.message = reason or 'Cancelled before dispatch.'
     job.save()

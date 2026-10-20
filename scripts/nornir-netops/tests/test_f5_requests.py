@@ -252,3 +252,23 @@ def test_non_upgrades_do_not_query_request_logs(profile, options, unit, mode):
     result, _, stages = run_unit(profile, options)
     assert not result.failed, result.result
     assert 'waf_requests' not in stages and unit.log_reads == 0
+
+
+def test_cancel_during_final_log_wait_preserves_restored_traffic(profile, options, unit):
+    from netops import cancellation
+    options.apply = True
+    options.validation_timeout = 4800
+    control = cancellation.Control()
+    original = unit._get
+    def get(path):
+        result = original(path)
+        if path == f5_requests.REQUESTS:
+            control.requested.set()
+            return {'items': [OLD]}
+        return result
+    unit._get = get
+    with cancellation.bind(control), pytest.raises(cancellation.Cancelled):
+        run_unit(replace(profile, drain_connections=True), options)
+    assert unit.log_reads == 1
+    assert unit.virtuals['/Common/vs-web'] and unit.saved_virtuals['/Common/vs-web']
+    assert not unit.virtuals['/Common/off']

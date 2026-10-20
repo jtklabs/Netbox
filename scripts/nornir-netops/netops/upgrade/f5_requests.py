@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import time
 
+from .. import cancellation
 from . import f5
 from ..errors import DeviceHTTPError
 
@@ -103,7 +104,11 @@ def wait_for_request(client, after, plan, options, emit):
         detail = f"; last read failed: {record['last_error']}" if record.get("last_error") else ""
         emit("waf_requests", f"No confirmed new WAF request log yet; {int(remaining)}s left{detail}")
         if remaining:
-            time.sleep(min(max(options.poll_interval, 0.1), remaining))
+            _sleep(min(max(options.poll_interval, 0.1), remaining))
     record.update(status="timed_out", seconds_remaining=0)
     raise TimeoutError(f"No post-upgrade WAF request log confirmed within {timeout}s; "
                        "traffic remains in its validated state. Check local WAF logging and incoming traffic.")
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

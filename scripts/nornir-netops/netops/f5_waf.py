@@ -6,6 +6,8 @@ plans remote server lists; it does not assume an inventory or execution mode.
 
 from __future__ import annotations
 
+from . import cancellation
+
 import ipaddress
 from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
@@ -38,6 +40,7 @@ class Client:
         self._reauthentication_needed = False
 
     def request(self, method, path, payload=None, timeout=None):
+        cancellation.checkpoint()
         response = self.session.request(
             method, self.base + path, json=payload, verify=self.verify_tls,
             timeout=timeout or self.timeout,
@@ -56,6 +59,7 @@ class Client:
                 # must not be interpreted as a potentially successful reboot.
                 from .errors import summarize
                 raise RuntimeError(f"F5 session reauthentication failed: {summarize(exc)}") from None
+            cancellation.checkpoint()
             response = self.session.request(
                 method, self.base + path, json=payload, verify=self.verify_tls,
                 timeout=timeout or self.timeout,

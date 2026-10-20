@@ -11,6 +11,7 @@ from pathlib import Path
 
 from nornir.core.task import Result
 
+from .. import cancellation
 from . import checks, report
 from .images import local_image
 from .profile import version
@@ -151,7 +152,9 @@ class Device:
         self.connection = None
 
     def connect(self):
+        cancellation.checkpoint()
         self.connection = self.task.host.get_connection("netmiko", self.task.nornir.config)
+        cancellation.checkpoint()
         self.connection.enable()
         return self.connection
 
@@ -164,6 +167,7 @@ class Device:
             self.connection = None
 
     def read(self, command):
+        cancellation.checkpoint()
         timeout = self.options.show_timeout
         if command in ("show running-config", "show startup-config"):
             # Configuration dumps are the slowest reads on a large stack.
@@ -171,6 +175,7 @@ class Device:
         return self.connection.send_command(command, read_timeout=timeout)
 
     def write(self, command, timeout=120):
+        cancellation.checkpoint()
         output = self.connection.send_command(command, read_timeout=timeout)
         checks.understood(command, output)
         if INSTALL_FAILURE.search(output):
@@ -202,8 +207,10 @@ class Device:
         Once installation may have begun, never retry it on a transport error.
         A lost session is resolved through fresh post-reload observations.
         """
+        cancellation.checkpoint()
         conn = self.connection
         prompt = conn.find_prompt().strip()
+        cancellation.checkpoint()
         conn.write_channel(command + "\n")
         deadline, heartbeat = time.monotonic() + timeout, time.monotonic()
         transcript, answered = "", 0
@@ -217,6 +224,7 @@ class Device:
                 tail = transcript[answered:]
                 reply = self.answer(tail, reload)
                 if reply is not None:
+                    cancellation.checkpoint()
                     conn.write_channel(reply)
                     answered = len(transcript)
                 elif re.search(r"(?:\[y/n(?:/q)?\]|\[confirm\]|\[yes/no[^\]]*\]|[Pp]assword:|[Uu]sername:)\s*[:?]?\s*$", tail):
@@ -232,7 +240,7 @@ class Device:
                 if time.monotonic() - heartbeat >= 30:
                     self.emit("installing" if reload else "staging", "Operation still running")
                     heartbeat = time.monotonic()
-                time.sleep(1)
+                _sleep(1)
         except (OSError, EOFError):
             if reload:
                 return transcript
@@ -240,8 +248,9 @@ class Device:
         finally:
             # Capture even interrupted/ambiguous dialogues without putting
             # command output or configs into the external progress payload.
-            self.emit("installing" if reload else "staging", "Command dialogue captured",
-                      {"install_output" if reload else "copy_output": transcript})
+            with cancellation.bind(None):
+                self.emit("installing" if reload else "staging", "Command dialogue captured",
+                          {"install_output" if reload else "copy_output": transcript})
         raise TimeoutError("install/copy dialogue timed out; do not automatically retry")
 
     def resync(self):
@@ -265,11 +274,13 @@ class Device:
         marks = {"reported": time.monotonic()}
 
         def progress4(filename, size, sent, peer):
+            cancellation.checkpoint()
             if time.monotonic() - marks["reported"] >= 30:
                 marks["reported"] = time.monotonic()
                 self.emit("staging", f"SCP push {100 * sent // size if size else 0}% ({sent} of {size} bytes)")
 
         try:
+            cancellation.checkpoint()
             scp = SCPConn(self.connection, socket_timeout=120, progress4=progress4)
             try:
                 scp.scp_transfer_file(str(local), destination)
@@ -302,7 +313,7 @@ class Device:
             except Exception as exc:
                 last_error = type(exc).__name__
             self.close()
-            time.sleep(self.options.poll_interval)
+            _sleep(self.options.poll_interval)
         raise TimeoutError(f"reload deadline exceeded: {last_error}; manual recovery required")
 
 
@@ -442,7 +453,7 @@ def settle(emit, options):
     remaining = options.settle_seconds
     while remaining > 0:
         pause = min(30, remaining)
-        time.sleep(pause)
+        _sleep(pause)
         remaining -= pause
         emit("converging", f"Initial settling time remaining: {remaining}s")
 
@@ -512,7 +523,7 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
         else:
             emit("converging", f"Comparison {attempt} matched the baseline; one more clean comparison needed "
                                f"({seconds_left}s left)" + waf_message)
-        time.sleep(options.poll_interval)
+        _sleep(options.poll_interval)
 
 
 def comparison_report(reporter, host, before, after, findings, plan, status):
@@ -625,6 +636,7 @@ def upgrade_device(task, profile, options, reporter):
                 raise ValueError("configuration or software changed since precheck; rerun required")
             changed = True
             emit("configuring_boot", "Setting packages.conf autoboot and saving configuration")
+            cancellation.checkpoint()
             output = device.connection.send_config_set(BOOT_COMMANDS, read_timeout=options.show_timeout,
                                                         error_pattern=r"(?im)^\s*%\s*(?:Invalid|Error|Incomplete|Ambiguous|Authorization)")
             checks.understood("boot configuration", output)
@@ -658,3 +670,7 @@ def upgrade_device(task, profile, options, reporter):
         return Result(host=task.host, result={"error": message}, failed=True, changed=changed)
     finally:
         device.close()
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

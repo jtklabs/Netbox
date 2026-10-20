@@ -18,6 +18,7 @@ from pathlib import Path
 
 from nornir.core.task import Result
 
+from .. import cancellation
 from .. import f5_waf
 from . import checks, f5, f5_drain, f5_requests
 from .images import local_image
@@ -222,7 +223,7 @@ def wait_for_state(client, wanted, options, emit):
         if time.monotonic() >= deadline:
             raise ValueError(f"unit did not become {wanted} within {FAILOVER_WAIT}s; failover state is {state}")
         emit("failing_over", f"Waiting to become {wanted}; currently {state}")
-        time.sleep(options.poll_interval)
+        _sleep(options.poll_interval)
 
 
 def installed_target(info, profile):
@@ -251,7 +252,7 @@ def wait_for_install(client, volume, options, emit, profile):
         if time.monotonic() - heartbeat >= 30:
             emit("installing", f"Installing to {volume}: {status}; version {info.get('version')}, build {info.get('build')}")
             heartbeat = time.monotonic()
-        time.sleep(options.poll_interval)
+        _sleep(options.poll_interval)
 
 
 def wait_for_target(host, settings, profile, volume, options, emit):
@@ -273,7 +274,7 @@ def wait_for_target(host, settings, profile, volume, options, emit):
                 client.__exit__(None, None, None)
             except Exception:
                 pass
-        time.sleep(options.poll_interval)
+        _sleep(options.poll_interval)
     raise TimeoutError(f"reboot deadline exceeded: {last}; manual recovery required")
 
 
@@ -514,3 +515,7 @@ def upgrade_device(task, profile, options, reporter):
         status = ("staging_failed" if stage_only else "recovery_required") if changed else "failed"
         emit(status, message, {"error": message, "upgrade_plan": plan})
         return Result(host=host, result={"error": message}, failed=True, changed=changed)
+
+
+def _sleep(seconds):
+    return cancellation.sleep(seconds, fallback=time.sleep)

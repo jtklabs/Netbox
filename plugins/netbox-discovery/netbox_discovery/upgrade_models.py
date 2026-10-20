@@ -38,6 +38,12 @@ class UpgradeJob(PrimaryModel):
         max_length=50, blank=True, editable=False,
         help_text='Version of the worker that claimed this job',
     )
+    supports_cancellation = models.BooleanField(default=False, editable=False)
+    cancel_requested_at = models.DateTimeField(null=True, blank=True, editable=False)
+    cancel_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                            null=True, blank=True, editable=False, related_name='+')
+    cancel_reason = models.CharField(max_length=1000, blank=True, editable=False)
+    cancel_acknowledged_at = models.DateTimeField(null=True, blank=True, editable=False)
     claim_token = models.UUIDField(null=True, blank=True, editable=False)
     sequence = models.PositiveIntegerField(default=0, editable=False)
     stage = models.CharField(max_length=50, blank=True)
@@ -74,6 +80,15 @@ class UpgradeJob(PrimaryModel):
 
     def get_status_color(self):
         return 'red' if self.heartbeat_stale else UpgradeStatusChoices.colors.get(self.status)
+
+    @property
+    def cancellation_pending(self):
+        return bool(self.cancel_requested_at and not self.cancel_acknowledged_at and self.status in ACTIVE)
+
+    @property
+    def can_request_cancel(self):
+        return (self.supports_cancellation and self.status in ACTIVE
+                and not self.completed_at and not self.cancel_requested_at)
 
     @property
     def heartbeat_stale(self):
