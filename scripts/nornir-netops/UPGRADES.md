@@ -549,6 +549,11 @@ upgrade paths.
 
 ## BIG-IP upgrades
 
+For the end-to-end engineering and change-management procedure, download the
+[F5 Upgrade Operations Guide](../../docs/deliverables/F5%20Upgrade%20Operations%20Guide.docx).
+It includes the nine workflow steps, HA ordering, validation decisions, boot
+rollback, change checklists and recorded live-test limitations.
+
 The same command, profile shape, NetBox scheduling, progress events, archive
 and comparison report drive F5 BIG-IP units over iControl REST. A profile is a
 BIG-IP profile when its `image` is a `BIGIP-<version>-<build>.iso`; the image
