@@ -62,6 +62,37 @@ class QuickRunTest(TestCase):
         self.run_now()
         self.assertEqual(UpgradeJob.objects.get().operation, 'audit_config')
 
+    def test_raw_health_check_queues_audit_and_records_pass_fail(self):
+        from netbox_compliance.job_results import record_job_results
+        from netbox_compliance.models import ConfigCompliance
+        from netbox_discovery.upgrade_choices import REMEDIATION_FEATURES
+
+        self.standard = ConfigStandard.objects.create(name='NTP operational check', check_type='netops',
+            auto_remediable=False, definition_yaml=r"""raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      show: show ntp associations
+      reject:
+        - regex: '(?i)\bINIT\b'
+""")
+        response = self.run_now()
+        job = UpgradeJob.objects.get()
+        self.assertRedirects(response, job.get_absolute_url())
+        self.assertEqual(job.operation, 'audit_config')
+        self.assertEqual(job.profile['features'], ['raw_commands'])
+        self.assertEqual(job.profile['raw_standard_id'], self.standard.pk)
+        self.assertNotIn('commands', job.standards_snapshot['document']['raw_commands']['platforms']['cisco_ios'])
+        self.assertNotIn('ssh_mac', dict(REMEDIATION_FEATURES))
+        for verdict in ('non-compliant', 'compliant'):
+            failed = [r'forbidden regex: (?i)\bINIT\b'] if verdict == 'non-compliant' else []
+            record_job_results(job, {'compliance_results': {'raw_commands': verdict},
+                'compliance_details': {'raw_commands': {'current': failed, 'commands': []}}}, timezone.now())
+            result = ConfigCompliance.objects.get(device=self.device, standard=self.standard)
+            self.assertEqual(result.result, verdict)
+            self.assertEqual(result.findings['checks']['raw_commands']['current'], failed)
+            self.assertEqual(result.standard_revision.number, self.standard.revision)
+
     def test_audit_dropdown_always_queues_read_only(self):
         self.run_now(action='audit')
         self.assertEqual(UpgradeJob.objects.get().operation, 'audit_config')

@@ -270,26 +270,9 @@ local_accounts:
 #    ntp: service-source
 #    syslog: service-source
 
-# SSH MAC integrity -> configure.py ssh-mac --replace
-# Edit these lists to define the complete allowed set for each platform.
-# This example excludes SHA-1 MACs while retaining SHA-256 and SHA-512 where
-# supported. Check algorithm availability on your software releases.
-# ASA macs renders an explicit custom integrity list, not the high preset.
-# Add mode reports only; replace mode writes only with --apply.
-# Encryption ciphers and key exchange are separate settings.
-ssh_mac:
-  ios_scope: both
-  platforms:
-    cisco_ios:
-      macs: [hmac-sha2-256, hmac-sha2-512]
-    arista_eos:
-      macs: [hmac-sha2-256, hmac-sha2-512]
-    cisco_asa:
-      macs: [hmac-sha2-256]
-    juniper_junos:
-      macs: [hmac-sha2-256, hmac-sha2-512]
-
-# Literal configuration commands, evaluated independently of the typed features.
+# Show-output checks with optional literal configuration commands.
+# Omit commands (or use commands: []) for read-only checks, even with --apply.
+# NTP example: show: show ntp associations; reject: [{regex: "(?i)INIT"}]
 # Opt in explicitly. Each regional bundle replaces the complete default bundle.
 raw_commands:
   enabled: false

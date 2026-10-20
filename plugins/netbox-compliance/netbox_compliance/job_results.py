@@ -8,7 +8,7 @@ def record_job_results(job, summary, checked_at):
     if not isinstance(verdicts, dict):
         return
     for pinned in job.standards_snapshot['revisions']:
-        check_features = [f for f in job.profile['features'] if FEATURE_SECTIONS[f] == pinned['section']]
+        check_features = [f for f in job.profile['features'] if FEATURE_SECTIONS.get(f, f) == pinned['section']]
         if pinned['section'] == 'raw_commands' and 'raw_standard_ids' in job.profile:
             check_features = [f'raw_commands:{pinned["standard_id"]}']
         results = [verdicts[f] for f in check_features

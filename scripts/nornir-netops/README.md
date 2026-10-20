@@ -2803,13 +2803,12 @@ and AWS settings, processes a bounded Nornir batch, and reports progress to
 NetBox and the optional upgrade webhook. Without `--apply` it claims audits only.
 See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruption/recovery behavior.
 
-## SSH MAC integrity
+## Raw command checks
 
-`configure.py ssh-mac --replace` audits the MAC lists defined in `ssh_mac`
-YAML on IOS/IOS-XE, EOS, ASA and Junos. Shared values and per-platform overrides
-are supported, including explicit ASA custom lists. Add `--apply` to remediate;
-add mode only reports drift. NetBox jobs expose **SSH MAC integrity** and pin
-its YAML standard revision. See [setup, scope and platform behavior](../../docs/SSH-MAC-STANDARD.md).
+Use `raw_commands` to run a show command and require or forbid text or regex matches.
+Omit `commands` for a read-only pass/fail check. SSH MAC policies also use raw
+standards; the dedicated `ssh-mac` feature has been retired. See
+[raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for NTP and SSH examples.
 
 ## Checking the deployed worker version
 
@@ -2837,10 +2836,12 @@ The repository's Poller versions CI check covers both workers, including
 templates and dependency files. Documentation and tests alone do not require
 a release bump.
 
-### Raw configuration commands
+### Raw commands
 
-Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle can select a `show` command and define `expect` (complete lines), `contains` (literal required text or explicit `regex` items; regex requires worker 0.2.17 or newer), and/or `reject` (forbidden text) checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
+Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle can select a `show` command and define `expect` (complete lines), `contains` (literal required text or explicit `regex` items; regex requires worker 0.2.17 or newer), and/or `reject` (forbidden text or regex) checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
 
 Infoblox NIOS raw bundles use `infoblox_nios`, require an explicit `show`, and run noninteractive `set` commands directly over SSH. They support the same literal/regex checks and regional overrides. There is no separate save or commit step. Deploy the updated Compliance plugin and worker 0.2.18 or newer.
 
 NetBox job profiles can choose up to eight named **Raw command standards**. Each selected standard is pinned and executed separately with its own checks and compliance result. Blank selection requires exactly one applicable raw standard. Multiple selections require worker 0.2.16 or newer and the matching Discovery and Compliance plugins.
+
+With worker 0.2.19 or newer, omit `commands` (or use `commands: []`) for read-only pass/fail checks. These never configure or save, even with `--apply`. `reject` accepts the same literal and regex items as `contains`. See the NTP synchronization examples in the raw command guide.

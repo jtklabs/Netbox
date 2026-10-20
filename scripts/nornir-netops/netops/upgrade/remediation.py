@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize', 'ssh_mac', 'raw_commands')
+FEATURES = ('ntp', 'syslog', 'banner', 'acl', 'users', 'snmp', 'snmp_packetsize', 'raw_commands')
 MODES = ('add', 'replace')
 CONFIG_OPERATIONS = ('remediate', 'audit_config')
 READ_ONLY_OPERATIONS = ('audit', 'audit_config')
@@ -159,6 +159,8 @@ def report_details(document):
     if not isinstance(row, dict):
         return fallback
     details = fallback
+    if row.get('read_only') is True:
+        details['read_only'] = True
     for key in ('add', 'remove', 'commands', 'advisories', 'notes', 'current', 'desired'):
         values = row.get(key, [])
         if isinstance(values, list):
@@ -316,6 +318,20 @@ def _run_job(task, job, args, emit):
         return False, False, results
     if not pending:
         emit('already_current', f'Already compliant: {", ".join(features)}', summary)
+        return False, False, results
+
+    # Assertion-only raw standards have no apply phase, even in a mixed
+    # remediation profile. Preserve their failed verdict without claiming a write.
+    read_only = [feature for feature in pending
+                 if feature.split(':', 1)[0] == 'raw_commands'
+                 and args.compliance_details.get(feature, {}).get('read_only') is True]
+    for feature in read_only:
+        results[feature] = 'attention'
+    pending = [feature for feature in pending if feature not in read_only]
+    summary['progress_summary']['features'] = dict(results)
+    if not pending:
+        emit('completed_with_warnings', 'Read-only checks failed: ' + ', '.join(read_only)
+             + '; no configuration changed', summary)
         return False, False, results
 
     if not emit('ready', f'Applying {", ".join(pending)} ({mode})', summary):
