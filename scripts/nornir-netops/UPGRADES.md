@@ -742,19 +742,23 @@ unavailable rather than as removals.
 
 Nodes whose names contain `_auto` are dynamic and are excluded from normalized
 node tables, counts and baseline comparisons. Their raw API responses remain in
-the private archive. Static node changes still fail validation.
+the private archive. Static node changes are subject to the profile threshold.
 
 When ASM is provisioned, prechecks also require a complete, paginated WAF
 policy inventory and ASM readiness. Every returned policy is counted, including
 parents, children and other types, even without active or enforcement fields.
-Postchecks compare only the total policy count; policy identities and enforcement
-states are informational and do not block the job. A readable REST API
+Postchecks compare policy full paths and collected type, active and enforcement
+fields. Both `f5_ltm_min_unchanged_percent` and `f5_waf_min_unchanged_percent`
+default to `100`; set these directly in the job profile YAML. The LTM minimum
+applies separately to nodes, pools and virtual servers. See
+[profile examples](PROFILE_EXAMPLES.md) for percentage calculation and limits.
+Accepted differences remain warnings. A readable REST API
 or matching count alone is insufficient: F5's `F5::ASMReady::is_asm_ready()`
 signal must also return ready. Missing/failed queries block preflight or keep
 postchecks pending. The automation account needs access to the policy inventory
 and `util/bash` for the read-only readiness query. F5 documents this readiness
 function in its [ASM startup workaround](https://techdocs.f5.com/kb/en-us/products/big-ip_ltm/releasenotes/related/relnote-supplement-bigip-12-1-3-4.html).
-This checks inventory count and ASM service readiness; it does not
+This checks collected inventory fields and ASM service readiness; it does not
 replace a synthetic request that exercises each application's WAF enforcement.
 
 Two consecutive clean comparisons are required. Set `validation_timeout` in
@@ -818,7 +822,12 @@ recovery. Prechecks, install, reboot and reconnect cannot be forced through.
 Only the current validation step can be overridden. Each request records the
 operator, UTC timestamp and reason in the job; the worker records acceptance in
 its progress log, archive and final comparison report. Observed differences
-remain available rather than being reported as an automatic clean pass.
+remain available rather than being reported as an automatic clean pass. After a
+step-8 manual pass, the worker collects fresh health (after traffic restoration
+when draining was enabled). Step 9 uses that current WAF policy count and HA role,
+so a recovered standby is skipped normally. The archive keeps the accepted
+snapshot, and the report separates its original findings from the refreshed
+observation. A failed refresh still requires recovery.
 
 After either validation window expires, an upgraded scheduled worker stops
 retrying that check and waits for **Force pass** or **Cancel running job**.
@@ -886,8 +895,11 @@ After two clean standby health checks, the poller records private handoff
 evidence under `.upgrade-locks/f5-ha`. The second job permits `Changes Pending`
 only when that evidence is less than 24 hours old, the upgraded peer is healthy
 on the exact target version/build, and neither member's recorded configuration
-revision has changed. Missing evidence, manual validation overrides, changes to
-the pair, or unexpected sync states stop the handoff. Both jobs need management
+revision has changed. HA handoff checks always require unchanged inventories,
+even when the local job profile allows a lower percentage. Manual validation
+or threshold-accepted differences can complete the local job with warnings,
+but invalidate its handoff evidence and skip automatic pair synchronization.
+Missing evidence, changes to the pair, or unexpected sync states stop the handoff. Both jobs need management
 API access to both members using the configured device credentials.
 
 After failover, the worker confirms that the upgraded peer owns every floating

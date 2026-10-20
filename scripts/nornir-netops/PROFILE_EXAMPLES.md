@@ -32,6 +32,36 @@ complete effective profile, including explicit values for the four defaults
 that were omitted from those saved jobs: `bundle_conversion_validated`,
 `volume`, `license_check_date` and `skip_running_config_check`.
 
+BIG-IP validation thresholds stay in the profile YAML (there are no separate
+form controls):
+
+```yaml
+f5_ltm_min_unchanged_percent: 100
+f5_waf_min_unchanged_percent: 100
+```
+
+Both default to 100 when omitted. Set the LTM value to `90` to require at least
+90% unchanged **in each** of nodes, pools and virtual servers. WAF policies
+use the independent WAF value. Values must be integers from 0 through 100;
+0 permits all object differences but does not bypass collection errors or
+other safety checks. Non-default values apply only to BIG-IP profiles.
+
+The percentage is unchanged objects divided by all distinct object identities
+present before or after, multiplied by 100. Added, removed and changed objects
+each count against the threshold; multiple changed fields on one object count
+once. Nine unchanged objects and one changed object meet 90%; nine unchanged
+objects, one removed object and one replacement object are 9/11 (81.82%).
+Two explicitly empty inventories match at 100%. Missing or duplicate identities
+fail validation. Node names containing `_auto` remain excluded.
+
+LTM comparison covers collected availability, enabled state and pool active-member
+counts. WAF comparison now matches policy `fullPath`, `type`, `active` and
+`enforcementMode` rather than policy count alone; it does not compare entire
+policy contents. ASM readiness, API errors, software, licensing, HA and other
+checks remain independent. Accepted differences remain warnings in progress,
+the archive and the comparison report. Two consecutive passing comparisons are
+still required, and manual Force pass remains a separately recorded action.
+
 ```yaml
 name: F5 Lab - 17.5.1.9 to 17.5.1.10
 models:

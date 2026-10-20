@@ -19,7 +19,7 @@ def snapshot(role, version='17.1.1.3', build='0.0.5', sync='In Sync'):
     return {'facts': {'version': version, 'build': build, 'active_status': 'complete',
                      'active_volume': 'HD1.1', 'license_service_check_date': '2025-03-01',
                      'failover_state': role, 'sync_status': sync, 'peers': ['peer']},
-            'errors': {}, 'warnings': {}, 'tables': {'waf_policies': [{}, {}]}, 'routing': {},
+            'errors': {}, 'warnings': {}, 'tables': {'waf_policies': [{'fullPath': '/Common/p1'}, {'fullPath': '/Common/p2'}]}, 'routing': {},
             'waf': {'ready': True, 'provisioned': True, 'policy_count': 2}}
 
 
@@ -146,9 +146,13 @@ def test_manual_override_does_not_produce_handoff_receipt(lab, profile, options)
     with ExitStack() as stack:
         pair = prepare(lab, B, profile, options, stack)
         pair.begin()
-        with pytest.raises(ValueError, match='manual validation'):
-            pair.finish(lab[B], lab[B].snapshot, {'validation_overrides': {'8': {}}}, Mock())
-        assert pair.receipt['phase'] == 'first_started'
+        plan = {'validation_overrides': {'8': {}}}
+        assert pair.finish(lab[B], lab[B].snapshot, plan, Mock()) == lab[B].snapshot
+        assert pair.receipt['phase'] == 'handoff_withheld'
+        assert plan['ha']['automatic_sync_skipped']
+        assert not lab[B].calls
+    with ExitStack() as stack, pytest.raises(ValueError, match='no completed standby upgrade'):
+        prepare(lab, A, replace(profile, allow_active=True), options, stack)
 
 
 def test_failed_traffic_handoff_never_authorizes_second_reboot(lab, profile, options, monkeypatch):
@@ -175,10 +179,16 @@ def test_sync_refused_if_peer_build_changes(lab, profile, options):
         assert not lab[A].calls
 
 
-def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, options, monkeypatch):
+@pytest.mark.parametrize('acceptance', ['strict', 'threshold', 'manual'])
+def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, options, monkeypatch, acceptance):
     from test_upgrade_f5 import FakeBigIP, IMAGE_BYTES, ISO
     from netops.upgrade import workflow
 
+    from netops import cancellation
+    from test_f5_validation import control, override
+    channel = control()
+    if acceptance == 'threshold':
+        profile = replace(profile, f5_ltm_min_unchanged_percent=50)
     timeline, units = [], {}
     class Appliance(FakeBigIP):
         def __init__(self, name):
@@ -216,6 +226,8 @@ def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, optio
                 timeline.append((self.name, 'reboot'))
                 assert self.failover == 'standby'
                 self.revision = 'upgraded'
+                if acceptance != 'strict':
+                    self.virtual_availability = 'offline'
                 for unit in units.values(): unit.sync = 'Changes Pending'
             return super()._post(path, payload)
 
@@ -226,10 +238,22 @@ def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, optio
     options.apply = True
     for name, address in ((B, '192.0.2.2'), (A, '192.0.2.1')):
         host = SimpleNamespace(name=name.rsplit('/', 1)[1], hostname=address, platform='f5_tmsh', username='u', password='p', data={})
-        reporter = Mock()
-        reporter.emit.return_value = True
-        result = workflow.upgrade_device(SimpleNamespace(host=host), replace(profile, allow_active=name == A), options, reporter)
+        def emit(host, stage, message, payload, **kwargs):
+            if acceptance == 'manual' and payload.get('progress_summary', {}).get('error_count'):
+                channel.observe({'supports_validation_overrides': True, 'validation_overrides': {'8': override(8)}})
+            return True
+        reporter = Mock(emit=Mock(side_effect=emit))
+        with cancellation.bind(channel):
+            result = workflow.upgrade_device(SimpleNamespace(host=host), replace(profile, allow_active=name == A), options, reporter)
         assert not result.failed, [call.args[2] for call in reporter.emit.call_args_list][-3:]
+        if acceptance != 'strict':
+            assert result.result['status'] == 'completed_with_warnings'
+            assert any(f['check'] == 'ha_handoff' for f in result.result['findings'])
+            assert not any(f['severity'] == 'error' for f in result.result['findings'])
+            assert timeline == [(B, 'reboot')]
+            with ExitStack() as stack, pytest.raises(ValueError, match='no completed standby upgrade'):
+                prepare(units, A, replace(profile, allow_active=True), options, stack)
+            return
     final_payload = [c.args[3] for c in reporter.emit.call_args_list if len(c.args) > 3 and 'post' in c.args[3]][-1]
     assert final_payload['post']['facts']['sync_status'] == 'In Sync'
     assert final_payload['findings'] == []
@@ -266,3 +290,20 @@ def test_second_reboot_rechecks_upgraded_peer(lab, profile, options):
         with pytest.raises(ValueError, match='reboot cancelled'):
             pair.before_reboot(Mock())
         assert not lab[A].calls
+
+
+@pytest.mark.parametrize('second', [False, True])
+def test_threshold_acceptance_completes_local_validation_without_authorizing_pair(lab, profile, options, second):
+    profile = replace(profile, f5_waf_min_unchanged_percent=50)
+    if second:
+        first_pass(lab, profile, options)
+    name = A if second else B
+    with ExitStack() as stack:
+        pair = prepare(lab, name, replace(profile, allow_active=second), options, stack)
+        pair.begin()
+        lab[name].snapshot['tables']['waf_policies'].pop()
+        plan = {}
+        assert pair.finish(lab[name], lab[name].snapshot, plan, Mock()) == lab[name].snapshot
+        assert pair.receipt['phase'] == 'handoff_withheld'
+        assert plan['ha']['automatic_sync_skipped']
+        assert not lab[name].calls

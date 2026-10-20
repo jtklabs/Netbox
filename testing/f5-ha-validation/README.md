@@ -66,3 +66,9 @@ gates skipped because each upgraded member was standby at its final check.
 The remaining blocker is unattended recovery of the appliance's REST backend;
 the shutdown trigger has not been established. The successful post-recovery
 gates do not turn this into an unattended pass.
+
+Worker **0.2.14** integrates this guard with the later YAML validation thresholds
+and manual-pass refresh. Local acceptance with differences completes with
+warnings but withholds HA handoff evidence and automatic synchronization.
+Regression tests cover these paths; the live evidence above remains pinned to
+**0.2.7** and does not establish a live run of the integrated release.

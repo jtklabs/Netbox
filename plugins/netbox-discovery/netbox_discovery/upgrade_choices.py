@@ -13,7 +13,7 @@ class UpgradeOperationChoices(ChoiceSet):
 # configure.py features a queued remediation may run; the poller checks the same list.
 REMEDIATION_FEATURES = [('ntp', 'NTP'), ('syslog', 'Syslog'), ('banner', 'Banner'), ('acl', 'ACLs'),
                         ('users', 'Local users'), ('snmp', 'SNMP'), ('snmp_packetsize', 'SNMP packet size'),
-                        ('ssh_mac', 'SSH MAC integrity')]
+                        ('ssh_mac', 'SSH MAC integrity'), ('raw_commands', 'Raw configuration commands')]
 REMEDIATION_MODES = [('add', 'Add missing entries only'), ('replace', 'Replace: add missing and remove the rest')]
 
 

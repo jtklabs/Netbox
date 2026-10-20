@@ -512,7 +512,7 @@ def upgrade_device(task, profile, options, reporter):
                             if any(restored.get(row['name']) != row['enabled'] for row in drain['virtual_servers']):
                                 raise RuntimeError('Original virtual-server states could not be confirmed after restoration')
                         final = f5.collect(client, lambda path: emit('postcheck', path))
-                        final_findings = checks.compare(before, final) + target_findings(final, profile, plan)
+                        final_findings = checks.compare(before, final, **thresholds) + target_findings(final, profile, plan)
                         final_findings = f5_validation.findings_after_override(final_findings, plan)
                         emit('validating', 'Final collection after restoring original virtual-server states',
                              {'post': final, 'findings': final_findings,
@@ -537,18 +537,50 @@ def upgrade_device(task, profile, options, reporter):
                     # transition, including when checks just passed naturally.
                     validation_gate = None
                     emit('validating', 'Health validation gate finished')
-                    f5_validation.forced(plan, 8, emit)
+                    manually_passed = f5_validation.forced(plan, 8, emit)
+                    if manually_passed:
+                        # The operator may have waited through service startup.
+                        # Keep the accepted observation, but never use its stale
+                        # WAF count/role to choose the next gate.
+                        plan['validation_before_override'] = {
+                            'findings': findings, 'waf': after.get('waf', {}),
+                            'failover_state': after.get('facts', {}).get('failover_state'),
+                        }
+                        emit('validating', 'Refreshing health after manual acceptance',
+                             {'post_before_override': after, 'upgrade_plan': plan})
+                        if not drain:
+                            after = f5.collect(client, lambda path: emit('postcheck', path))
+                            findings = compare_health(before, after) + target_findings(after, profile, plan)
                     findings = f5_validation.findings_after_override(findings, plan)
                     if drain:
                         after, findings = finish_validation(after, findings)
                     if pair:
                         after = pair.finish(client, after, plan, emit)
-                        findings = checks.compare(before, after) + target_findings(after, profile, plan)
+                        findings = checks.compare(before, after, **thresholds) + target_findings(after, profile, plan)
+                        findings = f5_validation.findings_after_override(findings, plan)
+                        if plan.get('ha', {}).get('phase') == 'handoff_withheld':
+                            findings.append({'check': 'ha_handoff', 'severity': 'warning',
+                                             'message': 'HA handoff and automatic sync withheld: ' + plan['ha']['reason']})
                         emit('validating', 'Final HA health snapshot recorded',
                              {'post': after, 'findings': findings, 'upgrade_plan': plan,
                               'progress_summary': {'counts': after['metrics']['counts'],
                                                    'finding_count': len(findings),
                                                    'error_count': sum(f['severity'] == 'error' for f in findings)}})
+                    if manually_passed:
+                        emit('validating', 'Fresh health snapshot recorded after manual acceptance',
+                             {'post': after, 'findings': findings,
+                              'progress_summary': {
+                                  'counts': after['metrics']['counts'],
+                                  'finding_count': len(findings),
+                                  'error_count': sum(f['severity'] == 'error' for f in findings),
+                                  'pending': [checks.describe_finding(f) for f in findings
+                                              if f['severity'] == 'error'],
+                                  'object_comparisons': checks.threshold_summary(before, after, thresholds),
+                                  **({'waf': {'expected_policies': before['waf'].get('policy_count'),
+                                              'observed_policies': after.get('waf', {}).get('policy_count'),
+                                              'ready': after.get('waf', {}).get('ready')}}
+                                     if before.get('waf', {}).get('provisioned') else {}),
+                              }})
                     # This gate runs outside restoration's failure handler: a
                     # quiet log must not disable traffic that passed health checks.
                     validation_gate = 9
@@ -559,11 +591,15 @@ def upgrade_device(task, profile, options, reporter):
                         plan['waf_requests']['status'] = 'manually_passed'
                     return after, findings
                 validation_gate = 8
+                thresholds = {key: getattr(profile, key) for key in set(checks.F5_THRESHOLDS.values())}
+                def compare_health(before, after, **kwargs):
+                    if drain:
+                        return f5_drain.compare_while_drained(before, after, drain, **kwargs, **thresholds)
+                    return checks.compare(before, after, **kwargs, **thresholds)
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
                                 lambda after: target_findings(after, profile, plan),
-                                compare_snapshots=(lambda before, after, **kwargs:
-                                    f5_drain.compare_while_drained(before, after, drain, **kwargs)) if drain else None,
+                                compare_snapshots=compare_health,
                                 on_validated=finish_upgrade,
                                 validation_override=lambda **kwargs: f5_validation.forced(plan, 8, emit, **kwargs))
             finally:

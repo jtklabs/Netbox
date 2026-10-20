@@ -8,6 +8,7 @@ import re
 from ..core import Desired, Entry, Feature, MODE_REPLACE, PlatformSupport, canonical_platform
 from ..rollback import Reversal
 from ..standards import of as standards_of
+from ..ssh_mac_policy import validate_ssh_mac
 
 MAC = 'hmac-sha2-512'
 
@@ -40,9 +41,18 @@ def parse_eos(output):
 
 
 def parse_asa(output):
-    return [entry('integrity', line.split()[3:], line)
-            for raw in output.splitlines()
-            if (line := raw.strip()).startswith('ssh cipher integrity ')]
+    result = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line.startswith('ssh cipher integrity '):
+            continue
+        value = line[len('ssh cipher integrity '):]
+        if value.startswith('custom '):
+            algorithms = value[len('custom '):].strip('"').split(':')
+            result.append(entry('integrity', ['custom', *algorithms], line))
+        else:
+            result.append(entry('integrity', [value], line))
+    return result
 
 
 def add_arguments(parser):
@@ -52,26 +62,38 @@ def add_arguments(parser):
 
 def build_desired(args):
     settings = standards_of(args).section('ssh_mac')
-    if set(settings) - {'macs', 'ios_scope', 'asa_integrity'}:
-        raise ValueError('Unknown ssh_mac setting')
-    if settings.get('macs', [MAC]) != [MAC]:
-        raise ValueError('ssh_mac.macs must be [hmac-sha2-512]')
-    if settings.get('asa_integrity', 'high') != 'high':
-        raise ValueError('ssh_mac.asa_integrity must be high')
-    scope = args.ios_scope or settings.get('ios_scope', 'both')
-    if scope not in ('both', 'client', 'server'):
-        raise ValueError('ssh_mac.ios_scope must be both, client or server')
-    return Desired(keys=['server:' + MAC], variables={'ios_scope': scope})
+    validate_ssh_mac(settings)
+    override = args.ios_scope
+    if override is not None and override not in ('both', 'client', 'server'):
+        raise ValueError('ios_scope must be both, client or server')
+    # Preserve the legacy defaults for existing standards and standalone use.
+    policies = {}
+    for platform in FEATURE.platforms.keys() | FEATURE.platform_runs.keys():
+        local = settings.get('platforms', {}).get(platform, {})
+        policy = {'macs': list(local.get('macs', settings.get('macs', [MAC])))}
+        if platform == 'cisco_ios':
+            policy['ios_scope'] = override or local.get('ios_scope', settings.get('ios_scope', 'both'))
+        if platform == 'cisco_asa':
+            policy = ({'macs': list(local['macs'])} if 'macs' in local else
+                      {'asa_integrity': local.get('asa_integrity', settings.get('asa_integrity', 'high'))})
+        policies[platform] = policy
+    return Desired(keys=[], variables={'policies': policies})
+
+
+def policy_for(platform, variables):
+    return variables['policies'][platform]
 
 
 def wanted_for(platform, variables):
+    policy = policy_for(platform, variables)
     if platform == 'cisco_asa':
-        return ['integrity:high']
+        values = ['custom', *policy['macs']] if 'macs' in policy else [policy['asa_integrity']]
+        return [entry('integrity', values, '').key]
     scopes = ('server',)
     if platform == 'cisco_ios':
-        scope = variables['ios_scope']
+        scope = policy['ios_scope']
         scopes = ('client', 'server') if scope == 'both' else (scope,)
-    return [scope + ':' + MAC for scope in scopes]
+    return [entry(scope, policy['macs'], '').key for scope in scopes]
 
 
 def per_device(keys, variables, host):
@@ -80,7 +102,13 @@ def per_device(keys, variables, host):
 
 def plan(current, desired, mode, context):
     wanted = wanted_for(context['platform'], context['variables'])
-    # Equality of the complete list matters: SHA-512 alongside SHA-1 fails.
+    policy = policy_for(context['platform'], context['variables'])
+    # Used by both the worker renderer and offline selftest after planning.
+    context['variables']['macs'] = policy.get('macs', [])
+    context['variables']['asa_integrity'] = (
+        'custom ' + ':'.join(policy['macs']) if context['platform'] == 'cisco_asa' and 'macs' in policy
+        else policy.get('asa_integrity'))
+    # Compare the complete configured set; order alone does not cause drift.
     missing = [key for key in wanted if [e.key for e in current
                if e.data['scope'] == key.split(':')[0]] != [key]]
     if missing and mode != MODE_REPLACE:

@@ -430,12 +430,19 @@ def health(snapshot):
 
 def pool_delta(old_rows, new_rows):
     """Match full pool paths before comparing state; a changed row is not a removal."""
+    return object_delta(old_rows, new_rows, label="Pool")
+
+
+def object_delta(old_rows, new_rows, identity="name", label="Object"):
+    """Match stable object identities; count each changed object once."""
     def indexed(rows):
+        if not isinstance(rows, list):
+            raise ValueError(f"{label} inventory is unavailable")
         result = {}
         for row in rows:
-            name = row.get("name")
+            name = row.get(identity) if isinstance(row, dict) else None
             if not isinstance(name, str) or not name or name in result:
-                raise ValueError("Pool names are missing or duplicated; cannot reliably match baseline and post-check pools")
+                raise ValueError(f"{label} names are missing or duplicated; cannot reliably match baseline and post-check objects")
             result[name] = row
         return result
 
@@ -454,6 +461,41 @@ def pool_delta(old_rows, new_rows):
             "added": [new[name] for name in sorted(new.keys() - old.keys())]}
 
 
+F5_THRESHOLDS = {"nodes": "f5_ltm_min_unchanged_percent", "pools": "f5_ltm_min_unchanged_percent",
+                 "virtual_servers": "f5_ltm_min_unchanged_percent", "waf_policies": "f5_waf_min_unchanged_percent"}
+
+
+def object_comparison(key, old, new, required=100):
+    delta = object_delta(old, new, identity="fullPath" if key == "waf_policies" else "name",
+                         label=key)
+    total = delta["unchanged"] + len(delta["changed"]) + len(delta["removed"]) + len(delta["added"])
+    # Compare integer counts, never rounded display percentages.
+    passed = not total or 100 * delta["unchanged"] >= required * total
+    return {"before_count": len(old), "after_count": len(new), **delta,
+            "total_objects": total, "unchanged_percent": 100 * delta["unchanged"] / total if total else 100.0,
+            "required_percent": required, "threshold_passed": passed}
+
+
+def threshold_summary(before, after, profile, intentionally_disabled=()):
+    summary = {}
+    for key, setting in F5_THRESHOLDS.items():
+        old, new = before.get("tables", {}).get(key), after.get("tables", {}).get(key)
+        if old is None and new is None:
+            continue
+        try:
+            if key in before.get("errors", {}) or key in after.get("errors", {}):
+                raise ValueError("baseline or post-check collection failed")
+            if key == "virtual_servers" and isinstance(new, list) and intentionally_disabled:
+                new = [dict(row, enabled="enabled")
+                       if row.get("name") in intentionally_disabled and row.get("enabled") in ("disabled", "disabled-by-user")
+                       else row for row in new]
+            result = object_comparison(key, old, new, profile.get(setting, 100))
+            summary[key] = {k: v for k, v in result.items() if k not in ("changed", "removed", "added")}
+        except ValueError as exc:
+            summary[key] = {"threshold_passed": False, "message": str(exc)}
+    return summary
+
+
 def describe_pool_change(change):
     def value(item):
         return "unavailable" if item is None else str(item)
@@ -462,7 +504,8 @@ def describe_pool_change(change):
     return f"{change['name']} ({fields})"
 
 
-def compare(before, after, skip_running_config_check=False):
+def compare(before, after, skip_running_config_check=False, *,
+            f5_ltm_min_unchanged_percent=100, f5_waf_min_unchanged_percent=100):
     findings = []
     for key, error in after["errors"].items():
         findings.append({"check": key, "severity": "error", "message": error})
@@ -472,20 +515,19 @@ def compare(before, after, skip_running_config_check=False):
             if old is None or new is None:
                 findings.append({"check": key, "severity": "error", "message": "baseline or post-check unavailable"})
                 continue
-            if category == "tables" and key == "waf_policies":
-                if len(old) != len(new):
-                    findings.append({"check": key, "severity": "error", "before_count": len(old),
-                                     "after_count": len(new), "message": "WAF policy count changed"})
-                continue
-            if category == "tables" and key == "pools":
+            if category == "tables" and key in F5_THRESHOLDS:
                 try:
-                    delta = pool_delta(old, new)
+                    required = f5_waf_min_unchanged_percent if key == "waf_policies" else f5_ltm_min_unchanged_percent
+                    delta = object_comparison(key, old, new, required)
                 except ValueError as exc:
                     findings.append({"check": key, "severity": "error", "message": str(exc)})
                     continue
                 if delta["removed"] or delta["added"] or delta["changed"]:
-                    findings.append({"check": key, "severity": "error", "before_count": len(old),
-                                     "after_count": len(new), **delta})
+                    findings.append({"check": key, "severity": "warning" if delta["threshold_passed"] else "error",
+                                     "message": (f"{delta['unchanged']}/{delta['total_objects']} objects unchanged "
+                                                 f"({delta['unchanged_percent']:.2f}%; minimum {required}%); "
+                                                 + ("differences accepted by profile" if delta["threshold_passed"] else "below profile minimum")),
+                                     **delta})
                 continue
             a = Counter(canonical(row) for row in old)
             b = Counter(canonical(row) for row in new)
@@ -530,7 +572,7 @@ def compare(before, after, skip_running_config_check=False):
 
 # Row identities that are safe to name in a progress message. Endpoint MAC and
 # IP addresses and configuration text stay in the archive.
-IDENTITY_KEYS = ("port", "interface", "local_interface", "destination_port", "name", "neighbor_name", "neighbor",
+IDENTITY_KEYS = ("port", "interface", "local_interface", "destination_port", "name", "fullPath", "neighbor_name", "neighbor",
                  "system_id", "network", "group", "server", "vlan_id", "mlag", "instance")
 
 
@@ -547,8 +589,11 @@ def describe_finding(finding):
     check = finding["check"]
     if "before_count" in finding:
         text = f"{check}: {finding['before_count']}->{finding['after_count']} rows"
+        if "required_percent" in finding:
+            text += (f"; {finding['unchanged']}/{finding['total_objects']} unchanged "
+                     f"({finding['unchanged_percent']:.2f}%; minimum {finding['required_percent']}%)")
         details = []
-        if check == "pools" and finding.get("changed"):
+        if finding.get("changed"):
             changes = finding["changed"]
             details.append("changed " + ", ".join(describe_pool_change(row) for row in changes[:3])
                            + (", ..." if len(changes) > 3 else ""))

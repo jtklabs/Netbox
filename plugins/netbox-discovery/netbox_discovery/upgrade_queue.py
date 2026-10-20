@@ -100,12 +100,12 @@ def validate_profile(profile, operation=None):
         return validate_remediation(profile)
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
             'minimum_free_bytes', 'bundle_conversion_validated', 'image_source', 'skip_running_config_check',
-            'validation_timeout',
+            'validation_timeout', 'f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent',
             # BIG-IP profiles; the worker's validator applies the family rules.
             'volume', 'allow_active', 'ucs_backup', 'license_check_date', 'drain_connections',
             'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
     required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup',
-                       'validation_timeout',
+                       'validation_timeout', 'f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent',
                        'license_check_date', 'skip_running_config_check', 'drain_connections',
                        'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
     if not isinstance(profile, dict) or set(profile) - keys or required - set(profile):
@@ -124,6 +124,12 @@ def validate_profile(profile, operation=None):
     for key in ('name', 'target_version', 'image', 'md5'):
         if not isinstance(profile[key], str) or not profile[key].strip():
             raise QueueError(f'Profile {key} must be a nonempty string.')
+    for key in ('f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent'):
+        value = profile.get(key, 100)
+        if type(value) is not int or not 0 <= value <= 100:
+            raise QueueError(f'Profile {key} must be an integer between 0 and 100.')
+        if not profile['image'].lower().endswith('.iso') and value != 100:
+            raise QueueError(f'Profile {key} applies to BIG-IP profiles only.')
     if type(profile.get('drain_connections', False)) is not bool:
         raise QueueError('Profile drain_connections must be a boolean.')
     drain_defaults = {'drain_min_reduction_percent': 5, 'drain_window_seconds': 60, 'drain_timeout_seconds': 900}

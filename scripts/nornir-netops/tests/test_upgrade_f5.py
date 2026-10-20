@@ -417,7 +417,8 @@ def test_post_check_difference_is_reported_with_its_reason(profile, options, uni
     unit._post = reboot_then_degrade
     result, reporter, stages = run_unit(profile, options)
     assert result.failed and stages[-1] == "validation_failed"
-    assert "virtual_servers: 2->2 rows (removed /Common/vs-web; added /Common/vs-web)" in reporter.emit.call_args.args[2]
+    assert "virtual_servers: 2->2 rows; 1/2 unchanged (50.00%; minimum 100%)" in reporter.emit.call_args.args[2]
+    assert "changed /Common/vs-web (availability: available → offline)" in reporter.emit.call_args.args[2]
 
 
 def test_baseline_is_unordered_and_report_renders(profile, options, unit):

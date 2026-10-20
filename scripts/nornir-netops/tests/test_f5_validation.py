@@ -155,3 +155,95 @@ def test_comparison_report_identifies_manual_pass():
                         {'validation_overrides': {'9': override(9)}}, 'completed_with_warnings')
     assert 'Step 9: operator at 2026-10-20T15:00:00Z' in text
     assert 'Verified device and accepted difference' in text
+
+
+@pytest.mark.parametrize('drain', [False, True])
+@pytest.mark.parametrize('current_role', ['standby', 'active'])
+def test_manual_pass_refreshes_recovered_waf_and_role(profile, options, unit, monkeypatch, drain, current_role):
+    """A timeout-era offline snapshot must not decide the request-log gate."""
+    options.apply = True
+    options.validation_timeout = 0
+    channel = control()
+    collect = f5.collect
+    refreshed = []
+    def observe(client, progress):
+        snapshot = collect(client, progress)
+        if unit.rebooted_to:
+            if '8' not in channel.validation_overrides:
+                snapshot['facts']['failover_state'] = 'offline'
+                snapshot['waf'].update(ready=False, policy_count=None)
+                snapshot['errors']['waf_ready'] = 'ASM still starting at timeout'
+            else:
+                snapshot['facts']['failover_state'] = current_role
+                refreshed.append(snapshot)
+        return snapshot
+    monkeypatch.setattr(f5, 'collect', observe)
+    monkeypatch.setattr(cancellation, 'sleep', lambda *a, **k: cancellation.checkpoint())
+    monkeypatch.setattr(workflow, 'comparison_report', lambda *a: ({}, None))
+    events = []
+    def emit(host, stage, message, payload, **kwargs):
+        events.append((stage, message, payload))
+        if stage == 'validating' and payload['progress_summary'].get('awaiting_manual_validation'):
+            channel.observe({'supports_validation_overrides': True, 'validation_overrides': {'8': override(8)}})
+        return True
+    host = SimpleNamespace(name='unit', hostname='192.0.2.10', platform='f5_tmsh',
+                           username='admin', password='secret', data={})
+    reporter = Mock(emit=Mock(side_effect=emit))
+    with cancellation.bind(channel):
+        result = workflow.upgrade_device(SimpleNamespace(host=host),
+                                         replace(profile, drain_connections=drain, validation_timeout=1), options, reporter)
+    assert not result.failed, result.result
+    assert result.result['status'] == 'completed_with_warnings'
+    assert len(refreshed) == 1  # Draining already refreshes after restoration.
+    final_plan = events[-1][2]['upgrade_plan']
+    assert final_plan['validation_overrides'] == {'8': override(8)}
+    original = final_plan['validation_before_override']
+    assert original['waf']['ready'] is False
+    assert original['failover_state'] == 'offline'
+    assert any(f['message'] == 'ASM still starting at timeout' for f in original['findings'])
+    old_snapshot = next(p['post_before_override'] for _, _, p in events if 'post_before_override' in p)
+    assert old_snapshot['waf']['policy_count'] is None
+    fresh_payload = next(p for _, m, p in events if m.endswith('snapshot recorded after manual acceptance'))
+    assert fresh_payload['post']['waf']['ready'] is True
+    assert fresh_payload['progress_summary']['waf']['observed_policies'] == 1
+    assert fresh_payload['progress_summary']['error_count'] == 0
+    assert fresh_payload['progress_summary']['pending'] == []
+    assert final_plan['waf_requests']['status'] == ('skipped' if current_role == 'standby' else 'passed')
+    assert unit.log_reads == (0 if current_role == 'standby' else 1)
+    text = report.build(host, refreshed[0], refreshed[0], result.result['findings'], final_plan,
+                        'completed_with_warnings')
+    assert 'Observation accepted at step 8' in text
+    assert 'ASM still starting at timeout' in text
+    assert 'operator at 2026-10-20T15:00:00Z' in text
+
+
+@pytest.mark.parametrize('drain', [False, True])
+def test_manual_pass_refresh_failure_does_not_open_log_gate(profile, options, unit, monkeypatch, drain):
+    options.apply = True
+    channel = control()
+    collect = f5.collect
+    def observe(client, progress):
+        if '8' in channel.validation_overrides:
+            raise RuntimeError('Fresh health collection failed')
+        return collect(client, progress)
+    monkeypatch.setattr(f5, 'collect', observe)
+    monkeypatch.setattr(cancellation, 'sleep', lambda *a, **k: cancellation.checkpoint())
+    events = []
+    def emit(host, stage, message, payload, **kwargs):
+        events.append((stage, message, payload))
+        # Exercise a manual request arriving as an otherwise clean gate closes.
+        if message.endswith('Health validation gate finished'):
+            channel.observe({'supports_validation_overrides': True, 'validation_overrides': {'8': override(8)}})
+        return True
+    host = SimpleNamespace(name='unit', hostname='192.0.2.10', platform='f5_tmsh',
+                           username='admin', password='secret', data={})
+    with cancellation.bind(channel):
+        result = workflow.upgrade_device(SimpleNamespace(host=host),
+                                         replace(profile, drain_connections=drain), options,
+                                         Mock(emit=Mock(side_effect=emit)))
+    assert result.failed
+    assert events[-1][0] == 'recovery_required'
+    assert not any(stage == 'waf_requests' for stage, _, _ in events)
+    assert unit.log_reads == 0
+    if drain:
+        assert not any(unit.virtuals.values())

@@ -59,3 +59,32 @@ def test_passphrase_is_shell_quoted_without_expansion():
     words = shlex.split(command)
     assert words[:2] == ['tmsh', '-c'] and len(words) == 3
     assert '$(id)' in words[2] and '`whoami`' in words[2]
+
+
+@pytest.mark.parametrize('name', ['../backup.ucs', 'backup.ucs;id', 'backup', '/var/local/ucs/backup.ucs', 'backup\n.ucs'])
+def test_invalid_archive_name_never_launches(name):
+    client = SimpleNamespace(request=Mock())
+    with pytest.raises(ValueError, match='invalid UCS archive name'):
+        f5.save_ucs(client, name)
+    client.request.assert_not_called()
+
+
+def test_control_character_passphrase_never_launches():
+    client = SimpleNamespace(request=Mock())
+    with pytest.raises(ValueError, match='control characters'):
+        f5.save_ucs(client, 'backup.ucs', 'secret\nvalue')
+    client.request.assert_not_called()
+
+
+def test_unconfirmed_launch_never_polls_or_relaunches():
+    client = SimpleNamespace(request=Mock(return_value={'commandResult': 'unknown'}))
+    with pytest.raises(RuntimeError, match='launch not confirmed'):
+        f5.save_ucs(client, 'backup.ucs')
+    assert client.request.call_count == 1
+
+
+def test_poll_transport_failure_never_relaunches():
+    client = SimpleNamespace(request=Mock(side_effect=[{'commandResult': 'NETOPS_UCS_STARTED'}, requests.Timeout()]))
+    with pytest.raises(requests.Timeout):
+        f5.save_ucs(client, 'backup.ucs')
+    assert client.request.call_count == 2

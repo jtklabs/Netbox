@@ -271,11 +271,60 @@ local_accounts:
 #    syslog: service-source
 
 # SSH MAC integrity -> configure.py ssh-mac --replace
-# Exact SHA-512 MAC list on IOS/IOS-XE, EOS and Junos. ASA uses its high
-# integrity preset, whose algorithms depend on the release (not SHA-512).
-# Add mode reports drift without changing SSH. --replace is still a dry run
-# unless --apply is given. Encryption ciphers and key exchange are separate.
+# Edit these lists to define the complete allowed set for each platform.
+# This example excludes SHA-1 MACs while retaining SHA-256 and SHA-512 where
+# supported. Check algorithm availability on your software releases.
+# ASA macs renders an explicit custom integrity list, not the high preset.
+# Add mode reports only; replace mode writes only with --apply.
+# Encryption ciphers and key exchange are separate settings.
 ssh_mac:
-  macs: [hmac-sha2-512]
-  ios_scope: both       # both | client | server; IOS/IOS-XE only
-  asa_integrity: high
+  ios_scope: both
+  platforms:
+    cisco_ios:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    arista_eos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+    cisco_asa:
+      macs: [hmac-sha2-256]
+    juniper_junos:
+      macs: [hmac-sha2-256, hmac-sha2-512]
+
+# Literal configuration commands, evaluated independently of the typed features.
+# Opt in explicitly. Each regional bundle replaces the complete default bundle.
+raw_commands:
+  enabled: false
+  platforms:
+    cisco_ios:
+      # Optional audit/readback command; omit to read the full running config.
+      show: show running-config | include ^ip ssh server algorithm mac
+      commands:
+        - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
+      expect:
+        - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
+      # Optional literal substring checks, combined with the exact-line checks.
+      contains: [hmac-sha2-512]
+      reject: [hmac-sha1]
+      regions:
+        us-east:
+          commands:
+            - ip ssh server algorithm mac hmac-sha2-512
+          expect:
+            - ip ssh server algorithm mac hmac-sha2-512
+    arista_eos:
+      commands:
+        - management ssh
+        - mac hmac-sha2-256 hmac-sha2-512
+        - exit
+      expect:
+        - mac hmac-sha2-256 hmac-sha2-512
+    cisco_asa:
+      commands:
+        - ssh cipher integrity custom hmac-sha2-256
+      expect:
+        - ssh cipher integrity custom hmac-sha2-256
+    juniper_junos:
+      commands:
+        - delete system services ssh macs
+        - set system services ssh macs hmac-sha2-512
+      expect:
+        - set system services ssh macs hmac-sha2-512

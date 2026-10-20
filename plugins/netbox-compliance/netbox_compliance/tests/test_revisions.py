@@ -19,6 +19,44 @@ from .factories import feature_standards
 
 
 class RevisionTest(GridTest):
+    def test_raw_commands_snapshot_policy_and_revision(self):
+        text = """raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      commands: [ip ssh server algorithm mac hmac-sha2-512]
+      show: show ip ssh
+      contains: [hmac-sha2-512]
+      reject: [hmac-sha1]
+      regions:
+        us-east:
+          commands: [ip ssh server algorithm mac hmac-sha2-256]
+          show: show running-config | include ^ip ssh
+          expect: [ip ssh server algorithm mac hmac-sha2-256]
+"""
+        standard = ConfigStandard.objects.create(name='Raw commands', check_type='netops',
+            definition_yaml=text, auto_remediable=True, allow_enforce=False)
+        device = self.devices['sw1']
+        snapshot = snapshot_for_device(self.user, device, ['raw_commands'], 'replace', audit=True)
+        self.assertEqual(snapshot['document'], parse_definition(text))
+        with self.assertRaises(ValidationError):
+            snapshot_for_device(self.user, device, ['raw_commands'], 'replace')
+        standard.allow_enforce = True
+        standard.save()
+        self.assertEqual(snapshot_for_device(self.user, device, ['raw_commands'], 'replace')
+                         ['revisions'][0]['revision'], standard.revision)
+        standard.definition_yaml = text.replace('enabled: true', 'enabled: false')
+        standard.save()
+        self.assertTrue(snapshot['document']['raw_commands']['enabled'])
+        for bad in (text.replace('enabled: true', 'enabled: "true"'),
+                    text.replace('commands: [ip ssh server algorithm mac hmac-sha2-512]', 'commands: []'),
+                    text.replace('expect:', 'unknown:'),
+                    text.replace('show ip ssh', 'show ip ssh | redirect flash:output'),
+                    text.replace('contains: [hmac-sha2-512]', 'contains: hmac-sha2-512')):
+            with self.assertRaises(ValidationError):
+                parse_definition(bad)
+
+
     def test_ssh_mac_snapshot_pins_policy_and_requires_enforce_for_writes(self):
         standard = ConfigStandard.objects.create(
             name='SSH MAC policy', check_type='netops',

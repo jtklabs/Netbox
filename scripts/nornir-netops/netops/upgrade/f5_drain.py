@@ -142,7 +142,7 @@ def disable_again(client, record, emit):
         raise RuntimeError('Could not re-disable virtual servers; manual recovery required for: ' + ', '.join(failures))
 
 
-def compare_while_drained(before, after, record, skip_running_config_check=False):
+def compare_while_drained(before, after, record, skip_running_config_check=False, **thresholds):
     """Account only for the deliberate admin-state change; retain raw evidence."""
     from . import checks
     comparable = deepcopy(after)
@@ -150,7 +150,7 @@ def compare_while_drained(before, after, record, skip_running_config_check=False
     for row in comparable.get('tables', {}).get('virtual_servers', []):
         if row.get('name') in pending and row.get('enabled') in {'disabled', 'disabled-by-user'}:
             row['enabled'] = 'enabled'
-    findings = checks.compare(before, comparable, skip_running_config_check=skip_running_config_check)
+    findings = checks.compare(before, comparable, skip_running_config_check=skip_running_config_check, **thresholds)
     observed = {r.get('name'): r.get('enabled') for r in after.get('tables', {}).get('virtual_servers', [])}
     if any(observed.get(name) not in {'disabled', 'disabled-by-user'} for name in pending):
         findings.append({'check': 'traffic_hold', 'severity': 'error', 'message': 'A drained virtual server is not disabled'})

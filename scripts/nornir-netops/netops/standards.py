@@ -37,7 +37,8 @@ EXAMPLE_FILENAME = "standards.yaml.example"
 #: Sections this tool understands. A typo would otherwise read as "that
 #: standard is not defined", which looks compliant while enforcing nothing.
 KNOWN_SECTIONS = {
-    "ssh_mac": {"macs", "ios_scope", "asa_integrity"},
+    "raw_commands": {"enabled", "platforms"},
+    "ssh_mac": {"macs", "ios_scope", "asa_integrity", "platforms"},
     "ntp": {"servers", "regions", "vrf", "source", "prefer", "iburst", "authentication", "aruba", "clearpass"},
     "syslog": {"destinations", "severity", "source", "vrf", "facility", "origin_id"},
     "snmp": {

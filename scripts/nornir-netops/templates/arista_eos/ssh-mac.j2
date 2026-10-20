@@ -1,5 +1,5 @@
 {% if add %}
 management ssh
-mac hmac-sha2-512
+mac {{ macs | join(' ') }}
 exit
 {% endif %}

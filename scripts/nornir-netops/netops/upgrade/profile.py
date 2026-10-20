@@ -100,6 +100,9 @@ class Profile:
     skip_running_config_check: bool = False
     # Seconds for post-upgrade convergence; None retains the worker CLI default.
     validation_timeout: Optional[int] = None
+    # Minimum unchanged objects in each BIG-IP inventory category.
+    f5_ltm_min_unchanged_percent: int = 100
+    f5_waf_min_unchanged_percent: int = 100
 
     @property
     def family(self):
@@ -141,6 +144,12 @@ class Profile:
             raise ValueError(f"incomplete upgrade profile: {exc}") from None
         if not isinstance(result.name, str) or not result.name.strip():
             raise ValueError("profile name is required")
+        for key in ("f5_ltm_min_unchanged_percent", "f5_waf_min_unchanged_percent"):
+            value = getattr(result, key)
+            if type(value) is not int or not 0 <= value <= 100:
+                raise ValueError(f"{key} must be an integer between 0 and 100")
+            if result.family != "f5" and value != 100:
+                raise ValueError(f"{key} applies to BIG-IP profiles only")
         if result.validation_timeout is not None and (
                 type(result.validation_timeout) is not int or result.validation_timeout <= 0):
             raise ValueError("validation_timeout must be a positive integer number of seconds or null")

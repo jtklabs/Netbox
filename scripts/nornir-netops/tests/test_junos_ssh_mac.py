@@ -4,6 +4,7 @@ import pytest
 from nornir.core.inventory import Host
 
 from netops import junos_ssh_mac as junos
+from test_ssh_mac import desired
 
 
 def config(macs, attributes='', enabled=True):
@@ -37,7 +38,7 @@ class Device:
                 if self.failure == 'commit':
                     raise EOFError()
                 if self.failure != 'verify':
-                    self.macs = ['hmac-sha2-512']
+                    self.macs = list(self.candidate)
             # Dual-RE output can omit the optional rollback warning.
             return 're0:\nconfiguration check succeeds\ncommit complete\nre1:\ncommit complete'
         raise AssertionError(command)
@@ -49,7 +50,9 @@ class Device:
     def send_config_set(self, commands, **kwargs):
         assert kwargs == {'exit_config_mode': False}
         self.calls.extend(commands)
-        assert commands == ['delete system services ssh macs', 'set system services ssh macs hmac-sha2-512']
+        assert commands[0] == 'delete system services ssh macs'
+        assert all(c.startswith('set system services ssh macs ') for c in commands[1:])
+        self.candidate = [c.split()[-1] for c in commands[1:]]
         return 'error: rejected' if self.failure == 'write' else ''
 
     def find_prompt(self):
@@ -59,10 +62,10 @@ class Device:
         self.calls.append('exit')
 
 
-def run(box, monkeypatch, *, mode='replace', dry_run=False, save=True, verify=True):
+def run(box, monkeypatch, *, mode='replace', dry_run=False, save=True, verify=True, settings=None):
     monkeypatch.setattr(Host, 'get_connection', lambda *args: box)
     task = SimpleNamespace(host=Host('srx', platform='juniper_junos'), nornir=SimpleNamespace(config=None))
-    return junos.run(task, [], {}, mode, dry_run, save, verify)
+    return junos.run(task, [], desired(settings).variables, mode, dry_run, save, verify)
 
 
 def test_dry_run_and_add_do_not_enter_configuration(monkeypatch):
@@ -123,3 +126,18 @@ def test_required_transaction_guards(monkeypatch, options):
 def test_invalid_read_is_not_treated_as_empty(output):
     with pytest.raises(ValueError):
         junos.parse(output)
+
+
+def test_configurable_list_is_committed_verified_and_then_idempotent(monkeypatch):
+    box = Device()
+    settings = {'macs': ['hmac-sha2-512'], 'platforms': {'juniper_junos': {
+        'macs': ['hmac-sha2-512-etm@openssh.com', 'hmac-sha2-256']}}}
+    result = run(box, monkeypatch, settings=settings)
+    assert not result.failed and result.result['verified']
+    assert result.result['desired'] == ['hmac-sha2-512-etm@openssh.com', 'hmac-sha2-256']
+    assert result.result['commands'] == [
+        'delete system services ssh macs',
+        'set system services ssh macs hmac-sha2-512-etm@openssh.com',
+        'set system services ssh macs hmac-sha2-256',
+    ]
+    assert run(box, monkeypatch, settings=settings).result['compliant']

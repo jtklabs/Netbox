@@ -197,7 +197,24 @@ class Pair:
 
     def finish(self, client, after, plan, emit):
         self.client = client
-        require(not plan.get('validation_overrides'), 'manual validation cannot authorize the next HA member')
+        baseline = self.receipt['active_before' if self.second else 'standby_before']
+        strict_errors = [f for f in checks.compare(baseline, after) if f['severity'] == 'error']
+        thresholds = {key: getattr(self.profile, key) for key in set(checks.F5_THRESHOLDS.values())}
+        tolerated = (strict_errors and not any(f['severity'] == 'error'
+                     for f in checks.compare(baseline, after, **thresholds)))
+        if plan.get('validation_overrides') or tolerated:
+            # Acceptance of this device does not authorize changes to its peer.
+            # Invalidate the receipt, retain the local job's normal completion
+            # flow, and leave synchronization to the operator.
+            reason = ('manual validation acceptance' if plan.get('validation_overrides')
+                      else 'object differences accepted by profile thresholds')
+            self.receipt.update(phase='handoff_withheld', reason=reason)
+            write_receipt(self.path, self.receipt)
+            plan['ha'] = {'phase': 'handoff_withheld', 'peer': self.peer,
+                          'reason': reason, 'automatic_sync_skipped': True}
+            emit('validating', 'Local validation accepted; HA handoff and automatic sync withheld: ' + reason,
+                 {'upgrade_plan': plan})
+            return after
         require(exact_target(after, self.profile) and after['facts']['failover_state'] == 'standby', 'upgraded member is not healthy standby on exact target')
         healthy(self.receipt['active_before' if self.second else 'standby_before'], after)
         peer = f5.collect(self.peer_client, lambda _: None)
