@@ -82,7 +82,7 @@ class UpgradePlanForm(forms.Form):
     raw_standard = raw_standard_field()
     remediation_mode = forms.ChoiceField(
         choices=REMEDIATION_MODES, initial='add', required=False, label='Comparison mode',
-        help_text='Replace also checks for extra entries. Only remediation jobs apply changes.')
+        help_text='Replace also checks for extra entries. Remediation changes only standards that permit this mode; others are audited.')
     description = forms.CharField(max_length=200, required=False)
     allow_clearpass_cluster_changes = forms.BooleanField(
         label='Allow ClearPass cluster-wide changes', required=False)

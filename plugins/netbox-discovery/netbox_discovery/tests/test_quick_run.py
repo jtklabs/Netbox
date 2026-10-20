@@ -102,15 +102,18 @@ class QuickRunTest(TestCase):
         self.run_now()
         self.assertEqual(UpgradeJob.objects.get().profile['mode'], 'add')
 
-    def test_enforce_disabled_defaults_to_add_but_explicit_replace_is_rejected(self):
+    def test_enforce_disabled_defaults_to_add_but_explicit_replace_is_audited(self):
         self.standard.allow_enforce = False
         self.standard.save()
         self.profile.plan['mode'] = 'replace'
         self.profile.save()
         self.run_now(action='replace')
-        self.assertFalse(UpgradeJob.objects.exists())
+        job = UpgradeJob.objects.get()
+        self.assertEqual(job.operation, 'audit_config')
+        self.assertEqual(job.standards_snapshot['read_only_features'], ['ntp'])
+        UpgradeJob.objects.update(status='completed')
         self.run_now()
-        self.assertEqual(UpgradeJob.objects.get().profile['mode'], 'add')
+        self.assertEqual(UpgradeJob.objects.latest('pk').profile['mode'], 'add')
 
     def test_duplicate_click_does_not_duplicate_pending_work(self):
         self.run_now()

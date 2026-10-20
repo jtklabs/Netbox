@@ -585,3 +585,50 @@ def test_raw_read_only_failures_never_enter_apply_phase(monkeypatch, mixed):
     assert emit.events[-1][2]['compliance_results']['raw_commands:12'] == 'non-compliant'
     assert ('raw_commands:12', True) not in calls
     assert ('ready' in emit.stages) is mixed
+
+
+@pytest.mark.parametrize('kind', ['typed', 'raw_single', 'raw_multiple'])
+@pytest.mark.parametrize('all_read_only', [False, True])
+def test_pinned_read_only_permissions_skip_apply_and_acknowledge_gate(monkeypatch, kind, all_read_only):
+    if kind == 'raw_multiple':
+        assignment = multi_raw_job('remediate')
+        first, second = 'raw_commands:12', 'raw_commands:13'
+    else:
+        first, second = ('ntp', 'syslog') if kind == 'typed' else ('raw_commands', 'syslog')
+        assignment = job([first, second], 'replace')
+    read_only = sorted([first, second] if all_read_only else [first])
+    assignment['standards_snapshot']['read_only_features'] = read_only
+    calls = []
+
+    def invoke(feature, device_id, mode, apply, args):
+        calls.append((feature, apply))
+        assert mode == 'replace'
+        # A command bundle can exist even when policy prohibits execution.
+        args.compliance_details[feature] = {'commands': ['would configure'], 'read_only': False}
+        if feature in read_only:
+            assert not apply
+            return 2, ONE
+        return (0 if apply or (feature, True) in calls else 2), ONE
+
+    monkeypatch.setattr(remediation, 'invoke', invoke)
+    emit = Recorder()
+    failed, changed, results = remediation.run_job(None, assignment, None, emit)
+    assert not failed and changed is (not all_read_only)
+    assert results[first] == 'attention'
+    assert emit.events[-1][2]['compliance_results'][first] == 'non-compliant'
+    assert ('ready' in emit.stages) is (not all_read_only)
+    detail = emit.events[-1][2]['progress_summary']['compliance_details'][first]
+    assert detail['read_only'] is True
+    assert any('Audit only' in note for note in detail['notes'])
+    assert all(not apply for feature, apply in calls if feature in read_only)
+    for _, _, payload in emit.events:
+        assert payload['progress_summary']['read_only_features'] == read_only
+
+
+@pytest.mark.parametrize('value', [None, 'ntp', [False], ['ntp', 'ntp'], ['unknown'], ['raw_commands:12']])
+def test_invalid_pinned_read_only_selection_fails_before_device_processing(monkeypatch, value):
+    assignment = job()
+    assignment['standards_snapshot']['read_only_features'] = value
+    monkeypatch.setattr(remediation, 'invoke', lambda *a, **kw: pytest.fail('must not connect'))
+    with pytest.raises(ValueError, match='read-only standards'):
+        remediation.run_job(None, assignment, None, Recorder())

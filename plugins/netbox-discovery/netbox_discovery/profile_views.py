@@ -88,7 +88,8 @@ class JobProfileForm(NetBoxModelForm):
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, required=False,
                                          widget=RemediationWidget, label='Remediate')
     raw_standard = raw_standard_field()
-    remediation_mode = forms.ChoiceField(choices=REMEDIATION_MODES, required=False, initial='add')
+    remediation_mode = forms.ChoiceField(choices=REMEDIATION_MODES, required=False, initial='add',
+        help_text='Each standard must permit this mode to be changed. Other standards run as read-only checks.')
     allow_clearpass_cluster_changes = forms.BooleanField(
         label='Allow ClearPass cluster-wide changes', required=False)
 

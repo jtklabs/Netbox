@@ -54,7 +54,8 @@ class AuditScheduleForm(NetBoxModelForm):
     features = forms.MultipleChoiceField(choices=REMEDIATION_FEATURES, widget=RemediationWidget,
                                          required=False, label='Standards')
     raw_standard = raw_standard_field()
-    comparison = forms.ChoiceField(choices=(('replace', 'Exact match'), ('add', 'Required entries present')), required=False)
+    comparison = forms.ChoiceField(choices=(('replace', 'Exact match'), ('add', 'Required entries present')), required=False,
+        help_text='When remediation is enabled, standards that do not permit this mode remain read-only.')
     time_zone = forms.ChoiceField(choices=[(zone, zone) for zone in sorted(available_timezones())], required=False)
     local_time = forms.TimeField(widget=forms.TimeInput(attrs={'type': 'time'}), label='Start time', required=False)
     allow_clearpass_cluster_changes = forms.BooleanField(required=False, label='Allow ClearPass cluster-wide changes')

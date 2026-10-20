@@ -83,15 +83,15 @@ class RawStandardSelectionTest(TestCase):
             self.schedule()
         self.assertFalse(UpgradeJob.objects.exists())
 
-    def test_selected_standard_still_requires_visibility_and_enforcement(self):
+    def test_selected_standard_requires_visibility_and_pins_read_only_when_enforcement_is_disabled(self):
         hidden = get_user_model().objects.create_user('no-raw-access')
         with self.assertRaises(ValidationError):
             snapshot_for_device(hidden, self.device, ['raw_commands'], 'replace', audit=True,
                                 raw_standard_id=self.first.pk)
         self.first.allow_enforce = False
         self.first.save()
-        with self.assertRaises(queue.QueueError):
-            self.schedule(operation='remediate')
+        self.assertEqual(self.schedule(operation='remediate').standards_snapshot['read_only_features'],
+                         ['raw_commands'])
         self.assertEqual(self.schedule().operation, 'audit_config')
         form = JobProfileForm(user=hidden)
         self.assertEqual(list(form.fields['raw_standard'].choices), [])
@@ -178,13 +178,13 @@ class RawStandardSelectionTest(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.standards_snapshot, snapshot)
 
-    def test_every_selected_raw_standard_must_allow_apply_and_match_scope(self):
+    def test_selected_raw_standards_keep_individual_apply_permissions_and_must_match_scope(self):
         plan = {'features': ['raw_commands'], 'mode': 'replace',
                 'raw_standard_ids': [self.first.pk, self.second.pk]}
         self.second.allow_enforce = False
         self.second.save()
-        with self.assertRaises(queue.QueueError):
-            self.schedule(plan, operation='remediate')
+        self.assertEqual(self.schedule(plan, operation='remediate').standards_snapshot['read_only_features'],
+                         [f'raw_commands:{self.second.pk}'])
         self.assertEqual(self.schedule(plan).operation, 'audit_config')
         self.second.sites.add(Site.objects.create(name='Out of scope', slug='out-of-scope'))
         with self.assertRaises(queue.QueueError):

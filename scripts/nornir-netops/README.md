@@ -2782,7 +2782,7 @@ conflict handling and the `--no-ntp-discovery` opt-out.
 On a device page, **Run standards now** queues a single standard (NTP is listed
 first) or a complete saved profile without opening the scheduling form. **Use
 standard / profile settings** uses the assigned profile's add/remove mode and
-audits standards that do not allow remediation. A standard without an assigned
+audits standards that do not permit the selected mode. Mixed profiles still remediate the standards that do permit it. A standard without an assigned
 profile defaults to adding missing entries; permission to remove entries alone
 does not select replace mode. The action dropdown also offers **Audit only**,
 **Add missing**, and **Add and remove**, subject to permissions and the standard's
@@ -2845,3 +2845,9 @@ Infoblox NIOS raw bundles use `infoblox_nios`, require an explicit `show`, and r
 NetBox job profiles can choose up to eight named **Raw command standards**. Each selected standard is pinned and executed separately with its own checks and compliance result. Blank selection requires exactly one applicable raw standard. Multiple selections require worker 0.2.16 or newer and the matching Discovery and Compliance plugins.
 
 With worker 0.2.19 or newer, omit `commands` (or use `commands: []`) for read-only pass/fail checks. These never configure or save, even with `--apply`. `reject` accepts the same literal and regex items as `contains`. See the NTP synchronization examples in the raw command guide.
+
+Worker 0.2.20 and the matching plugins support mixed audit/remediation profiles.
+A standard that does not permit the profile's mode remains a read-only check;
+other permitted standards can still be applied. The worker acknowledges the
+pinned read-only selection before the start gate authorizes writes. See
+[Mixed profiles](../../docs/RAW-COMMAND-STANDARDS.md#mix-audits-and-remediation-in-one-profile).

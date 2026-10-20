@@ -227,6 +227,14 @@ def run_job(task, job, args, emit):
         raise ValueError('Selected raw standard does not match the pinned job snapshot; re-create the job')
     options = copy.copy(args) if args is not None else SimpleNamespace()
     options.compliance_details = {}
+    check_names = [check for feature in job['profile']['features'] for check in
+                   ([f'raw_commands:{pk}' for pk in sorted(selected)]
+                    if feature == 'raw_commands' and raw is not None else [feature])]
+    read_only = snapshot.get('read_only_features', [])
+    if (not isinstance(read_only, list) or any(not isinstance(item, str) for item in read_only)
+            or len(set(read_only)) != len(read_only) or not set(read_only).issubset(check_names)):
+        raise ValueError('Invalid read-only standards in the pinned job snapshot; re-create the job')
+    options.read_only_features = list(read_only)
     # Both the dry run and apply read the same private snapshot, never a local fallback.
     with tempfile.TemporaryDirectory(prefix='netops-standards-') as directory:
         path = Path(directory) / 'standards.json'
@@ -240,6 +248,7 @@ def run_job(task, job, args, emit):
                                                'raw_commands': raw[str(standard_id)]}), encoding='utf-8')
                 options.raw_standard_paths[f'raw_commands:{standard_id}'] = raw_path
         options.allow_clearpass_cluster_changes = (job.get('operation') == 'remediate' and
+                                                    'ntp' not in options.read_only_features and
                                                     job['profile'].get('allow_clearpass_cluster_changes') is True)
         options.clearpass_cluster_snapshot = None
         cluster = snapshot.get('clearpass_cluster')
@@ -264,6 +273,8 @@ def run_job(task, job, args, emit):
         def report(stage, message, payload=None):
             payload = dict(payload or {})
             summary = {**payload.get('progress_summary', {}), 'standards_revisions': revisions}
+            if 'read_only_features' in snapshot:
+                summary['read_only_features'] = options.read_only_features
             if cluster is not None:
                 summary['clearpass_cluster'] = cluster
             if conductor is not None:
@@ -271,6 +282,12 @@ def run_job(task, job, args, emit):
             if 'compliance_results' in payload:
                 summary['compliance_results'] = payload['compliance_results']
                 summary['compliance_details'] = copy.deepcopy(options.compliance_details)
+                for feature in options.read_only_features:
+                    if feature in summary['compliance_details']:
+                        detail = summary['compliance_details'][feature]
+                        detail['read_only'] = True
+                        detail.setdefault('notes', []).append(
+                            'Audit only: the pinned standard does not permit changes in this run.')
             # Reporter sends progress_summary to NetBox and keeps the full
             # payload in the local archive.
             return emit(stage, message, {**payload, 'progress_summary': summary,
@@ -320,11 +337,12 @@ def _run_job(task, job, args, emit):
         emit('already_current', f'Already compliant: {", ".join(features)}', summary)
         return False, False, results
 
-    # Assertion-only raw standards have no apply phase, even in a mixed
-    # remediation profile. Preserve their failed verdict without claiming a write.
+    # Standard permissions and assertion-only raw bundles have no apply phase.
+    # Preserve their failed verdict without claiming a write.
     read_only = [feature for feature in pending
-                 if feature.split(':', 1)[0] == 'raw_commands'
-                 and args.compliance_details.get(feature, {}).get('read_only') is True]
+                 if feature in args.read_only_features or
+                 (feature.split(':', 1)[0] == 'raw_commands'
+                  and args.compliance_details.get(feature, {}).get('read_only') is True)]
     for feature in read_only:
         results[feature] = 'attention'
     pending = [feature for feature in pending if feature not in read_only]
