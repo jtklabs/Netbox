@@ -7,16 +7,14 @@ def record_job_results(job, summary, checked_at):
     verdicts = summary.get('compliance_results', {})
     if not isinstance(verdicts, dict):
         return
-    grouped = {}
-    for feature in job.profile['features']:
-        result = verdicts.get(feature)
-        if result not in ('compliant', 'non-compliant', 'error'):
-            continue
-        grouped.setdefault(FEATURE_SECTIONS[feature], []).append(result)
     for pinned in job.standards_snapshot['revisions']:
-        results = grouped.get(pinned['section'])
+        check_features = [f for f in job.profile['features'] if FEATURE_SECTIONS[f] == pinned['section']]
+        if pinned['section'] == 'raw_commands' and 'raw_standard_ids' in job.profile:
+            check_features = [f'raw_commands:{pinned["standard_id"]}']
+        results = [verdicts[f] for f in check_features
+                   if verdicts.get(f) in ('compliant', 'non-compliant', 'error')]
         # A shared section (SNMP + packet size) needs every selected check.
-        required = sum(FEATURE_SECTIONS[f] == pinned['section'] for f in job.profile['features'])
+        required = len(check_features)
         if not results or len(results) != required:
             continue
         revision = ConfigStandardRevision.objects.get(standard_id=pinned['standard_id'], number=pinned['revision'])
@@ -30,8 +28,8 @@ def record_job_results(job, summary, checked_at):
         record.source = 'ssh'
         record.findings = {'job_id': job.pk, 'run_id': job.run_id}
         details = summary.get('compliance_details', {})
-        checks = {feature: details[feature] for feature in job.profile['features']
-                  if FEATURE_SECTIONS[feature] == pinned['section'] and isinstance(details, dict)
+        checks = {feature: details[feature] for feature in check_features
+                  if isinstance(details, dict)
                   and isinstance(details.get(feature), dict)}
         checks = {feature: {
             **{key: [item for item in check.get(key, []) if isinstance(item, str)]

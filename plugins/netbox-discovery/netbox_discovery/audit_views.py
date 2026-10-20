@@ -25,7 +25,7 @@ from utilities.htmx import htmx_partial
 
 from .models import AuditSchedule, AuditRun, JobProfile, UpgradeJob
 from .profile_views import RemediationWidget
-from .raw_standard_selection import raw_standard_field, configure_raw_standard
+from .raw_standard_selection import raw_standard_field, configure_raw_standard, selected_standard_ids, store_selection
 from .upgrade_choices import REMEDIATION_FEATURES
 from . import upgrade_queue as queue
 from .audit_scheduling import validate_profile_access
@@ -77,7 +77,7 @@ class AuditScheduleForm(NetBoxModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         configure_raw_standard(self, getattr(self.instance, 'run_as', None))
-        self.initial['raw_standard'] = self.instance.profile.get('raw_standard_id')
+        self.initial['raw_standard'] = selected_standard_ids(self.instance.profile)
         self.fields['weekday'].required = False
         self.initial.setdefault('time_zone', settings.TIME_ZONE)
         self.initial['comparison'] = self.instance.profile.get('mode', 'replace')
@@ -113,7 +113,7 @@ class AuditScheduleForm(NetBoxModelForm):
         source = data.get('profile_source')
         profile = {'features': data.get('features', []), 'mode': data.get('comparison') or 'replace'} if source == 'custom' else {}
         if source == 'custom' and data.get('raw_standard'):
-            profile['raw_standard_id'] = data['raw_standard']
+            store_selection(profile, data['raw_standard'])
         if source == 'custom' and data.get('remediate') and data.get('allow_clearpass_cluster_changes'):
             profile['allow_clearpass_cluster_changes'] = True
         if source == 'custom' and not profile['features']:

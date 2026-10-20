@@ -105,27 +105,31 @@ For NetBox, create a standard with check type **Feature settings (YAML)**, paste
 
 This is independent of `ssh_mac`, NTP and other typed features. Avoid selecting competing standards for the same setting in one job. Raw commands do not change the typed SSH MAC policy or its parser.
 
-## Select one raw standard in a job profile
+## Select raw standards in a job profile
 
 Create separate NetBox YAML standards for separate raw bundles, such as **SSH integrity** and **Disable HTTP**. They can apply to the same devices.
 
 1. Open **Job Profiles** and create or edit a **Remediation** profile.
 2. Select **Raw configuration commands** in the feature list.
-3. Choose the named standard in **Raw command standard**, for example **SSH integrity**.
-4. Save the profile and use it in an audit or remediation schedule. Audit-only scheduling does not send its configuration commands.
+3. Choose up to eight named standards in **Raw command standards**.
+4. Save the profile and use it in an audit or remediation schedule. Audit-only scheduling does not send configuration commands.
 
-Only that raw standard is included. The same picker is available for custom audit schedules and configuration-job edits. On the device page, choosing a named raw standard in **Run standards now** also selects that exact standard.
+Only the selected raw standards are included. Each retains its own platform/region bundle, `show` command, expectations, pinned revision and compliance result. They run separately in ascending standard ID order; the order of commands within each bundle remains unchanged. The same multi-select is available for custom audit schedules and configuration-job edits. On the device page, choosing one named standard in **Run standards now** still selects only that standard; choosing a profile uses that profile's selections.
 
-Leaving the picker blank preserves automatic selection: exactly one visible, in-force raw standard must apply to each device. Multiple matches block scheduling; they are never combined or all executed. Unrelated NTP or other feature jobs ignore raw standards. Selected standards still must be visible to the scheduling user, active, in device scope, and permitted for the requested operation. A missing, deleted, inaccessible or out-of-scope selection fails rather than falling back to another standard.
+Leaving the picker blank preserves automatic selection: exactly one visible, in-force raw standard must apply to each device. Multiple automatic matches block scheduling; a blank picker never means run everything. Unrelated NTP or other feature jobs ignore raw standards. Every selected standard must be visible to the scheduling user, active, in device scope, and permitted for the requested operation. A missing, deleted, inaccessible or out-of-scope selection fails rather than silently skipping or falling back.
 
-The API profile stores the selection by standard ID:
+The API profile accepts a list of standard IDs:
 
 ```yaml
 features: [raw_commands]
 mode: replace
-raw_standard_id: 42  # ID of the selected NetBox standard
+raw_standard_ids: [42, 57]  # IDs of the selected NetBox standards
 ```
 
-A profile may also list typed features such as `ntp`; those use their own applicable standards. Each profile selects at most one raw standard. Use separate profiles/jobs to run different raw standards independently.
+The list must contain one through eight distinct positive integers. Legacy `raw_standard_id: 42` plans remain supported, and the forms retain that representation for a single selection. Do not supply both keys. A profile may also list typed features such as `ntp`; those retain their own applicable standards.
 
-Scheduling pins the selected standard's current revision and YAML. The worker checks that the selected ID matches that snapshot. Applying changes retains the existing start-time revision check; if the selected standard changes after scheduling, recreate the job. Changes to an unselected raw standard do not add it to the job.
+Scheduling freezes each selected standard's current revision and YAML. The worker checks the selected IDs against the pinned snapshot. Apply retains the start-time revision check; if a selected standard changes after scheduling, recreate the job. Changes to an unselected standard do not add it to the job. Editing a saved profile affects future jobs; existing jobs retain their selections.
+
+All selected checks run read-only before the start gate. Remediation applies only bundles with drift. After the apply pass, the worker audits all selected raw standards again, including those initially compliant, so a later bundle cannot silently undo an earlier check. Conflicting expectations produce noncompliance rather than an automatic clean pass. Bundles are not a transaction and do not have a generated rollback; avoid competing commands for the same setting. Progress and compliance evidence use `raw_commands:<standard ID>` for separate results in multi-selection jobs.
+
+Deploy the updated Discovery and Compliance plugins together with netops worker **0.2.16** or newer before scheduling multiple selections. No database migration is required. Older workers reject plural-selection profiles before executing device commands. Existing single-selection jobs remain compatible.

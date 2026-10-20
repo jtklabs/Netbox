@@ -65,3 +65,25 @@ def validate_raw_commands(settings):
             if not isinstance(slug, str) or not slug or slug != slug.strip().lower():
                 raise ValueError(f'{label}.regions keys must be lowercase region slugs.')
             bundle(override, platform, f'{label}.regions.{slug}')
+
+
+def selected_standard_ids(profile):
+    """Validate explicit selection; keep legacy single-ID plans compatible."""
+    if 'raw_standard_id' in profile and 'raw_standard_ids' in profile:
+        raise ValueError('Use raw_standard_ids or raw_standard_id, not both.')
+    if 'raw_standard_id' in profile:
+        value = profile['raw_standard_id']
+        if type(value) is not int or value < 1:
+            raise ValueError('raw_standard_id must be a positive integer.')
+        selected = [value]
+    elif 'raw_standard_ids' in profile:
+        selected = profile['raw_standard_ids']
+        if (not isinstance(selected, list) or not 1 <= len(selected) <= 8
+                or any(type(value) is not int or value < 1 for value in selected)
+                or len(set(selected)) != len(selected)):
+            raise ValueError('raw_standard_ids must contain 1–8 distinct positive integers.')
+    else:
+        return []
+    if 'raw_commands' not in profile.get('features', []):
+        raise ValueError('A raw standard selection requires the raw_commands feature.')
+    return list(selected)

@@ -14,7 +14,7 @@ from utilities.views import register_model_view
 from utilities.exceptions import AbortRequest
 
 from .models import JobProfile, DeviceTypeProfile, PlatformProfile
-from .raw_standard_selection import raw_standard_field, configure_raw_standard
+from .raw_standard_selection import raw_standard_field, configure_raw_standard, selected_standard_ids, store_selection
 from .profile_filtersets import JobProfileFilterSet, DeviceTypeProfileFilterSet, PlatformProfileFilterSet
 from .upgrade_choices import REMEDIATION_FEATURES, REMEDIATION_MODES
 from .upgrade_queue import validate_profile
@@ -111,7 +111,7 @@ class JobProfileForm(NetBoxModelForm):
             if self.instance.kind == 'remediate':
                 self.initial.update(features=self.instance.plan['features'],
                                     remediation_mode=self.instance.plan['mode'],
-                                    raw_standard=self.instance.plan.get('raw_standard_id'),
+                                    raw_standard=selected_standard_ids(self.instance.plan),
                                     allow_clearpass_cluster_changes=self.instance.plan.get(
                                         'allow_clearpass_cluster_changes', False))
             else:
@@ -133,7 +133,7 @@ class JobProfileForm(NetBoxModelForm):
             plan = ({'features': data.get('features', []), 'mode': data.get('remediation_mode') or 'add'}
                     if kind == 'remediate' else yaml.safe_load(data.get('upgrade_yaml', '')))
             if kind == 'remediate' and data.get('raw_standard'):
-                plan['raw_standard_id'] = data['raw_standard']
+                store_selection(plan, data['raw_standard'])
             if kind == 'remediate' and data.get('allow_clearpass_cluster_changes'):
                 plan['allow_clearpass_cluster_changes'] = True
             if kind == 'upgrade' and isinstance(plan, dict):
@@ -264,12 +264,12 @@ class JobProfileView(ObjectView):
     def get_extra_context(self, request, instance):
         from django.db.models import Q
         from django.apps import apps
-        raw_standard = None
-        if instance.plan.get('raw_standard_id') and apps.is_installed('netbox_compliance'):
+        raw_standards = []
+        if selected_standard_ids(instance.plan) and apps.is_installed('netbox_compliance'):
             from netbox_compliance.models import ConfigStandard
-            raw_standard = ConfigStandard.objects.restrict(request.user, 'view').filter(
-                pk=instance.plan['raw_standard_id']).first()
-        return {'raw_standard': raw_standard, 'plan_yaml': profile_yaml(instance.resolved_plan()),
+            raw_standards = ConfigStandard.objects.restrict(request.user, 'view').filter(
+                pk__in=selected_standard_ids(instance.plan)).order_by('pk')
+        return {'raw_standards': raw_standards, 'plan_yaml': profile_yaml(instance.resolved_plan()),
                 'platform_assignments': PlatformProfile.objects.restrict(request.user, 'view').filter(
                     remediation_profile=instance).select_related('platform'),
                 'assignments': DeviceTypeProfile.objects.restrict(request.user, 'view').filter(
