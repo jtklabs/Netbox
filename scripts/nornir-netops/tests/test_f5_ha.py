@@ -12,6 +12,7 @@ from test_upgrade_f5 import profile, options, iso, entries
 
 A, B = '/Common/a', '/Common/b'
 GROUPS = ['/Common/datasync-global-dg', '/Common/pair']
+COLLECT = f5.collect
 
 
 def snapshot(role, version='17.1.1.3', build='0.0.5', sync='In Sync'):
@@ -171,3 +172,63 @@ def test_sync_refused_if_peer_build_changes(lab, profile, options):
         with pytest.raises(ValueError, match='refusing sync'):
             pair.finish(lab[A], lab[A].snapshot, {}, Mock())
         assert not lab[A].calls
+
+
+def test_real_workflow_runs_standby_then_handoff_then_second(lab, profile, options, monkeypatch):
+    from test_upgrade_f5 import FakeBigIP, IMAGE_BYTES, ISO
+    from netops.upgrade import workflow
+
+    timeline, units = [], {}
+    class Appliance(FakeBigIP):
+        def __init__(self, name):
+            super().__init__(failover='active' if name == A else 'standby', peers=('b' if name == A else 'a',))
+            self.name, self.pair, self.revision = name, units, 'original'
+            self.images[ISO] = {'verified': 'yes', 'bytes': bytearray(IMAGE_BYTES)}
+
+        @property
+        def snapshot(self):
+            return snapshot(self.failover, self.version, sync=self.sync)
+
+        def _get(self, path):
+            if path == '/mgmt/tm/cm/device':
+                rows = Unit.get_json(self, path)['items']
+                for row in rows:
+                    unit = units[row['fullPath']]
+                    active = next(v for v in unit.volumes if v['active'])
+                    row.update(hostname=row['name'], marketingName=self.model, platformId='C119',
+                               chassisId=row['name'], failoverState=unit.failover, version=unit.version, build=active['build'])
+                return {'items': rows}
+            if path.startswith('/mgmt/tm/cm/device-group') or path.endswith('traffic-group/stats'):
+                return Unit.get_json(self, path)
+            return super()._get(path)
+
+        def _post(self, path, payload):
+            if path == '/mgmt/tm/cm':
+                timeline.append((self.name, 'sync'))
+                assert all(u.version == profile.target_version for u in units.values())
+                for unit in units.values(): unit.sync = 'In Sync'
+                return {}
+            if path == '/mgmt/tm/sys/failover':
+                timeline.append((self.name, 'failover'))
+                for name, unit in units.items(): unit.failover = 'standby' if name == self.name else 'active'
+            if path == '/mgmt/tm/sys' and payload.get('command') == 'reboot':
+                timeline.append((self.name, 'reboot'))
+                assert self.failover == 'standby'
+                self.revision = 'upgraded'
+                for unit in units.values(): unit.sync = 'Changes Pending'
+            return super()._post(path, payload)
+
+    units.update({n: Appliance(n) for n in (A, B)})
+    # Replace the protocol-only fixture's snapshot stub with the production collector.
+    monkeypatch.setattr(f5, 'collect', COLLECT)
+    monkeypatch.setattr(f5_ha.f5_waf, 'Client', lambda host, **kw: units[A if host.hostname.endswith('.1') else B])
+    options.apply = True
+    for name, address in ((B, '192.0.2.2'), (A, '192.0.2.1')):
+        host = SimpleNamespace(name=name.rsplit('/', 1)[1], hostname=address, platform='f5_tmsh', username='u', password='p', data={})
+        reporter = Mock()
+        reporter.emit.return_value = True
+        result = workflow.upgrade_device(SimpleNamespace(host=host), replace(profile, allow_active=name == A), options, reporter)
+        assert not result.failed, [call.args[2] for call in reporter.emit.call_args_list][-3:]
+    assert timeline == [(B, 'reboot'), (A, 'failover'), (A, 'reboot'), (A, 'sync'), (A, 'sync')]
+    assert units[B].failover == 'active' and units[A].failover == 'standby'
+    assert all(u.sync == 'In Sync' for u in units.values())
