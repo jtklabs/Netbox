@@ -19,7 +19,7 @@ def validate_raw_commands(settings):
                        or len(line) > 2048 for line in value)):
             raise ValueError(f'{label} must be a list of single-line strings (1–256 entries, at most 2048 characters each).')
 
-    def contains(value, label):
+    def matches(value, label):
         if not isinstance(value, list) or len(value) > 256:
             raise ValueError(f'{label} must be a list of at most 256 literal strings or regex items.')
         for index, item in enumerate(value):
@@ -38,7 +38,7 @@ def validate_raw_commands(settings):
 
     def bundle(value, platform, label):
         mapping(value, BUNDLE_KEYS, label)
-        lines(value.get('commands'), label + '.commands')
+        lines(value.get('commands', []), label + '.commands', False)
         if platform == 'infoblox_nios' and 'show' not in value:
             raise ValueError(f'{label}.show is required for Infoblox NIOS audit and verification.')
         if 'show' in value:
@@ -52,11 +52,11 @@ def validate_raw_commands(settings):
                            for part in parts[1:])):
                 raise ValueError(f'{label}.show must be one show command with read-only output filters.')
         lines(value.get('expect', []), label + '.expect', False)
-        contains(value.get('contains', []), label + '.contains')
-        lines(value.get('reject', []), label + '.reject', False)
+        matches(value.get('contains', []), label + '.contains')
+        matches(value.get('reject', []), label + '.reject')
         if not any(value.get(key) for key in ('expect', 'contains', 'reject')):
             raise ValueError(f'{label} requires expect, contains or reject checks for audit and verification.')
-        for command in value['commands']:
+        for command in value.get('commands', []):
             words = command.strip().lower().split()
             if platform == 'infoblox_nios':
                 if (words[0] != 'set' or len(words) < 2
@@ -86,7 +86,7 @@ def validate_raw_commands(settings):
         if not isinstance(regions, dict) or ('regions' in value and not regions):
             raise ValueError(f'{label}.regions must be a nonempty region mapping.')
         if not default and not regions:
-            raise ValueError(f'{label} requires default commands or regional bundles.')
+            raise ValueError(f'{label} requires default checks or regional bundles.')
         for slug, override in regions.items():
             if not isinstance(slug, str) or not slug or slug != slug.strip().lower():
                 raise ValueError(f'{label}.regions keys must be lowercase region slugs.')

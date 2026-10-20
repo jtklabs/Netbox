@@ -1,6 +1,6 @@
 # Raw command standards
 
-The `raw_commands` section provides an explicit escape hatch for literal configuration commands. It works in `standards.yaml` and in a NetBox configuration standard's YAML definition. Select **Raw configuration commands** in the remediation profile, or use the `raw-commands` CLI feature.
+The `raw_commands` section runs show-output pass/fail checks with optional literal configuration commands. It works in `standards.yaml` and in a NetBox configuration standard's YAML definition. Select **Raw commands** in the remediation profile, or use the `raw-commands` CLI feature.
 
 ```yaml
 raw_commands:
@@ -26,6 +26,63 @@ raw_commands:
         - mac hmac-sha2-256 hmac-sha2-512
 ```
 
+## Read-only operational checks
+
+Omit `commands`, or set `commands: []`, to run only the selected show command.
+The standard passes only when every `expect`/`contains` check matches and every
+`reject` check is absent. A failure is recorded as non-compliant, with the failed
+checks in the report. No configuration, save or commit is sent, including when
+run in replace mode with `--apply`. CLI failures return 2; connection errors,
+empty output and rejected commands return 1; a passing check returns 0.
+
+For IOS/IOS-XE, require a selected NTP peer (`*`) and fail if `INIT` appears:
+
+```yaml
+raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      show: show ntp associations
+      contains:
+        - regex: '^\s*\*~?\S+\s+'
+      reject:
+        - regex: '(?i)\bINIT\b'
+```
+
+The `reject` check searches the full output, so any association in INIT fails,
+even if another peer is selected. The required peer pattern excludes the `* sys.peer`
+legend by requiring an address immediately after the selection flags. To test
+only absence of INIT, omit `contains`.
+Absence alone does not establish synchronization. For a direct clock-status
+check, create a second named raw standard using:
+
+```yaml
+raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      show: show ntp status
+      contains:
+        - regex: '(?i)\bClock is synchronized\b'
+      reject:
+        - regex: '(?i)\bunsynchronized\b'
+```
+
+Select both named standards in an audit profile to check associations and clock
+status. Use **Feature settings (YAML)**, clear **Can be remediated automatically**,
+and run **Audit only**. A NetBox standard still stores the check definition;
+no device configuration entry or remediation command is needed.
+
+`reject` accepts literal strings or `{regex: 'pattern'}` just like `contains`.
+A forbidden regex match is reported as `forbidden regex: <pattern>`. Literal
+strings are case-sensitive; use `(?i)` in a regex for case-insensitive matching.
+An empty show response remains an error, even for absence-only checks; run the
+full show command rather than piping away all healthy output.
+
+Deploy the Compliance and Discovery plugins with worker **0.2.19** or newer.
+No database migration is required. Older workers reject omitted/empty commands
+and regex entries in `reject`.
+
 ## Selection and execution
 
 - Supported platform keys: `cisco_ios`, `arista_eos`, `cisco_asa`, `cisco_nxos`, `juniper_junos`, `infoblox_nios`. Inventory aliases are normalized; YAML uses these canonical keys.
@@ -33,7 +90,7 @@ raw_commands:
 - A region replaces the **whole bundle**, including its checks. Commands are never appended to the platform default. A platform may contain only regional bundles; an unmatched device then fails with an explicit error.
 - `enabled: true` is mandatory for a run. `false` blocks the feature and reports an error rather than a compliant result. The shipped example is disabled.
 - Commands run once, in the exact list order, only when checks report drift. No Jinja substitution, automatic removal commands, or automatic rollback commands are generated. Repeated commands and submode `exit` commands are preserved.
-- Supply configuration statements, one YAML string per command. For Cisco and Arista, the worker enters configuration mode and saves after verification. Junos uses the transaction described below; Infoblox sends commands directly. Omit `configure terminal`, `end`, save and commit commands. Interactive prompts, multiline banner bodies and operational command jobs are outside this feature.
+- Supply configuration statements, one YAML string per command. For Cisco and Arista, the worker enters configuration mode and saves after verification. Junos uses the transaction described below; Infoblox sends commands directly. Omit `configure terminal`, `end`, save and commit commands. Interactive prompts and multiline banner bodies are outside this feature. Omit `commands` for read-only operational checks.
 - Execution requires replace mode. Add mode audits and reports drift without executing the bundle. Existing NetBox permissions, standard scope, `auto_remediable`, `allow_enforce`, job approval and revision snapshots still apply.
 
 ## Compliance and verification
@@ -49,7 +106,7 @@ reject:
   - hmac-sha1
 ```
 
-`expect` matches complete lines in the selected show output, ignoring leading and trailing whitespace. `contains` accepts literal strings and explicit `regex` items; `reject` forbids literal text anywhere in the output. Plain strings remain literal and case-sensitive, including strings containing regex punctuation. `expect` and `reject` do not accept regex items. Choose checks from the device's actual displayed configuration: spelling and algorithm order may differ from the input commands. All expected lines, required fragments and regex matches must exist, and every rejected fragment must be absent. A check covers only what it states; it does not infer encryption or MAC security from a command.
+`expect` matches complete lines in the selected show output, ignoring leading and trailing whitespace. `contains` accepts literal strings and explicit `regex` items; `reject` forbids literal strings or explicit `regex` matches anywhere in the output. Plain strings remain literal and case-sensitive, including strings containing regex punctuation. `expect` does not accept regex items. Choose checks from the device's actual displayed configuration: spelling and algorithm order may differ from the input commands. All expected lines, required fragments and regex matches must exist, and every rejected fragment or regex match must be absent. A check covers only what it states; it does not infer encryption or MAC security from a command.
 
 By default, the worker reads `show running-config` on IOS, EOS, ASA and NX-OS, and `show configuration | display set` on Junos. Set `show` within a platform or regional bundle to select a different command. Checks are against that command's output; indentation is not a hierarchy selector. Choose sufficiently specific lines, and use the typed feature where its parser is needed to distinguish sections. Infoblox requires an explicit `show` command in each bundle. An empty or rejected read fails instead of being considered compliant. Reports retain failed-check evidence rather than the full configuration.
 
@@ -78,7 +135,7 @@ Patterns use Python regular expression syntax and search the entire show respons
 
 Every item must pass. Regex matching applies to read-only audits and the readback after remediation. A failed pattern is reported as `missing regex: <pattern>` in `failed_checks` and, after an apply, `missing_after`. Reports label the desired check as `contains regex: <pattern>`. Existing literal failures still use `missing text: <text>`.
 
-A regex item supports only the `regex` key with a nonempty, single-line string up to 2,048 characters. Each `contains` list supports up to 256 items. Invalid regex syntax is rejected when NetBox validates the definition and when the worker loads the standard, before connecting to devices. Use specific patterns; a broad expression such as `.*` can pass without proving the intended setting exists.
+A regex item supports only the `regex` key with a nonempty, single-line string up to 2,048 characters. Each `contains` or `reject` list supports up to 256 items. Invalid regex syntax is rejected when NetBox validates the definition and when the worker loads the standard, before connecting to devices. Use specific patterns; a broad expression such as `.*` can pass without proving the intended setting exists.
 
 Deploy the updated Compliance plugin and netops worker **0.2.17** or newer before using regex entries. No database migration is required. Existing plain-text standards retain their behavior; older workers reject regex items during validation.
 
@@ -142,7 +199,7 @@ The example uses Infoblox's documented [set tcp_timestamps](https://infoblox-doc
 
 The worker uses the generic SSH driver and sends each noninteractive `set` command individually, in order, at the NIOS prompt. It does not send `enable`, `configure terminal`, `write memory`, or `commit`. A rejected command or timeout stops the bundle. Interactive questions, confirmation responses, command chaining, and commands that interrupt the SSH connection are not supported.
 
-Read-only audits send only the selected `show` command. Applies require replace mode and verification, and run the same literal or regex checks afterward. Regional overrides and selection of multiple named raw standards work as on the other platforms. A regional bundle replaces the default completely, so it must include `commands`, `show`, and checks.
+Read-only audits send only the selected `show` command. Applies require replace mode and verification, and run the same literal or regex checks afterward. Regional overrides and selection of multiple named raw standards work as on the other platforms. A regional bundle replaces the default completely, so it must include its own `show` and checks, plus `commands` if remediation is wanted.
 
 NIOS commands may take effect before verification; failure does not undo earlier commands. Reports use `verified` for the readback result and leave `saved` and `save_command` null because no separate persistence step is performed. `--no-save` does not make NIOS commands temporary. Automatic rollback is unavailable.
 
@@ -158,16 +215,16 @@ python configure.py raw-commands --standards standards.yaml --csv devices.csv --
 python configure.py raw-commands --standards standards.yaml --csv devices.csv --replace --apply --yes
 ```
 
-For NetBox, create a standard with check type **Feature settings (YAML)**, paste the section above, scope it to the intended devices and platforms, and select **Raw configuration commands** in the profile. Use replace mode for remediation. Queued jobs pin the complete YAML revision; subsequent edits affect later jobs.
+For NetBox, create a standard with check type **Feature settings (YAML)**, paste the section above, scope it to the intended devices and platforms, and select **Raw commands** in the profile. Use replace mode for remediation. Queued jobs pin the complete YAML revision; subsequent edits affect later jobs.
 
-This is independent of `ssh_mac`, NTP and other typed features. Avoid selecting competing standards for the same setting in one job. Raw commands do not change the typed SSH MAC policy or its parser.
+SSH MAC checks now use raw standards; the dedicated `ssh_mac` feature is retired. See [SSH MAC migration](SSH-MAC-STANDARD.md) for replacing existing profiles and preserving historical results. Avoid selecting competing standards for the same setting in one job.
 
 ## Select raw standards in a job profile
 
 Create separate NetBox YAML standards for separate raw bundles, such as **SSH integrity** and **Disable HTTP**. They can apply to the same devices.
 
 1. Open **Job Profiles** and create or edit a **Remediation** profile.
-2. Select **Raw configuration commands** in the feature list.
+2. Select **Raw commands** in the feature list.
 3. Choose up to eight named standards in **Raw command standards**.
 4. Save the profile and use it in an audit or remediation schedule. Audit-only scheduling does not send configuration commands.
 

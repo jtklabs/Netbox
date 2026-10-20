@@ -48,7 +48,7 @@ def test_region_ancestry_default_and_regional_only():
 @pytest.mark.parametrize('mutation', [
     lambda p: p.pop('enabled'), lambda p: p.update(enabled='true'),
     lambda p: p.update(platforms={}), lambda p: p['platforms'].update(ios=bundle()),
-    lambda p: p['platforms']['cisco_ios'].update(commands=[]),
+    lambda p: p['platforms']['cisco_ios'].update(commands=None),
     lambda p: p['platforms']['cisco_ios'].update(commands=['one\ntwo']),
     lambda p: p['platforms']['cisco_ios'].update(expect=[], reject=[]),
     lambda p: p['platforms']['cisco_ios'].update(expect='description default'),
@@ -86,6 +86,7 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
         regional['contains'] = ['{{literal}}']
         if custom_show == 'regex':
             regional['contains'] = [{'regex': r'^description \{\{literal\}\}$'}]
+            regional['reject'] = [{'regex': '(?i)description old'}]
         del regional['expect']
         policy['platforms'][platform]['show'] = 'show version'
     policy['platforms'][platform]['regions'] = {'us-east': regional}
@@ -123,9 +124,9 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     assert not state['writes']
     if custom_show == 'regex':
         pattern = regional['contains'][0]['regex']
-        assert row['desired'] == ['contains regex: ' + pattern]
+        assert row['desired'] == ['contains regex: ' + pattern, 'reject regex: (?i)description old']
         assert row['config_before']['failed_checks'] == [
-            'missing regex: ' + pattern, 'forbidden text: description old']
+            'missing regex: ' + pattern, 'forbidden regex: (?i)description old']
     code, row = invoke('--replace', '--apply', '--yes')
     assert code == cli.EXIT_OK and row['verified'] and row['saved']
     assert state['writes'] == [regional['commands']]
@@ -543,3 +544,100 @@ def test_infoblox_validates_explicit_show_and_direct_commands(regional, mutation
 def test_infoblox_rejected_cli_output_cannot_pass_checks(output):
     with pytest.raises(ValueError):
         raw.checked_nios('show tcp_timestamps', output)
+
+
+@pytest.mark.parametrize('platform', sorted(raw.SHOW) + ['infoblox_nios'])
+@pytest.mark.parametrize('regional', [False, True])
+@pytest.mark.parametrize('empty_commands', [False, True])
+@pytest.mark.parametrize('output,compliant', [
+    ('*~192.0.2.1 192.0.2.2 2 10 64 377 0.1 0.1 0.1', True),
+    ('*~192.0.2.1 good\n ~192.0.2.2 .INIT. 16', False),
+    (' ~192.0.2.1 good', False),
+    (' ~192.0.2.1 good\n * sys.peer, # selected, + candidate, ~ configured', False),
+])
+def test_read_only_checks_never_write_even_with_apply(monkeypatch, platform, regional, empty_commands, output, compliant):
+    checks = {'show': 'show ntp associations', 'contains': [{'regex': r'^\s*\*~?\S+\s+'}],
+              'reject': [{'regex': r'(?i)\bINIT\b'}]}
+    if empty_commands:
+        checks['commands'] = []
+    policy = {'enabled': True, 'platforms': {platform: (
+        {'regions': {'us': checks}} if regional else checks)}}
+    validate_raw_commands(policy)
+    calls = []
+    host = Host('switch', platform=platform, data={'regions': ['us']})
+
+    def read(command, **kwargs):
+        calls.append(command)
+        assert command == checks['show']
+        return output
+
+    monkeypatch.setattr(Host, 'get_connection', lambda *a: SimpleNamespace(send_command=read))
+    monkeypatch.setattr(Host, 'close_connection', lambda *a: None)
+    task = SimpleNamespace(host=host, nornir=SimpleNamespace(config=None),
+                           run=lambda **kw: Result(host=host, result=read(kw['command_string'])))
+    # No verification/save is necessary for an assertion-only run.
+    result = raw.run(task, [], {'raw_commands': policy}, 'replace', False, False, False)
+    assert not result.failed and not result.changed
+    row = result.result
+    assert row['read_only'] and row['compliant'] is compliant
+    assert not row['commands'] and not row['add'] and not row['applied']
+    assert row['saved'] is None and row['verified'] is None and row['save_command'] is None
+    assert bool(row['config_before']['failed_checks']) is not compliant
+    assert calls == [checks['show']]
+
+
+@pytest.mark.parametrize('mode', ['--add', '--replace'])
+@pytest.mark.parametrize('apply', [False, True])
+@pytest.mark.parametrize('output,code', [
+    ('address ref clock\n ~192.0.2.1 .INIT. 16', cli.EXIT_DIFF),
+    ('address ref clock\n ~192.0.2.1 .init. 16', cli.EXIT_DIFF),
+    ('address ref clock\n*~192.0.2.1 192.0.2.2 2', cli.EXIT_OK),
+    ('', cli.EXIT_FAILED),
+    ('% Invalid input detected', cli.EXIT_FAILED),
+])
+def test_read_only_cli_absence_check_reports_pass_fail(tmp_path, monkeypatch, mode, apply, output, code):
+    monkeypatch.setenv('NET_USER', 'operator')
+    monkeypatch.setenv('NET_PASS', 'test-password')
+    csv = tmp_path / 'devices.csv'
+    csv.write_text('host,name,platform\n192.0.2.1,switch,cisco_ios\n')
+    path = tmp_path / 'standards.yaml'
+    path.write_text(yaml.safe_dump({'raw_commands': {'enabled': True, 'platforms': {'cisco_ios': {
+        'show': 'show ntp associations', 'reject': [{'regex': r'(?i)\bINIT\b'}]}}}}))
+    report = tmp_path / 'report.json'
+
+    def read(task, command_string, **kwargs):
+        assert command_string == 'show ntp associations'
+        return Result(host=task.host, result=output)
+
+    monkeypatch.setattr(runner, 'netmiko_send_command', read)
+    monkeypatch.setattr(runner, 'netmiko_send_config', lambda *a, **kw: pytest.fail('must never configure'))
+    flags = ['--apply', '--yes'] if apply else []
+    assert cli.main(['raw-commands', '--no-env-file', '--csv', str(csv), '--standards', str(path),
+                     '--report', str(report), mode, *flags]) == code
+    row = json.loads(report.read_text())['devices']['switch']
+    assert row['compliant'] is (code == cli.EXIT_OK)
+    assert not row['commands'] and not row['applied']
+    if code == cli.EXIT_DIFF:
+        assert row['current'] == [r'forbidden regex: (?i)\bINIT\b']
+
+
+@pytest.mark.parametrize('check', ['contains', 'reject'])
+@pytest.mark.parametrize('value', [None, '', [{'regex': '['}], [{'regex': False}], [{'pattern': 'INIT'}]])
+def test_read_only_check_validation(check, value):
+    with pytest.raises(ValueError):
+        validate_raw_commands({'enabled': True, 'platforms': {'cisco_ios': {
+            'show': 'show ntp associations', check: value}}})
+
+
+def test_reject_literal_and_regex_semantics():
+    checks = {'reject': ['[literal].*', {'regex': r'(?i)\bINIT\b'}, {'regex': '^bad$'}]}
+    assert raw.missing('initialized\nnot bad\nliteral', checks) == []
+    assert raw.missing('header\n.init.\nbad\n[literal].*', checks) == [
+        'forbidden text: [literal].*', r'forbidden regex: (?i)\bINIT\b', 'forbidden regex: ^bad$']
+
+
+def test_ssh_mac_feature_is_retired():
+    from netops.features import FEATURES
+    assert 'ssh-mac' not in FEATURES
+    with pytest.raises(ValueError):
+        remediation.validate({'features': ['ssh_mac'], 'mode': 'replace'})

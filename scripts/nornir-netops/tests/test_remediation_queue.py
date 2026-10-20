@@ -560,3 +560,28 @@ def test_later_raw_apply_cannot_hide_conflict_with_initially_compliant_standard(
     assert emit.events[-1][2]['compliance_results'] == {
         'raw_commands:12': 'non-compliant', 'raw_commands:13': 'compliant'}
     assert calls[-2:] == [('raw_commands:12', False), ('raw_commands:13', False)]
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_raw_read_only_failures_never_enter_apply_phase(monkeypatch, mixed):
+    calls = []
+
+    def invoke(feature, device_id, mode, apply, args):
+        calls.append((feature, apply))
+        read_only = feature == 'raw_commands:12' or not mixed
+        args.compliance_details[feature] = remediation.report_details({'devices': {'sw': {
+            'read_only': read_only, 'current': ['forbidden text: INIT'] if read_only else []}}})
+        if read_only:
+            assert not apply
+            return 2, ONE
+        return (0 if apply or (feature, True) in calls else 2), ONE
+
+    monkeypatch.setattr(remediation, 'invoke', invoke)
+    emit = Recorder()
+    failed, changed, results = remediation.run_job(None, multi_raw_job('remediate'), None, emit)
+    assert not failed and changed is mixed
+    assert results['raw_commands:12'] == 'attention'
+    assert emit.events[-1][0] == 'completed_with_warnings'
+    assert emit.events[-1][2]['compliance_results']['raw_commands:12'] == 'non-compliant'
+    assert ('raw_commands:12', True) not in calls
+    assert ('ready' in emit.stages) is mixed

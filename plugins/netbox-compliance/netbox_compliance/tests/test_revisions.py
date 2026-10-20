@@ -104,7 +104,7 @@ class RevisionTest(GridTest):
         standard.save()
         self.assertTrue(snapshot['document']['raw_commands']['enabled'])
         for bad in (text.replace('enabled: true', 'enabled: "true"'),
-                    text.replace('commands: [ip ssh server algorithm mac hmac-sha2-512]', 'commands: []'),
+                    text.replace('commands: [ip ssh server algorithm mac hmac-sha2-512]', 'commands: null'),
                     text.replace('expect:', 'unknown:'),
                     text.replace('show ip ssh', 'show ip ssh | redirect flash:output'),
                     text.replace('contains: [hmac-sha2-512]', 'contains: hmac-sha2-512')):
@@ -112,22 +112,27 @@ class RevisionTest(GridTest):
                 parse_definition(bad)
 
 
-    def test_ssh_mac_snapshot_pins_policy_and_requires_enforce_for_writes(self):
-        standard = ConfigStandard.objects.create(
-            name='SSH MAC policy', check_type='netops',
-            definition_yaml='ssh_mac: {macs: [hmac-sha2-512], ios_scope: both, asa_integrity: high}',
-            auto_remediable=True, allow_enforce=False,
-        )
-        device = self.devices['sw1']
-        snapshot = snapshot_for_device(self.user, device, ['ssh_mac'], 'replace', audit=True)
-        self.assertEqual(snapshot['document']['ssh_mac']['ios_scope'], 'both')
+    def test_read_only_raw_definition_and_snapshot(self):
+        text = r"""raw_commands:
+  enabled: true
+  platforms:
+    cisco_ios:
+      show: show ntp associations
+      contains:
+        - regex: '^\s*\*~?\S+\s+'
+      reject:
+        - regex: '(?i)\bINIT\b'
+"""
+        standard = ConfigStandard.objects.create(name='NTP synchronization', check_type='netops',
+            definition_yaml=text, auto_remediable=False, allow_enforce=False)
+        snapshot = snapshot_for_device(self.user, self.devices['sw1'], ['raw_commands'], 'replace', audit=True)
+        self.assertEqual(snapshot['document'], parse_definition(text))
         self.assertEqual(snapshot['revisions'][0]['standard_id'], standard.pk)
-        with self.assertRaises(ValidationError):
-            snapshot_for_device(self.user, device, ['ssh_mac'], 'replace')
-        standard.allow_enforce = True
-        standard.save()
-        self.assertEqual(snapshot_for_device(self.user, device, ['ssh_mac'], 'replace')
-                         ['revisions'][0]['revision'], standard.revision)
+        self.assertNotIn('commands', snapshot['document']['raw_commands']['platforms']['cisco_ios'])
+        for bad in (text.replace("(?i)\\bINIT\\b", '['),
+                    'ssh_mac: {macs: [hmac-sha2-512]}'):
+            with self.subTest(definition=bad), self.assertRaises(ValidationError):
+                parse_definition(bad)
 
     def test_batch_snapshots_are_isolated_and_next_batch_reads_new_revisions(self):
         standard = feature_standards()[0]

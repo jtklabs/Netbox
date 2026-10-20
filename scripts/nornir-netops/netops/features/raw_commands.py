@@ -1,4 +1,4 @@
-"""Literal, ordered configuration commands with explicit compliance checks."""
+"""Show-output assertions with optional, ordered configuration remediation."""
 import re
 
 from .. import archive
@@ -36,7 +36,7 @@ def select(settings, host):
         slug = str(region).strip().lower()
         if slug in policy.get('regions', {}):
             return policy['regions'][slug], slug
-    if 'commands' not in policy:
+    if not any(key != 'regions' for key in policy):
         raise ValueError(f'No raw command region matches {host.name} and no platform default is defined')
     return {key: value for key, value in policy.items() if key != 'regions'}, None
 
@@ -68,9 +68,16 @@ def missing(output, policy):
                 contains_failures.append(f'missing text: {item}')
         elif re.search(item['regex'], output, re.MULTILINE) is None:
             contains_failures.append(f"missing regex: {item['regex']}")
+    reject_failures = []
+    for item in policy.get('reject', []):
+        if isinstance(item, str):
+            if item in output:
+                reject_failures.append(f'forbidden text: {item}')
+        elif re.search(item['regex'], output, re.MULTILINE) is not None:
+            reject_failures.append(f"forbidden regex: {item['regex']}")
     return ([f'missing line: {line}' for line in policy.get('expect', []) if line.strip() not in lines]
             + contains_failures
-            + [f'forbidden text: {text}' for text in policy.get('reject', []) if text in output])
+            + reject_failures)
 
 
 def run(task, desired, variables, mode, dry_run, save, verify):
@@ -93,7 +100,10 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             raise ValueError('Infoblox NIOS requires an explicit show command')
         payload.update(desired=list(policy.get('expect', [])) + [
             ('contains: ' + item if isinstance(item, str) else 'contains regex: ' + item['regex'])
-            for item in policy.get('contains', [])], selected_region=region,
+            for item in policy.get('contains', [])] + [
+            ('reject: ' + item if isinstance(item, str) else 'reject regex: ' + item['regex'])
+            for item in policy.get('reject', [])], selected_region=region,
+            read_only=not policy.get('commands'),
             read_steps=[{'transport': 'ssh', 'command': show, 'purpose': 'read_config'}])
         junos = platform == 'juniper_junos'
         if nios:
@@ -127,6 +137,9 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         # Archive the check evidence, not an entire configuration with unrelated secrets.
         payload.update(current=drift, config_before={'show_command': show, 'failed_checks': drift}, compliant=not drift)
         if not drift:
+            return Result(host=task.host, result=payload, changed=False)
+        if not policy.get('commands'):
+            payload['advisories'].append('Raw output checks failed; this standard is read-only and has no remediation commands.')
             return Result(host=task.host, result=payload, changed=False)
         if mode != MODE_REPLACE:
             payload['advisories'].append('Raw commands differ; replace mode is required to execute the command bundle.')
@@ -217,6 +230,6 @@ def selftest(desired):
     return 0
 
 
-FEATURE = Feature(name='raw-commands', help='audit or execute YAML command bundles by platform and region',
+FEATURE = Feature(name='raw-commands', help='check show output or execute YAML command bundles by platform and region',
                   platforms={}, add_arguments=lambda parser: None, build_desired=build_desired,
                   run=run, reversible=False, selftest=selftest)
