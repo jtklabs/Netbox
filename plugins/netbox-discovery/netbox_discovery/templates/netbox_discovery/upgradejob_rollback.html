@@ -1,0 +1,22 @@
+{% extends 'base/layout.html' %}
+{% block title %}Roll back {{ object.device_name }}{% endblock %}
+{% block content %}
+<h1>Roll back {{ object.device_name }}</h1>
+{% if not rollback or rollback.error %}
+<div class="alert alert-warning">{{ rollback.error|default:'This job is not eligible for F5 boot partition rollback.' }}</div>
+{% else %}
+<div class="alert alert-danger" role="alert">
+  <strong>Immediate reboot. No traffic drain.</strong>
+  <p class="mb-0">This boots {{ object.device_name }} ({{ object.address }}) back to <strong>{{ rollback.plan.volume }}</strong>, the old partition recorded by job {{ object.pk }}.
+  Traffic on this device is interrupted as soon as the poller sends the reboot. There is no drain or failover step. The action is dispatched now; poller pickup can take time. The reboot and startup are not instantaneous. If pickup does not occur within 15 minutes, this request expires.</p>
+</div>
+<p>The device uses the configuration already saved on that partition. Rollback does not copy the current configuration, reinstall software, or restore a UCS backup.</p>
+{% if rollback.plan.note %}<div class="alert alert-warning">{{ rollback.plan.note }}</div>{% endif %}
+<form method="post">{% csrf_token %}
+  <label class="form-label" for="device-name">Type <strong>{{ object.device_name }}</strong> exactly to confirm</label>
+  <input id="device-name" name="device_name" type="text" class="form-control mb-3" maxlength="64" required autocomplete="off" spellcheck="false">
+  <button class="btn btn-danger" type="submit">Confirm rollback — reboot without draining</button>
+</form>
+{% endif %}
+<a class="btn btn-outline-secondary mt-3" href="{{ object.get_absolute_url }}">Back to job</a>
+{% endblock %}

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from .. import archive, cancellation, __version__
 from ..netbox import Client, NetBoxError
 from .profile import Profile
-from . import remediation
+from . import remediation, f5_boot_rollback
 from .progress import Reporter, settings_from_env
 from .workflow import upgrade_device
 
@@ -176,12 +176,14 @@ def validate_assignment(job, apply):
         raise ValueError('Upgrade queue returned invalid job/device IDs')
     UUID(job['claim_token'])
     ipaddress.ip_address(job['hostname'])
-    if job.get('operation') not in {'audit', 'stage', 'upgrade', *remediation.CONFIG_OPERATIONS}:
+    if job.get('operation') not in {'audit', 'stage', 'upgrade', 'f5_rollback', *remediation.CONFIG_OPERATIONS}:
         raise ValueError('Upgrade queue returned an unknown operation')
     if job['operation'] not in remediation.READ_ONLY_OPERATIONS and not apply:
         raise ValueError('Upgrade queue returned a mutating job without --apply')
     if not isinstance(job.get('device'), str) or not job['device'].strip():
         raise ValueError('Upgrade queue returned an invalid device name')
+    if job['operation'] == 'f5_rollback':
+        return f5_boot_rollback.validate(job)
     if job['operation'] in remediation.CONFIG_OPERATIONS:
         return remediation.validate(job['profile'])
     return Profile.from_mapping(job['profile'], staging=job['operation'] == 'stage')
@@ -226,7 +228,8 @@ def execute_job(task, args, client, outbox):
                         task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))
                     code = 1 if failed or reporter.delivery_failed else 0
                     return Result(host=task.host, result=outcome, failed=bool(code), changed=changed)
-                result = upgrade_device(task, profile, options, reporter)
+                result = (f5_boot_rollback.run(task, profile, options, reporter) if job['operation'] == 'f5_rollback'
+                          else upgrade_device(task, profile, options, reporter))
                 code = 1 if result.failed or reporter.delivery_failed else 0
                 return Result(host=task.host, result=result.result, failed=bool(code), changed=result.changed)
             except Exception as exc:
@@ -293,7 +296,7 @@ def run_queue(args, client, outbox, login):
                             return 1
                     else:
                         response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply,
-                                                             'worker_version': __version__, 'supports_cancellation': True})
+                                                             'worker_version': __version__, 'supports_cancellation': True, 'supports_f5_rollback': True})
                         jobs = response.get('jobs')
                         if not isinstance(jobs, list) or len(jobs) > free or any(not isinstance(j, dict) for j in jobs):
                             raise NetBoxError('Upgrade queue returned an invalid batch')

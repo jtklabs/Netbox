@@ -20,6 +20,18 @@
 {% elif object.cancel_acknowledged_at %}
 <div class="alert alert-info" role="status">Worker stopped at {{ object.cancel_acknowledged_at }}. {% if object.needs_recovery %}Changes had already been authorized; verify the device state and record recovery below before scheduling more work.{% endif %}</div>
 {% endif %}
+{% if object.rollback_of_id %}
+<div class="alert alert-warning">Rollback of <a href="{{ object.rollback_of.get_absolute_url }}">job {{ object.rollback_of_id }}</a> to <strong>{{ object.rollback_plan.volume }}</strong>. Immediate reboot when the poller picks it up; no traffic drain or failover step. {% if object.rollback_plan.note %}{{ object.rollback_plan.note }}{% endif %}</div>
+{% endif %}
+{% if f5_rollback %}
+<div class="card mb-3"><h5 class="card-header">F5 rollback</h5><div class="card-body">
+  {% if f5_rollback.previous %}<p><a href="{{ f5_rollback.previous.get_absolute_url }}">View rollback job {{ f5_rollback.previous.pk }}</a></p>{% endif %}
+  {% if f5_rollback.error %}<p class="text-muted">{{ f5_rollback.error }}</p>{% else %}
+  <p>Boot back to <strong>{{ f5_rollback.plan.volume }}</strong>. This immediately reboots the device once picked up by the poller. <strong>No traffic drain.</strong></p>
+  <a class="btn btn-danger" href="{% url 'plugins:netbox_discovery:upgradejob_rollback' pk=object.pk %}">Roll back F5</a>
+  {% endif %}
+</div></div>
+{% endif %}
 <div class="row"><div class="col-lg-6">
   <div class="card"><h5 class="card-header">Scheduled work</h5><div class="card-body">
     <table class="table attr-table">

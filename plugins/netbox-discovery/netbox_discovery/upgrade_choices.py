@@ -6,6 +6,7 @@ class UpgradeOperationChoices(ChoiceSet):
                ('audit_config', 'Audit configuration standards (read-only)', 'teal'),
                ('stage', 'Stage image only', 'blue'),
                ('upgrade', 'Install upgrade', 'orange'),
+               ('f5_rollback', 'F5 boot partition rollback', 'red'),
                ('remediate', 'Remediate configuration', 'purple')]
 
 

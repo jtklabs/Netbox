@@ -27,9 +27,16 @@ def waiting_details(job, user, now=None):
         return result('scheduled', 'Waiting for scheduled start', 'This job is not due yet. See its scheduled start time.')
 
     active = UpgradeJob.objects.filter(status__in=ACTIVE)
-    same_device = active.filter(device_id=job.device_id)
+    same_device = UpgradeJob.objects.filter(device_id=job.device_id).filter(
+        Q(status__in=ACTIVE) | Q(operation='f5_rollback', status__in=('pending', 'held'))).exclude(pk=job.pk)
+    if job.operation == 'f5_rollback':
+        same_device = same_device.exclude(pk=job.rollback_of_id)
     if same_device.exists():
         return result('device_busy', 'Waiting for device', 'Another job still owns this device.', same_device)
+    if job.operation == 'f5_rollback':
+        return result('pickup', 'Awaiting rollback pickup',
+                      f'Waiting for poller {job.poller.name} running worker 0.2.3 or newer with a free slot. '
+                      'The device will reboot immediately when picked up, without a traffic drain.')
     if queue.hold_reason(job):
         return result('hold', 'Waiting for review',
                       'A related job failed or requires recovery. The poller will hold this job for review.')

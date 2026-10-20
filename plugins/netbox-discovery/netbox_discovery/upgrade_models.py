@@ -15,6 +15,9 @@ from .upgrade_choices import ACTIVE, UpgradeGroupSourceChoices, UpgradeOperation
 class UpgradeJob(PrimaryModel):
     audit_run = models.ForeignKey('netbox_discovery.AuditRun', on_delete=models.PROTECT,
                                   null=True, blank=True, editable=False, related_name='jobs')
+    rollback_of = models.ForeignKey('self', on_delete=models.PROTECT, null=True, blank=True,
+                                      editable=False, related_name='rollback_jobs')
+    rollback_plan = models.JSONField(default=dict, blank=True, editable=False)
     batch_id = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
     device = models.ForeignKey('dcim.Device', on_delete=models.PROTECT, related_name='upgrade_jobs')
     poller = models.ForeignKey('netbox_discovery.DiscoveryPoller', on_delete=models.PROTECT,
