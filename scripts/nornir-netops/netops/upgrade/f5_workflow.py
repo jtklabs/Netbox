@@ -2,7 +2,7 @@
 
 Order of operations under --apply: save the configuration, baseline, verify or
 upload the image, the ready gate, UCS backup, install to a boot volume, reboot,
-reconnect, then convergence. Standalone units can disable VIPs after install,
+reconnect, convergence, then one new WAF request log. Standalone units can disable VIPs after install,
 observe connections before reboot, and restore them after reconnect.
 Without draining, an optional failover happens before installation as usual.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 from nornir.core.task import Result
 
 from .. import f5_waf
-from . import checks, f5, f5_drain
+from . import checks, f5, f5_drain, f5_requests
 from .images import local_image
 from .profile import F5_IMAGE, f5_version
 from .workflow import comparison_report, converge, device_lock, settle
@@ -316,9 +316,9 @@ def upgrade_device(task, profile, options, reporter):
     phases = {"connecting": 1, "saving_config": 1, "precheck": 1, "precheck_complete": 1, "ready": 1,
               "staging": 2, "image_verification": 2, "backing_up": 3, "failing_over": 4, "installing": 4,
               "draining": 4, "rebooting": 5, "reconnecting": 6, "settling": 7,
-              "postcheck": 8, "validating": 8, "converging": 8}
+              "postcheck": 8, "validating": 8, "converging": 8, "waf_requests": 9}
     labels = {1: "Prechecks", 2: "Image staging", 3: "UCS backup", 4: "Drain and install",
-              5: "Reboot", 6: "Reconnect", 7: "Settling", 8: "Health validation"}
+              5: "Reboot", 6: "Reconnect", 7: "Settling", 8: "Health validation", 9: "WAF request logs"}
 
     def emit(stage, message, payload=None, attachment=None):
         nonlocal phase_step, phase_started
@@ -327,10 +327,12 @@ def upgrade_device(task, profile, options, reporter):
         step = (7 if stage == "converging" and phase_step < 8 else phases.get(stage, phase_step))
         if step > phase_step:
             phase_step, phase_started = step, now
-        phase = {"step": phase_step, "total": 2 if stage_only else 8, "name": labels[phase_step],
+        phase = {"step": phase_step, "total": 2 if stage_only else 9, "name": labels[phase_step],
                  "elapsed_seconds": int(now - started), "phase_elapsed_seconds": int(now - phase_started)}
         payload["progress_summary"] = {**payload.get("progress_summary", {}), "phase": phase}
         message = f"Step {phase_step}/{phase['total']} · {labels[phase_step]} · {int(now - started)}s elapsed: {message}"
+        if plan.get("waf_requests"):
+            payload["progress_summary"]["waf_requests"] = dict(plan["waf_requests"])
         if plan.get("connection_drain"):
             payload = dict(payload or {})
             record = plan["connection_drain"]
@@ -459,6 +461,7 @@ def upgrade_device(task, profile, options, reporter):
                 drain = plan.get('connection_drain')
                 if drain:
                     f5_drain.hold_after_reboot(client, drain, emit)
+                f5_requests.mark_reconnected(client, before, plan)
                 emit("settling", "Target volume is reachable; waiting before health validation")
                 settle(emit, options)
                 def finish_validation(after, findings):
@@ -485,12 +488,19 @@ def upgrade_device(task, profile, options, reporter):
                         # not leave traffic enabled on an unhealthy unit.
                         f5_drain.disable_again(client, drain, emit)
                         raise
+                def finish_upgrade(after, findings):
+                    if drain:
+                        after, findings = finish_validation(after, findings)
+                    # This gate runs outside restoration's failure handler: a
+                    # quiet log must not disable traffic that passed health checks.
+                    f5_requests.wait_for_request(client, after, plan, options, emit)
+                    return after, findings
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
                                 lambda after: target_findings(after, profile, plan),
                                 compare_snapshots=(lambda before, after, **kwargs:
                                     f5_drain.compare_while_drained(before, after, drain, **kwargs)) if drain else None,
-                                on_validated=finish_validation if drain else None)
+                                on_validated=finish_upgrade)
             finally:
                 close(client)
     except Exception as exc:

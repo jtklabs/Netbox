@@ -580,7 +580,9 @@ in seconds. The saved-profile editor exposes **Post-upgrade validation timeout
 (seconds)**: use 7200 for a two-hour F5 WAF loading window and, for example,
 600 for Cisco. Blank uses the worker setting (default 600). This applies to
 post-upgrade validation, not individual HTTP requests, install or reconnect
-timeouts. Jobs retain the value captured when scheduled; changing a saved
+timeouts. F5 upgrades use a separate window of the same length for their final
+post-upgrade WAF request-log check after health checks and traffic restoration.
+Jobs retain the value captured when scheduled; changing a saved
 profile does not change an existing job. Update both the Discovery plugin and
 worker before using this field; no database migration is required.
 
