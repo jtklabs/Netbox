@@ -654,6 +654,23 @@ Before changes, the NetBox ready acknowledgement and any configured webhook must
 
 If progress remains undeliverable, the poller reports an error and claims no additional work until delivery succeeds. Permission changes or manually closing a job can make old reports permanently unreportable: inspect the corresponding archive and NetBox state before moving those outbox files aside. Never replay a start command manually from the spool. If the entire remote is down, the detail page warns about a stale heartbeat and allows verified recovery of a job that had started; stored stale status transitions occur when its worker next checks in. The API also exposes `heartbeat_stale` and `needs_recovery` without waiting for another check-in.
 
+## Manually passing F5 validation
+
+Worker **0.2.4** exposes **Force pass step 8** during health validation and
+**Force pass step 9** during the WAF request-log check. The job detail page
+requires a reason and view/change/apply job permissions. Step 8 accepts health
+differences and restores originally enabled virtual servers; it does not skip
+step 9. Step 9 completes the unit successfully with an explicit override warning.
+Requests are audited with operator, time and reason and delivered to this job's
+worker through report/heartbeat responses. Only the worker completes the job.
+
+Deploy the plugin with migration `0026_f5_validation_overrides` and the new worker
+together. After a validation timeout, upgraded scheduled F5 jobs wait for a
+manual pass or cancellation, retaining their worker slot and device reservation.
+Traffic remains disabled at step 8 for drained jobs and restored at step 9.
+Older running workers and jobs that have ended cannot accept the new controls.
+See [F5 validation](UPGRADES.md#manually-passing-f5-validation) for details.
+
 ## F5 boot partition rollback
 
 On an F5 upgrade job, choose **Roll back F5**. The confirmation page names the device, address and recorded old partition and requires typing the exact device name. It warns **Immediate reboot. No traffic drain.** The request is due now, expires if not picked up within 15 minutes, and runs through the owning poller as a separate linked job. Pickup depends on a free worker slot; appliance reboot and startup take time.
@@ -674,6 +691,7 @@ All paths below are under `/api/plugins/discovery/upgrade-jobs/` and use the nor
 - `POST check-in/`: `{"name":"checkmk-us","limit":3,"apply":true,"worker_version":"0.2.3","supports_cancellation":true,"supports_f5_rollback":true}`. Only workers implementing the stop handshake should advertise `supports_cancellation`; the cancellation capability is frozen per claim. `supports_f5_rollback` permits claiming confirmed boot-partition rollback jobs. Atomically returns due job assignments and private claim tokens. This is a claim, not a read-only poll, and is not blindly retried.
 - `POST {id}/report/`: claim token and either `heartbeat: true`, or `sequence`, `stage`, `message`, optional `run_id` and `summary`. The worker uses `ready` as the synchronous start gate. Repeated/older event sequences cannot overwrite newer state. Responses include `cancel_requested`; a capable worker must stop before doing more device work and emit `cancelled` only after its workflow has unwound. A pending cancellation prevents `ready` from authorizing changes and prevents an in-flight completion from releasing the device.
 - `POST {id}/cancel/`: cancel a pending/held job or request cancellation of an active job (optional `reason`); or `{"recovered":true,"reason":"..."}` to release a verified recovery case.
+- `POST {id}/force-validation/`: `{"step":8,"reason":"Verified the health differences"}` or step `9`. Requests a manual pass for the current running F5 validation gate; requires view/change/apply access. Returns the job ID, current status and `validation_overrides`. Report/heartbeat responses advertise `supports_validation_overrides` and deliver these records to the claimed worker.
 - `POST {id}/rollback/`: `{"device_name":"exact-device-name"}` confirms immediate F5 boot partition rollback without draining. The ID names the original upgrade. Returns the linked rollback job `id`, `status` and `rollback_of`; rejects a running source or an unknown old partition.
 - `POST {id}/requeue/` with an empty body: a new pending job for a closed job's device, profile and operation, due now with the same window length, in a new batch. Returns `201` with the new `id`, `batch_id` and window; `409` when the job is not closed or the device already has a queued or active job. Needs `add` (and `apply` for staging/upgrades) like `schedule/`.
 - `GET /` and `GET {id}/`: current queue and progress for a dashboard. These endpoints never expose claim tokens and reject ordinary PATCH/DELETE operations.

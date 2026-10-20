@@ -163,6 +163,7 @@ urlpatterns += [
     path('upgrades/<int:pk>/edit/', upgrade_views.UpgradeJobEditView.as_view(), name='upgradejob_edit'),
     path('upgrades/<int:pk>/rollback/', upgrade_views.UpgradeRollbackView.as_view(), name='upgradejob_rollback'),
     path('upgrades/<int:pk>/cancel/', upgrade_views.UpgradeCancelView.as_view(), name='upgradejob_cancel'),
+    path('upgrades/<int:pk>/force-validation/', upgrade_views.UpgradeForceValidationView.as_view(), name='upgradejob_force_validation'),
     path('upgrades/<int:pk>/changelog/', ObjectChangeLogView.as_view(), name='upgradejob_changelog',
          kwargs={'model': UpgradeJob}),
     path('upgrades/<int:pk>/hold/', upgrade_views.UpgradeHoldView.as_view(), name='upgradejob_hold'),

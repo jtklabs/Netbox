@@ -459,7 +459,7 @@ def settle(emit, options):
 
 
 def converge(emit, options, before, plan, reporter, host, collect_after, extra_findings,
-             *, compare_snapshots=None, on_validated=None):
+             *, compare_snapshots=None, on_validated=None, validation_override=None):
     """Compare fresh baselines until two consecutive clean passes, or the deadline.
 
     The validation window starts once the first post-check has been collected,
@@ -502,13 +502,17 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
                                    **({"waf": waf_summary} if waf_summary else {}),
                                    "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})
-        if consecutive >= 2:
+        overridden = bool(validation_override and validation_override(
+            timed_out=consecutive < 2 and time.monotonic() >= deadline))
+        if consecutive >= 2 or overridden:
             if on_validated:
                 after, findings = on_validated(after, findings)
-            status = "completed_with_warnings" if findings else "completed"
+            status = "completed_with_warnings" if findings or plan.get("validation_overrides") else "completed"
             fields, attachment = comparison_report(reporter, host, before, after, findings, plan, status)
             message = ("Target installed; enabled checks passed; running-config matching skipped"
                        if skip_running_config else "Target installed and baseline restored")
+            if plan.get("validation_overrides"):
+                message = "Target installed; validation manually passed for step(s) " + ", ".join(plan["validation_overrides"])
             emit(status, message, {"upgrade_plan": plan, **fields}, attachment)
             return Result(host=host, result={"status": status, "findings": findings}, changed=True)
         if time.monotonic() >= deadline:

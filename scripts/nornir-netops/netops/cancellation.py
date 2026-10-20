@@ -21,10 +21,26 @@ class Cancelled(BaseException):
 class Control:
     def __init__(self):
         self.requested = threading.Event()
+        self.validation_overrides = {}
+        self.supports_validation_overrides = False
+        self.lock = threading.Lock()
 
     def observe(self, response):
         if response.get('cancel_requested') is True:
             self.requested.set()
+        if response.get('supports_validation_overrides') is True:
+            with self.lock:
+                self.supports_validation_overrides = True
+                # Requests are immutable. An older heartbeat response arriving
+                # after a progress response must not erase an accepted request.
+                self.validation_overrides = {**self.validation_overrides,
+                                             **response.get('validation_overrides', {})}
+
+
+def validation_control():
+    """The current job's server-confirmed manual validation channel, if available."""
+    control = _current.get()
+    return control if control and control.supports_validation_overrides else None
 
 
 @contextmanager

@@ -23,6 +23,30 @@
 {% if object.rollback_of_id %}
 <div class="alert alert-warning">Rollback of <a href="{{ object.rollback_of.get_absolute_url }}">job {{ object.rollback_of_id }}</a> to <strong>{{ object.rollback_plan.volume }}</strong>. Immediate reboot when the poller picks it up; no traffic drain or failover step. {% if object.rollback_plan.note %}{{ object.rollback_plan.note }}{% endif %}</div>
 {% endif %}
+{% if manual_validation_step %}
+<div class="card mb-3"><h5 class="card-header">Manual F5 validation</h5><div class="card-body">
+  {% if manual_validation_step == 8 %}
+  <p>Force pass step 8 to accept the current health differences and restore the original enabled virtual servers. Step 9 still checks WAF request logs.</p>
+  {% else %}
+  <p>Force pass step 9 to accept the missing WAF request log and complete this unit successfully with a manual-override warning.</p>
+  {% endif %}
+  <form method="post" action="{% url 'plugins:netbox_discovery:upgradejob_force_validation' pk=object.pk %}">{% csrf_token %}
+    <input type="hidden" name="step" value="{{ manual_validation_step }}">
+    <label for="validation-reason">Reason for manually passing this step</label>
+    <textarea id="validation-reason" name="reason" class="form-control" maxlength="1000" required></textarea>
+    <button class="btn btn-warning mt-2">Force pass step {{ manual_validation_step }}</button>
+  </form>
+</div></div>
+{% endif %}
+{% if object.validation_overrides %}
+<div class="alert alert-warning" role="status">
+  <strong>Manual validation requested</strong>
+  {% for step, override in object.validation_overrides.items %}
+  <div>Step {{ step }} — {{ override.username }} at {{ override.timestamp }}: {{ override.reason }}</div>
+  {% endfor %}
+  <div>The progress log records when the worker accepts each override.</div>
+</div>
+{% endif %}
 {% if f5_rollback %}
 <div class="card mb-3"><h5 class="card-header">F5 rollback</h5><div class="card-body">
   {% if f5_rollback.previous %}<p><a href="{{ f5_rollback.previous.get_absolute_url }}">View rollback job {{ f5_rollback.previous.pk }}</a></p>{% endif %}
