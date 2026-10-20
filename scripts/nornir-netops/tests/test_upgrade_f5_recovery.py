@@ -145,7 +145,8 @@ def test_phase_progress_is_ordered(profile, options, unit):
     assert not result.failed
     phases = [call.args[3]["progress_summary"]["phase"] for call in reporter.emit.call_args_list]
     steps = [p["step"] for p in phases]
-    assert steps == sorted(steps) and steps[-1] == 8
+    assert steps == sorted(steps) and steps[-1] == 9
+    assert all(p["total"] == 9 for p in phases)
     assert all(p["elapsed_seconds"] >= p["phase_elapsed_seconds"] >= 0 for p in phases)
     assert any(p["step"] == 7 for p in phases)
 

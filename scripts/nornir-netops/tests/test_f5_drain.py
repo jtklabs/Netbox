@@ -356,6 +356,16 @@ def test_waf_loading_keeps_vips_disabled_until_two_clean_passes(profile, options
                 snapshot['errors']['waf_ready'] = 'ASM still loading'
         return snapshot
     monkeypatch.setattr(f5, 'collect', observed)
+    from netops.upgrade import f5_requests
+    request = unit.request
+    def with_logs(method, path, payload=None, timeout=None):
+        if path == f5_requests.REQUESTS:
+            assert unit.virtuals['/Common/vs-web']
+            return {'items': [{'id': 'new', 'requestDatetime': '2026-10-20T10:00:01Z'}]}
+        if path == '/mgmt/tm/util/bash' and f5_requests.CLOCK in (payload or {}).get('utilCmdArgs', ''):
+            return {'commandResult': '2026-10-20T10:00:00Z'}
+        return request(method, path, payload, timeout)
+    monkeypatch.setattr(unit, 'request', with_logs)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert not result.failed
     assert len(attempts) == 5  # two loading, two ready, final restored collection

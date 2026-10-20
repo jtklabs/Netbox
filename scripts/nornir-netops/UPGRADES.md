@@ -754,7 +754,7 @@ Cisco profiles can use `validation_timeout: 600` for ten minutes. In NetBox,
 edit the saved profile's **Post-upgrade validation timeout (seconds)** field.
 The profile value overrides the worker's `--validation-timeout`; omitted or
 null values (a blank form field) retain the worker setting, whose default is
-600 seconds. The worker finishes early once two consecutive checks pass.
+600 seconds. Health validation finishes early once two consecutive checks pass.
 Scheduled jobs keep the timeout from their profile snapshot; editing a saved
 profile affects newly scheduled jobs, not existing jobs. Deploy both the
 Discovery plugin and worker before setting this field; no migration is needed.
@@ -766,15 +766,40 @@ with the configured settling interval before validation. The lab worker uses
 these settings. Timeout produces a failed validation/recovery result, never an
 automatic rollback. The previous boot volume remains recorded in the plan.
 
-NetBox job messages include the current step out of eight, its name and elapsed
+After health validation and restoration of the original virtual-server states,
+step 9 waits for **one** newly logged WAF request before completing the upgrade.
+It skips units without WAF, WAF units with zero policies, and units whose
+validated failover state is standby. All policy types count, including parents.
+Active units with policies must produce a qualifying request log; an empty log
+or an unreadable API is not a skip.
+
+The worker reads `/mgmt/tm/asm/events/requests`, selecting only the request ID
+and timestamp. The request must be newer than the device's UTC time recorded
+when the target boot volume reconnected. Existing logs cannot satisfy the check.
+If that clock read was unavailable, the final step retries it and uses the later
+boundary. No request bodies, URLs or client information are stored. This checks
+that logging has resumed; either an allowed or blocked request can satisfy it.
+It does not verify that every application is serving traffic.
+
+This step receives a **fresh** `validation_timeout` window, separate from health
+validation, and polls at `--poll-interval`. Transient HTTP/401 errors are retried
+with the existing token-refresh behavior until that window expires. Timeout
+leaves the job in recovery required and keeps already validated/restored traffic
+enabled. It does not trigger another drain or rollback. Local WAF request
+logging and incoming requests are required; remote-only logging cannot satisfy
+this check. The worker does not change logging settings or generate traffic.
+
+NetBox job messages include the current step out of nine, its name and elapsed
 time: prechecks, image staging, UCS backup, drain/install, reboot,
-reconnect, settling and health validation. Optional steps may be skipped; these
+reconnect, settling, health validation and WAF request logs. Optional steps may be skipped; these
 are workflow steps, not a percentage or estimated finish time. Validation
 summaries include expected/observed WAF policy counts, ASM readiness, clean-pass
 count and time remaining. The archive retains `pre`, the latest full `post`,
 all progress events, and (for drained upgrades) `post_before_restore` plus its
 findings. Each comparison refreshes `post`; it does not retain every full snapshot.
-NetBox keeps compact baseline and post-validation summaries.
+NetBox keeps compact baseline and post-validation summaries. The final
+`waf_requests` summary records passed/skipped/timed-out status, the time boundary,
+matching request ID/time when available, attempts and timeout.
 
 Authenticated UCS download links appear on job and device pages when NetBox
 can read the verified backup. Configure `netbox_discovery.ucs_download_roots`
