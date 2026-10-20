@@ -405,3 +405,141 @@ def test_contains_limits_mixed_check_count():
     policy['platforms']['cisco_ios']['contains'] = [{'regex': '^ok$'}] * 257
     with pytest.raises(ValueError, match='256'):
         validate_raw_commands(policy)
+
+
+@pytest.mark.parametrize('alias', ['infoblox_nios', 'infoblox-nios', 'infoblox', 'nios'])
+def test_infoblox_cli_audit_preview_apply_verify_and_repeat(tmp_path, monkeypatch, alias):
+    monkeypatch.setenv('NET_USER', 'operator')
+    monkeypatch.setenv('NET_PASS', 'test-password')
+    csv = tmp_path / 'devices.csv'
+    csv.write_text(f'host,name,platform,region\n192.0.2.1,dns1,{alias},us-east\n')
+    path = tmp_path / 'standards.yaml'
+    checks = {'commands': ['set tcp_timestamps enable', 'set tcp_timestamps disable'],
+              'show': 'show tcp_timestamps',
+              'contains': [{'regex': r'^TCP timestamps are disabled\.$'}]}
+    policy = {'enabled': True, 'platforms': {'infoblox_nios': {
+        'regions': {'us-east': checks}}}}
+    path.write_text(yaml.safe_dump({'raw_commands': policy}))
+    report = tmp_path / 'report.json'
+    state = {'output': 'TCP timestamps are enabled.', 'calls': [], 'closed': []}
+
+    class Connection:
+        def send_command(self, command, read_timeout):
+            assert read_timeout == 60
+            state['calls'].append(command)
+            if command == 'show tcp_timestamps':
+                return state['output']
+            assert command in checks['commands']
+            state['output'] = 'TCP timestamps are disabled.'
+            return ''
+
+    def connect(host, kind, config):
+        assert kind == 'netmiko' and host.platform == 'generic'
+        assert host.username == 'operator' and host.password == 'test-password'
+        return Connection()
+
+    def close(host, kind):
+        assert host.platform == 'infoblox_nios'
+        state['closed'].append(kind)
+
+    monkeypatch.setattr(Host, 'get_connection', connect)
+    monkeypatch.setattr(Host, 'close_connection', close)
+    monkeypatch.setattr(runner, 'netmiko_send_config', lambda *a, **kw: pytest.fail('NIOS has no configuration mode'))
+
+    def invoke(*flags):
+        code = cli.main(['raw-commands', '--no-env-file', '--csv', str(csv),
+                         '--standards', str(path), '--report', str(report), *flags])
+        return code, json.loads(report.read_text())['devices']['dns1']
+
+    assert invoke('--add', '--apply', '--yes', '--fail-on-diff')[0] == cli.EXIT_DIFF
+    assert state['calls'] == ['show tcp_timestamps']
+    state['calls'].clear()
+    code, row = invoke('--replace', '--fail-on-diff')
+    assert code == cli.EXIT_DIFF and not row['applied']
+    assert row['commands'] == checks['commands'] and row['save_command'] is None
+    assert state['calls'] == ['show tcp_timestamps']
+    state['calls'].clear()
+    code, row = invoke('--replace', '--apply', '--yes')
+    assert code == cli.EXIT_OK and row['verified'] and row['applied']
+    assert row['platform'] == 'infoblox_nios' and row['selected_region'] == 'us-east'
+    assert row['saved'] is None and row['save_command'] is None
+    assert state['calls'] == ['show tcp_timestamps', *checks['commands'], 'show tcp_timestamps']
+    assert row['config_after']['failed_checks'] == []
+    state['calls'].clear()
+    assert invoke('--replace', '--apply', '--yes')[1]['compliant']
+    assert state['calls'] == ['show tcp_timestamps']
+    assert state['closed'] == ['netmiko'] * 4
+
+
+@pytest.mark.parametrize('failure', ['read', 'empty', 'command', 'timeout', 'verify', 'connect'])
+def test_infoblox_failures_stop_and_restore_platform(monkeypatch, failure):
+    calls, closed = [], []
+    checks = {'commands': ['set tcp_timestamps enable', 'set tcp_timestamps disable'],
+              'show': 'show tcp_timestamps', 'expect': ['TCP timestamps are disabled.']}
+
+    class Connection:
+        def send_command(self, command, **kwargs):
+            calls.append(command)
+            if command == 'show tcp_timestamps':
+                return {'read': 'Unknown command: tcp_timestamps', 'empty': ''}.get(
+                    failure, 'TCP timestamps are enabled.')
+            if command == checks['commands'][0]:
+                if failure == 'timeout':
+                    raise TimeoutError('Prompt not returned')
+                return ''
+            if failure == 'command':
+                return 'Error: command rejected'
+            return ''
+
+    def connect(host, kind, config):
+        assert host.platform == 'generic'
+        if failure == 'connect':
+            raise ConnectionError('Login failed')
+        return Connection()
+
+    monkeypatch.setattr(Host, 'get_connection', connect)
+    monkeypatch.setattr(Host, 'close_connection', lambda host, kind: closed.append(kind))
+    host = Host('dns', platform='infoblox-nios')
+    task = SimpleNamespace(host=host, nornir=SimpleNamespace(config=None))
+    result = raw.run(task, [], {'raw_commands': {'enabled': True, 'platforms': {
+        'infoblox_nios': checks}}}, 'replace', False, True, True)
+    assert result.failed and host.platform == 'infoblox-nios'
+    assert result.result['saved'] is None
+    assert closed == ([] if failure == 'connect' else ['netmiko'])
+    if failure in ('read', 'empty', 'connect'):
+        assert not result.changed and not result.result['applied']
+        assert calls == ([] if failure == 'connect' else [checks['show']])
+    elif failure == 'timeout':
+        assert result.changed and calls == [checks['show'], checks['commands'][0]]
+    elif failure == 'command':
+        assert result.changed and result.result['applied']
+        assert calls == [checks['show'], *checks['commands']]
+    else:
+        assert result.changed and result.result['verified'] is False
+        assert result.result['missing_after'] == ['missing line: TCP timestamps are disabled.']
+        assert 'may remain active' in str(result.exception)
+
+
+@pytest.mark.parametrize('regional', [False, True])
+@pytest.mark.parametrize('mutation', [
+    lambda p: p.pop('show'), lambda p: p.update(commands=['configure terminal']),
+    lambda p: p.update(commands=['set']), lambda p: p.update(commands=['y']),
+    lambda p: p.update(commands=['set tcp_timestamps disable; reboot']),
+    lambda p: p.update(commands=['set tcp_timestamps disable | show status']),
+    lambda p: p.update(commands=['set tcp_timestamps disable && reboot']),
+])
+def test_infoblox_validates_explicit_show_and_direct_commands(regional, mutation):
+    checks = {'commands': ['set tcp_timestamps disable'], 'show': 'show tcp_timestamps',
+              'contains': ['disabled']}
+    mutation(checks)
+    policy = {'enabled': True, 'platforms': {'infoblox_nios': (
+        {'regions': {'us': checks}} if regional else checks)}}
+    with pytest.raises(ValueError):
+        validate_raw_commands(policy)
+
+
+@pytest.mark.parametrize('output', ['Unknown command: bad', 'Invalid argument', 'Usage: set ...',
+                                    'Error setting value', 'Permission denied', 'Not authorized'])
+def test_infoblox_rejected_cli_output_cannot_pass_checks(output):
+    with pytest.raises(ValueError):
+        raw.checked_nios('show tcp_timestamps', output)

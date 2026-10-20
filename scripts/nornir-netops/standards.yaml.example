@@ -331,3 +331,10 @@ raw_commands:
         - set system services ssh macs hmac-sha2-512
       expect:
         - set system services ssh macs hmac-sha2-512
+    infoblox_nios:
+      # NIOS runs noninteractive set commands directly; explicit show is required.
+      commands:
+        - set tcp_timestamps disable
+      show: show tcp_timestamps
+      contains:
+        - regex: '^TCP timestamps are disabled\.\r?$'

@@ -28,12 +28,12 @@ raw_commands:
 
 ## Selection and execution
 
-- Supported platform keys: `cisco_ios`, `arista_eos`, `cisco_asa`, `cisco_nxos`, `juniper_junos`. Inventory aliases are normalized; YAML uses these canonical keys.
+- Supported platform keys: `cisco_ios`, `arista_eos`, `cisco_asa`, `cisco_nxos`, `juniper_junos`, `infoblox_nios`. Inventory aliases are normalized; YAML uses these canonical keys.
 - For each device, the nearest matching region in its NetBox site ancestry wins. If none matches, the platform default wins. CSV inventories use the `region` column. Region keys are lowercase NetBox slugs.
 - A region replaces the **whole bundle**, including its checks. Commands are never appended to the platform default. A platform may contain only regional bundles; an unmatched device then fails with an explicit error.
 - `enabled: true` is mandatory for a run. `false` blocks the feature and reports an error rather than a compliant result. The shipped example is disabled.
 - Commands run once, in the exact list order, only when checks report drift. No Jinja substitution, automatic removal commands, or automatic rollback commands are generated. Repeated commands and submode `exit` commands are preserved.
-- Supply configuration statements, one YAML string per command. The worker enters configuration mode and saves after verification. Omit `configure terminal`, `end`, save and commit commands. Interactive prompts, multiline banner bodies and operational command jobs are outside this feature.
+- Supply configuration statements, one YAML string per command. For Cisco and Arista, the worker enters configuration mode and saves after verification. Junos uses the transaction described below; Infoblox sends commands directly. Omit `configure terminal`, `end`, save and commit commands. Interactive prompts, multiline banner bodies and operational command jobs are outside this feature.
 - Execution requires replace mode. Add mode audits and reports drift without executing the bundle. Existing NetBox permissions, standard scope, `auto_remediable`, `allow_enforce`, job approval and revision snapshots still apply.
 
 ## Compliance and verification
@@ -51,7 +51,7 @@ reject:
 
 `expect` matches complete lines in the selected show output, ignoring leading and trailing whitespace. `contains` accepts literal strings and explicit `regex` items; `reject` forbids literal text anywhere in the output. Plain strings remain literal and case-sensitive, including strings containing regex punctuation. `expect` and `reject` do not accept regex items. Choose checks from the device's actual displayed configuration: spelling and algorithm order may differ from the input commands. All expected lines, required fragments and regex matches must exist, and every rejected fragment must be absent. A check covers only what it states; it does not infer encryption or MAC security from a command.
 
-By default, the worker reads `show running-config` on IOS, EOS, ASA and NX-OS, and `show configuration | display set` on Junos. Set `show` within a platform or regional bundle to select a different command. Checks are against that command's output; indentation is not a hierarchy selector. Choose sufficiently specific lines, and use the typed feature where its parser is needed to distinguish sections. An empty or rejected read fails instead of being considered compliant. Reports retain failed-check evidence rather than the full configuration.
+By default, the worker reads `show running-config` on IOS, EOS, ASA and NX-OS, and `show configuration | display set` on Junos. Set `show` within a platform or regional bundle to select a different command. Checks are against that command's output; indentation is not a hierarchy selector. Choose sufficiently specific lines, and use the typed feature where its parser is needed to distinguish sections. Infoblox requires an explicit `show` command in each bundle. An empty or rejected read fails instead of being considered compliant. Reports retain failed-check evidence rather than the full configuration.
 
 ### Regex checks in contains
 
@@ -116,9 +116,37 @@ If `hmac-sha2-512` is missing, the report also lists `missing text: hmac-sha2-51
 
 Each regional bundle is complete: omitting `show` there uses the platform's built-in default, not another bundle's custom command. Existing YAML without `show` or `contains` keeps its original behavior. On Junos the selected show command runs in operational context, including after the confirmed commit; the concurrent-change guard still compares configuration separately.
 
-Audits use the same checks as post-change verification. If checks already pass, the bundle is not sent. Failed verification fails the job and prevents saving. `--no-verify` is refused for an apply. Raw statements are visible in standards, revisions and reports; do not embed credentials in them.
+Audits use the same checks as post-change verification. If checks already pass, the bundle is not sent. Failed verification fails the job and prevents a separate save or commit confirmation. Infoblox has no separate save step; commands already accepted may remain active. `--no-verify` is refused for an apply. Raw statements are visible in standards, revisions and reports; do not embed credentials in them.
 
 Junos accepts `set`, `delete`, `activate`, `deactivate`, `insert` and `rename` statements. It uses a private candidate, checks for pending changes and commits, runs `commit check`, then `commit confirmed 5`, verifies the active configuration and confirms permanently only after the checks pass. An unconfirmed failed change is left to roll back. Junos requires saving and verification. There is no generated rollback after a permanent commit.
+
+## Infoblox NIOS
+
+Use `infoblox_nios` as the YAML platform key. NetBox's `infoblox-nios` platform slug is supported; CSV and direct-IP inventory also accept `infoblox`, `infoblox-nios`, and `nios`. Configure the platform explicitly rather than relying on autodetection.
+
+Every default or regional Infoblox bundle requires its own `show` command. For example, this standard disables TCP timestamps and verifies their displayed state:
+
+```yaml
+raw_commands:
+  enabled: true
+  platforms:
+    infoblox_nios:
+      commands:
+        - set tcp_timestamps disable
+      show: show tcp_timestamps
+      contains:
+        - regex: '^TCP timestamps are disabled\.\r?$'
+```
+
+The example uses Infoblox's documented [set tcp_timestamps](https://infoblox-docs.atlassian.net/wiki/spaces/nios86/pages/35984513/set%2Btcp_timestamps) and [show tcp_timestamps](https://infoblox-docs.atlassian.net/wiki/spaces/nios90/pages/280887741/show%2Btcp_timestamps) commands. Check command availability and output on the target NIOS release when writing other standards.
+
+The worker uses the generic SSH driver and sends each noninteractive `set` command individually, in order, at the NIOS prompt. It does not send `enable`, `configure terminal`, `write memory`, or `commit`. A rejected command or timeout stops the bundle. Interactive questions, confirmation responses, command chaining, and commands that interrupt the SSH connection are not supported.
+
+Read-only audits send only the selected `show` command. Applies require replace mode and verification, and run the same literal or regex checks afterward. Regional overrides and selection of multiple named raw standards work as on the other platforms. A regional bundle replaces the default completely, so it must include `commands`, `show`, and checks.
+
+NIOS commands may take effect before verification; failure does not undo earlier commands. Reports use `verified` for the readback result and leave `saved` and `save_command` null because no separate persistence step is performed. `--no-save` does not make NIOS commands temporary. Automatic rollback is unavailable.
+
+Deploy the updated Compliance plugin and netops worker **0.2.18** or newer before using Infoblox raw standards. No database migration is required. Validation rejects the new platform on older workers.
 
 ## Run
 

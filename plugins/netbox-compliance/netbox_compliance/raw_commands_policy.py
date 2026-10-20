@@ -2,7 +2,7 @@
 import re
 
 
-PLATFORMS = {'cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos', 'juniper_junos'}
+PLATFORMS = {'cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos', 'juniper_junos', 'infoblox_nios'}
 BUNDLE_KEYS = {'commands', 'show', 'expect', 'contains', 'reject'}
 SHOW_FILTERS = {'include', 'exclude', 'begin', 'section', 'count', 'match', 'except',
                 'find', 'display', 'no-more', 'trim'}
@@ -39,6 +39,8 @@ def validate_raw_commands(settings):
     def bundle(value, platform, label):
         mapping(value, BUNDLE_KEYS, label)
         lines(value.get('commands'), label + '.commands')
+        if platform == 'infoblox_nios' and 'show' not in value:
+            raise ValueError(f'{label}.show is required for Infoblox NIOS audit and verification.')
         if 'show' in value:
             command = value['show']
             lines([command], label + '.show')
@@ -56,7 +58,11 @@ def validate_raw_commands(settings):
             raise ValueError(f'{label} requires expect, contains or reject checks for audit and verification.')
         for command in value['commands']:
             words = command.strip().lower().split()
-            if platform == 'juniper_junos':
+            if platform == 'infoblox_nios':
+                if (words[0] != 'set' or len(words) < 2
+                        or any(token in command for token in (';', '|', '&', '>', '<', '`', '$('))):
+                    raise ValueError(f'{label}: Infoblox requires one noninteractive set command per item.')
+            elif platform == 'juniper_junos':
                 if words[0] not in ('set', 'delete', 'activate', 'deactivate', 'insert', 'rename') or ';' in command or '|' in command:
                     raise ValueError(f'{label}: Junos requires configuration statements; commit is managed by the worker.')
             elif words[0] in ('conf', 'configure', 'end', 'write', 'wr', 'copy', 'reload', 'exit-config', 'commit'):
