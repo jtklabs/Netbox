@@ -80,11 +80,8 @@ def delta_section(title, before, after):
         if old is None or new is None:
             lines.append(f"| {key} | {'-' if old is None else len(old)} | {'-' if new is None else len(new)} | | | not collected on one side | |")
             continue
-        if key == "waf_policies":
-            lines.append(f"| {key} (count only) | {len(old)} | {len(new)} | | | | |")
-            continue
         try:
-            delta = checks.pool_delta(old, new) if key == "pools" else table_delta(old, new)
+            delta = checks.object_comparison(key, old, new) if key in checks.F5_THRESHOLDS else table_delta(old, new)
         except ValueError as exc:
             lines.append(f"| {key} | {len(old)} | {len(new)} | | | | unavailable |")
             details += [f"### {key}", "", str(exc), ""]
@@ -202,10 +199,24 @@ def build(host, before, after, findings, plan, status):
              f"- Outcome: **{status}**",
              f"- Profile: {plan.get('profile', '?')}; target {plan.get('target_version', '?')}",
              f"- Software: {versions(before)} before, {versions(after)} after",
-             "- Method: pools are matched by full name and changes list individual fields; other tables are compared as unordered sets of stable fields. Ages, uptimes, timers and timestamps are excluded or masked.",
+             "- Method: BIG-IP traffic objects and WAF policies are matched by full name and changes list individual collected fields; other tables are compared as unordered sets of stable fields. Ages, uptimes, timers and timestamps are excluded or masked.",
              "", "## Findings", "",
              f"Errors ({len(errors)}):"] + [f"- {checks.describe_finding(f)}" for f in errors] + ["", f"Warnings ({len(warnings)}):"] + [
              f"- {f['check']}: {f.get('message', f.get('interface', ''))}" for f in warnings] + [""]
+    comparisons = checks.threshold_summary(before, after, plan.get('approved_profile', {}))
+    if comparisons:
+        lines += ["## Object validation thresholds", "",
+                  "Each category passes independently. Unchanged objects / all distinct identities before or after; additions, removals and changed objects count against the threshold. Two empty inventories match at 100%.", "",
+                  "| Category | Unchanged / Total | Unchanged % | Required % | Result |",
+                  "| --- | --- | --- | --- | --- |"]
+        for key, result in comparisons.items():
+            if 'message' in result:
+                lines.append(f"| {key} | | | | Unavailable: {result['message']} |")
+            else:
+                lines.append(f"| {key} | {result['unchanged']} / {result['total_objects']} | "
+                             f"{result['unchanged_percent']:.2f} | {result['required_percent']} | "
+                             f"{'Pass' if result['threshold_passed'] else 'Fail'} |")
+        lines.append("")
     if plan.get('validation_overrides'):
         lines += ["## Manual validation", "",
                   "The following checks were accepted by an operator, not automatically validated.", ""]

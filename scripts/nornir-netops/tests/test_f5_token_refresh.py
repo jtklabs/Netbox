@@ -119,7 +119,8 @@ def test_postcheck_recovers_policy_and_readiness_queries_across_expirations(clie
         if path == '/mgmt/tm/sys/provision':
             return response(body={'items': [{'name': 'asm', 'level': 'nominal'}]})
         if path == f5.ASM_POLICIES:
-            return response(body={'items': [{'type': 'parent'}, {'type': 'security'}]})
+            return response(body={'items': [{'fullPath': '/Common/parent', 'type': 'parent'},
+                                            {'fullPath': '/Common/security', 'type': 'security'}]})
         if path == '/mgmt/tm/util/bash':
             return response(body={'commandResult': '1'})
         return response(body=backend.request(method, path, json))

@@ -20,6 +20,34 @@ from .test_upgrades import UpgradeFixture, PROFILE
 
 
 class JobProfileTest(UpgradeFixture, TestCase):
+    def test_f5_thresholds_remain_in_yaml_and_frozen_assignments(self):
+        plan = {**PROFILE, 'image': 'BIGIP-17.5.1.10-0.0.35.iso',
+                'f5_ltm_min_unchanged_percent': 90, 'f5_waf_min_unchanged_percent': 100}
+        data = {'name': 'F5 thresholds', 'kind': 'upgrade', 'upgrade_yaml': yaml.safe_dump(plan),
+                'device_types': [self.device.device_type_id]}
+        form = JobProfileForm(data, instance=self.upgrade, user=self.user)
+        self.assertTrue(form.is_valid(), form.errors)
+        saved = form.save()
+        edit = JobProfileForm(instance=saved)
+        for key in ('f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent'):
+            self.assertNotIn(key, edit.fields)
+            self.assertEqual(yaml.safe_load(edit.initial['upgrade_yaml'])[key], plan[key])
+        job = queue.schedule(self.user, {**self.defaults, 'profile_source': 'saved',
+                                         'saved_profile': saved.pk})[0]
+        saved.plan['f5_ltm_min_unchanged_percent'] = 50
+        saved.save()
+        self.assertEqual(queue.assignment(job)['profile']['f5_ltm_min_unchanged_percent'], 90)
+
+    def test_f5_threshold_intake_rejects_invalid_values_and_other_families(self):
+        for key in ('f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent'):
+            for value in (-1, 101, True, False, None, '90', 90.5):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(queue.QueueError, key):
+                    queue.validate_profile({**PROFILE, 'image': 'BIGIP.iso', key: value})
+            with self.assertRaisesRegex(queue.QueueError, 'BIG-IP'):
+                queue.validate_profile({**PROFILE, key: 90})
+            for value in (0, 90, 100):
+                queue.validate_profile({**PROFILE, 'image': 'BIGIP.iso', key: value})
+
     def test_clearpass_approval_checkbox_roundtrip(self):
         data = {'name': 'ClearPass NTP', 'kind': 'remediate', 'features': ['ntp'], 'remediation_mode': 'add',
                 'allow_clearpass_cluster_changes': True}

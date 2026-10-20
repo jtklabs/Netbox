@@ -493,7 +493,7 @@ def upgrade_device(task, profile, options, reporter):
                             if any(restored.get(row['name']) != row['enabled'] for row in drain['virtual_servers']):
                                 raise RuntimeError('Original virtual-server states could not be confirmed after restoration')
                         final = f5.collect(client, lambda path: emit('postcheck', path))
-                        final_findings = checks.compare(before, final) + target_findings(final, profile, plan)
+                        final_findings = checks.compare(before, final, **thresholds) + target_findings(final, profile, plan)
                         final_findings = f5_validation.findings_after_override(final_findings, plan)
                         emit('validating', 'Final collection after restoring original virtual-server states',
                              {'post': final, 'findings': final_findings,
@@ -532,11 +532,15 @@ def upgrade_device(task, profile, options, reporter):
                         plan['waf_requests']['status'] = 'manually_passed'
                     return after, findings
                 validation_gate = 8
+                thresholds = {key: getattr(profile, key) for key in set(checks.F5_THRESHOLDS.values())}
+                def compare_health(before, after, **kwargs):
+                    if drain:
+                        return f5_drain.compare_while_drained(before, after, drain, **kwargs, **thresholds)
+                    return checks.compare(before, after, **kwargs, **thresholds)
                 return converge(emit, options, before, plan, reporter, host,
                                 lambda: f5.collect(client, lambda path: emit("postcheck", path)),
                                 lambda after: target_findings(after, profile, plan),
-                                compare_snapshots=(lambda before, after, **kwargs:
-                                    f5_drain.compare_while_drained(before, after, drain, **kwargs)) if drain else None,
+                                compare_snapshots=compare_health,
                                 on_validated=finish_upgrade,
                                 validation_override=lambda **kwargs: f5_validation.forced(plan, 8, emit, **kwargs))
             finally:
