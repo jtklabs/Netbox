@@ -49,6 +49,14 @@ def checked_cli(command, output):
     return output
 
 
+def checked_nios(command, output):
+    checked_cli(command, output)
+    if re.search(r'(?im)^\s*(?:error\b|invalid\b|unknown command\b|syntax error\b|'
+                 r'usage:|command not found\b|not authorized\b|permission denied\b)', output):
+        raise ValueError(f'The device rejected {command}')
+    return output
+
+
 def missing(output, policy):
     # Exact lines ignore indentation; rejected fragments match anywhere in the
     # selected show output. Regex matching is explicit and uses line anchors.
@@ -76,20 +84,34 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                    rollback_unsupported=[], applied=False, saved=None, verified=None,
                    missing_after=[], save_command=None, skipped=False, skip_reason=None)
     connection = None
+    nios = platform == 'infoblox_nios'
     locked = candidate = confirmed = attempted = False
     try:
         policy, region = select(variables['raw_commands'], task.host)
-        show = policy.get('show', SHOW[platform])
+        show = policy.get('show') or SHOW.get(platform)
+        if not show:
+            raise ValueError('Infoblox NIOS requires an explicit show command')
         payload.update(desired=list(policy.get('expect', [])) + [
             ('contains: ' + item if isinstance(item, str) else 'contains regex: ' + item['regex'])
             for item in policy.get('contains', [])], selected_region=region,
             read_steps=[{'transport': 'ssh', 'command': show, 'purpose': 'read_config'}])
         junos = platform == 'juniper_junos'
-        if junos:
+        if nios:
+            # NIOS has no dedicated Netmiko driver. Preserve the inventory
+            # platform for reports and later features, as command collection does.
+            original = task.host.platform
+            task.host.platform = 'generic'
+            try:
+                connection = task.host.get_connection('netmiko', task.nornir.config)
+            finally:
+                task.host.platform = original
+        elif junos:
             connection = task.host.get_connection('netmiko', task.nornir.config)
 
         def read(command=show):
-            if junos:
+            if nios:
+                output = checked_nios(command, connection.send_command(command, read_timeout=60) or '')
+            elif junos:
                 output = checked(connection.send_command(('run ' if locked else '') + command, read_timeout=60))
             else:
                 result = task.run(task=runner.netmiko_send_command, name=command,
@@ -111,8 +133,11 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             return Result(host=task.host, result=payload, changed=False)
         commands = list(policy['commands'])
         payload.update(commands=commands, add=commands,
-                       save_command=('commit' if junos else SAVE_COMMANDS[platform]) if save else None,
+                       save_command=('commit' if junos else SAVE_COMMANDS.get(platform)) if save else None,
                        rollback_unsupported=['Raw command bundles have no automatically generated rollback.'])
+        if nios:
+            payload['notes'].append('NIOS set commands take effect directly; no separate save or commit is sent. '
+                                    'Verification cannot undo commands already accepted by the appliance.')
         if dry_run:
             return Result(host=task.host, result=payload, changed=False)
         if not verify or (junos and not save):
@@ -132,8 +157,12 @@ def run(task, desired, variables, mode, dry_run, save, verify):
                 raise ValueError('Junos configuration changed during planning; retry the job')
         archive.checkpoint(task, payload)
         attempted = True
-        payload.update(saved=False if save else None, verified=False)
-        if junos:
+        payload.update(saved=False if save and not nios else None, verified=False)
+        if nios:
+            for command in commands:
+                checked_nios(command, connection.send_command(command, read_timeout=60) or '')
+                payload['applied'] = True
+        elif junos:
             candidate = True
             checked(connection.send_config_set(commands, exit_config_mode=False))
             commit(connection, 'commit check')
@@ -147,8 +176,10 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         remaining = missing(read(), policy)
         payload.update(config_after={'show_command': show, 'failed_checks': remaining}, missing_after=remaining, verified=not remaining)
         if remaining:
+            if nios:
+                raise ValueError('Raw command verification failed; NIOS commands already accepted may remain active')
             raise ValueError('Raw command verification failed; configuration was not saved or confirmed')
-        if save:
+        if save and not nios:
             if junos:
                 commit(connection, 'commit')
             else:
@@ -163,6 +194,11 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             payload['advisories'].append('The unconfirmed Junos commit will roll back after five minutes; do not confirm it manually.')
         return Result(host=task.host, result=payload, changed=attempted, failed=True, exception=exc)
     finally:
+        if nios and connection is not None:
+            try:
+                task.host.close_connection('netmiko')
+            except Exception:
+                payload['advisories'].append('Could not close the Infoblox SSH session.')
         if locked:
             try:
                 if candidate and not confirmed:

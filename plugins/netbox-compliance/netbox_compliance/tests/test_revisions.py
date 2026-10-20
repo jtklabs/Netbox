@@ -19,6 +19,31 @@ from .factories import feature_standards
 
 
 class RevisionTest(GridTest):
+    def test_infoblox_raw_definition_and_snapshot(self):
+        text = r"""raw_commands:
+  enabled: true
+  platforms:
+    infoblox_nios:
+      commands: [set tcp_timestamps disable]
+      show: show tcp_timestamps
+      contains:
+        - regex: '^TCP timestamps are disabled\.$'
+      regions:
+        us-east:
+          commands: [set tcp_timestamps enable]
+          show: show tcp_timestamps
+          expect: [TCP timestamps are enabled.]
+"""
+        ConfigStandard.objects.create(name='Infoblox raw', check_type='netops',
+            definition_yaml=text, auto_remediable=True)
+        snapshot = snapshot_for_device(self.user, self.devices['sw1'], ['raw_commands'], 'replace', audit=True)
+        self.assertEqual(snapshot['document'], parse_definition(text))
+        for bad in (text.replace('      show: show tcp_timestamps\n', '', 1),
+                    text.replace('          show: show tcp_timestamps\n', '', 1),
+                    text.replace('set tcp_timestamps disable', 'write memory')):
+            with self.subTest(definition=bad), self.assertRaises(ValidationError):
+                parse_definition(bad)
+
     def test_raw_contains_regex_is_validated_and_pinned(self):
         text = r"""raw_commands:
   enabled: true

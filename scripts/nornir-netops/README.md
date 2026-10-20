@@ -2841,4 +2841,6 @@ a release bump.
 
 Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle can select a `show` command and define `expect` (complete lines), `contains` (literal required text or explicit `regex` items; regex requires worker 0.2.17 or newer), and/or `reject` (forbidden text) checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
 
+Infoblox NIOS raw bundles use `infoblox_nios`, require an explicit `show`, and run noninteractive `set` commands directly over SSH. They support the same literal/regex checks and regional overrides. There is no separate save or commit step. Deploy the updated Compliance plugin and worker 0.2.18 or newer.
+
 NetBox job profiles can choose up to eight named **Raw command standards**. Each selected standard is pinned and executed separately with its own checks and compliance result. Blank selection requires exactly one applicable raw standard. Multiple selections require worker 0.2.16 or newer and the matching Discovery and Compliance plugins.
