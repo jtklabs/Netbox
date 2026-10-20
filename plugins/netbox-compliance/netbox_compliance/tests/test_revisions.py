@@ -25,10 +25,13 @@ class RevisionTest(GridTest):
   platforms:
     cisco_ios:
       commands: [ip ssh server algorithm mac hmac-sha2-512]
-      expect: [ip ssh server algorithm mac hmac-sha2-512]
+      show: show ip ssh
+      contains: [hmac-sha2-512]
+      reject: [hmac-sha1]
       regions:
         us-east:
           commands: [ip ssh server algorithm mac hmac-sha2-256]
+          show: show running-config | include ^ip ssh
           expect: [ip ssh server algorithm mac hmac-sha2-256]
 """
         standard = ConfigStandard.objects.create(name='Raw commands', check_type='netops',
@@ -47,7 +50,9 @@ class RevisionTest(GridTest):
         self.assertTrue(snapshot['document']['raw_commands']['enabled'])
         for bad in (text.replace('enabled: true', 'enabled: "true"'),
                     text.replace('commands: [ip ssh server algorithm mac hmac-sha2-512]', 'commands: []'),
-                    text.replace('expect:', 'unknown:')):
+                    text.replace('expect:', 'unknown:'),
+                    text.replace('show ip ssh', 'show ip ssh | redirect flash:output'),
+                    text.replace('contains: [hmac-sha2-512]', 'contains: hmac-sha2-512')):
             with self.assertRaises(ValidationError):
                 parse_definition(bad)
 

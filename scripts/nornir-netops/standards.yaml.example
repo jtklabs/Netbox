@@ -295,10 +295,15 @@ raw_commands:
   enabled: false
   platforms:
     cisco_ios:
+      # Optional audit/readback command; omit to read the full running config.
+      show: show running-config | include ^ip ssh server algorithm mac
       commands:
         - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
       expect:
         - ip ssh server algorithm mac hmac-sha2-256 hmac-sha2-512
+      # Optional literal substring checks, combined with the exact-line checks.
+      contains: [hmac-sha2-512]
+      reject: [hmac-sha1]
       regions:
         us-east:
           commands:

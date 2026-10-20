@@ -2835,4 +2835,4 @@ a release bump.
 
 ### Raw configuration commands
 
-Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle defines `expect` and/or `reject` checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
+Use `raw_commands.enabled: true` with literal command bundles per platform and optional regional overrides. Each bundle can select a `show` command and define `expect` (complete lines), `contains` (required text), and/or `reject` (forbidden text) checks for audit and post-change verification. The `raw-commands` feature requires replace mode to apply. See [Raw command standards](../../docs/RAW-COMMAND-STANDARDS.md) for YAML, selection rules and supported platforms.
