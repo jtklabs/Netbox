@@ -73,20 +73,32 @@ def bullets(title, rows):
 
 
 def delta_section(title, before, after):
-    lines = [f"## {title}", "", "| Item | Before | After | Unchanged | Removed | Added |", "| --- | --- | --- | --- | --- | --- |"]
+    lines = [f"## {title}", "", "| Item | Before | After | Unchanged | Removed | Added | Changed |", "| --- | --- | --- | --- | --- | --- | --- |"]
     details = []
     for key in sorted(set(before) | set(after)):
         old, new = before.get(key), after.get(key)
         if old is None or new is None:
-            lines.append(f"| {key} | {'-' if old is None else len(old)} | {'-' if new is None else len(new)} | | | not collected on one side |")
+            lines.append(f"| {key} | {'-' if old is None else len(old)} | {'-' if new is None else len(new)} | | | not collected on one side | |")
             continue
         if key == "waf_policies":
-            lines.append(f"| {key} (count only) | {len(old)} | {len(new)} | | | |")
+            lines.append(f"| {key} (count only) | {len(old)} | {len(new)} | | | | |")
             continue
-        delta = table_delta(old, new)
-        lines.append(f"| {key} | {len(old)} | {len(new)} | {delta['unchanged']} | {len(delta['removed'])} | {len(delta['added'])} |")
-        if delta["removed"] or delta["added"]:
+        try:
+            delta = checks.pool_delta(old, new) if key == "pools" else table_delta(old, new)
+        except ValueError as exc:
+            lines.append(f"| {key} | {len(old)} | {len(new)} | | | | unavailable |")
+            details += [f"### {key}", "", str(exc), ""]
+            continue
+        changed = delta.get("changed", [])
+        lines.append(f"| {key} | {len(old)} | {len(new)} | {delta['unchanged']} | {len(delta['removed'])} | {len(delta['added'])} | {len(changed)} |")
+        if delta["removed"] or delta["added"] or changed:
             details += [f"### {key}", ""]
+            if changed:
+                details += [f"Changed ({len(changed)}):"]
+                details += ["- " + checks.describe_pool_change(row).replace("|", "\\|") for row in changed[:LIMIT]]
+                if len(changed) > LIMIT:
+                    details.append(f"- ... {len(changed) - LIMIT} more in the archive")
+                details.append("")
             if delta["removed"]:
                 details += bullets("Removed", delta["removed"]) + [""]
             if delta["added"]:
@@ -190,7 +202,7 @@ def build(host, before, after, findings, plan, status):
              f"- Outcome: **{status}**",
              f"- Profile: {plan.get('profile', '?')}; target {plan.get('target_version', '?')}",
              f"- Software: {versions(before)} before, {versions(after)} after",
-             "- Method: tables are compared as unordered sets of stable fields; ages, uptimes, timers and timestamps are excluded or masked.",
+             "- Method: pools are matched by full name and changes list individual fields; other tables are compared as unordered sets of stable fields. Ages, uptimes, timers and timestamps are excluded or masked.",
              "", "## Findings", "",
              f"Errors ({len(errors)}):"] + [f"- {checks.describe_finding(f)}" for f in errors] + ["", f"Warnings ({len(warnings)}):"] + [
              f"- {f['check']}: {f.get('message', f.get('interface', ''))}" for f in warnings] + [""]
