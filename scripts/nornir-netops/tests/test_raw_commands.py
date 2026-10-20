@@ -71,7 +71,8 @@ def test_checks_are_literal_exact_lines_and_rejected_fragments():
 
 
 @pytest.mark.parametrize('platform', ['cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos'])
-def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, monkeypatch, platform):
+@pytest.mark.parametrize('custom_show', [False, True])
+def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, monkeypatch, platform, custom_show):
     monkeypatch.setenv('NET_USER', 'operator')
     monkeypatch.setenv('NET_PASS', 'test-password')
     csv = tmp_path / 'devices.csv'
@@ -80,6 +81,11 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     policy = settings(platform)
     regional = {'commands': ['interface Ethernet1', 'description {{literal}}', 'exit'],
                 'expect': ['description {{literal}}'], 'reject': ['description old']}
+    if custom_show:
+        regional['show'] = 'show interfaces description'
+        regional['contains'] = ['{{literal}}']
+        del regional['expect']
+        policy['platforms'][platform]['show'] = 'show version'
     policy['platforms'][platform]['regions'] = {'us-east': regional}
     path.write_text(yaml.safe_dump({'raw_commands': policy}))
     report = tmp_path / 'report.json'
@@ -87,6 +93,7 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
 
     def read(task, command_string, **kwargs):
         if command_string.startswith('show '):
+            assert command_string == regional.get('show', raw.SHOW[platform])
             return Result(host=task.host, result=state['output'])
         state['saves'].append(command_string)
         return Result(host=task.host, result='OK')
@@ -109,6 +116,8 @@ def test_cli_dry_run_exact_apply_verify_repeat_and_failed_readback(tmp_path, mon
     code, row = invoke('--replace', '--fail-on-diff')
     assert code == cli.EXIT_DIFF and row['commands'] == regional['commands']
     assert row['selected_region'] == 'us-east' and not row['rollback']
+    assert row['config_before']['show_command'] == regional.get('show', raw.SHOW[platform])
+    assert row['read_steps'][0]['command'] == regional.get('show', raw.SHOW[platform])
     assert not state['writes']
     code, row = invoke('--replace', '--apply', '--yes')
     assert code == cli.EXIT_OK and row['verified'] and row['saved']
@@ -134,7 +143,7 @@ class Junos:
 
     def send_command(self, command, **kwargs):
         self.calls.append(command)
-        if command.removeprefix('run ') == raw.SHOW['juniper_junos']:
+        if command.removeprefix('run ') in (raw.SHOW['juniper_junos'], 'show system information'):
             return self.output
         if command == 'show | compare':
             return 'pending changes' if self.failure == 'dirty' else ''
@@ -171,11 +180,13 @@ class Junos:
         self.calls.append('exit')
 
 
-def run_junos(box, monkeypatch, **options):
+def run_junos(box, monkeypatch, show=None, **options):
     monkeypatch.setattr(Host, 'get_connection', lambda *args: box)
     task = SimpleNamespace(host=Host('srx', platform='junos'), nornir=SimpleNamespace(config=None))
     policy = {'enabled': True, 'platforms': {'juniper_junos': {
         'commands': ['set system host-name new'], 'expect': ['set system host-name new']}}}
+    if show:
+        policy['platforms']['juniper_junos']['show'] = show
     return raw.run(task, [], {'raw_commands': policy}, **dict(
         dict(mode='replace', dry_run=False, save=True, verify=True), **options))
 
@@ -265,3 +276,70 @@ def test_optional_selftest_does_not_require_a_raw_standard():
 def test_platform_cli_errors_are_never_success(output):
     with pytest.raises(ValueError):
         raw.checked_cli('raw commands', output)
+
+
+@pytest.mark.parametrize('show', ['show ip ssh', 'show running-config | include ^ip ssh',
+                                 'show configuration system services ssh | display set | no-more'])
+def test_custom_show_and_contains_validate(show):
+    policy = settings()
+    policy['platforms']['cisco_ios'] = {'commands': ['description new'], 'show': show,
+                                      'contains': ['some text'], 'reject': ['bad text']}
+    validate_raw_commands(policy)
+    assert raw.missing('prefix some text suffix', policy['platforms']['cisco_ios']) == []
+    assert raw.missing('bad text', policy['platforms']['cisco_ios']) == [
+        'missing text: some text', 'forbidden text: bad text']
+
+
+@pytest.mark.parametrize('show', [None, False, [], '', 'show', 'configure terminal',
+    'show version\nreload', 'show version; reload', 'show version | save disk0:file',
+    'show version > disk0:file', 'show version | redirect tftp://example/file',
+    'show version |', 'show version && reload', 'show version | tee file'])
+def test_custom_show_rejects_non_show_and_output_writes(show):
+    policy = settings()
+    policy['platforms']['cisco_ios']['show'] = show
+    with pytest.raises(ValueError):
+        validate_raw_commands(policy)
+
+
+@pytest.mark.parametrize('contains', ['', False, [None], ['line\nbreak'], []])
+def test_contains_requires_valid_nonempty_checks(contains):
+    policy = settings()
+    policy['platforms']['cisco_ios'] = {'commands': ['description new'], 'contains': contains}
+    with pytest.raises(ValueError):
+        validate_raw_commands(policy)
+
+
+def test_junos_custom_show_keeps_configuration_race_check(monkeypatch):
+    box = Junos()
+    result = run_junos(box, monkeypatch, show='show system information')
+    assert not result.failed and result.result['verified']
+    assert box.calls[:2] == ['show system information', raw.SHOW['juniper_junos']]
+    assert 'run ' + raw.SHOW['juniper_junos'] in box.calls
+    assert 'run show system information' in box.calls
+    assert box.calls.index('run show system information') < box.calls.index('commit')
+
+
+def test_junos_operational_output_changes_do_not_trip_config_guard(monkeypatch):
+    class OperationalJunos(Junos):
+        def send_command(self, command, **kwargs):
+            output = super().send_command(command, **kwargs)
+            if command.removeprefix('run ') == 'show system information':
+                return output + '\nuptime: ' + str(len(self.calls))
+            return output
+
+    box = OperationalJunos()
+    result = run_junos(box, monkeypatch, show='show system information')
+    assert not result.failed and result.result['verified']
+
+
+def test_junos_custom_show_does_not_hide_concurrent_config_change(monkeypatch):
+    class ConcurrentJunos(Junos):
+        def config_mode(self, config_command):
+            result = super().config_mode(config_command)
+            self.output = 'set system host-name changed-elsewhere'
+            return result
+
+    box = ConcurrentJunos()
+    result = run_junos(box, monkeypatch, show='show system information')
+    assert result.failed and 'configuration changed' in str(result.exception)
+    assert 'set system host-name new' not in box.calls and 'commit' not in box.calls

@@ -1,6 +1,8 @@
 """Raw command standard validation; keep worker and NetBox copies identical."""
 PLATFORMS = {'cisco_ios', 'arista_eos', 'cisco_asa', 'cisco_nxos', 'juniper_junos'}
-BUNDLE_KEYS = {'commands', 'expect', 'reject'}
+BUNDLE_KEYS = {'commands', 'show', 'expect', 'contains', 'reject'}
+SHOW_FILTERS = {'include', 'exclude', 'begin', 'section', 'count', 'match', 'except',
+                'find', 'display', 'no-more', 'trim'}
 
 
 def validate_raw_commands(settings):
@@ -17,10 +19,21 @@ def validate_raw_commands(settings):
     def bundle(value, platform, label):
         mapping(value, BUNDLE_KEYS, label)
         lines(value.get('commands'), label + '.commands')
+        if 'show' in value:
+            command = value['show']
+            lines([command], label + '.show')
+            parts = command.strip().split('|')
+            words = parts[0].split()
+            if (len(words) < 2 or words[0].lower() != 'show'
+                    or any(token in command for token in (';', '&', '>', '<', '`', '$('))
+                    or any(not part.strip() or part.split()[0].lower() not in SHOW_FILTERS
+                           for part in parts[1:])):
+                raise ValueError(f'{label}.show must be one show command with read-only output filters.')
         lines(value.get('expect', []), label + '.expect', False)
+        lines(value.get('contains', []), label + '.contains', False)
         lines(value.get('reject', []), label + '.reject', False)
-        if not value.get('expect') and not value.get('reject'):
-            raise ValueError(f'{label} requires expect or reject checks for audit and verification.')
+        if not any(value.get(key) for key in ('expect', 'contains', 'reject')):
+            raise ValueError(f'{label} requires expect, contains or reject checks for audit and verification.')
         for command in value['commands']:
             words = command.strip().lower().split()
             if platform == 'juniper_junos':

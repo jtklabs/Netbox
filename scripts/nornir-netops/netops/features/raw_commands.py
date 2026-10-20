@@ -51,9 +51,10 @@ def checked_cli(command, output):
 
 def missing(output, policy):
     # Exact lines ignore indentation; rejected fragments match anywhere in the
-    # running configuration. Strings remain literal: no regex or templating.
+    # selected show output. Strings remain literal: no regex or templating.
     lines = {line.strip() for line in output.splitlines()}
     return ([f'missing line: {line}' for line in policy.get('expect', []) if line.strip() not in lines]
+            + [f'missing text: {text}' for text in policy.get('contains', []) if text not in output]
             + [f'forbidden text: {text}' for text in policy.get('reject', []) if text in output])
 
 
@@ -71,27 +72,30 @@ def run(task, desired, variables, mode, dry_run, save, verify):
     locked = candidate = confirmed = attempted = False
     try:
         policy, region = select(variables['raw_commands'], task.host)
-        payload.update(desired=list(policy.get('expect', [])), selected_region=region)
+        show = policy.get('show', SHOW[platform])
+        payload.update(desired=list(policy.get('expect', [])) + [
+            'contains: ' + text for text in policy.get('contains', [])], selected_region=region,
+            read_steps=[{'transport': 'ssh', 'command': show, 'purpose': 'read_config'}])
         junos = platform == 'juniper_junos'
         if junos:
             connection = task.host.get_connection('netmiko', task.nornir.config)
 
-        def read():
+        def read(command=show):
             if junos:
-                output = checked(connection.send_command(('run ' if locked else '') + SHOW[platform], read_timeout=60))
+                output = checked(connection.send_command(('run ' if locked else '') + command, read_timeout=60))
             else:
-                result = task.run(task=runner.netmiko_send_command, name=SHOW[platform],
-                                  command_string=SHOW[platform], enable=True, read_timeout=60)
+                result = task.run(task=runner.netmiko_send_command, name=command,
+                                  command_string=command, enable=True, read_timeout=60)
                 output = result.result or ''
-                checked_cli(SHOW[platform], output)
+                checked_cli(command, output)
             if not output.strip():
-                raise ValueError('Empty configuration response; cannot evaluate raw command checks')
+                raise ValueError('Empty show response; cannot evaluate raw command checks')
             return output
 
         before = read()
         drift = missing(before, policy)
         # Archive the check evidence, not an entire configuration with unrelated secrets.
-        payload.update(current=drift, config_before={'failed_checks': drift}, compliant=not drift)
+        payload.update(current=drift, config_before={'show_command': show, 'failed_checks': drift}, compliant=not drift)
         if not drift:
             return Result(host=task.host, result=payload, changed=False)
         if mode != MODE_REPLACE:
@@ -106,6 +110,9 @@ def run(task, desired, variables, mode, dry_run, save, verify):
         if not verify or (junos and not save):
             raise ValueError('Raw commands require verification; Junos also requires saving')
         if junos:
+            # Operational show output can change on its own. Keep the candidate
+            # race check anchored to configuration, independently of audit data.
+            config_before = before if show == SHOW[platform] else read(SHOW[platform])
             checked(connection.config_mode(config_command='configure private'))
             locked = True
             if checked(connection.send_command('show | compare', read_timeout=60)).strip():
@@ -113,7 +120,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             if re.search(r'rollback in|commit confirmed|pending', checked(connection.send_command(
                     'run show system commit', read_timeout=60)), re.I):
                 raise ValueError('Junos has a pending commit')
-            if read() != before:
+            if read(SHOW[platform]) != config_before:
                 raise ValueError('Junos configuration changed during planning; retry the job')
         archive.checkpoint(task, payload)
         attempted = True
@@ -130,7 +137,7 @@ def run(task, desired, variables, mode, dry_run, save, verify):
             checked_cli('raw commands', result.result or '')
         payload['applied'] = True
         remaining = missing(read(), policy)
-        payload.update(config_after={'failed_checks': remaining}, missing_after=remaining, verified=not remaining)
+        payload.update(config_after={'show_command': show, 'failed_checks': remaining}, missing_after=remaining, verified=not remaining)
         if remaining:
             raise ValueError('Raw command verification failed; configuration was not saved or confirmed')
         if save:
