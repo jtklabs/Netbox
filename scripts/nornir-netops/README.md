@@ -8,6 +8,10 @@ would send.
 See [complete profile examples](PROFILE_EXAMPLES.md) for the F5 lab upgrade,
 saved standards job profiles, and their full configuration definitions.
 
+The [F5 Upgrade Operations Guide](../../docs/deliverables/F5%20Upgrade%20Operations%20Guide.docx)
+is the Word runbook for engineers and change management, covering preparation,
+execution, HA sequencing, validation, recovery and change closure.
+
 Every run automatically saves a private JSON archive with original feature configuration,
 implementation steps, backout steps, effective action and the resulting state.
 See [JSON run archives](RUN_ARCHIVES.md) for the schema, `.env` settings and examples.
