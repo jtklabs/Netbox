@@ -800,7 +800,7 @@ pilot before fleet rollout.
 
 An address-only NTP standard reuses the device's current VRF and source
 configuration when those selections are absent from NetBox and the standard.
-This applies to IOS/IOS-XE, EOS, NX-OS and Junos. No source-interface tag or
+This applies to IOS/IOS-XE, ASA, EOS, NX-OS and Junos. No source-interface tag or
 interface object is needed to preserve an existing interface or source IP.
 Global source statements stay in place. New server statements inherit the
 current routing context and inline source options; replace mode adds the new
@@ -840,6 +840,58 @@ EOS permits one NTP VRF: add mode rejects a different VRF before writing;
 `--replace` removes old-VRF servers before adding the new ones. These behaviors
 follow the [EOS NTP documentation](https://www.arista.com/en/um-eos/eos-system-clock-and-time-protocols)
 and [command reference](https://www.arista.com/en/um-eos/eos-switch-administration-commands).
+
+### Cisco ASA
+
+Worker **0.2.23** adds typed NTP support for the `cisco_asa` platform (`asa` and
+`cisco-asa` inventory aliases also work). Select the existing **NTP** feature in
+the job profile and use the same global or regional NTP YAML as other devices:
+
+```yaml
+ntp:
+  servers: [192.0.2.10, 192.0.2.11]
+```
+
+With no source override, replacing `ntp server 192.0.2.9 source inside` produces:
+
+```text
+ntp server 192.0.2.10 source inside
+ntp server 192.0.2.11 source inside
+no ntp server 192.0.2.9 source inside
+```
+
+ASA uses a `nameif` label such as `inside`, `outside`, or `management` for the
+outgoing interface. Its NTP syntax has no named VRF option. Blank/default VRF
+is accepted; an explicit named VRF fails before configuration is sent. This
+adapter manages ASA CLI settings, not FXOS chassis NTP. In multiple-context
+mode, NTP is configured in the system execution space and sources refer to
+admin-context interface names; the worker does not switch contexts.
+
+The worker reads `show running-config ntp` and `show running-config interface`.
+Existing source labels and unmanaged authentication-key bindings carry over to
+new addresses. An existing desired server retains its own source, including no
+explicit source. If old servers mix one defined source with unspecified sources,
+new addresses inherit the defined source. Multiple different defined sources
+require an explicit selection for new addresses rather than choosing one.
+
+A `service-source` tag can select a physical NetBox interface: the worker maps
+its name to the ASA's live `nameif`. An unreadable or ambiguous physical mapping
+fails before writing. `ntp.source` or `--source` can also select a nameif directly.
+No interface tag is required to preserve existing source settings.
+
+Use IPv4 or IPv6 server addresses. ASA does not support DNS names for NTP servers or the
+EOS `iburst` option; this adapter never emits `iburst`. Shared authentication
+settings support the ASA algorithms `md5`, `sha1`, `sha256`, `sha512`, and `cmac`,
+subject to the target release. Authentication remains unchanged when omitted
+from the standard. Add mode retains extra servers; replace mode removes them.
+Audit runs only read and plan. Apply verifies the server/source/key configuration
+before `write memory`; losing a source during readback fails verification and
+prevents saving. Reports include rollback commands for server changes, while
+changed authentication key material cannot be recovered from encrypted readback.
+Configuration compliance does not prove NTP clock synchronization.
+
+See Cisco's [ASA NTP command reference](https://www.cisco.com/c/en/us/td/docs/security/asa/asa-cli-reference/I-R/asa-command-ref-I-R/n-commands.html)
+and [basic settings guide](https://www.cisco.com/c/en/us/td/docs/security/asa/asa917/configuration/general/asa-917-general-config/basic-hostname-pw.html).
 
 ### Juniper SRX and MX
 

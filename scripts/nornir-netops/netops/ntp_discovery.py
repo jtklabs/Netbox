@@ -18,7 +18,13 @@ SHOW_COMMANDS = ('show running-config | include ^ntp.server',
                  'show running-config | include ^ntp.local-interface')
 
 
-def interface_name(value):
+def interface_name(value, platform=None):
+    if platform == 'cisco_asa':
+        # ASA sources use nameif labels, not IOS interface abbreviations.
+        # Physical inventory names are translated by the ASA NTP adapter.
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]{0,63}', value):
+            raise ValueError('ASA NTP source must be an interface name or nameif label')
+        return value
     value = re.sub(r'\s+', '', value)
     if re.fullmatch(r'(?:lo\d+|irb|fxp\d+|em\d+|ae\d+|reth\d+|vlan|vme|(?:ge|xe|et)-\d+/\d+/\d+(?::\d+)?)\.\d+', value):
         return value

@@ -39,7 +39,7 @@ from ..core import (
 )
 from ..netbox import source_for
 from ..ntp_discovery import global_sources, interface_name, source_ip
-from .. import aruba_ntp, clearpass_ntp, f5_ntp, junos_ntp, ntp_nxos, opengear_ntp
+from .. import aruba_ntp, clearpass_ntp, f5_ntp, junos_ntp, ntp_asa, ntp_nxos, opengear_ntp
 from .. import ntp_context
 from .waf import add_connection_arguments, connection_settings
 from ..standards import StandardsError, host_and_port, of as standards_of
@@ -212,6 +212,8 @@ def plan_ntp(
 ) -> Tuple[List[str], List[Entry]]:
     context = context or {}
     variables = context.get("variables") or {}
+    if context.get('platform') == 'cisco_asa' and not context.get('asa_servers'):
+        return ntp_asa.plan(current, desired, mode, context)
     if not context.get('nxos_servers'):
         desired = ntp_context.resolve(current, desired, variables, platform=context.get('platform'), notes=context.get('notes'))
     if context.get('platform') == 'cisco_nxos' and not context.get('nxos_servers'):
@@ -237,7 +239,10 @@ def plan_ntp(
                 return False
             source = source or entry.data.get('inherited_source')
             try:
-                source_matches = interface_name(source or '').lower() == interface_name(wanted['source']).lower()
+                platform = context.get('platform')
+                actual = interface_name(source or '', platform)
+                expected = interface_name(wanted['source'], platform)
+                source_matches = actual == expected if platform == 'cisco_asa' else actual.lower() == expected.lower()
             except ValueError:
                 source_matches = source == wanted['source']
         else:
@@ -480,7 +485,9 @@ def build_desired(args: argparse.Namespace) -> Desired:
             entries[trusted] = {"kind": "trusted-key", "id": key_id}
 
     source = None if server_list_only else args.source or standards.value("ntp.source")
-    source = interface_name(str(source)) if source else None
+    source_platform = 'cisco_asa' if 'cisco_asa' in {
+        canonical_platform(p) for p in getattr(args, 'ntp_platforms', [])} else None
+    source = interface_name(str(source), source_platform) if source else None
     iburst = standards.value("ntp.iburst", True) if args.iburst is None else args.iburst
     if type(iburst) is not bool:
         raise StandardsError("ntp.iburst must be true or false")
@@ -613,11 +620,14 @@ def per_device(keys, variables, host, *, manage_vrf=True):
     """This device's servers (its region's, if it has one) and source interface."""
     servers, prefer, regional = server_settings(variables, host)
 
+    platform = canonical_platform(getattr(host, "platform", None))
     source, authoritative = source_for(host, "ntp")
     if authoritative and source:
-        source = interface_name(str(source)) if source else None
+        source = interface_name(str(source), platform) if source else None
     else:
         source = variables.get("source")  # Missing tags do not clear the standard or device's source.
+    if source:
+        source = interface_name(str(source), platform)
     vrf = variables.get('vrf') if manage_vrf else None
     selected_vrf = (getattr(host, 'data', {}) or {}).get('ntp_vrf') if manage_vrf else None
     if selected_vrf:
@@ -650,6 +660,8 @@ FEATURE = Feature(
     help="converge the NTP servers and their authentication key",
     platforms={
         "cisco_ios": PlatformSupport(SHOW_COMMAND, parse_ntp, IOS_SAMPLE),
+        "cisco_asa": PlatformSupport('show running-config ntp', ntp_asa.parse, ntp_asa.SAMPLE,
+                                     extra_commands=('show running-config interface',)),
         "arista_eos": PlatformSupport(SHOW_COMMAND, parse_eos, EOS_SAMPLE,
                                       extra_commands=('show running-config | include ^no.ntp$',)),
         "cisco_nxos": PlatformSupport('show running-config ntp', ntp_nxos.parse, ntp_nxos.SAMPLE),

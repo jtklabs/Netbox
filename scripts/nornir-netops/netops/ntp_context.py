@@ -34,7 +34,9 @@ def resolve(current, desired, variables, *, platform, notes=None):
         # A global source stays global. Compare its effective interface so an
         # equivalent inline source does not create a false ambiguity.
         name = row.get('source') or row.get('inherited_source')
-        return (interface_name(name).lower() if name else None, row.get('source_address'))
+        normalized = interface_name(name, platform) if name else None
+        return (normalized if platform == 'cisco_asa' else (normalized.lower() if normalized else None),
+                row.get('source_address'))
 
     resolved, keys, options = {}, [], {}
     for key in desired:
@@ -60,7 +62,7 @@ def resolve(current, desired, variables, *, platform, notes=None):
                                      'select a source interface for the new server addresses')
                 # Prefer leaving an already configured global source in place.
                 donor = next((row for row in source_donors if not row.get('source')), source_donors[0])
-                record['source'] = interface_name(donor['source']) if donor.get('source') else None
+                record['source'] = interface_name(donor['source'], platform) if donor.get('source') else None
                 record['source_address'] = donor.get('source_address')
             if not variables.get('manages_auth') and not wanted.get('key') and donors:
                 ids = {row.get('key') for row in donors}
