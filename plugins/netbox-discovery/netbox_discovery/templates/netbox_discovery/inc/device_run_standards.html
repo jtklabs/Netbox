@@ -6,7 +6,7 @@
       {% csrf_token %}
       <label class="form-label" for="run-standard-selection">Standard or profile</label>
       <select class="form-select mb-2" id="run-standard-selection" name="selection">
-        {% for choice in run_choices %}<option value="{{ choice.value }}">{{ choice.label }}</option>{% endfor %}
+        {% for choice in run_choices %}<option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>{% endfor %}
       </select>
       <label class="form-label" for="run-standard-action">Action</label>
       <select class="form-select mb-2" id="run-standard-action" name="action">
