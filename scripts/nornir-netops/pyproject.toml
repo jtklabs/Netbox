@@ -14,6 +14,8 @@ dependencies = [
     "nornir>=3.4.1",
     "nornir-netmiko>=1.0.0",
     "netmiko>=4.2.0",
+    # Keep ssh-rsa signatures and SHA-1 key exchange for older managed devices.
+    "paramiko>=4.0.0,<5",
     "ntc-templates>=7.0",
     "Jinja2>=3.1.2",
     "PyYAML>=6.0",

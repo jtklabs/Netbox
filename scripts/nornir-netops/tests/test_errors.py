@@ -168,3 +168,19 @@ def test_https_connection_timeout_and_tls_errors_are_actionable():
     assert 'connection timed out' in summarize(ConnectTimeout('raw transport detail'))
     assert 'HTTP response timed out' in summarize(ReadTimeout('raw transport detail'))
     assert 'certificate' in summarize(SSLError('raw TLS detail'))
+
+
+@pytest.mark.parametrize('detail,category', [
+    ('Incompatible ssh peer (no acceptable host key)', 'host key algorithm'),
+    ('Incompatible ssh peer (no acceptable kex algorithm)', 'key exchange algorithm'),
+    ('Incompatible ssh server (no acceptable ciphers)', 'encryption cipher'),
+    ('Incompatible ssh server (no acceptable macs)', 'MAC algorithm'),
+    ('other negotiation failure', 'SSH algorithm'),
+])
+def test_ssh_algorithm_mismatch_identifies_negotiation_stage(detail, category):
+    from paramiko.ssh_exception import IncompatiblePeer
+    summary = summarize(IncompatiblePeer(detail + '\nprivate-host sensitive detail'))
+    assert f'no shared {category}' in summary
+    assert 'worker dependencies' in summary
+    assert 'private-host' not in summary and 'sensitive detail' not in summary
+    assert len(summary) <= MAX_LENGTH
