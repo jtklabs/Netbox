@@ -476,11 +476,29 @@ def collect_waf(client, get, snapshot):
 
 
 def collect(client, progress):
+    import requests
+    from ..errors import summarize
+
     snapshot = {"raw": {}, "tables": {}, "errors": {}, "warnings": {}, "routing": {}, "routing_commands": {}}
 
     def get(path):
         progress(path)
-        document = client.get_json(path)
+        # Only repeat reads. An interrupted install, save, PATCH or reboot may
+        # already have taken effect and must never be replayed by this retry.
+        for attempt in range(1, 4):
+            cancellation.checkpoint()
+            try:
+                document = client.get_json(path)
+                break
+            except requests.exceptions.SSLError:
+                raise
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
+                reason = f"F5 GET {path}: {summarize(exc)}"
+                snapshot.setdefault("read_retries", []).append({"path": path, "attempt": attempt, "error": reason})
+                if attempt == 3:
+                    raise RuntimeError(f"{reason}; collection unavailable after 3 attempts") from exc
+                progress(f"{reason}; retrying read ({attempt + 1}/3)")
+                _sleep(2 * attempt)
         snapshot["raw"][path] = document
         return document
 

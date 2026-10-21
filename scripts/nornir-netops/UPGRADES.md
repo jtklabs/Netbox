@@ -722,6 +722,24 @@ timeouts leave VIPs disabled. Failures before an accepted or ambiguous reboot
 restore and save the original states on the running source volume. Never sync
 or edit device configuration concurrently with the upgrade.
 
+Worker 0.2.21 retries interrupted collection GETs up to three times, waiting
+two seconds and then four seconds between attempts. This applies to baseline,
+health-validation and final post-restoration collections. It does not replay
+configuration writes, saves, installs or reboots, or retry TLS, authorization
+or malformed-response errors. Each attempt still has the configured request
+timeout. Retry details remain in the snapshot's `read_retries` list and the
+progress log. Persistent collection failures still block automatic completion.
+
+The final collection's failed checks appear in its progress message and
+`summary.pending`, and in the terminal recovery message. Missing facts are
+reported as an inability to verify identity, release and boot volume, rather
+than evidence that they changed. A `holding_traffic` event identifies saving
+the disabled state for recovery; it does not indicate another installation.
+Existing failed jobs remain in recovery after updating the worker. Verify the
+running version and volume, WAF readiness and service health, then restore only
+the originally enabled VIPs recorded in `upgrade_plan.connection_drain` before
+recording recovery in NetBox. Do not rerun an upgrade as a VIP-restoration step.
+
 `draining` and `restoring_virtuals` events report the current count, elapsed
 time, window reduction, completion reason and pending restoration count in
 NetBox's `connection_drain` summary. Original VIP identities and enabled states

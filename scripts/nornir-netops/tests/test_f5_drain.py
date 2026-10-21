@@ -7,6 +7,7 @@ from unittest.mock import Mock
 from urllib.parse import unquote
 
 import pytest
+import requests
 
 from netops.upgrade import f5_drain, f5_workflow
 from netops.upgrade.profile import Profile
@@ -419,6 +420,54 @@ def test_final_health_failure_disables_and_saves_again(profile, options, unit, m
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and stages[-1] == 'recovery_required'
     assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+    assert 'waf_ready: ASM became unhealthy' in reporter.emit.call_args.args[2]
+    assert any('configuration for recovery' in call.args[2]
+               and call.args[1] == 'holding_traffic' for call in reporter.emit.call_args_list)
+
+
+@pytest.mark.parametrize('failures', [2, 3])
+def test_final_collection_disconnects_retry_reads_without_replaying_restoration(
+        profile, options, unit, monkeypatch, failures):
+    from netops.upgrade import f5
+    options.apply = True
+    unit.read_count = lambda: 0
+    paths = {'/mgmt/tm/cm/device': 0, '/mgmt/tm/net/vlan': 0, '/mgmt/tm/ltm/rule': 0}
+    get = unit.get_json
+    def interrupted(path):
+        if unit.rebooted_to and any(unit.virtuals.values()) and path in paths:
+            paths[path] += 1
+            if paths[path] <= failures:
+                raise requests.ConnectionError('RemoteDisconnected: remote end closed connection without response')
+        return get(path)
+    monkeypatch.setattr(unit, 'get_json', interrupted)
+    waits = []
+    monkeypatch.setattr(f5, '_sleep', waits.append)
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    final = next(call.args[3] for call in reporter.emit.call_args_list
+                 if 'Final collection after restoring' in call.args[2])
+    assert set(paths.values()) == {3}
+    assert waits == [2, 4] * 3
+    assert len(final['post']['read_retries']) == failures * 3
+    # Each initially enabled VIP is restored once, regardless of read retries.
+    assert sum(method == 'PATCH' and payload.get('enabled', False)
+               for method, _, payload in unit.calls) == 2
+    if failures == 2:
+        assert not result.failed and stages[-1] == 'completed'
+        assert final['progress_summary']['error_count'] == 0
+        assert unit.virtuals == unit.saved_virtuals == {
+            '/Common/vs-web': True, '/Tenant/app/vs api': True, '/Common/off': False}
+    else:
+        assert result.failed and stages[-1] == 'recovery_required'
+        assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+        assert 'F5 GET /mgmt/tm/cm/device: connection failed' in result.result['error']
+        assert 'after 3 attempts' in result.result['error']
+        assert final['progress_summary']['pending']
+        findings = {f['check']: f['message'] for f in final['findings'] if f['severity'] == 'error'}
+        assert 'facts collection failed' in findings['software']
+        assert 'facts collection failed' in findings['stack']
+        assert 'not running' not in findings['software']
+        assert 'readiness changed' not in findings['stack']
+        assert 'F5 GET /mgmt/tm/ltm/rule' in findings['irules']
 
 
 def test_drain_comparison_does_not_mask_missing_vips_or_pool_failure(profile, unit):
