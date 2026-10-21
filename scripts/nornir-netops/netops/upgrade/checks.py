@@ -513,7 +513,13 @@ def compare(before, after, skip_running_config_check=False, *,
         for key in sorted(set(before[category]) | set(after[category])):
             old, new = before[category].get(key), after[category].get(key)
             if old is None or new is None:
-                findings.append({"check": key, "severity": "error", "message": "baseline or post-check unavailable"})
+                # Required collection failures are already errors above. An
+                # optional read becomes required when it was in the baseline;
+                # retain its actual failure instead of hiding it in a warning.
+                if key not in after["errors"]:
+                    reason = after["warnings"].get(key)
+                    findings.append({"check": key, "severity": "error",
+                                     "message": "baseline or post-check unavailable" + (f": {reason}" if reason else "")})
                 continue
             if category == "tables" and key in F5_THRESHOLDS:
                 try:
@@ -536,7 +542,9 @@ def compare(before, after, skip_running_config_check=False, *,
                                  "removed": [json.loads(row) for row in (a-b).elements()],
                                  "added": [json.loads(row) for row in (b-a).elements()]})
     if before.get("stack") != after.get("stack"):
-        findings.append({"check": "stack", "severity": "error", "message": "member identity or readiness changed"})
+        findings.append({"check": "stack", "severity": "error",
+                         "message": "member identity or readiness could not be verified: facts collection failed"
+                         if "facts" in after["errors"] else "member identity or readiness changed"})
     for key in ("config", "startup_config"):
         if key == "config" and skip_running_config_check:
             if key in before or key in after:

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from netops.upgrade import checks, f5, f5_workflow, report, workflow
 from test_upgrade_f5 import FakeBigIP, options, profile, iso, unit, run_unit
@@ -33,6 +34,57 @@ def test_non_waf_does_not_query_asm():
     snapshot = f5.collect(unit, lambda _: None)
     assert "waf" not in snapshot
     assert not any("/asm/" in call[1] for call in unit.calls)
+
+
+@pytest.mark.parametrize('error', [requests.ConnectTimeout, requests.ReadTimeout,
+                                  requests.exceptions.ChunkedEncodingError])
+def test_collection_retries_interrupted_gets(monkeypatch, error):
+    unit = FakeBigIP()
+    expected = f5.collect(unit, lambda _: None)
+    original = unit.get_json
+    attempts = []
+    def get(path):
+        if path == '/mgmt/tm/net/vlan':
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise error('interrupted read')
+        return original(path)
+    unit.get_json = get
+    sleep = Mock()
+    monkeypatch.setattr(f5, '_sleep', sleep)
+    observed = f5.collect(unit, Mock())
+    assert not checks.compare(expected, observed)
+    assert len(attempts) == 3 and sleep.call_count == 2
+
+
+@pytest.mark.parametrize('error', [requests.exceptions.SSLError('TLS failed'),
+                                  RuntimeError('HTTP 403'), ValueError('malformed JSON')])
+def test_collection_does_not_retry_nontransport_failures(monkeypatch, error):
+    unit = FakeBigIP()
+    original = unit.get_json
+    attempts = []
+    def get(path):
+        if path == '/mgmt/tm/net/vlan':
+            attempts.append(path)
+            raise error
+        return original(path)
+    unit.get_json = get
+    sleep = Mock()
+    monkeypatch.setattr(f5, '_sleep', sleep)
+    observed = f5.collect(unit, Mock())
+    assert 'vlans' in observed['errors']
+    assert len(attempts) == 1
+    sleep.assert_not_called()
+
+
+def test_collection_retry_honors_cancellation(monkeypatch):
+    from netops import cancellation
+    unit = FakeBigIP()
+    unit.get_json = Mock(side_effect=requests.ConnectionError('disconnected'))
+    monkeypatch.setattr(f5, '_sleep', Mock(side_effect=cancellation.Cancelled('cancelled')))
+    with pytest.raises(cancellation.Cancelled):
+        f5.collect(unit, Mock())
+    unit.get_json.assert_called_once()
 
 
 @pytest.mark.parametrize("ready", ["0", "", "error: module unavailable"])

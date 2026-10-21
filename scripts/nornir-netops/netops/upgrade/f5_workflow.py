@@ -282,6 +282,9 @@ def wait_for_target(host, settings, profile, volume, options, emit):
 
 def target_findings(after, profile, plan):
     findings = []
+    if "facts" in after.get("errors", {}):
+        return [{"check": "software", "severity": "error",
+                 "message": "target release, boot volume and licensing could not be verified: facts collection failed"}]
     info = after.get("facts", {})
     unit = after.get("software", {}).get("1", {})
     if (not unit or unit.get("mode") != plan["volume"]["name"] or not unit.get("version")
@@ -514,16 +517,20 @@ def upgrade_device(task, profile, options, reporter):
                         final = f5.collect(client, lambda path: emit('postcheck', path))
                         final_findings = checks.compare(before, final, **thresholds) + target_findings(final, profile, plan)
                         final_findings = f5_validation.findings_after_override(final_findings, plan)
-                        emit('validating', 'Final collection after restoring original virtual-server states',
+                        errors = [f for f in final_findings if f['severity'] == 'error']
+                        reasons = checks.describe_findings(errors)
+                        emit('validating', 'Final collection after restoring original virtual-server states: '
+                             + (reasons if errors else 'validation passed'),
                              {'post': final, 'findings': final_findings,
                               'progress_summary': {'counts': final['metrics']['counts'],
                                                    'finding_count': len(final_findings),
                                                    **({'waf': {'expected_policies': before['waf'].get('policy_count'),
                                                                'observed_policies': final.get('waf', {}).get('policy_count'),
                                                                'ready': final.get('waf', {}).get('ready')}} if before.get('waf', {}).get('provisioned') else {}),
-                                                   'error_count': sum(f['severity'] == 'error' for f in final_findings)}})
-                        if any(f['severity'] == 'error' for f in final_findings):
-                            raise RuntimeError('Validation failed after traffic restoration')
+                                                   'pending': [checks.describe_finding(f) for f in errors[:10]],
+                                                   'error_count': len(errors)}})
+                        if errors:
+                            raise RuntimeError('Validation failed after traffic restoration: ' + reasons)
                         return final, final_findings
                     except Exception:
                         # A partial restoration or failing final observation must

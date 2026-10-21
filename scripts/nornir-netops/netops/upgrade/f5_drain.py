@@ -111,10 +111,12 @@ def restore(client, record, emit):
         raise RuntimeError("manual VIP restoration required for: " + ", ".join(failures))
 
 
-def persist_disabled(client, record, emit):
+def persist_disabled(client, record, emit, *, recovery=False):
     record['disabled_config_saved'] = True  # Save responses can be lost.
     client.save_config()
-    emit('draining', 'Saved disabled virtual-server configuration for installation and boot',
+    emit('holding_traffic' if recovery else 'draining',
+         'Saved virtual-server configuration for recovery after an unsuccessful post-upgrade check; traffic must remain disabled'
+         if recovery else 'Saved disabled virtual-server configuration for installation and boot',
          {'connection_drain': record})
 
 
@@ -137,7 +139,7 @@ def disable_again(client, record, emit):
             set_enabled(client, name, False)
         except Exception:
             failures.append(name)
-    persist_disabled(client, record, emit)
+    persist_disabled(client, record, emit, recovery=True)
     if failures:
         raise RuntimeError('Could not re-disable virtual servers; manual recovery required for: ' + ', '.join(failures))
 
