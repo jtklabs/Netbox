@@ -659,7 +659,7 @@ If progress remains undeliverable, the poller reports an error and claims no add
 Worker **0.2.4** exposes **Force pass step 8** during health validation and
 **Force pass step 9** during the WAF request-log check. The job detail page
 requires a reason and view/change/apply job permissions. Step 8 accepts health
-differences and restores originally enabled virtual servers; it does not skip
+differences and restores originally enabled virtual addresses; it does not skip
 step 9. Step 9 completes the unit successfully with an explicit override warning.
 Requests are audited with operator, time and reason and delivered to this job's
 worker through report/heartbeat responses. Only the worker completes the job.

@@ -26,7 +26,7 @@
 {% if manual_validation_step %}
 <div class="card mb-3"><h5 class="card-header">Manual F5 validation</h5><div class="card-body">
   {% if manual_validation_step == 8 %}
-  <p>Force pass step 8 to accept the current health differences and restore the original enabled virtual servers. Step 9 still checks WAF request logs.</p>
+  <p>Force pass step 8 to accept the current health differences and restore the original enabled virtual addresses. Step 9 still checks WAF request logs.</p>
   {% else %}
   <p>Force pass step 9 to accept the missing WAF request log and complete this unit successfully with a manual-override warning.</p>
   {% endif %}

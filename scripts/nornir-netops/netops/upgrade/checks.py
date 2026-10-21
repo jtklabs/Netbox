@@ -476,7 +476,10 @@ def object_comparison(key, old, new, required=100):
             "required_percent": required, "threshold_passed": passed}
 
 
-def threshold_summary(before, after, profile, intentionally_disabled=()):
+def threshold_summary(before, after, profile, connection_drain=None):
+    if connection_drain and connection_drain.get('restore_pending'):
+        from . import f5_drain
+        after = f5_drain.comparison_snapshot(before, after, connection_drain)
     summary = {}
     for key, setting in F5_THRESHOLDS.items():
         old, new = before.get("tables", {}).get(key), after.get("tables", {}).get(key)
@@ -485,10 +488,6 @@ def threshold_summary(before, after, profile, intentionally_disabled=()):
         try:
             if key in before.get("errors", {}) or key in after.get("errors", {}):
                 raise ValueError("baseline or post-check collection failed")
-            if key == "virtual_servers" and isinstance(new, list) and intentionally_disabled:
-                new = [dict(row, enabled="enabled")
-                       if row.get("name") in intentionally_disabled and row.get("enabled") in ("disabled", "disabled-by-user")
-                       else row for row in new]
             result = object_comparison(key, old, new, profile.get(setting, 100))
             summary[key] = {k: v for k, v in result.items() if k not in ("changed", "removed", "added")}
         except ValueError as exc:

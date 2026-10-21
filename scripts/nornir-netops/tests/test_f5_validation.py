@@ -28,7 +28,7 @@ def test_manual_health_then_request_gate(profile, options, unit, monkeypatch, ti
     options.apply = True
     options.validation_timeout = 0 if timed_out else 1
     unit.request_items = []
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     channel = control()
     collect = f5.collect
     def observe(client, progress):
@@ -42,10 +42,10 @@ def test_manual_health_then_request_gate(profile, options, unit, monkeypatch, ti
     monkeypatch.setattr(workflow, 'comparison_report', lambda *a: ({}, None))
     if restore_error:
         def fail(name, payload):
-            if payload.get('enabled'):
+            if payload.get('enabled') == 'yes':
                 if restore_error == 'request':
                     raise RuntimeError('restore request failed')
-                unit.virtuals[name] = False  # A successful PATCH did not actually restore the state.
+                unit.addresses[name] = False  # A successful PATCH did not actually restore the state.
         unit.patch_failure = fail
     events = []
     def emit(host, stage, message, payload, **kwargs):
@@ -53,11 +53,11 @@ def test_manual_health_then_request_gate(profile, options, unit, monkeypatch, ti
         summary = payload['progress_summary']
         if stage == 'validating' and (summary.get('awaiting_manual_validation') if timed_out
                                       else 'Comparison' in message):
-            assert not any(unit.virtuals.values())
+            assert not any(unit.addresses.values())
             channel.observe({'supports_validation_overrides': True, 'validation_overrides': {'8': override(8)}})
         if stage == 'waf_requests' and summary.get('awaiting_manual_validation'):
-            assert unit.virtuals == initial
-            assert unit.saved_virtuals == initial
+            assert unit.addresses == initial
+            assert unit.saved_addresses == initial
             assert '9' not in channel.validation_overrides  # Step 8 did not authorize step 9.
             channel.observe({'supports_validation_overrides': True,
                              'validation_overrides': {'8': override(8), '9': override(9)}})
@@ -70,7 +70,7 @@ def test_manual_health_then_request_gate(profile, options, unit, monkeypatch, ti
                                          replace(profile, drain_connections=True), options, reporter)
     if restore_error:
         assert result.failed
-        assert not any(unit.virtuals.values())
+        assert not any(unit.addresses.values())
         assert not any(stage == 'waf_requests' for stage, _, _ in events)
         return
     assert not result.failed and result.result['status'] == 'completed_with_warnings'
@@ -80,7 +80,7 @@ def test_manual_health_then_request_gate(profile, options, unit, monkeypatch, ti
     assert final['upgrade_plan']['waf_requests']['status'] == 'manually_passed'
     assert final['progress_summary']['manual_validation_step'] is None
     assert not final['progress_summary']['awaiting_manual_validation']
-    assert unit.virtuals == initial
+    assert unit.addresses == initial
 
 
 def test_manual_wait_is_cancellable_and_separate_from_other_jobs():
@@ -246,4 +246,4 @@ def test_manual_pass_refresh_failure_does_not_open_log_gate(profile, options, un
     assert not any(stage == 'waf_requests' for stage, _, _ in events)
     assert unit.log_reads == 0
     if drain:
-        assert not any(unit.virtuals.values())
+        assert not any(unit.addresses.values())

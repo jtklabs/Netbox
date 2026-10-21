@@ -150,8 +150,8 @@ class WafBigIP(DrainBigIP):
             return {'items': [{'fullPath': '/Common/parent'}]}
         if path == f5_requests.REQUESTS:
             assert self.rebooted_to == 'HD1.2'
-            assert self.virtuals['/Common/vs-web']
-            assert self.saved_virtuals['/Common/vs-web']
+            assert self.addresses['/Common/192.0.2.10']
+            assert self.saved_addresses['/Common/192.0.2.10']
             self.log_reads += 1
             return {'items': self.request_items}
         return super()._get(path)
@@ -164,7 +164,7 @@ class WafBigIP(DrainBigIP):
             assert self.rebooted_to == 'HD1.2'
             return {'commandResult': '2026-10-20T10:00:00Z'}
         if path == '/mgmt/tm/sys' and payload.get('command') == 'reboot':
-            self.virtuals = dict(self.saved_virtuals)
+            self.addresses = dict(self.saved_addresses)
         return FakeBigIP._post(self, path, payload)
 
 
@@ -196,8 +196,8 @@ def test_no_new_log_needs_recovery_but_preserves_restored_traffic(profile, optio
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and stages[-1] == 'recovery_required'
     assert not any(stage.startswith('completed') for stage in stages)
-    assert unit.virtuals['/Common/vs-web'] and unit.saved_virtuals['/Common/vs-web']
-    assert not unit.virtuals['/Common/off']
+    assert unit.addresses['/Common/192.0.2.10'] and unit.saved_addresses['/Common/192.0.2.10']
+    assert not unit.addresses['/Common/192.0.2.20']
     assert reporter.emit.call_args.args[3]['progress_summary']['waf_requests']['status'] == 'timed_out'
 
 
@@ -213,7 +213,7 @@ def test_health_failure_does_not_start_log_check(profile, options, unit, monkeyp
     monkeypatch.setattr(f5, 'collect', broken)
     result, _, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and 'waf_requests' not in stages
-    assert unit.log_reads == 0 and not any(unit.virtuals.values())
+    assert unit.log_reads == 0 and not any(unit.addresses.values())
 
 
 def test_standby_with_policies_finishes_without_log_reads(profile, options, unit):
@@ -270,5 +270,5 @@ def test_cancel_during_final_log_wait_preserves_restored_traffic(profile, option
     with cancellation.bind(control), pytest.raises(cancellation.Cancelled):
         run_unit(replace(profile, drain_connections=True), options)
     assert unit.log_reads == 1
-    assert unit.virtuals['/Common/vs-web'] and unit.saved_virtuals['/Common/vs-web']
-    assert not unit.virtuals['/Common/off']
+    assert unit.addresses['/Common/192.0.2.10'] and unit.saved_addresses['/Common/192.0.2.10']
+    assert not unit.addresses['/Common/192.0.2.20']

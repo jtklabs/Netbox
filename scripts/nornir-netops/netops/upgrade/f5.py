@@ -15,6 +15,7 @@ import time
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote, urlsplit
 
 from .. import cancellation
@@ -526,6 +527,11 @@ def collect(client, progress):
                                           if "_auto" not in str(row.get("name", ""))]
         except Exception as exc:
             snapshot["errors" if (ltm or not needs_ltm) else "warnings"][key] = str(exc)
+    try:
+        from . import f5_drain
+        snapshot["tables"]["virtual_addresses"] = f5_drain.inventory(SimpleNamespace(get_json=get))
+    except Exception as exc:
+        snapshot["errors" if ltm else "warnings"]["virtual_addresses"] = str(exc)
     if any(row.get("name") == "asm" and row.get("level") not in (None, "none")
            for row in snapshot["tables"].get("provision", [])):
         collect_waf(client, get, snapshot)

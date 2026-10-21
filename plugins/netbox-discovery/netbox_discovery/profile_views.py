@@ -75,7 +75,7 @@ class JobProfileForm(NetBoxModelForm):
                   '4800 for 80 minutes, or 7200 for two hours. Blank uses the worker setting (default 600).')
     drain_connections = forms.BooleanField(
         label='Drain F5 connections before reboot', required=False,
-        help_text='Standalone BIG-IP only; HA/cluster members are blocked. Temporarily disable virtual servers '
+        help_text='Standalone BIG-IP only; HA/cluster members are blocked. Temporarily disable virtual addresses '
                   'and wait for existing connections to settle. Original states are restored after reboot or on failure.')
     drain_min_reduction_percent = forms.IntegerField(
         label='F5 drain minimum reduction (%)', required=False, initial=5, min_value=1, max_value=100,
