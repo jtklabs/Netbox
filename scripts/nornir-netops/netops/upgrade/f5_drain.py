@@ -45,23 +45,49 @@ def check_standalone(client):
             raise ValueError("cannot establish standalone status: unknown device-group type")
 
 
-def inventory(client):
+def inventory(client, *, virtual_addresses=True):
+    """Keep address state separate from the read-only virtual-server inventory."""
+    resource = "virtual-address" if virtual_addresses else "virtual"
     result = []
-    for row in items(client, "/mgmt/tm/ltm/virtual"):
+    for row in items(client, "/mgmt/tm/ltm/" + resource):
         name = row.get("fullPath")
         if not isinstance(name, str) or not name.startswith("/") or "~" in name:
-            raise ValueError("cannot identify virtual server by fullPath for draining")
+            raise ValueError(f"cannot identify {resource} by fullPath for draining")
         enabled, disabled = row.get("enabled"), row.get("disabled")
-        if enabled is True and disabled in (None, False):
+        if virtual_addresses:
+            if enabled not in ("yes", "no"):
+                raise ValueError(f"cannot determine original enabled state of {name}")
+            state = enabled == "yes"
+        elif enabled is True and disabled in (None, False):
             state = True
         elif disabled is True and enabled in (None, False):
             state = False
         else:
             raise ValueError(f"cannot determine original enabled state of {name}")
         result.append({"name": name, "enabled": state})
+        if virtual_addresses:
+            result[-1]["address"] = row.get("address")
+        else:
+            result[-1]["destination"] = row.get("destination")
     if len({row["name"] for row in result}) != len(result):
-        raise ValueError("duplicate virtual server in drain inventory")
+        raise ValueError(f"duplicate {resource} in drain inventory")
     return result
+
+
+def address_for_virtual(virtual, addresses):
+    """Resolve named or numeric destinations, including IPv6 and route domains."""
+    destination = virtual.get("destination")
+    if not isinstance(destination, str):
+        return None
+    for address in addresses:
+        names = {address["name"]}
+        if address.get("address"):
+            names.add(address["name"].rsplit("/", 1)[0] + "/" + address["address"])
+        for name in names:
+            suffix = destination[len(name):] if destination.startswith(name) else ""
+            if suffix[:1] in {":", "."} and (suffix[1:].isdigit() or suffix[1:] == "any"):
+                return address["name"]
+    return None
 
 
 def connections(client, virtuals):
@@ -84,17 +110,20 @@ def connections(client, virtuals):
 
 def prepare(client, profile):
     check_standalone(client)
-    virtuals = inventory(client)
+    addresses = inventory(client)
+    virtuals = inventory(client, virtual_addresses=False)
+    for virtual in virtuals:
+        virtual["virtual_address"] = address_for_virtual(virtual, addresses)
     baseline = connections(client, virtuals) if virtuals else 0
-    return {"virtual_servers": virtuals, "baseline_connections": baseline,
+    return {"virtual_addresses": addresses, "virtual_servers": virtuals, "baseline_connections": baseline,
             "min_reduction_percent": profile.drain_min_reduction_percent,
             "window_seconds": profile.drain_window_seconds, "timeout_seconds": profile.drain_timeout_seconds,
             "restore_pending": [], "status": "planned"}
 
 
 def set_enabled(client, name, enabled):
-    path = "/mgmt/tm/ltm/virtual/" + quote(name.replace("/", "~"), safe="~")
-    client.request("PATCH", path, {"enabled" if enabled else "disabled": True})
+    path = "/mgmt/tm/ltm/virtual-address/" + quote(name.replace("/", "~"), safe="~")
+    client.request("PATCH", path, {"enabled": "yes" if enabled else "no"})
 
 
 def restore(client, record, emit):
@@ -105,7 +134,7 @@ def restore(client, record, emit):
             record["restore_pending"].remove(name)
         except Exception:
             failures.append(name)
-    emit("restoring_virtuals", "Virtual-server state restoration " + ("failed" if failures else "complete"),
+    emit("restoring_virtuals", "Virtual-address state restoration " + ("failed" if failures else "complete"),
          {"connection_drain": record})
     if failures:
         raise RuntimeError("manual VIP restoration required for: " + ", ".join(failures))
@@ -115,24 +144,24 @@ def persist_disabled(client, record, emit, *, recovery=False):
     record['disabled_config_saved'] = True  # Save responses can be lost.
     client.save_config()
     emit('holding_traffic' if recovery else 'draining',
-         'Saved virtual-server configuration for recovery after an unsuccessful post-upgrade check; traffic must remain disabled'
-         if recovery else 'Saved disabled virtual-server configuration for installation and boot',
+         'Saved virtual-address configuration for recovery after an unsuccessful post-upgrade check; traffic must remain disabled'
+         if recovery else 'Saved disabled virtual-address configuration for installation and boot',
          {'connection_drain': record})
 
 
 def hold_after_reboot(client, record, emit):
     current = {row['name']: row for row in inventory(client)}
-    if set(current) != {row['name'] for row in record['virtual_servers']}:
-        raise RuntimeError('Virtual-server inventory changed during reboot; recovery required')
+    if set(current) != {row['name'] for row in record['virtual_addresses']}:
+        raise RuntimeError('Virtual-address inventory changed during reboot; recovery required')
     if any(current[name]['enabled'] for name in record['restore_pending']):
         disable_again(client, record, emit)
-        raise RuntimeError('A drained virtual server booted enabled; disabled again for recovery')
-    emit('converging', 'Virtual servers booted disabled; waiting for WAF and health validation',
+        raise RuntimeError('A drained virtual address booted enabled; disabled again for recovery')
+    emit('converging', 'Virtual addresses booted disabled; waiting for WAF and health validation',
          {'connection_drain': record})
 
 
 def disable_again(client, record, emit):
-    record['restore_pending'] = [v['name'] for v in record['virtual_servers'] if v['enabled']]
+    record['restore_pending'] = [v['name'] for v in record['virtual_addresses'] if v['enabled']]
     failures = []
     for name in record['restore_pending']:
         try:
@@ -141,21 +170,35 @@ def disable_again(client, record, emit):
             failures.append(name)
     persist_disabled(client, record, emit, recovery=True)
     if failures:
-        raise RuntimeError('Could not re-disable virtual servers; manual recovery required for: ' + ', '.join(failures))
+        raise RuntimeError('Could not re-disable virtual addresses; manual recovery required for: ' + ', '.join(failures))
+
+
+def comparison_snapshot(before, after, record):
+    """Account only for the deliberate admin-state change; retain raw evidence."""
+    comparable = deepcopy(after)
+    pending = set(record['restore_pending'])
+    observed = {r.get('name'): r.get('enabled') for r in after.get('tables', {}).get('virtual_addresses', [])}
+    held = {name for name in pending if observed.get(name) is False}
+    for row in comparable.get('tables', {}).get('virtual_addresses', []):
+        if row.get('name') in held:
+            row['enabled'] = True
+    # Only account for inherited disablement on servers using a held address.
+    # User-disabled servers and unrelated health changes still compare normally.
+    affected = {v['name'] for v in record['virtual_servers'] if v.get('virtual_address') in held}
+    original = {r['name']: r.get('enabled') for r in before.get('tables', {}).get('virtual_servers', [])}
+    for row in comparable.get('tables', {}).get('virtual_servers', []):
+        if row.get('name') in affected and row.get('enabled') == 'disabled-by-parent':
+            row['enabled'] = original.get(row['name'])
+    return comparable
 
 
 def compare_while_drained(before, after, record, skip_running_config_check=False, **thresholds):
-    """Account only for the deliberate admin-state change; retain raw evidence."""
     from . import checks
-    comparable = deepcopy(after)
-    pending = set(record['restore_pending'])
-    for row in comparable.get('tables', {}).get('virtual_servers', []):
-        if row.get('name') in pending and row.get('enabled') in {'disabled', 'disabled-by-user'}:
-            row['enabled'] = 'enabled'
+    comparable = comparison_snapshot(before, after, record)
     findings = checks.compare(before, comparable, skip_running_config_check=skip_running_config_check, **thresholds)
-    observed = {r.get('name'): r.get('enabled') for r in after.get('tables', {}).get('virtual_servers', [])}
-    if any(observed.get(name) not in {'disabled', 'disabled-by-user'} for name in pending):
-        findings.append({'check': 'traffic_hold', 'severity': 'error', 'message': 'A drained virtual server is not disabled'})
+    observed = {r.get('name'): r.get('enabled') for r in after.get('tables', {}).get('virtual_addresses', [])}
+    if any(observed.get(name) is not False for name in record['restore_pending']):
+        findings.append({'check': 'traffic_hold', 'severity': 'error', 'message': 'A drained virtual address is not disabled'})
     return findings
 
 
@@ -164,7 +207,7 @@ def release_traffic(client, record, emit):
     if record.get('disabled_config_saved'):
         client.save_config()
         record['disabled_config_saved'] = False
-        emit('restoring_virtuals', 'Original virtual-server states restored and saved', {'connection_drain': record})
+        emit('restoring_virtuals', 'Original virtual-address states restored and saved', {'connection_drain': record})
 
 
 def drain(client, profile, record, emit):
@@ -173,14 +216,18 @@ def drain(client, profile, record, emit):
     record.clear()
     record.update(fresh)
     record["status"] = "draining"
-    if not emit("draining", "Disabling virtual servers and observing current client connections",
+    if not emit("draining", "Disabling virtual addresses and observing current client connections",
                 {"connection_drain": record}):
-        raise ValueError("progress webhook unavailable before disabling virtual servers")
-    for row in record["virtual_servers"]:
+        raise ValueError("progress webhook unavailable before disabling virtual addresses")
+    for row in record["virtual_addresses"]:
         if row["enabled"]:
             # Include uncertain PATCH outcomes in restoration, too.
             record["restore_pending"].append(row["name"])
             set_enabled(client, row["name"], False)
+    disabled = inventory(client)
+    if ({row['name'] for row in disabled} != {row['name'] for row in record['virtual_addresses']}
+            or any(row['enabled'] for row in disabled)):
+        raise RuntimeError('Virtual addresses could not be confirmed disabled; reboot cancelled')
     start = window_start = time.monotonic()
     previous = record["baseline_connections"]
     while True:

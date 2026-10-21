@@ -95,19 +95,23 @@ def test_readiness_and_collection_errors_cannot_be_waived():
 
 def test_drained_comparison_and_progress_ignore_only_deliberate_disable():
     before, after = snapshot(), snapshot()
-    pending = [row["name"] for row in after["tables"]["virtual_servers"]]
+    address = '/Common/192.0.2.10'
+    before['tables']['virtual_addresses'] = [{'name': address, 'enabled': True}]
+    after['tables']['virtual_addresses'] = [{'name': address, 'enabled': False}]
+    record = {'restore_pending': [address], 'virtual_servers': [
+        {'name': row['name'], 'virtual_address': address} for row in after['tables']['virtual_servers']]}
     for row in after["tables"]["virtual_servers"]:
-        row["enabled"] = "disabled"
+        row["enabled"] = "disabled-by-parent"
     after["tables"]["nodes"][0]["enabled"] = "disabled"
-    findings = f5_drain.compare_while_drained(before, after, {"restore_pending": pending},
+    findings = f5_drain.compare_while_drained(before, after, record,
                                              f5_ltm_min_unchanged_percent=90)
     assert len(findings) == 1 and findings[0]["severity"] == "warning"
-    summary = checks.threshold_summary(before, after, {"f5_ltm_min_unchanged_percent": 90}, pending)
+    summary = checks.threshold_summary(before, after, {"f5_ltm_min_unchanged_percent": 90}, record)
     assert summary["virtual_servers"]["unchanged_percent"] == 100
     assert summary["nodes"]["unchanged_percent"] == 90
-    assert after["tables"]["virtual_servers"][0]["enabled"] == "disabled"
-    after["tables"]["virtual_servers"][0]["enabled"] = "enabled"
-    findings = f5_drain.compare_while_drained(before, after, {"restore_pending": pending},
+    assert after["tables"]["virtual_servers"][0]["enabled"] == "disabled-by-parent"
+    after["tables"]["virtual_addresses"][0]["enabled"] = True
+    findings = f5_drain.compare_while_drained(before, after, record,
                                              f5_ltm_min_unchanged_percent=0)
     assert any(f["check"] == "traffic_hold" and f["severity"] == "error" for f in findings)
 

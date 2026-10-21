@@ -689,10 +689,12 @@ VIPs. There is no cluster override. Dry runs check eligibility and show the
 policy without changing VIPs; image staging never drains connections.
 
 After capturing the original baseline and UCS, but before installing the image
-to the inactive volume, the worker records the original enabled state of every virtual server across all partitions and
-disables only those that were enabled. This prevents new connections while
-allowing established connections to finish, using F5's
-[virtual-server disabled setting](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_ltm_virtual.html).
+to the inactive volume, the worker records the original enabled state of every
+virtual address across all partitions and disables only those that were enabled,
+using F5's [virtual-address enabled setting](https://clouddocs.f5.com/api/icontrol-rest/APIRef_tm_ltm_virtual-address.html)
+(`enabled: "no"` to disable, `enabled: "yes"` to restore). Each address is changed
+once even when several virtual servers share it. Virtual-server configuration
+is unchanged, including servers that were already disabled.
 The worker samples the sum of `clientside.curConns` across virtual servers
 at most every five seconds. Management connections are not counted.
 
@@ -712,7 +714,8 @@ checked between bounded REST requests, so request latency can extend wall time.
 
 After draining, the disabled state is saved before installation and configuration
 copy. The target therefore boots with those VIPs disabled. Validation uses fresh
-collections and accounts only for the deliberate VIP admin-state differences;
+collections and accounts only for the deliberate virtual-address admin-state
+differences and inherited `disabled-by-parent` states on their virtual servers;
 raw snapshots retain the actual disabled states. WAF policy count,
 ASM readiness, and all other health checks still apply.
 After two consecutive clean comparisons, the worker restores and saves the
@@ -809,7 +812,7 @@ a health validation timeout waits for a manual pass or cancellation as described
 below. Other timeouts produce a failed validation/recovery result, never an
 automatic rollback. The previous boot volume remains recorded in the plan.
 
-After health validation and restoration of the original virtual-server states,
+After health validation and restoration of the original virtual-address states,
 step 9 waits for **one** newly logged WAF request before completing the upgrade.
 It skips units without WAF, WAF units with zero policies, and units whose
 validated failover state is standby. All policy types count, including parents.
@@ -836,7 +839,7 @@ this check. The worker does not change logging settings or generate traffic.
 ### Manually passing F5 validation
 
 On the running NetBox job, enter a reason and choose **Force pass step 8** to
-accept health differences and restore the original enabled virtual servers.
+accept health differences and restore the original enabled virtual addresses.
 Step 9 remains a separate gate: **Force pass step 9** accepts the missing WAF
 request log and completes the unit with status `completed_with_warnings`, which
 is a successful outcome for scheduling. Restore/save failures still require

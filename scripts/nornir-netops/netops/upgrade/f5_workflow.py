@@ -99,14 +99,14 @@ def planned_commands(profile, plan, host):
     if plan.get("failover_first"):
         commands.append('POST /mgmt/tm/sys/failover {"command": "run", "standby": true}')
     if profile.drain_connections:
-        commands += ['PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"disabled": true}',
+        commands += ['PATCH /mgmt/tm/ltm/virtual-address/<originally-enabled-address> {"enabled": "no"}',
                      'GET /mgmt/tm/ltm/virtual/stats (wait for zero connections or a plateau)',
                      'POST /mgmt/tm/sys/config {"command": "save"} (persist disabled boot state)']
     commands.append(f"POST /mgmt/tm/sys/software/image {json.dumps(install)}")
     commands.append(f"POST /mgmt/tm/util/bash (cpcfg --source={plan['active_volume']} {plan['volume']['name']}; require exit 0)")
     commands.append(f'POST /mgmt/tm/sys {json.dumps({"command": "reboot", "volume": plan["volume"]["name"]})}')
     if profile.drain_connections:
-        commands += ['PATCH /mgmt/tm/ltm/virtual/<originally-enabled-virtual> {"enabled": true} (after WAF and health validation)',
+        commands += ['PATCH /mgmt/tm/ltm/virtual-address/<originally-enabled-address> {"enabled": "yes"} (after WAF and health validation)',
                      'POST /mgmt/tm/sys/config {"command": "save"} (persist restored states)']
     return commands
 
@@ -352,13 +352,13 @@ def upgrade_device(task, profile, options, reporter):
             payload = dict(payload or {})
             record = plan["connection_drain"]
             summary = {key: value for key, value in record.items()
-                       if key not in {"virtual_servers", "restore_pending"}}
+                       if key not in {"virtual_addresses", "virtual_servers", "restore_pending"}}
             summary["restoration_pending"] = len(record["restore_pending"])
             payload["progress_summary"] = {**payload.get("progress_summary", {}), "connection_drain": summary}
             if plan.get('rollback_note'):
                 payload['progress_summary'].update(rollback_note=plan['rollback_note'], rollback_volume=plan['active_volume'])
             if stage == 'validation_failed' and record.get('restore_pending'):
-                message += '; virtual servers remain disabled in the saved configuration; manual recovery required'
+                message += '; virtual addresses remain disabled in the saved configuration; manual recovery required'
                 payload['upgrade_plan'] = plan
         return reporter.emit(host, stage, message, payload, changed=changed, attachment=attachment)
 
@@ -512,14 +512,14 @@ def upgrade_device(task, profile, options, reporter):
                         f5_drain.release_traffic(client, drain, emit)
                         if plan.get('validation_overrides', {}).get('8'):
                             restored = {row['name']: row['enabled'] for row in f5_drain.inventory(client)}
-                            if any(restored.get(row['name']) != row['enabled'] for row in drain['virtual_servers']):
-                                raise RuntimeError('Original virtual-server states could not be confirmed after restoration')
+                            if any(restored.get(row['name']) != row['enabled'] for row in drain['virtual_addresses']):
+                                raise RuntimeError('Original virtual-address states could not be confirmed after restoration')
                         final = f5.collect(client, lambda path: emit('postcheck', path))
                         final_findings = checks.compare(before, final, **thresholds) + target_findings(final, profile, plan)
                         final_findings = f5_validation.findings_after_override(final_findings, plan)
                         errors = [f for f in final_findings if f['severity'] == 'error']
                         reasons = checks.describe_findings(errors)
-                        emit('validating', 'Final collection after restoring original virtual-server states: '
+                        emit('validating', 'Final collection after restoring original virtual-address states: '
                              + (reasons if errors else 'validation passed'),
                              {'post': final, 'findings': final_findings,
                               'progress_summary': {'counts': final['metrics']['counts'],

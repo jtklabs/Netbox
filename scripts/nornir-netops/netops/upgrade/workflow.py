@@ -504,7 +504,7 @@ def converge(emit, options, before, plan, reporter, host, collect_after, extra_f
                                    "validation_timeout": validation_timeout,
                                    "object_comparisons": checks.threshold_summary(
                                        before, after, plan.get("approved_profile", {}),
-                                       plan.get("connection_drain", {}).get("restore_pending", [])),
+                                       plan.get("connection_drain")),
                                    **({"waf": waf_summary} if waf_summary else {}),
                                    "skipped_checks": ["config"] if skip_running_config else [],
                                    "pending": [checks.describe_finding(f) for f in errors[:10]]}})

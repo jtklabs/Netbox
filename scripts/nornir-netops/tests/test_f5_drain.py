@@ -17,7 +17,14 @@ from test_upgrade_f5 import FakeBigIP, iso, options, profile, run_unit  # noqa: 
 class DrainBigIP(FakeBigIP):
     def __init__(self):
         super().__init__(failover="active", peers=())
-        self.virtuals = {"/Common/vs-web": True, "/Tenant/app/vs api": True, "/Common/off": False}
+        self.addresses = {"/Common/192.0.2.10": True, "/Tenant/app/2001:db8::10%2": True, "/Common/192.0.2.20": False}
+        self.virtuals = {"/Common/vs-web": True, "/Common/vs-https": True,
+                         "/Common/off": False, "/Tenant/app/vs api": True, "/Common/vs-held": True}
+        self.destinations = {"/Common/vs-web": "/Common/192.0.2.10:80",
+                             "/Common/vs-https": "/Common/192.0.2.10:443",
+                             "/Common/off": "/Common/192.0.2.10:8080",
+                             "/Tenant/app/vs api": "/Tenant/app/2001:db8::10%2.443",
+                             "/Common/vs-held": "/Common/192.0.2.20:443"}
         self.groups = []
         self.count = 100
         self.read_count = lambda: self.count
@@ -26,38 +33,52 @@ class DrainBigIP(FakeBigIP):
     def _get(self, path):
         if path == "/mgmt/tm/cm/device-group":
             return {"items": deepcopy(self.groups)}
+        if path == "/mgmt/tm/ltm/virtual-address":
+            return {"items": [{"fullPath": n, "address": n.rsplit("/", 1)[-1],
+                               "enabled": "yes" if enabled else "no"}
+                              for n, enabled in self.addresses.items()]}
         if path == "/mgmt/tm/ltm/virtual":
-            return {"items": [{"fullPath": n, "enabled" if enabled else "disabled": True}
+            return {"items": [{"fullPath": n, "enabled" if enabled else "disabled": True,
+                               "destination": self.destinations[n]}
                               for n, enabled in self.virtuals.items()]}
         if path == "/mgmt/tm/ltm/virtual/stats":
             count = self.read_count()
             return {"entries": {str(i): {"nestedStats": {"entries": {
                 "tmName": {"description": name}, "clientside.curConns": {"value": count if i == 0 else 0},
                 "status.availabilityState": {"description": "available"},
-                "status.enabledState": {"description": "enabled" if enabled else "disabled"},
+                "status.enabledState": {"description": self.virtual_status(name, enabled)},
             }}} for i, (name, enabled) in enumerate(self.virtuals.items())}}
         return super()._get(path)
 
+    def virtual_status(self, name, enabled):
+        if not enabled:
+            return "disabled"
+        address = f5_drain.address_for_virtual({"destination": self.destinations[name]},
+                                              [{"name": n} for n in self.addresses])
+        return "enabled" if self.addresses.get(address) else "disabled-by-parent"
+
     def save_config(self):
         super().save_config()
-        self.saved_virtuals = dict(self.virtuals)
+        self.saved_addresses = dict(self.addresses)
 
     def _post(self, path, payload):
         if '/sbin/cpcfg' in payload.get('utilCmdArgs', ''):
-            assert not any(self.saved_virtuals.values())
+            assert not any(self.saved_addresses.values())
         if path == '/mgmt/tm/sys/software/image' and payload.get('command') == 'install':
-            assert not any(self.virtuals.values())
-            assert not any(self.saved_virtuals.values())
+            assert not any(self.addresses.values())
+            assert not any(self.saved_addresses.values())
         if path == '/mgmt/tm/sys' and payload.get('command') == 'reboot':
-            self.virtuals = dict(self.saved_virtuals)
-            assert not any(self.virtuals.values())
+            self.addresses = dict(self.saved_addresses)
+            assert not any(self.addresses.values())
         return super()._post(path, payload)
 
     def request(self, method, path, payload=None, timeout=None):
-        if method == "PATCH" and path.startswith("/mgmt/tm/ltm/virtual/"):
+        if method == "PATCH" and path.startswith("/mgmt/tm/ltm/virtual-address/"):
             self.calls.append((method, path, payload))
             name = unquote(path.rsplit("/", 1)[-1]).replace("~", "/")
-            self.virtuals[name] = bool(payload.get("enabled"))
+            assert name in self.addresses
+            assert payload in ({"enabled": "yes"}, {"enabled": "no"})
+            self.addresses[name] = payload["enabled"] == "yes"
             if self.patch_failure:
                 self.patch_failure(name, payload)
             return {}
@@ -95,10 +116,10 @@ def test_dynamic_stopping(profile, unit, timer, counts, reason, elapsed):
     record = {}
     f5_drain.drain(unit, profile, record, Mock(return_value=True))
     assert record["reason"] == reason and record["elapsed_seconds"] == elapsed
-    assert record["restore_pending"] == ["/Common/vs-web", "/Tenant/app/vs api"]
-    assert not any(unit.virtuals.values())
+    assert record["restore_pending"] == ["/Common/192.0.2.10", "/Tenant/app/2001:db8::10%2"]
+    assert not any(unit.addresses.values())
     f5_drain.restore(unit, record, Mock())
-    assert unit.virtuals == {"/Common/vs-web": True, "/Tenant/app/vs api": True, "/Common/off": False}
+    assert unit.addresses == {"/Common/192.0.2.10": True, "/Tenant/app/2001:db8::10%2": True, "/Common/192.0.2.20": False}
     assert record["restore_pending"] == []
 
 
@@ -134,7 +155,7 @@ def test_dry_run_reports_policy_without_disabling(profile, options, unit):
     assert not result.failed and stages[-1] == "dry_run_complete"
     assert not any(method == "PATCH" for method, _, _ in unit.calls)
     assert result.result["connection_drain"]["baseline_connections"] == 100
-    assert '"disabled": true' in str(result.result["commands"])
+    assert '/virtual-address/<originally-enabled-address> {"enabled": "no"}' in str(result.result["commands"])
     assert reporter.emit.call_args.args[3]["progress_summary"]["connection_drain"]["status"] == "planned"
 
 
@@ -151,15 +172,21 @@ def test_stage_only_and_already_current_do_not_drain(profile, options, unit, app
 
 def test_full_upgrade_preserves_states_and_order(profile, options, unit, timer):
     options.apply = True
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
+    virtuals = dict(unit.virtuals)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True,
                                                 drain_window_seconds=5), options)
     assert not result.failed, reporter.emit.call_args.args[2]
-    assert unit.virtuals == initial and unit.rebooted_to == "HD1.2"
+    assert unit.addresses == initial and unit.rebooted_to == "HD1.2"
+    assert unit.virtuals == virtuals
+    patches = [(path, payload) for method, path, payload in unit.calls if method == 'PATCH']
+    assert patches == [('/mgmt/tm/ltm/virtual-address/' + name, {'enabled': state})
+                       for state in ('no', 'yes')
+                       for name in ('~Common~192.0.2.10', '~Tenant~app~2001%3Adb8%3A%3A10%252')]
     assert stages.index("draining") < stages.index("installing") < stages.index("validating") < stages.index("restoring_virtuals")
     assert "failing_over" not in stages
     assert unit.saved == 3  # baseline, disabled boot config, restored config
-    assert unit.saved_virtuals == initial
+    assert unit.saved_addresses == initial
     assert reporter.emit.call_args.args[3]["progress_summary"]["connection_drain"]["restoration_pending"] == 0
 
 
@@ -202,7 +229,7 @@ def test_cluster_membership_rechecked_immediately_before_disable(profile, option
 
 def test_rejected_reboot_restores_vips_immediately(profile, options, unit, monkeypatch):
     options.apply = True
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     unit.read_count = lambda: 0
     original = unit._post
     def post(path, payload):
@@ -214,7 +241,7 @@ def test_rejected_reboot_restores_vips_immediately(profile, options, unit, monke
     monkeypatch.setattr(f5_workflow, 'wait_for_target', wait)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and stages[-1] == 'recovery_required'
-    assert unit.virtuals == initial
+    assert unit.addresses == initial
     assert '400' in reporter.emit.call_args.args[2]
     wait.assert_not_called()
 
@@ -222,15 +249,15 @@ def test_rejected_reboot_restores_vips_immediately(profile, options, unit, monke
 @pytest.mark.parametrize("failure", ["patch", "stats", "timeout"])
 def test_failure_restores_all_touched_vips_and_does_not_reboot(profile, options, unit, timer, failure, monkeypatch):
     options.apply = True
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     if failure == "patch":
         def fail(name, payload):
-            if name == "/Tenant/app/vs api" and payload.get("disabled"):
+            if name == "/Tenant/app/2001:db8::10%2" and payload.get("enabled") == "no":
                 raise RuntimeError("lost PATCH response")
         unit.patch_failure = fail
     elif failure == "stats":
         def count():
-            if not any(unit.virtuals.values()):
+            if not any(unit.addresses.values()):
                 raise RuntimeError("stats unavailable")
             return 100
         unit.read_count = count
@@ -239,46 +266,47 @@ def test_failure_restores_all_touched_vips_and_does_not_reboot(profile, options,
     result, reporter, stages = run_unit(replace(profile, drain_connections=True, allow_active=True,
                                                 drain_window_seconds=5, drain_timeout_seconds=10), options)
     assert result.failed and stages[-1] == "recovery_required"
-    assert unit.virtuals == initial and unit.rebooted_to is None
+    assert unit.addresses == initial and unit.rebooted_to is None
     assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == []
 
 
 def test_restore_failures_do_not_skip_other_vips(profile, options, unit, timer):
     options.apply = True
     def fail(name, payload):
-        if payload.get("enabled") and name == "/Common/vs-web":
+        if payload.get("enabled") == "yes" and name == "/Common/192.0.2.10":
             raise RuntimeError("restore failed")
     unit.patch_failure = fail
     result, reporter, stages = run_unit(replace(profile, drain_connections=True, drain_window_seconds=5), options)
     assert result.failed and "manual" in reporter.emit.call_args.args[2]
-    assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == ["/Common/vs-web", "/Tenant/app/vs api"]
-    assert not any(unit.virtuals.values())
-    assert not any(unit.saved_virtuals.values())
+    assert reporter.emit.call_args.args[3]["upgrade_plan"]["connection_drain"]["restore_pending"] == ["/Common/192.0.2.10", "/Tenant/app/2001:db8::10%2"]
+    assert not any(unit.addresses.values())
+    assert not any(unit.saved_addresses.values())
 
 
 @pytest.mark.parametrize("reachable", [True, False])
 def test_failed_reconnect_keeps_traffic_held_for_recovery(
         profile, options, unit, timer, monkeypatch, reachable):
     options.apply = True
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     def failed_target(*args):
         unit.down_until = 0 if reachable else float('inf')
         raise TimeoutError("reboot deadline exceeded")
     monkeypatch.setattr(f5_workflow, "wait_for_target", failed_target)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True, drain_window_seconds=5), options)
     assert result.failed and stages[-1] == "recovery_required"
-    assert not any(unit.virtuals.values())
+    assert not any(unit.addresses.values())
     assert "verify/restore original enabled state manually" in reporter.emit.call_args.args[2]
 
 
 def test_progress_gate_failure_never_disables(profile, unit, timer):
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     with pytest.raises(ValueError, match="webhook unavailable"):
         f5_drain.drain(unit, profile, {}, Mock(return_value=False))
-    assert unit.virtuals == initial
+    assert unit.addresses == initial
 
 
 def test_empty_inventory_is_noop(profile, unit, timer):
+    unit.addresses = {}
     unit.virtuals = {}
     record = {}
     f5_drain.drain(unit, profile, record, Mock(return_value=True))
@@ -294,14 +322,14 @@ def test_malformed_collections_fail_closed():
 
 def test_inventory_pagination_and_repeated_page_detection():
     documents = {
-        '/mgmt/tm/ltm/virtual': {'items': [{'fullPath': '/Common/a', 'enabled': True}],
-                               'nextLink': 'https://localhost/mgmt/tm/ltm/virtual?$skip=1'},
-        '/mgmt/tm/ltm/virtual?$skip=1': {'items': [{'fullPath': '/Partition/app/b', 'disabled': True}]},
+        '/mgmt/tm/ltm/virtual-address': {'items': [{'fullPath': '/Common/a', 'enabled': 'yes'}],
+                               'nextLink': 'https://localhost/mgmt/tm/ltm/virtual-address?$skip=1'},
+        '/mgmt/tm/ltm/virtual-address?$skip=1': {'items': [{'fullPath': '/Partition/app/b', 'enabled': 'no'}]},
     }
     client = SimpleNamespace(get_json=documents.__getitem__)
-    assert f5_drain.inventory(client) == [{'name': '/Common/a', 'enabled': True},
-                                         {'name': '/Partition/app/b', 'enabled': False}]
-    documents['/mgmt/tm/ltm/virtual?$skip=1']['nextLink'] = '/mgmt/tm/ltm/virtual'
+    assert f5_drain.inventory(client) == [{'name': '/Common/a', 'enabled': True, 'address': None},
+                                         {'name': '/Partition/app/b', 'enabled': False, 'address': None}]
+    documents['/mgmt/tm/ltm/virtual-address?$skip=1']['nextLink'] = '/mgmt/tm/ltm/virtual-address'
     with pytest.raises(ValueError, match="repeated"):
         f5_drain.inventory(client)
 
@@ -310,11 +338,11 @@ def test_inventory_pagination_and_repeated_page_detection():
 def test_bad_statistics_never_mean_zero(unit, value):
     unit.read_count = lambda: value
     with pytest.raises(ValueError, match="statistics"):
-        f5_drain.connections(unit, f5_drain.inventory(unit))
+        f5_drain.connections(unit, f5_drain.inventory(unit, virtual_addresses=False))
 
 
 def test_partial_stats_and_pagination(unit):
-    virtuals = f5_drain.inventory(unit)
+    virtuals = f5_drain.inventory(unit, virtual_addresses=False)
     document = unit.get_json("/mgmt/tm/ltm/virtual/stats")
     entries = list(document["entries"].items())
     pages = {"/mgmt/tm/ltm/virtual/stats": {"entries": dict(entries[:1]),
@@ -351,7 +379,7 @@ def test_waf_loading_keeps_vips_disabled_until_two_clean_passes(profile, options
         snapshot = collect(client, progress)
         snapshot['waf'] = {'provisioned': True, 'policy_count': 5, 'ready': True}
         if unit.rebooted_to:
-            attempts.append(dict(unit.virtuals))
+            attempts.append(dict(unit.addresses))
             if len(attempts) < 3:
                 snapshot['waf']['ready'] = False
                 snapshot['errors']['waf_ready'] = 'ASM still loading'
@@ -361,7 +389,7 @@ def test_waf_loading_keeps_vips_disabled_until_two_clean_passes(profile, options
     request = unit.request
     def with_logs(method, path, payload=None, timeout=None):
         if path == f5_requests.REQUESTS:
-            assert unit.virtuals['/Common/vs-web']
+            assert unit.addresses['/Common/192.0.2.10']
             return {'items': [{'id': 'new', 'requestDatetime': '2026-10-20T10:00:01Z'}]}
         if path == '/mgmt/tm/util/bash' and f5_requests.CLOCK in (payload or {}).get('utilCmdArgs', ''):
             return {'commandResult': '2026-10-20T10:00:00Z'}
@@ -371,10 +399,11 @@ def test_waf_loading_keeps_vips_disabled_until_two_clean_passes(profile, options
     assert not result.failed
     assert len(attempts) == 5  # two loading, two ready, final restored collection
     assert all(not any(state.values()) for state in attempts[:4])
-    assert attempts[-1]['/Common/vs-web'] is True
+    assert attempts[-1]['/Common/192.0.2.10'] is True
     raw = [c.args[3]['post_before_restore'] for c in reporter.emit.call_args_list
            if len(c.args) > 3 and 'post_before_restore' in c.args[3]][0]
-    assert all(row['enabled'] == 'disabled' for row in raw['tables']['virtual_servers'])
+    assert all(row['enabled'] is False for row in raw['tables']['virtual_addresses'])
+    assert {row['enabled'] for row in raw['tables']['virtual_servers']} == {'disabled', 'disabled-by-parent'}
 
 
 def test_validation_timeout_leaves_saved_vips_disabled(profile, options, unit, monkeypatch):
@@ -392,18 +421,18 @@ def test_validation_timeout_leaves_saved_vips_disabled(profile, options, unit, m
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and stages[-1] == 'validation_failed'
     assert 'restoring_virtuals' not in stages
-    assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+    assert not any(unit.addresses.values()) and not any(unit.saved_addresses.values())
 
 
 def test_install_failure_restores_original_saved_state(profile, options, unit, monkeypatch):
     from netops.upgrade import f5
     options.apply = True
     unit.read_count = lambda: 0
-    initial = dict(unit.virtuals)
+    initial = dict(unit.addresses)
     monkeypatch.setattr(f5, 'install', Mock(side_effect=RuntimeError('install failed')))
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and unit.rebooted_to is None
-    assert unit.virtuals == unit.saved_virtuals == initial
+    assert unit.addresses == unit.saved_addresses == initial
 
 
 def test_final_health_failure_disables_and_saves_again(profile, options, unit, monkeypatch):
@@ -413,13 +442,13 @@ def test_final_health_failure_disables_and_saves_again(profile, options, unit, m
     collect = f5.collect
     def observed(client, progress):
         snapshot = collect(client, progress)
-        if unit.rebooted_to and any(unit.virtuals.values()):
+        if unit.rebooted_to and any(unit.addresses.values()):
             snapshot['errors']['waf_ready'] = 'ASM became unhealthy'
         return snapshot
     monkeypatch.setattr(f5, 'collect', observed)
     result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
     assert result.failed and stages[-1] == 'recovery_required'
-    assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+    assert not any(unit.addresses.values()) and not any(unit.saved_addresses.values())
     assert 'waf_ready: ASM became unhealthy' in reporter.emit.call_args.args[2]
     assert any('configuration for recovery' in call.args[2]
                and call.args[1] == 'holding_traffic' for call in reporter.emit.call_args_list)
@@ -434,7 +463,7 @@ def test_final_collection_disconnects_retry_reads_without_replaying_restoration(
     paths = {'/mgmt/tm/cm/device': 0, '/mgmt/tm/net/vlan': 0, '/mgmt/tm/ltm/rule': 0}
     get = unit.get_json
     def interrupted(path):
-        if unit.rebooted_to and any(unit.virtuals.values()) and path in paths:
+        if unit.rebooted_to and any(unit.addresses.values()) and path in paths:
             paths[path] += 1
             if paths[path] <= failures:
                 raise requests.ConnectionError('RemoteDisconnected: remote end closed connection without response')
@@ -449,16 +478,16 @@ def test_final_collection_disconnects_retry_reads_without_replaying_restoration(
     assert waits == [2, 4] * 3
     assert len(final['post']['read_retries']) == failures * 3
     # Each initially enabled VIP is restored once, regardless of read retries.
-    assert sum(method == 'PATCH' and payload.get('enabled', False)
+    assert sum(method == 'PATCH' and payload.get('enabled') == 'yes'
                for method, _, payload in unit.calls) == 2
     if failures == 2:
         assert not result.failed and stages[-1] == 'completed'
         assert final['progress_summary']['error_count'] == 0
-        assert unit.virtuals == unit.saved_virtuals == {
-            '/Common/vs-web': True, '/Tenant/app/vs api': True, '/Common/off': False}
+        assert unit.addresses == unit.saved_addresses == {
+            '/Common/192.0.2.10': True, '/Tenant/app/2001:db8::10%2': True, '/Common/192.0.2.20': False}
     else:
         assert result.failed and stages[-1] == 'recovery_required'
-        assert not any(unit.virtuals.values()) and not any(unit.saved_virtuals.values())
+        assert not any(unit.addresses.values()) and not any(unit.saved_addresses.values())
         assert 'F5 GET /mgmt/tm/cm/device: connection failed' in result.result['error']
         assert 'after 3 attempts' in result.result['error']
         assert final['progress_summary']['pending']
@@ -473,12 +502,82 @@ def test_final_collection_disconnects_retry_reads_without_replaying_restoration(
 def test_drain_comparison_does_not_mask_missing_vips_or_pool_failure(profile, unit):
     from netops.upgrade import f5
     before = f5.collect(unit, lambda _: None)
-    record = {'restore_pending': ['/Common/vs-web']}
-    after = deepcopy(before)
-    after['tables']['virtual_servers'][0]['enabled'] = 'disabled'
+    record = f5_drain.prepare(unit, profile)
+    record['restore_pending'] = ['/Common/192.0.2.10']
+    unit.addresses['/Common/192.0.2.10'] = False
+    after = f5.collect(unit, lambda _: None)
     assert not f5_drain.compare_while_drained(before, after, record)
-    assert after['tables']['virtual_servers'][0]['enabled'] == 'disabled'
+    assert after['tables']['virtual_servers'][0]['enabled'] == 'disabled-by-parent'
+    after['tables']['virtual_addresses'].pop(0)
     after['tables']['virtual_servers'].pop(0)
     after['tables']['pools'][0]['availability'] = 'offline'
     findings = f5_drain.compare_while_drained(before, after, record)
-    assert {'virtual_servers', 'pools', 'traffic_hold'} <= {f['check'] for f in findings}
+    assert {'virtual_addresses', 'virtual_servers', 'pools', 'traffic_hold'} <= {f['check'] for f in findings}
+
+
+@pytest.mark.parametrize('enabled', [None, True, False, 'enabled', 'disabled', '', 1])
+def test_address_state_requires_yes_or_no(enabled):
+    client = SimpleNamespace(get_json=lambda _: {'items': [{'fullPath': '/Common/vip', 'enabled': enabled}]})
+    with pytest.raises(ValueError, match='original enabled state'):
+        f5_drain.inventory(client)
+
+
+@pytest.mark.parametrize('destination,name,address', [
+    ('/Common/web:443', '/Common/web', '192.0.2.10'),
+    ('/Common/192.0.2.10:80', '/Common/web', '192.0.2.10'),
+    ('/Tenant/app/2001:db8::10%2.443', '/Tenant/app/web', '2001:db8::10%2'),
+    ('/Common/0.0.0.0:any', '/Common/0.0.0.0', '0.0.0.0'),
+])
+def test_virtual_address_destination_matching(destination, name, address):
+    assert f5_drain.address_for_virtual({'destination': destination},
+                                       [{'name': name, 'address': address}]) == name
+    assert f5_drain.address_for_virtual({'destination': destination},
+                                       [{'name': '/Other/web', 'address': address}]) is None
+
+
+@pytest.mark.parametrize('change', ['user_disabled', 'unrelated_parent', 'availability', 'address_enabled'])
+def test_drain_comparison_keeps_unrelated_changes(profile, unit, change):
+    from netops.upgrade import f5
+    before = f5.collect(unit, lambda _: None)
+    record = f5_drain.prepare(unit, profile)
+    record['restore_pending'] = ['/Common/192.0.2.10']
+    unit.addresses['/Common/192.0.2.10'] = False
+    after = f5.collect(unit, lambda _: None)
+    virtuals = {row['name']: row for row in after['tables']['virtual_servers']}
+    if change == 'user_disabled':
+        virtuals['/Common/vs-web']['enabled'] = 'disabled'
+    elif change == 'unrelated_parent':
+        virtuals['/Tenant/app/vs api']['enabled'] = 'disabled-by-parent'
+    elif change == 'availability':
+        virtuals['/Common/vs-web']['availability'] = 'offline'
+    else:
+        after['tables']['virtual_addresses'][0]['enabled'] = True
+    findings = f5_drain.compare_while_drained(before, after, record)
+    assert any(f['severity'] == 'error' for f in findings)
+    if change == 'address_enabled':
+        assert any(f['check'] == 'traffic_hold' for f in findings)
+
+
+def test_reboot_with_enabled_address_is_disabled_again(profile, unit):
+    record = f5_drain.prepare(unit, profile)
+    record['restore_pending'] = [row['name'] for row in record['virtual_addresses'] if row['enabled']]
+    virtuals = dict(unit.virtuals)
+    with pytest.raises(RuntimeError, match='booted enabled'):
+        f5_drain.hold_after_reboot(unit, record, Mock())
+    assert not any(unit.addresses.values())
+    assert unit.saved_addresses == unit.addresses
+    assert unit.virtuals == virtuals
+
+
+def test_unapplied_address_disable_cancels_install_and_restores(profile, options, unit):
+    options.apply = True
+    initial = dict(unit.addresses)
+    def ignored(name, payload):
+        if payload['enabled'] == 'no':
+            unit.addresses[name] = True
+    unit.patch_failure = ignored
+    result, reporter, stages = run_unit(replace(profile, drain_connections=True), options)
+    assert result.failed and stages[-1] == 'recovery_required'
+    assert 'could not be confirmed disabled' in reporter.emit.call_args.args[2]
+    assert unit.installing is None and unit.rebooted_to is None
+    assert unit.addresses == initial
