@@ -82,6 +82,16 @@ def first_line(text: str) -> str:
 def summarize(exc: BaseException) -> str:
     """One line: what went wrong, and enough of the detail to act on it."""
     name = type(exc).__name__
+    if name == 'IncompatiblePeer':
+        detail = str(exc).lower()
+        category = next((label for marker, label in (
+            ('host key', 'host key algorithm'),
+            ('kex', 'key exchange algorithm'),
+            ('cipher', 'encryption cipher'),
+            ('mac', 'MAC algorithm'),
+        ) if marker in detail), 'SSH algorithm')
+        return (f'SSH negotiation failed -- no shared {category}; '
+                'check worker dependencies and device SSH settings')
     status = getattr(exc, 'status_code', None)
     response = getattr(exc, 'response', None)
     if response is not None:

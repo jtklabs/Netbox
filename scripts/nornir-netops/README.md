@@ -112,6 +112,43 @@ Install only the groups you use; the base CSV workflow needs none of them.
 Device configuration is read-only unless `--apply` is passed. `--open-change`
 writes a ServiceNow change record while leaving device configuration untouched.
 
+### Older SSH devices (`ssh-rsa` and SHA-1 key exchange)
+
+Worker **0.2.24** constrains its SSH dependency to `paramiko>=4.0.0,<5` in both
+installation methods. [Paramiko 5 removed RSA/SHA-1 (`ssh-rsa`) signatures and
+SHA-1 key exchange](https://www.paramiko.org/changelog.html#5.0.0), so an
+unconstrained install could fail before login with `Incompatible ssh peer
+(no acceptable host key)` or `(no acceptable kex algorithm)` on older devices.
+`ssh-rsa` is a signature algorithm, distinct from the encryption cipher.
+
+After updating the worker checkout, reinstall dependencies **in the same virtual
+environment used by the scheduled worker**, then restart any persistent worker
+process. Updating the Python source alone does not replace Paramiko:
+
+```bash
+# From scripts/nornir-netops, with the worker virtual environment active:
+python -m pip install -r requirements.txt
+python -m pip check
+python -c 'import paramiko; print(paramiko.__version__)'  # expect 4.x
+```
+
+Package installs can instead use `python -m pip install -e '.[netbox,aws,servicenow,waf]'`.
+No standards YAML or job-profile flag is required. The shared SSH stack covers
+standards audit/remediation (including raw commands), collection, autodetection
+and SSH upgrade connections. Modern RSA signatures and key exchanges remain
+preferred; the worker does not force every peer to use `ssh-rsa`. Compatibility
+includes RSA/SHA-1 host signatures, SHA-1 DH key exchange, AES-CBC/3DES ciphers and
+HMAC-SHA1 when those are needed and available in the host cryptographic backend.
+It does not restore DSA (`ssh-dss`), which Paramiko 4 removed, or bypass an operating
+system/FIPS policy that prohibits these algorithms.
+
+This lets the worker connect to older equipment to audit or remediate it; it does
+not change the device's configured cipher/MAC standard. A remaining negotiation
+error identifies the incompatible category (host key, key exchange, cipher or MAC).
+Check that full error and the device's offered algorithms before changing its
+configuration. An RSA key can also support modern `rsa-sha2-256`/`rsa-sha2-512`
+signatures; seeing an RSA key alone does not prove that the device requires SHA-1.
+
 ## The inventory CSV
 
 One column with an address is all that is required. Copy
