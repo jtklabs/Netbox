@@ -61,7 +61,7 @@ def choices_for(user, device):
                         'plan': plan, 'operation': operation, 'profile_name': assigned.name if assigned else ''})
     choices.sort(key=lambda item: ('ntp' not in item['plan']['features'], item['label']))
     for profile in profiles:
-        choices.append({'value': f'profile:{profile.pk}',
+        choices.append({'value': f'profile:{profile.pk}', 'selected': profile == assigned,
                         'label': f'Profile: {profile.name}' + (' (assigned)' if profile == assigned else ''),
                         'plan': profile.resolved_plan(), 'operation': 'remediate', 'profile_name': profile.name})
     return choices
