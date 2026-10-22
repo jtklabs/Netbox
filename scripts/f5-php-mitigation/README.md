@@ -50,11 +50,20 @@ An execution failure never triggers a retry through the other shell.
 It requires the standard BIG-IP `php`, `bigstart`, and Unix file utilities.
 It rejects a target without a BIG-IP `/VERSION` file or the PHP INI directory.
 
-Use verified host keys in `~/.ssh/known_hosts`, or set `F5_KNOWN_HOSTS` to another
-file. Register keys using your normal trusted fingerprint verification process;
-unknown or changed keys fail. For nonstandard ports use the standard SSH
-`[address]:port` known-hosts form. SSH agents and automatic key discovery are
-disabled so authentication uses the supplied configuration.
+By default, `F5_HOST_KEY_POLICY=accept-new` accepts previously unknown SSH host
+keys without prompting. A prepopulated `known_hosts` file is not required.
+Existing keys in `~/.ssh/known_hosts`, or the file selected by `F5_KNOWN_HOSTS`,
+are still checked: a changed key fails with `ssh_host_key_mismatch`. Newly
+accepted keys stay in the connection's memory; the job never writes the host-key
+file, including with concurrent workers. Unregistered keys are therefore trusted
+again on each run.
+
+Set `F5_HOST_KEY_POLICY=strict` to require an existing known-hosts file and a
+matching entry for every device. Missing entries report `ssh_host_key_unknown`
+before authentication. This policy is separate from username/password rejection
+(`ssh_authentication_failed`). For nonstandard ports use the SSH `[address]:port`
+known-hosts form. SSH agents and automatic key discovery are disabled so
+authentication uses the supplied configuration.
 
 All `.env` values are read from the specified file; ambient environment variables
 do not override them. Paths in `.env` are relative to that file. Dollar signs in
@@ -385,3 +394,12 @@ The TMSH interpreter test wraps SSH commands in `tmsh -c`; it does
 not establish password authentication for a separate TMSH login account. Live
 installation, rollback, service restarts, and external webhook delivery have not
 been exercised as part of this validation.
+
+Additional read-only CSV validation on October 22, 2026 used all four lab F5s
+with duplicate rows, first with one worker and then with four workers. All four
+connected using root SSH keys and returned `needs_change`. A four-worker run
+with a nonexistent known-hosts file also reached all four devices using the
+`accept-new` default. Notification calls were intercepted locally; no external
+webhooks, configuration writes, or service restarts occurred. Separate password
+CSV checks reached three devices; lab01 rejected its saved password with both
+CSV and `--host`, independently of host-key policy.
