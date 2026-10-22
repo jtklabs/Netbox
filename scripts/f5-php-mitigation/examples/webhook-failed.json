@@ -1,0 +1,21 @@
+{
+  "event": "f5.mitigation.device.completed",
+  "schema_version": 1,
+  "event_id": "aee1aaf4-de4d-4de0-8e90-011e5848ae53",
+  "run_id": "220fe43b-5269-46ba-9723-03dfde0ab54f",
+  "advisory": "https://my.f5.com/manage/s/article/K000163821",
+  "mode": "apply",
+  "device": {
+    "host": "192.0.2.11",
+    "name": "bigip-b",
+    "port": 22,
+    "httpd_sam": false
+  },
+  "started_at": "2026-10-22T00:00:00+00:00",
+  "finished_at": "2026-10-22T00:00:01+00:00",
+  "duration_seconds": 1.0,
+  "status": "failed",
+  "changed": null,
+  "stage": "connect",
+  "error": "ssh_authentication_failed"
+}

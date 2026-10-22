@@ -1,0 +1,4 @@
+host,name,port,httpd_sam
+192.0.2.10,bigip-a,22,auto
+192.0.2.11,bigip-b,22,auto
+192.0.2.20,bigip-apm,22,true

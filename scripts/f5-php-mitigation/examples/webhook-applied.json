@@ -1,0 +1,29 @@
+{
+  "event": "f5.mitigation.device.completed",
+  "schema_version": 1,
+  "event_id": "0d0e1555-7a90-485e-a350-74e0b40f3e52",
+  "run_id": "220fe43b-5269-46ba-9723-03dfde0ab54f",
+  "advisory": "https://my.f5.com/manage/s/article/K000163821",
+  "mode": "apply",
+  "device": {
+    "host": "192.0.2.10",
+    "name": "bigip-a",
+    "port": 22,
+    "httpd_sam": false
+  },
+  "status": "applied",
+  "changed": true,
+  "services": [
+    "httpd"
+  ],
+  "httpd_sam_state": "absent",
+  "httpd_sam_decision": "skip",
+  "stage": "complete",
+  "previous_sha256": "absent",
+  "sha256": "6a777b534aa1e2f6862ee3d40a42816745e111c024e9619eb18db2de958a97536",
+  "backup": "/var/tmp/K000163821.aB12cD34",
+  "remote_exit_code": 0,
+  "started_at": "2026-10-22T00:00:00+00:00",
+  "finished_at": "2026-10-22T00:00:04+00:00",
+  "duration_seconds": 4.0
+}
