@@ -561,6 +561,9 @@ def comparison_report(reporter, host, before, after, findings, plan, status):
 
 
 def upgrade_device(task, profile, options, reporter):
+    if profile.family == "panos":
+        from . import panos_workflow
+        return panos_workflow.upgrade_device(task, profile, options, reporter)
     if profile.family == "f5":
         from . import f5_workflow
         return f5_workflow.upgrade_device(task, profile, options, reporter)

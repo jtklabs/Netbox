@@ -14,5 +14,7 @@ truststore>=0.10.4; python_version >= "3.10"
 #   pip install 'requests>=2.31'
 # Only needed for AWS Secrets Manager:
 #   pip install 'boto3>=1.34'
+# Only needed for PAN-OS upgrades:
+#   pip install '.[panos]'
 # Only needed to run the test suite:
 #   pip install 'pytest>=8.0' 'requests>=2.31'

@@ -13,7 +13,11 @@ from pathlib import Path
 
 
 def local_md5(path):
-    digest = hashlib.md5()
+    return local_digest(path, 'md5')
+
+
+def local_digest(path, algorithm='sha256'):
+    digest = hashlib.new(algorithm)
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             cancellation.checkpoint()
@@ -51,21 +55,24 @@ def cache_dir(options):
 def local_image(profile, options, emit):
     """The image on this worker: a local path, or a cached download of the profile URL."""
     source = profile.image_source
+    sha256 = getattr(profile, 'sha256', '')
+    checksum = sha256 or profile.md5
+    digest = (lambda path: local_digest(path, 'sha256')) if sha256 else local_md5
     if not source:
         return None
     if re.match(r"^https?://", source):
         path = cache_dir(options) / profile.image
-        if path.is_file() and local_md5(path) == profile.md5.lower():
+        if path.is_file() and digest(path) == checksum.lower():
             return path
         emit("staging", f"Downloading {profile.image} to the worker image cache")
         download(source, path)
-        if local_md5(path) != profile.md5.lower():
+        if digest(path) != checksum.lower():
             path.unlink()
             raise ValueError("downloaded image checksum does not match the approved profile")
         return path
     path = Path(source)
     if not path.is_file():
         raise ValueError("image_source file is not present on this worker")
-    if local_md5(path) != profile.md5.lower():
+    if digest(path) != checksum.lower():
         raise ValueError("local image checksum does not match the approved profile")
     return path

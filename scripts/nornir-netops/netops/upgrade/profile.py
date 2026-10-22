@@ -7,7 +7,7 @@ sources.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -103,10 +103,15 @@ class Profile:
     # Minimum unchanged objects in each BIG-IP inventory category.
     f5_ltm_min_unchanged_percent: int = 100
     f5_waf_min_unchanged_percent: int = 100
+    # PAN-OS packages use the support portal's SHA-256 digest.
+    sha256: str = ""
+    panos: dict = field(default_factory=dict)
 
     @property
     def family(self):
         image = str(self.image).lower()
+        if image.startswith(("panos_", "panorama_")):
+            return "panos"
         if image.endswith(".iso"):
             return "f5"
         if image.endswith(".swi"):
@@ -114,6 +119,9 @@ class Profile:
         return ios_xe_family(self.models[0]) if self.models else "C9300"
 
     def release(self, value):
+        if self.family == "panos":
+            from .panos_profile import release
+            return release(value)
         if self.family == "f5":
             return f5_version(value)
         if self.family == "eos":
@@ -155,7 +163,9 @@ class Profile:
             raise ValueError("validation_timeout must be a positive integer number of seconds or null")
         if not isinstance(result.image, str) or not result.image:
             raise ValueError("image must be the image filename")
-        if not isinstance(result.md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result.md5):
+        if result.family != "panos" and (result.sha256 or result.panos):
+            raise ValueError("sha256 and panos apply to PAN-OS profiles only")
+        if result.family != "panos" and (not isinstance(result.md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result.md5)):
             raise ValueError("md5 must be the vendor-published 32-digit image checksum")
         floor = FREE_SPACE_FLOOR.get(result.family, DEFAULT_FREE_SPACE_FLOOR)
         if type(result.minimum_free_bytes) is not int or result.minimum_free_bytes < floor:
@@ -181,6 +191,9 @@ class Profile:
             return cls._validate_f5(result)
         if result.family == "eos":
             return cls._validate_eos(result)
+        if result.family == "panos":
+            from .panos_profile import validate
+            return validate(result)
         return cls._validate_ios_xe(result)
 
     @staticmethod
