@@ -164,6 +164,8 @@ class Heartbeat:
 def platform_for(profile):
     """Nornir platform for a job: the image filename names the family (.iso BIG-IP, .swi EOS)."""
     image = str((profile or {}).get('image', '')).lower() if isinstance(profile, dict) else ''
+    if image.startswith(('panos_', 'panorama_')):
+        return 'paloalto_panos'
     if image.endswith('.iso'):
         return 'f5_tmsh'
     if image.endswith('.swi'):

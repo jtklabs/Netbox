@@ -28,6 +28,7 @@ dependencies = [
 servicenow = ["requests>=2.31"]
 netbox = ["requests>=2.31"]
 waf = ["requests>=2.31"]
+panos = ["requests>=2.31", "requests-toolbelt>=1,<2", "panos-upgrade-assurance==2.1.1", "cryptography>=49"]
 aws = ["boto3>=1.34"]
 dev = ["pytest>=8.0", "requests>=2.31"]
 

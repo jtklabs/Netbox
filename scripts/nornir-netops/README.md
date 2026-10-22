@@ -2892,6 +2892,84 @@ and AWS settings, processes a bounded Nornir batch, and reports progress to
 NetBox and the optional upgrade webhook. Without `--apply` it claims audits only.
 See [SCHEDULED_UPGRADES.md](SCHEDULED_UPGRADES.md) for setup and the interruption/recovery behavior.
 
+### PAN-OS lab qualification
+
+The PAN-OS driver is under lab qualification. It is **not released for production
+upgrades**. Applying requires `NETOPS_PANOS_APPLY_ENABLED=true` on the poller;
+leave it unset until live upgrades, restore/retest cycles, and recovery tests
+have passed for the intended HA topology. Unit tests of the state machine do
+not establish live upgrade support.
+
+Install the optional dependencies with `pip install '.[panos]'`. A PAN-OS
+profile uses the vendor upgrade package (`PanOS_vm-<version>` or
+`Panorama_pc-<version>`), its published `sha256`, and an empty legacy `md5`.
+VHDX/OVA deployment images cannot be used as upgrade packages. Pin the target,
+approved starting versions, required content release, and feature base packages;
+the worker never chooses a newer release automatically. Only one same-major
+feature hop is currently accepted. Advanced routing, OSPF, OSPFv3, RIP and BFD
+need additional operational validation before qualification; detected enabled
+protocols without that coverage block the job.
+
+The `panos` settings contain:
+
+- `ha_mode`: `standalone`, `active-passive`, or `active-active`.
+- `members`: one or two `{address, serial}` mappings, in upgrade order. The
+  first HA member must initially be passive or active-secondary. Both HA jobs
+  must use the same profile and poller and a dedicated two-device NetBox upgrade
+  group with concurrency one. NetBox orders the second job behind the first.
+- Optional `panorama`: its literal management IP. Authentication uses the
+  worker's resolved device credentials for Panorama; operational commands target
+  the approved firewall serial. Images are imported to Panorama and distributed
+  with the **upload-only** command, one device at a time. Installation/reboot
+  remain separate steps. Without `panorama`, the same driver connects directly.
+- `minimum_content`: the target release's required apps/threats version.
+- `base_images`: explicit `{image, image_source, sha256}` mappings.
+- `probes`: `{name, url, status, body_sha256}` HTTP(S) checks. Deploy a stable
+  test application behind the firewall and ensure the poller's path actually
+  traverses it. These are application checks, not management-interface pings.
+- Optional `required_routes`, `required_bgp_peers`, and `required_tunnels`:
+  collector object identities that must be healthy on the forwarding member.
+- Optional `additional_checks`: `environmentals`, `dp_cpu_utilization`,
+  `mp_cpu_utilization`, `mp_mem_utilization`, and `planes_clock_sync`.
+- `verify_tls` defaults to true; `port` defaults to 443.
+
+The driver uses Palo Alto's upgrade-assurance collectors plus independent HA
+checks. Mandatory collection errors block changes. Validation covers device
+identity, configuration drift, pending commits/jobs/locks, startup auto-commit,
+dataplane readiness, NTP, certificate strength/expiry, content, license retention,
+interface/MTU inventory, BGP, critical/static routes and forwarding entries,
+configured tunnels, HA links/state, and synthetic application checks. HA3 is
+mandatory for active/active. Preemption must be disabled on both members before
+the first job. Two healthy post-check observations are required.
+
+Session counts, throughput, ARP entries, and changes in ordinary learned routes
+are recorded as informational data. They do not fail validation when people go
+home. Synthetic probes continue during HA changes; an outage over 15 seconds
+remains a failure even if the application later recovers.
+
+Supply `NETOPS_PANOS_BACKUP_KEY` as a runtime secret: 64 hexadecimal characters
+representing an AES-256 key. Configuration backups are encrypted with AES-GCM,
+verified before installation, and saved with mode 0600 beside private job
+journals under `.upgrade-locks/panos`. Keep the key in the secret store, outside
+profiles and reports. The backup filename is the authenticated associated data;
+the first 12 file bytes are the nonce. Raw configuration and license activation
+codes do not enter the NetBox report.
+
+A lost install response is never blindly retried. A failed mutation leaves a
+recovery reservation, and the other peer cannot proceed. Successful first-peer
+evidence is bound to the profile, configuration digests, and a 24-hour window.
+There is no force-pass path for PAN-OS. Hyper-V checkpoint restoration belongs
+to the isolated lab test procedure; it is not a production rollback operation.
+
+Live qualification still needs valid firewall/Panorama entitlements, the actual
+target upgrade/base packages, synchronized HA configurations, and a transit
+application topology. The unlicensed lab can exercise role changes but cannot
+qualify Panorama serial targeting or licensed traffic features.
+
+References: [Palo Alto upgrade assurance](https://github.com/PaloAltoNetworks/pan-os-upgrade-assurance),
+[HA upgrade XML API](https://docs.paloaltonetworks.com/ngfw/api/pan-os-xml-api-use-cases/upgrade-pan-os-on-multiple-ha-firewalls-through-panorama-api),
+and [HA synchronization](https://docs.paloaltonetworks.com/ngfw/administration/high-availability/reference-ha-synchronization).
+
 ## Raw command checks
 
 Use `raw_commands` to run a show command and require or forbid text or regex matches.

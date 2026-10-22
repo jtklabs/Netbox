@@ -99,12 +99,13 @@ def validate_profile(profile, operation=None):
     if operation in CONFIG_OPERATIONS:
         return validate_remediation(profile)
     keys = {'name', 'models', 'starting_versions', 'target_version', 'image', 'md5',
+            'sha256', 'panos',
             'minimum_free_bytes', 'bundle_conversion_validated', 'image_source', 'skip_running_config_check',
             'validation_timeout', 'f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent',
             # BIG-IP profiles; the worker's validator applies the family rules.
             'volume', 'allow_active', 'ucs_backup', 'license_check_date', 'drain_connections',
             'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
-    required = keys - {'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup',
+    required = keys - {'sha256', 'panos', 'bundle_conversion_validated', 'image_source', 'volume', 'allow_active', 'ucs_backup',
                        'validation_timeout', 'f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent',
                        'license_check_date', 'skip_running_config_check', 'drain_connections',
                        'drain_min_reduction_percent', 'drain_window_seconds', 'drain_timeout_seconds'}
@@ -121,9 +122,15 @@ def validate_profile(profile, operation=None):
         optional = key == 'starting_versions' and operation == 'stage'
         if not isinstance(profile[key], list) or not (profile[key] or optional) or not all(isinstance(x, str) for x in profile[key]):
             raise QueueError(f'Profile {key} must be a nonempty list of strings.')
-    for key in ('name', 'target_version', 'image', 'md5'):
+    is_panos = str(profile.get('image', '')).startswith(('PanOS_', 'Panorama_'))
+    for key in ('name', 'target_version', 'image') + (() if is_panos else ('md5',)):
         if not isinstance(profile[key], str) or not profile[key].strip():
             raise QueueError(f'Profile {key} must be a nonempty string.')
+    if is_panos:
+        from .upgrade_panos import validate_profile as validate_panos_profile
+        validate_panos_profile(profile)
+    elif profile.get('sha256') or profile.get('panos'):
+        raise QueueError('sha256 and panos apply to PAN-OS profiles only.')
     for key in ('f5_ltm_min_unchanged_percent', 'f5_waf_min_unchanged_percent'):
         value = profile.get(key, 100)
         if type(value) is not int or not 0 <= value <= 100:
@@ -334,6 +341,8 @@ def prepare(user, data, *, skipped=None):
     for row in rows:
         row['groups'] = groups.get(row['device'].pk, [])
         row['waits_for'] = downstream.get(row['device'].pk, [])
+    from .upgrade_panos import order_pairs
+    order_pairs(rows, data['operation'])
     try:
         plan_waves(rows)
     except GroupError as exc:
