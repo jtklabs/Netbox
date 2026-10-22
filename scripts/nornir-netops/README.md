@@ -2961,10 +2961,20 @@ evidence is bound to the profile, configuration digests, and a 24-hour window.
 There is no force-pass path for PAN-OS. Hyper-V checkpoint restoration belongs
 to the isolated lab test procedure; it is not a production rollback operation.
 
-Live qualification still needs valid firewall/Panorama entitlements, the actual
-target upgrade/base packages, synchronized HA configurations, and a transit
-application topology. The unlicensed lab can exercise role changes but cannot
-qualify Panorama serial targeting or licensed traffic features.
+Live Hyper-V testing has exercised both HA modes with two isolated Linux traffic
+endpoints, new HTTP requests, and established heartbeat streams. Both member
+handoffs passed in each mode without stream disconnections. Those tests exercise
+basic transit traffic and session continuity; they do not establish software
+upgrade or licensed security-feature qualification.
+
+Live upgrade qualification still needs valid firewall/Panorama entitlements, the
+actual target upgrade/base packages, synchronized HA configurations, and the
+remaining readiness checks. The current driver requires local configuration
+synchronization; Panorama-managed pairs that intentionally disable it need
+additional central policy/template synchronization validation before support.
+The unlicensed lab cannot qualify Panorama serial targeting and managed image
+distribution. Keep applying disabled until the actual upgrade/restore matrix
+passes.
 
 References: [Palo Alto upgrade assurance](https://github.com/PaloAltoNetworks/pan-os-upgrade-assurance),
 [HA upgrade XML API](https://docs.paloaltonetworks.com/ngfw/api/pan-os-xml-api-use-cases/upgrade-pan-os-on-multiple-ha-firewalls-through-panorama-api),
