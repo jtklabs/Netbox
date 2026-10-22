@@ -223,7 +223,7 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(job.read_channel(channel, 1), (0, "result"))
 
     def test_timeout_after_dispatch_is_unknown(self):
-        with patch.object(job.paramiko, "SSHClient") as constructor, patch.object(job, "read_channel", side_effect=TimeoutError), \
+        with patch.object(job.paramiko, "SSHClient") as constructor, patch.object(job, "read_channel", side_effect=TimeoutError) as read, \
              patch.object(job, "detect_shell", return_value=("bash", "/bin/bash -s")) as detect:
             result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "exit 0")
             client = constructor.return_value
@@ -232,7 +232,16 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(result["status"], "unknown")
             client.close.assert_called_once()
             detect.assert_called_once()
+            self.assertEqual(read.call_args.args[1], 900)
             client.get_transport.return_value.open_session.return_value.exec_command.assert_called_once_with("/bin/bash -s")
+
+    def test_check_preserves_configured_command_timeout(self):
+        with patch.object(job.paramiko, "SSHClient"), \
+             patch.object(job, "read_channel", side_effect=TimeoutError) as read, \
+             patch.object(job, "detect_shell", return_value=("bash", "/bin/bash -s")):
+            result = job.execute_device(job.Device("192.0.2.1"), config(), "check", "exit 0")
+            self.assertEqual(read.call_args.args[1], config().command_timeout)
+            self.assertEqual(result["status"], "failed")
 
     def test_authentication_failure_is_not_unknown(self):
         with patch.object(job.paramiko, "SSHClient") as constructor:
@@ -380,6 +389,13 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(calls, 1)
         self.assertEqual(len(notifications), 1)
+        self.assertEqual(report["unprocessed_count"], 1)
+
+    def test_failed_initial_httpd_recovery_stops_batch(self):
+        code, report, _, calls, _ = self.run_batch([
+            {"status": "failed", "failed_stage": "recover_httpd", "error": "httpd_recovery_failed"}])
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, 1)
         self.assertEqual(report["unprocessed_count"], 1)
 
     def test_success_exit_code(self):
@@ -557,11 +573,34 @@ class RemoteWorkflowTests(unittest.TestCase):
         # Translate only known fixture paths. No commands address real /etc or /var.
         for prefix in ("/etc/php.ini.d", "/var/tmp", "/var/run", "/VERSION"):
             self.template = self.template.replace(prefix, str(self.root) + prefix)
-        stub = '''import base64, hashlib, os, pathlib, shutil, sys
+        # Keep simulated health failures immediate; production uses wall-clock deadlines.
+        for setting in ("HEALTH_TIMEOUT=30", "EXIT_TIMEOUT=10"):
+            self.template = self.template.replace(setting, setting.split("=")[0] + "=0")
+        stub = '''import base64, hashlib, os, pathlib, shutil, subprocess, sys, time
 name = pathlib.Path(sys.argv[0]).name
 root = pathlib.Path(os.environ["SIM_ROOT"])
 target = root / "etc/php.ini.d/K000163821.ini"
-if name == "id": print("0")
+if name == "timeout":
+    assert sys.argv[1:3] == ["-k", "5s"]
+    assert sys.argv[3] in {"5s", "10s", "15s", "45s"}
+    try:
+        command = sys.argv[4:]
+        # Exercise an actual blocked subprocess without a 45-second test delay.
+        hangs = (command[:2] == ["bigstart", "restart"] and os.environ.get("SIM_RESTART_HANG")) or (command[:2] == ["bigstart", "stop"] and os.environ.get("SIM_STOP_HANG"))
+        limit = 0.3 if hangs else 10
+        sys.exit(subprocess.run(command, timeout=limit).returncode)
+    except subprocess.TimeoutExpired:
+        sys.exit(124)
+elif name == "pkill":
+    assert sys.argv[1:] == ["-KILL", "-x", "httpd"]
+    with (root / "forced_kills").open("a") as f: f.write("httpd\\n")
+    if os.environ.get("SIM_KILL_FAIL"): sys.exit(2)
+    if os.environ.get("SIM_NO_HTTPD"): sys.exit(1)
+elif name == "pgrep":
+    assert sys.argv[1:] == ["-x", "httpd"]
+    if os.environ.get("SIM_SURVIVOR"): print("123"); sys.exit(0)
+    sys.exit(1)
+elif name == "id": print("0")
 elif name == "sleep": pass
 elif name == "sha256sum":
     p = pathlib.Path(sys.argv[1]); print(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + str(p))
@@ -589,19 +628,40 @@ elif name == "bigstart":
             if state == "unknown": print("httpd_sam unexpected-state"); sys.exit(0)
             if state == "duplicate": print("httpd_sam down\\nhttpd_sam run (pid 456) 10 seconds"); sys.exit(0)
         if os.environ.get("SIM_DOWN"): print(service + " down"); sys.exit(1)
+        if service == "httpd" and ((root / "service_down").exists() or
+            (os.environ.get("SIM_INITIAL_DOWN") and not (root / "service_started").exists())):
+            print("httpd down"); sys.exit(1)
         if service == "httpd_sam" and (root / "sam_restart_failed").exists():
             print("httpd_sam down"); sys.exit(1)
         if os.environ.get("SIM_SYSV"): print(service + " (pid 4129) is running...")
         else: print(service + " run (pid 123) 10 seconds")
+    elif action == "stop":
+        assert service == "httpd"
+        with (root / "stops").open("a") as f: f.write(service + "\\n")
+        (root / "service_down").touch()
+        if os.environ.get("SIM_STOP_HANG"): time.sleep(60)
+    elif action == "start":
+        assert service == "httpd"
+        with (root / "starts").open("a") as f: f.write(service + "\\n")
+        marker = root / "start_failed"
+        if os.environ.get("SIM_START_FAIL_ONCE") and not marker.exists(): marker.touch(); sys.exit(1)
+        if os.environ.get("SIM_START_FAIL_ALWAYS"): sys.exit(1)
+        if not os.environ.get("SIM_START_FALSE_SUCCESS"):
+            (root / "service_down").unlink(missing_ok=True)
+            (root / "service_started").touch()
     elif action == "restart":
         with (root / "restarts").open("a") as f: f.write(service + "\\n")
+        if service == "httpd" and os.environ.get("SIM_RESTART_HANG"): time.sleep(60)
+        if service == "httpd" and os.environ.get("SIM_HEALTH_FAIL_AFTER_RESTART"):
+            (root / "service_down").touch(); sys.exit(0)
         if service == "httpd_sam" and os.environ.get("SIM_SAM_RESTART_FAIL"):
             (root / "sam_restart_failed").touch(); sys.exit(1)
         marker = root / "restart_failed"
         if os.environ.get("SIM_RESTART_FAIL_ONCE") and not marker.exists(): marker.touch(); sys.exit(1)
         if os.environ.get("SIM_RESTART_FAIL_ALWAYS"): sys.exit(1)
+        if service == "httpd": (root / "service_down").unlink(missing_ok=True)
 '''
-        for command in ("id", "sleep", "sha256sum", "base64", "install", "php", "bigstart"):
+        for command in ("id", "sleep", "sha256sum", "base64", "install", "php", "bigstart", "timeout", "pgrep", "pkill"):
             path = self.bin / command
             path.write_text(f"#!{sys.executable}\n" + stub)
             path.chmod(0o700)
@@ -620,6 +680,7 @@ elif name == "bigstart":
         self.assertIn("status\tneeds_change", result.stdout)
         self.assertFalse(self.target.exists())
         self.assertFalse((self.root / "restarts").exists())
+        self.assertFalse((self.root / "forced_kills").exists())
         self.assertEqual(list((self.root / "var/tmp").iterdir()), [])
         self.assertEqual(list((self.root / "var/run").iterdir()), [])
 
@@ -691,7 +752,80 @@ elif name == "bigstart":
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("status\tfailed_rollback_incomplete", result.stdout)
         self.assertFalse(self.target.exists())
+        self.assertFalse((self.root / "forced_kills").exists())
         self.assertEqual((self.root / "restarts").read_text(), "httpd\nhttpd_sam\nhttpd\nhttpd_sam\n")
+
+    def test_hung_restart_and_stop_recover_with_exact_httpd_kill_and_start(self):
+        result = self.run_remote(SIM_RESTART_HANG="1", SIM_STOP_HANG="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((self.root / "forced_kills").read_text(), "httpd\n")
+        self.assertEqual((self.root / "starts").read_text(), "httpd\n")
+        parsed = job.parse_result(0, result.stdout, "apply")
+        self.assertEqual(parsed["status"], "applied")
+        self.assertEqual(parsed["httpd_recovery"], "recovered")
+        self.assertEqual(parsed["httpd_recovery_attempts"], 1)
+        self.assertTrue(parsed["httpd_force_killed"])
+
+    def test_restart_failure_recovers_without_rolling_back_good_settings(self):
+        result = self.run_remote(SIM_RESTART_FAIL_ONCE="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.target.read_bytes(), self.content)
+        self.assertIn("httpd_recovery\trecovered", result.stdout)
+        self.assertNotIn("stage\trollback", result.stdout)
+
+    def test_reported_restart_success_with_failed_health_triggers_recovery(self):
+        result = self.run_remote(SIM_HEALTH_FAIL_AFTER_RESTART="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("httpd_recovery\trecovered", result.stdout)
+        self.assertNotIn("stage\trollback", result.stdout)
+        self.assertEqual(self.target.read_bytes(), self.content)
+
+    def test_no_matching_httpd_process_still_starts(self):
+        result = self.run_remote(SIM_RESTART_FAIL_ONCE="1", SIM_NO_HTTPD="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("httpd_force_killed\tfalse", result.stdout)
+        self.assertEqual((self.root / "starts").read_text(), "httpd\n")
+
+    def test_apply_can_recover_initially_down_httpd_before_install(self):
+        result = self.run_remote(SIM_INITIAL_DOWN="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertLess(result.stdout.index("httpd_recovery\trecovered"), result.stdout.index("stage\tinstall"))
+        self.assertEqual((self.root / "starts").read_text(), "httpd\n")
+
+    def test_initial_recovery_failure_never_installs(self):
+        result = self.run_remote(SIM_INITIAL_DOWN="1", SIM_START_FAIL_ALWAYS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed_stage\trecover_httpd", result.stdout)
+        self.assertFalse(self.target.exists())
+
+    def test_force_kill_error_or_survivor_never_starts_over_old_process(self):
+        for environment in ({"SIM_KILL_FAIL": "1"}, {"SIM_SURVIVOR": "1"}):
+            with self.subTest(environment=environment):
+                (self.root / "service_down").unlink(missing_ok=True)
+                result = self.run_remote(SIM_RESTART_FAIL_ALWAYS="1", **environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("status\tfailed_rollback_incomplete", result.stdout)
+                self.assertFalse((self.root / "starts").exists())
+
+    def test_existing_lock_blocks_initial_recovery(self):
+        (self.root / "var/run/K000163821.lock").mkdir()
+        result = self.run_remote(SIM_INITIAL_DOWN="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("error\tdevice_locked", result.stdout)
+        self.assertFalse((self.root / "forced_kills").exists())
+        self.assertFalse((self.root / "starts").exists())
+
+    def test_failed_health_after_start_never_reports_applied(self):
+        result = self.run_remote(SIM_RESTART_FAIL_ALWAYS="1", SIM_START_FALSE_SUCCESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("status\tfailed_rollback_incomplete", result.stdout)
+        self.assertNotIn("status\tapplied", result.stdout)
+
+    def test_healthy_restart_does_not_force_kill(self):
+        result = self.run_remote()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse((self.root / "forced_kills").exists())
+        self.assertIn("httpd_recovery\tnot_needed", result.stdout)
 
     def test_compliant_check_and_repeat_apply(self):
         self.target.write_bytes(self.content)
@@ -704,7 +838,7 @@ elif name == "bigstart":
 
     def test_restart_failure_restores_existing_file(self):
         self.target.write_text("old configuration\n")
-        result = self.run_remote(SIM_RESTART_FAIL_ONCE="1")
+        result = self.run_remote(SIM_RESTART_FAIL_ONCE="1", SIM_START_FAIL_ONCE="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("status\tfailed_rolled_back", result.stdout)
         self.assertEqual(self.target.read_text(), "old configuration\n")
@@ -718,7 +852,7 @@ elif name == "bigstart":
         self.assertTrue(list((self.root / "var/tmp").glob("*/original_absent")))
 
     def test_rollback_failure_is_distinct(self):
-        result = self.run_remote(SIM_RESTART_FAIL_ALWAYS="1")
+        result = self.run_remote(SIM_RESTART_FAIL_ALWAYS="1", SIM_START_FAIL_ALWAYS="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("status\tfailed_rollback_incomplete", result.stdout)
 
@@ -741,7 +875,7 @@ elif name == "bigstart":
         self.assertEqual(outside.read_text(), "preserve me")
 
     def test_stopped_service_prevents_writes(self):
-        result = self.run_remote(SIM_DOWN="1")
+        result = self.run_remote("check", SIM_DOWN="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.target.exists())
         self.assertFalse((self.root / "restarts").exists())

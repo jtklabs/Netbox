@@ -16,6 +16,12 @@ workdir=
 staged=
 error_code=
 services=(httpd)
+SERVICE_TIMEOUT=45
+HEALTH_TIMEOUT=30
+STOP_TIMEOUT=15
+EXIT_TIMEOUT=10
+httpd_recovery_attempts=0
+httpd_initially_running=true
 
 emit() { printf 'F5JOB\t%s\t%s\n' "$1" "$2"; }
 step() { stage=$1; emit stage "$stage"; }
@@ -27,7 +33,7 @@ cleanup() {
 trap cleanup EXIT
 healthy() {
     local output
-    output=$(bigstart status "$1" 2>/dev/null) || return 1
+    output=$(timeout -k 5s 5s bigstart status "$1" 2>/dev/null) || return 1
     printf '%s\n' "$output" | running_line "$1"
 }
 running_line() {
@@ -35,12 +41,56 @@ running_line() {
     grep -Eq "^[[:space:]]*$1[[:space:]]+(run[[:space:]]+\\(pid[[:space:]]+[0-9]+\\)|\\(pid[[:space:]]+[0-9]+\\)[[:space:]]+is[[:space:]]+running([.[:space:]]|$))"
 }
 wait_healthy() {
-    local n
-    for n in {1..30}; do
+    local deadline=$((SECONDS + HEALTH_TIMEOUT))
+    while :; do
         if healthy "$1"; then return 0; fi
+        (( SECONDS < deadline )) || return 1
         sleep 2
     done
+}
+httpd_gone() {
+    local deadline=$((SECONDS + EXIT_TIMEOUT)) rc
+    while :; do
+        if timeout -k 5s 5s pgrep -x httpd >/dev/null 2>&1; then
+            (( SECONDS < deadline )) || return 1
+            sleep 1
+        else
+            rc=$?
+            [[ "$rc" == 1 ]] && return 0
+            return 1
+        fi
+    done
+}
+recover_httpd() {
+    local rc
+    httpd_recovery_attempts=$((httpd_recovery_attempts + 1))
+    emit httpd_recovery_attempts "$httpd_recovery_attempts"
+    emit httpd_recovery attempted
+    # Stop first, but do not let a stuck service-control command block recovery.
+    timeout -k 5s "${STOP_TIMEOUT}s" bigstart stop httpd >/dev/null 2>&1 || :
+    # Exact process name only: never match httpd_sam/httpd_apm or shell arguments.
+    if timeout -k 5s 5s pkill -KILL -x httpd >/dev/null 2>&1; then
+        emit httpd_force_killed true
+    else
+        rc=$?
+        if [[ "$rc" != 1 ]]; then emit httpd_recovery failed; return 1; fi
+        # Exit 1 means no matching process; an already-stopped service still starts.
+    fi
+    if ! httpd_gone; then emit httpd_recovery failed; return 1; fi
+    if timeout -k 5s "${SERVICE_TIMEOUT}s" bigstart start httpd >/dev/null 2>&1 && wait_healthy httpd; then
+        emit httpd_recovery recovered
+        return 0
+    fi
+    emit httpd_recovery failed
     return 1
+}
+restart_service() {
+    if timeout -k 5s "${SERVICE_TIMEOUT}s" bigstart restart "$1" >/dev/null 2>&1 && wait_healthy "$1"; then
+        return 0
+    fi
+    # Forced recovery is limited to the management httpd daemon.
+    [[ "$1" == httpd ]] || return 1
+    recover_httpd
 }
 verify_php() {
     # This verifies the CLI's normal ini scan and effective settings, not an
@@ -61,6 +111,9 @@ fail() { error_code=$1; return 1; }
 on_error() {
     local rc=$? rollback_ok=true service
     [[ "$rc" != 0 ]] || rc=1
+    # Command substitutions inherit ERR with errtrace. Only the owning shell
+    # may roll back; a failed status probe must just return its exit status.
+    if (( BASH_SUBSHELL > 0 )); then exit "$rc"; fi
     trap - ERR HUP INT TERM
     set +e
     emit error "${error_code:-remote_command_failed}"
@@ -76,8 +129,7 @@ on_error() {
             rm -f -- "$TARGET" || rollback_ok=false
         fi
         for service in "${services[@]}"; do
-            bigstart restart "$service" >/dev/null 2>&1 || rollback_ok=false
-            wait_healthy "$service" || rollback_ok=false
+            restart_service "$service" || rollback_ok=false
         done
         if [[ "$rollback_ok" == true ]]; then
             emit status failed_rolled_back
@@ -98,15 +150,24 @@ emit stage preflight
 [[ -d /etc/php.ini.d && ! -L /etc/php.ini.d ]] || fail ini_directory_missing_or_symlink
 [[ ! -L "$TARGET" ]] || fail target_is_symlink
 [[ ! -e "$TARGET" || -f "$TARGET" ]] || fail target_not_regular
-for command in bigstart php sha256sum base64 mktemp install; do
+for command in bigstart php sha256sum base64 mktemp install timeout; do
     command -v "$command" >/dev/null || fail missing_required_command
 done
 # Query services directly: the aggregate inventory omits SysV services on
 # some BIG-IP releases. Unknown-service responses may themselves exit zero.
-healthy httpd || fail required_service_not_running
+if [[ "$MODE" == apply ]]; then
+    for command in pkill pgrep; do command -v "$command" >/dev/null || fail missing_required_command; done
+fi
+emit httpd_recovery not_needed
+emit httpd_recovery_attempts 0
+emit httpd_force_killed false
+if ! healthy httpd; then
+    [[ "$MODE" == apply ]] || fail required_service_not_running
+    httpd_initially_running=false
+fi
 emit httpd_sam_state unknown
 emit httpd_sam_decision blocked
-sam_line=$(bigstart status httpd_sam 2>&1) || fail service_discovery_failed
+sam_line=$(timeout -k 5s 10s bigstart status httpd_sam 2>&1) || fail service_discovery_failed
 if [[ "$sam_line" == "Couldn't find service: httpd_sam" ]]; then
     sam_state=absent
 elif [[ "$sam_line" == *$'\n'* ]]; then
@@ -133,6 +194,10 @@ if [[ "$MODE" == apply ]]; then
     step lock
     mkdir -- "$LOCK" 2>/dev/null || fail device_locked
     lock_owned=true
+    if [[ "$httpd_initially_running" == false ]]; then
+        step recover_httpd
+        recover_httpd || fail httpd_recovery_failed
+    fi
 fi
 step inspect
 current=absent
@@ -178,8 +243,7 @@ step restart
 # Repeated apply runs restart too: identical bytes alone cannot establish that
 # a previous interrupted run reloaded Apache successfully.
 for service in "${services[@]}"; do
-    bigstart restart "$service" >/dev/null 2>&1
-    wait_healthy "$service" || fail service_health_timeout
+    restart_service "$service" || fail service_restart_failed
 done
 step verify
 [[ $(sha256sum "$TARGET" | awk '{print $1}') == "$EXPECTED" ]] || fail installed_hash_mismatch

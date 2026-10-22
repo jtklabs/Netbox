@@ -179,7 +179,7 @@ def load_config(path: Path) -> Config:
     return Config(
         username, password, key, get("F5_SSH_KEY_PASSPHRASE") or None,
         known_hosts or "", positive(get("F5_CONNECT_TIMEOUT", "15")),
-        positive(get("F5_COMMAND_TIMEOUT", "300")), url,
+        positive(get("F5_COMMAND_TIMEOUT", "900")), url,
         get("WEBHOOK_BEARER_TOKEN") or None,
         local_file("WEBHOOK_CA_BUNDLE") or True,
         positive(get("WEBHOOK_TIMEOUT", "15")),
@@ -255,7 +255,7 @@ def parse_result(code: int, output: str, mode: str) -> dict:
                 parsed[key] = value
             elif key == "script_exit_code" and re.fullmatch(r"[0-9]{1,3}", value) and int(value) <= 255:
                 parsed[key] = int(value)
-            elif key == "changed" and value in {"true", "false"}:
+            elif key in {"changed", "httpd_force_killed"} and value in {"true", "false"}:
                 parsed[key] = value == "true"
             elif key in {"sha256", "previous_sha256"} and (re.fullmatch(r"[a-f0-9]{64}", value) or value == "absent"):
                 parsed[key] = value
@@ -263,6 +263,10 @@ def parse_result(code: int, output: str, mode: str) -> dict:
                 parsed[key] = value
             elif key == "services" and value in {"httpd", "httpd httpd_sam"}:
                 parsed[key] = value.split()
+            elif key == "httpd_recovery" and value in {"not_needed", "attempted", "recovered", "failed"}:
+                parsed[key] = value
+            elif key == "httpd_recovery_attempts" and value in {"0", "1", "2", "3"}:
+                parsed[key] = int(value)
             elif key == "httpd_sam_state" and value in {"unknown", "running", "stopped", "absent"}:
                 parsed[key] = value
             elif key == "httpd_sam_decision" and value in {"restart", "check", "skip", "blocked"}:
@@ -366,7 +370,10 @@ def execute_device(device: Device, config: Config, mode: str, script: str) -> di
         channel.exec_command(launcher)
         channel.sendall(script.encode("utf-8"))
         channel.shutdown_write()
-        code, output = read_channel(channel, config.command_timeout)
+        # Allow bounded restart recovery and rollback to finish even with an
+        # older .env containing the previous 300-second default.
+        command_timeout = max(config.command_timeout, 900) if mode == "apply" else config.command_timeout
+        code, output = read_channel(channel, command_timeout)
         result.update(parse_result(code, output, mode))
     except paramiko.AuthenticationException:
         result["error"] = "ssh_authentication_failed"
@@ -433,6 +440,10 @@ def print_report(results: list[dict], report_path: Path, mode: str) -> None:
             print(f"  Error: {result['error']} (stage: {result.get('failed_stage', result.get('stage'))})")
         if result.get("backup"):
             print(f"  Device backup: {result['backup']}")
+        if result.get("httpd_recovery") not in {None, "not_needed"}:
+            print(f"  httpd recovery: {result['httpd_recovery']} "
+                  f"(attempts: {result.get('httpd_recovery_attempts', 0)}, "
+                  f"force-killed: {result.get('httpd_force_killed', False)})")
         if result.get("login_shell"):
             print(f"  SSH shell: {result['login_shell']}")
         if result.get("httpd_sam_decision"):
@@ -509,7 +520,7 @@ class BatchRunner:
         event["webhook"] = {"status": "pending", "attempts": 0}
         unsafe = event["status"] in {"unknown", "failed_rollback_incomplete"}
         unsafe |= (self.mode == "apply" and event["status"] == "failed"
-                   and event.get("failed_stage") in {"restart", "verify"})
+                   and event.get("failed_stage") in {"restart", "verify", "recover_httpd"})
         if unsafe:
             # Stop scheduling immediately, before potentially slow delivery.
             self.stop.set()
