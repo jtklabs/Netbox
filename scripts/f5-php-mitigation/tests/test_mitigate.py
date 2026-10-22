@@ -98,6 +98,25 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(call.args[0], loaded.webhook_url)
                 self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer token${LITERAL}")
 
+    def test_missing_known_hosts_is_allowed_only_for_accept_new(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / ".env"
+            base = ("F5_USERNAME=root\nF5_PASSWORD=test\nF5_KNOWN_HOSTS=missing-hosts\n"
+                    "WEBHOOK_URL=https://hooks.example.test/path\n")
+            path.write_text(base)
+            loaded = job.load_config(path)
+            self.assertEqual(loaded.host_key_policy, "accept-new")
+            self.assertEqual(loaded.known_hosts, "")
+            path.write_text(base + "F5_HOST_KEY_POLICY=strict\n")
+            with self.assertRaisesRegex(ValueError, "F5_KNOWN_HOSTS"):
+                job.load_config(path)
+            (root / "missing-hosts").write_text("")
+            self.assertEqual(job.load_config(path).host_key_policy, "strict")
+            path.write_text(base + "F5_HOST_KEY_POLICY=typo\n")
+            with self.assertRaisesRegex(ValueError, "F5_HOST_KEY_POLICY"):
+                job.load_config(path)
+
     def test_worker_count_bounds(self):
         for value in ("0", "33", "-1", "invalid"):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -208,7 +227,7 @@ class ChannelTests(unittest.TestCase):
              patch.object(job, "detect_shell", return_value=("bash", "/bin/bash -s")) as detect:
             result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "exit 0")
             client = constructor.return_value
-            self.assertIsInstance(client.set_missing_host_key_policy.call_args.args[0], job.paramiko.RejectPolicy)
+            self.assertIsInstance(client.set_missing_host_key_policy.call_args.args[0], job.paramiko.AutoAddPolicy)
             self.assertFalse(client.connect.call_args.kwargs["allow_agent"])
             self.assertEqual(result["status"], "unknown")
             client.close.assert_called_once()
@@ -222,6 +241,50 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"], "ssh_authentication_failed")
             self.assertNotIn("secret", json.dumps(result))
+
+
+class HostKeyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.key = job.paramiko.RSAKey.generate(1024)
+
+    def test_accept_new_does_not_write_or_share_keys_between_clients(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "known_hosts"
+            original = "192.0.2.99 " + self.key.get_name() + " " + self.key.get_base64() + "\n"
+            path.write_text(original)
+            clients = [job.paramiko.SSHClient(), job.paramiko.SSHClient()]
+            for client in clients:
+                job.configure_host_keys(client, replace(config(), known_hosts=str(path)))
+                self.assertIn("192.0.2.99", client._system_host_keys)
+            with patch.object(clients[0], "save_host_keys") as save, patch.object(clients[0], "_log"):
+                clients[0]._policy.missing_host_key(clients[0], "192.0.2.1", self.key)
+                save.assert_not_called()
+            self.assertIn("192.0.2.1", clients[0].get_host_keys())
+            self.assertNotIn("192.0.2.1", clients[1].get_host_keys())
+            self.assertEqual(path.read_text(), original)
+
+    def test_strict_unknown_host_is_reported_before_script_dispatch(self):
+        with patch.object(job.paramiko, "SSHClient") as factory:
+            client = factory.return_value
+            def connect(**kwargs):
+                policy = client.set_missing_host_key_policy.call_args.args[0]
+                policy.missing_host_key(client, kwargs["hostname"], self.key)
+            client.connect.side_effect = connect
+            result = job.execute_device(job.Device("192.0.2.1"),
+                replace(config(), known_hosts="", host_key_policy="strict"), "apply", "do-not-send")
+            self.assertEqual(result["error"], "ssh_host_key_unknown")
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["stage"], "connect")
+            client.get_transport.assert_not_called()
+
+    def test_changed_known_key_still_fails_in_accept_new_mode(self):
+        with patch.object(job.paramiko, "SSHClient") as factory:
+            factory.return_value.connect.side_effect = job.paramiko.BadHostKeyException("192.0.2.1", self.key, self.key)
+            result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "do-not-send")
+            self.assertEqual(result["error"], "ssh_host_key_mismatch")
+            self.assertEqual(result["status"], "failed")
+            factory.return_value.get_transport.assert_not_called()
 
 
 class WebhookTests(unittest.TestCase):

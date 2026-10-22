@@ -57,6 +57,7 @@ class Config:
     webhook_timeout: int
     webhook_attempts: int
     workers: int = 1
+    host_key_policy: str = "accept-new"
 
 
 def utc_now() -> str:
@@ -145,7 +146,7 @@ def load_config(path: Path) -> Config:
     def get(key: str, default: str = "") -> str:
         return values.get(key) or default
 
-    def local_file(key: str, default: str = "") -> str | None:
+    def local_file(key: str, default: str = "", *, allow_missing: bool = False) -> str | None:
         raw = get(key, default)
         if not raw:
             return None
@@ -153,6 +154,8 @@ def load_config(path: Path) -> Config:
         if not item.is_absolute():
             item = path.parent / item
         if not item.is_file():
+            if allow_missing and not item.exists():
+                return None
             raise ValueError(f"{key} must point to an existing file")
         return str(item)
 
@@ -161,7 +164,11 @@ def load_config(path: Path) -> Config:
     key = local_file("F5_SSH_KEY")
     if not username or not (password or key):
         raise ValueError("Set F5_USERNAME and F5_PASSWORD or F5_SSH_KEY in .env")
-    known_hosts = local_file("F5_KNOWN_HOSTS", "~/.ssh/known_hosts")
+    host_key_policy = get("F5_HOST_KEY_POLICY", "accept-new").strip().lower()
+    if host_key_policy not in {"accept-new", "strict"}:
+        raise ValueError("F5_HOST_KEY_POLICY must be accept-new or strict")
+    known_hosts = local_file("F5_KNOWN_HOSTS", "~/.ssh/known_hosts",
+                            allow_missing=host_key_policy == "accept-new")
     url = get("WEBHOOK_URL")
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username
@@ -177,7 +184,7 @@ def load_config(path: Path) -> Config:
         local_file("WEBHOOK_CA_BUNDLE") or True,
         positive(get("WEBHOOK_TIMEOUT", "15")),
         min(positive(get("WEBHOOK_ATTEMPTS", "3")), 5),
-        worker_count(get("F5_WORKERS", "1")),
+        worker_count(get("F5_WORKERS", "1")), host_key_policy,
     )
 
 
@@ -308,14 +315,35 @@ def detect_shell(transport, timeout: int) -> tuple[str, str]:
     raise ShellAccessError("bash_access_unavailable")
 
 
+class UnknownHostKeyError(paramiko.SSHException):
+    """An unregistered host was rejected by the explicitly strict policy."""
+
+
+class RejectUnknownHostKey(paramiko.RejectPolicy):
+    def missing_host_key(self, client, hostname, key):
+        raise UnknownHostKeyError("ssh_host_key_unknown")
+
+
+def configure_host_keys(client, config: Config) -> None:
+    if config.known_hosts:
+        # Read-only host-key store: newly accepted keys stay in this client's
+        # memory, so workers never race to rewrite a shared known_hosts file.
+        client.load_system_host_keys(config.known_hosts)
+    if config.host_key_policy == "accept-new":
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    elif config.host_key_policy == "strict":
+        client.set_missing_host_key_policy(RejectUnknownHostKey())
+    else:
+        raise ValueError("Invalid host key policy")
+
+
 def execute_device(device: Device, config: Config, mode: str, script: str) -> dict:
     result = {"status": "failed", "changed": None, "stage": "connect"}
     client = paramiko.SSHClient()
     started = False
     channel = None
     try:
-        client.load_host_keys(config.known_hosts)
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        configure_host_keys(client, config)
         client.connect(
             hostname=device.host, port=device.port, username=config.username,
             password=config.password, key_filename=config.key,
@@ -342,6 +370,8 @@ def execute_device(device: Device, config: Config, mode: str, script: str) -> di
         result.update(parse_result(code, output, mode))
     except paramiko.AuthenticationException:
         result["error"] = "ssh_authentication_failed"
+    except UnknownHostKeyError:
+        result["error"] = "ssh_host_key_unknown"
     except paramiko.BadHostKeyException:
         result["error"] = "ssh_host_key_mismatch"
     except ShellAccessError as exc:
@@ -573,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
             "started_at": utc_now(), "finished_at": None,
             "target_count": len(devices), "mitigation_sha256": hashlib.sha256(content).hexdigest(),
             "workers": workers,
+            "host_key_policy": config.host_key_policy,
             "results": [],
         }
         save_report(report_path, report)
@@ -582,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"Mode: {mode} | Targets: {len(devices)} | Concurrent device limit: {workers}", flush=True)
+    print(f"SSH host-key policy: {config.host_key_policy}", flush=True)
     runner = BatchRunner(config, mode, report, report_path)
     try:
         runner.run(devices, scripts, workers)
