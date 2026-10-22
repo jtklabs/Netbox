@@ -42,14 +42,30 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(devices[0].httpd_sam)
         self.assertTrue(devices[1].httpd_sam)
 
-    def test_rejects_bad_rows_and_duplicates(self):
-        bad = ["host\n", "ip\n192.0.2.1\n", "host\n192.0.2.1\n192.0.2.1\n",
+    def test_rejects_bad_rows_and_duplicate_columns(self):
+        bad = ["host\n", "ip\n192.0.2.1\n",
                "host\n192.0.2.1;id\n", "host,port\n192.0.2.1,0\n",
                "host,httpd_sam\n192.0.2.1,maybe\n", "host,host\n192.0.2.1,192.0.2.2\n",
                "host,name\n192.0.2.1\n", "host\n192.0.2.1,extra\n"]
         for content in bad:
             with self.subTest(content=content), self.assertRaises(ValueError):
                 self.load(content)
+
+    def test_duplicate_ips_keep_first_settings_and_order(self):
+        devices = self.load(
+            "host,name,port,httpd_sam\n"
+            "192.0.2.2,first,2222,true\n"
+            "2001:0db8:0:0:0:0:0:1,ipv6,22,auto\n"
+            " 192.0.2.2 ,later,22,false\n"
+            "2001:db8::1,later-v6,2222,true\n"
+            "192.0.2.1,last,,auto\n")
+        self.assertEqual(devices, [job.Device("192.0.2.2", "first", 2222, True),
+                                  job.Device("2001:db8::1", "ipv6"),
+                                  job.Device("192.0.2.1", "last")])
+
+    def test_malformed_duplicate_still_fails_validation(self):
+        with self.assertRaises(ValueError):
+            self.load("host,port\n192.0.2.1,22\n192.0.2.1,0\n")
 
     def test_single_host_and_default_check(self):
         args = job.parser().parse_args(["--host", "192.0.2.9"])
@@ -247,11 +263,11 @@ class WebhookTests(unittest.TestCase):
 
 
 class BatchTests(unittest.TestCase):
-    def run_batch(self, outcomes, deliveries=None):
+    def run_batch(self, outcomes, deliveries=None, inventory_text="host\n192.0.2.1\n192.0.2.2\n"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inventory = root / "devices.csv"
-            inventory.write_text("host\n192.0.2.1\n192.0.2.2\n")
+            inventory.write_text(inventory_text)
             with patch.object(job, "load_config", return_value=config()), \
                  patch.object(job, "execute_device", side_effect=outcomes) as execute, \
                  patch.object(job, "notify", side_effect=deliveries,
@@ -261,6 +277,18 @@ class BatchTests(unittest.TestCase):
             path = next((root / "reports").glob("*.json"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             return code, json.loads(path.read_text()), terminal.getvalue(), execute.call_count, notify.call_args_list
+
+    def test_duplicate_rows_execute_and_notify_once_per_ip(self):
+        code, report, _, calls, notifications = self.run_batch(
+            [{"status": "applied"}, {"status": "applied"}],
+            inventory_text="host\n192.0.2.1\n192.0.2.1\n192.0.2.2\n192.0.2.1\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(len(notifications), 2)
+        self.assertEqual(report["target_count"], 2)
+        self.assertEqual(report["unprocessed_count"], 0)
+        self.assertEqual([r["device"]["host"] for r in report["results"]],
+                         ["192.0.2.1", "192.0.2.2"])
 
     def test_failure_still_notifies_and_next_host_runs(self):
         code, report, text, calls, notifications = self.run_batch([

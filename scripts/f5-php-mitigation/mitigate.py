@@ -127,10 +127,12 @@ def load_devices(args: argparse.Namespace) -> list[Device]:
                 raise ValueError(f"Invalid inventory at CSV line {line}") from exc
     if not devices:
         raise ValueError("CSV contains no devices")
-    identities = [(device.host, device.port) for device in devices]
-    if len(identities) != len(set(identities)):
-        raise ValueError("CSV contains duplicate host/port pairs")
-    return devices
+    # Normalize and validate every row before deduplicating. Preserve inventory
+    # order and the first row's settings, even if later rows use another port.
+    unique = {}
+    for device in devices:
+        unique.setdefault(device.host, device)
+    return list(unique.values())
 
 
 def load_config(path: Path) -> Config:
