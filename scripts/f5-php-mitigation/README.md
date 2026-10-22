@@ -115,8 +115,12 @@ host,name,port,httpd_sam
 192.0.2.20,bigip-apm,22,true
 ```
 
-`host` must be an IPv4 or IPv6 address. Duplicate host/port pairs and malformed
-rows are rejected before any device is contacted. Names are optional labels.
+`host` must be an IPv4 or IPv6 address. Repeated IPs are deduplicated after
+normalization (including equivalent IPv6 spellings). Each unique IP runs once,
+in first-seen order, using the first row's name, port, and `httpd_sam` setting;
+later rows for that IP are ignored even if those settings differ. Target counts,
+webhooks, and device report entries reflect unique IPs. Every row is validated,
+so malformed rows still fail before any device is contacted. Names are optional labels.
 Empty/missing `port` uses `--port` (default 22). The `httpd_sam` column accepts:
 
 | Value | Behavior |
