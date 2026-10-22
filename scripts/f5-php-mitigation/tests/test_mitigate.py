@@ -117,6 +117,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "F5_HOST_KEY_POLICY"):
                 job.load_config(path)
 
+    def test_ssh_login_worker_default_and_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            base = ("F5_USERNAME=root\nF5_PASSWORD=test\n"
+                    "F5_KNOWN_HOSTS=missing\nWEBHOOK_URL=https://hooks.example.test/path\n")
+            path.write_text(base)
+            self.assertEqual(job.load_config(path).ssh_login_workers, 1)
+            path.write_text(base + "F5_SSH_LOGIN_WORKERS=2\n")
+            self.assertEqual(job.load_config(path).ssh_login_workers, 2)
+            for value in ("0", "33", "invalid"):
+                path.write_text(base + f"F5_SSH_LOGIN_WORKERS={value}\n")
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    job.load_config(path)
+
     def test_worker_count_bounds(self):
         for value in ("0", "33", "-1", "invalid"):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -250,6 +264,85 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"], "ssh_authentication_failed")
             self.assertNotIn("secret", json.dumps(result))
+
+
+class LoginConcurrencyTests(unittest.TestCase):
+    def test_login_limit_keeps_remote_work_parallel(self):
+        # Exercise main -> CSV -> real BatchRunner -> real execute_device.
+        # Only the SSH boundary and webhook are simulated. Remote work must
+        # overlap even when logins are serialized, or the barrier times out.
+        for login_workers in (1, 2):
+            with self.subTest(login_workers=login_workers), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                inventory = root / "devices.csv"
+                inventory.write_text("host\n192.0.2.1\n192.0.2.2\n192.0.2.3\n192.0.2.4\n")
+                mutex = threading.Lock()
+                remote_barrier = threading.Barrier(2)
+                connect_barrier = threading.Barrier(2) if login_workers == 2 else None
+                active = peak = 0
+                clients = []
+
+                def connect(**kwargs):
+                    nonlocal active, peak
+                    self.assertEqual(kwargs["password"], config().password)
+                    with mutex:
+                        active += 1
+                        peak = max(peak, active)
+                    try:
+                        if connect_barrier:
+                            connect_barrier.wait(5)
+                        else:
+                            threading.Event().wait(0.05)
+                    finally:
+                        with mutex:
+                            active -= 1
+
+                def factory():
+                    client = MagicMock()
+                    client.connect.side_effect = connect
+                    clients.append(client)
+                    return client
+
+                def detect(*_):
+                    remote_barrier.wait(5)
+                    return "bash", "/bin/bash -s"
+
+                output = ("F5JOB\tstatus\tcompliant\nF5JOB\tstage\tcomplete\n"
+                          "F5JOB\tchanged\tfalse\nF5JOB\tscript_exit_code\t0\n")
+                with patch.object(job, "load_config", return_value=replace(config(), ssh_login_workers=login_workers)), \
+                     patch.object(job.paramiko, "SSHClient", side_effect=factory), \
+                     patch.object(job, "detect_shell", side_effect=detect), \
+                     patch.object(job, "read_channel", return_value=(0, output)), \
+                     patch.object(job, "notify", return_value={"status": "delivered", "attempts": 1}) as notify, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    code = job.main(["--csv", str(inventory), "--check", "--workers", "2",
+                                     "--report-dir", str(root / "reports")])
+                report = json.loads(next((root / "reports").glob("*.json")).read_text())
+                self.assertEqual(code, 0)
+                self.assertEqual(peak, login_workers)
+                self.assertEqual(report["ssh_login_workers"], login_workers)
+                self.assertEqual(notify.call_count, 4)
+                self.assertEqual(len(clients), 4)
+                for client in clients:
+                    client.connect.assert_called_once()
+                    client.close.assert_called_once()
+
+    def test_failed_login_releases_slot_without_retry_or_dispatch(self):
+        gate = threading.BoundedSemaphore(1)
+        for failure in (job.paramiko.AuthenticationException("private-password"),
+                        TimeoutError(), job.UnknownHostKeyError()):
+            with self.subTest(failure=type(failure).__name__), patch.object(job.paramiko, "SSHClient") as factory:
+                client = factory.return_value
+                client.connect.side_effect = failure
+                result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "do-not-run", gate)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["stage"], "connect")
+                self.assertNotIn("private-password", json.dumps(result))
+                client.connect.assert_called_once()
+                client.get_transport.assert_not_called()
+                client.close.assert_called_once()
+                self.assertTrue(gate.acquire(blocking=False))
+                gate.release()
 
 
 class HostKeyTests(unittest.TestCase):

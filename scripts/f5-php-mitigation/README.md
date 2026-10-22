@@ -112,6 +112,23 @@ connections and handles one device through notification before taking another.
 Report writes and console lines are serialized. Webhooks from separate workers
 can arrive concurrently and in any order.
 
+SSH connection and authentication have a separate limit:
+`F5_SSH_LOGIN_WORKERS=1` by default, including when an older `.env` omits it.
+For example, `F5_WORKERS=5` with `F5_SSH_LOGIN_WORKERS=1` allows five devices
+in progress but only one SSH login at a time. Once a login completes, its
+shell commands, service checks, and webhook can overlap with other devices.
+The login limit accepts 1–32 and applies within one job process; separate
+invocations do not share it. Slot waiting does not consume `F5_CONNECT_TIMEOUT`.
+The effective limit is printed at startup and saved as `ssh_login_workers`
+in the JSON run report.
+
+This reduces simultaneous authentication requests when CSV batches fail but
+individual hosts work. It does not establish that the credentials or a shared
+authentication backend are the cause. Authentication rejections are not retried;
+each device still reports its original failure and sends one completion event.
+If failures persist with serialized logins, compare the exact error/stage,
+CSV port overrides, and the same explicit `--env-file` with `--host`.
+
 Use concurrent workers for independent devices. The job does not discover or
 serialize HA peers or blades belonging to the same chassis. Run those targets
 with `--workers 1` or separate them into batches to avoid simultaneous restarts.
@@ -449,3 +466,13 @@ and stop subprocesses, failed health checks, failed SIGKILL/start operations,
 surviving processes, initially stopped httpd, and rollback. Live lab inspection
 confirmed GNU timeout support and separate httpd/httpd_sam executable names.
 No live forced kill or restart was performed for this recovery change.
+
+The separate SSH login limit was validated with one- and four-worker read-only
+CSV runs against all four lab F5s using root SSH keys. All eight device checks
+reached inspection and returned `needs_change`, with the effective login limit
+of one recorded in each run report. Webhooks were intercepted locally. Tests
+also verify parallel remote work after serialized logins, the configured login
+limit, and slot release on authentication, timeout, and host-key failures.
+The reported concurrent password-authentication failure has not been reproduced
+in the lab; this change removes overlapping logins by default without claiming
+to diagnose that failure.

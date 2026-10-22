@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+from contextlib import nullcontext
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ class Config:
     webhook_attempts: int
     workers: int = 1
     host_key_policy: str = "accept-new"
+    ssh_login_workers: int = 1
 
 
 def utc_now() -> str:
@@ -185,6 +187,7 @@ def load_config(path: Path) -> Config:
         positive(get("WEBHOOK_TIMEOUT", "15")),
         min(positive(get("WEBHOOK_ATTEMPTS", "3")), 5),
         worker_count(get("F5_WORKERS", "1")), host_key_policy,
+        worker_count(get("F5_SSH_LOGIN_WORKERS", "1")),
     )
 
 
@@ -341,20 +344,25 @@ def configure_host_keys(client, config: Config) -> None:
         raise ValueError("Invalid host key policy")
 
 
-def execute_device(device: Device, config: Config, mode: str, script: str) -> dict:
+def execute_device(device: Device, config: Config, mode: str, script: str,
+                   login_gate: threading.BoundedSemaphore | None = None) -> dict:
     result = {"status": "failed", "changed": None, "stage": "connect"}
     client = paramiko.SSHClient()
     started = False
     channel = None
     try:
         configure_host_keys(client, config)
-        client.connect(
-            hostname=device.host, port=device.port, username=config.username,
-            password=config.password, key_filename=config.key,
-            passphrase=config.key_passphrase, look_for_keys=False,
-            allow_agent=False, timeout=config.connect_timeout,
-            banner_timeout=config.connect_timeout, auth_timeout=config.connect_timeout,
-        )
+        # Limit handshakes/authentication independently of device execution.
+        # Waiting for a slot does not consume the SSH connection timeout.
+        # Release on every outcome, before any shell or mitigation command.
+        with login_gate if login_gate is not None else nullcontext():
+            client.connect(
+                hostname=device.host, port=device.port, username=config.username,
+                password=config.password, key_filename=config.key,
+                passphrase=config.key_passphrase, look_for_keys=False,
+                allow_agent=False, timeout=config.connect_timeout,
+                banner_timeout=config.connect_timeout, auth_timeout=config.connect_timeout,
+            )
         result["stage"] = "shell_detect"
         transport = client.get_transport()
         if transport is None:
@@ -482,6 +490,7 @@ class BatchRunner:
         self.report = report
         self.path = path
         self.lock = threading.Lock()
+        self.login_gate = threading.BoundedSemaphore(config.ssh_login_workers)
         self.stop = threading.Event()
         self.interrupted = False
         self.reporting_failed = False
@@ -505,7 +514,7 @@ class BatchRunner:
         with self.lock:
             print(f"[{device.host}] {self.mode} started", flush=True)
         try:
-            event.update(execute_device(device, self.config, self.mode, script))
+            event.update(execute_device(device, self.config, self.mode, script, self.login_gate))
         except KeyboardInterrupt:
             with self.lock:
                 self.interrupted = True
@@ -614,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
             "started_at": utc_now(), "finished_at": None,
             "target_count": len(devices), "mitigation_sha256": hashlib.sha256(content).hexdigest(),
             "workers": workers,
+            "ssh_login_workers": min(config.ssh_login_workers, workers),
             "host_key_policy": config.host_key_policy,
             "results": [],
         }
@@ -624,7 +634,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"Mode: {mode} | Targets: {len(devices)} | Concurrent device limit: {workers}", flush=True)
-    print(f"SSH host-key policy: {config.host_key_policy}", flush=True)
+    print(f"SSH host-key policy: {config.host_key_policy} | "
+          f"Concurrent SSH login limit: {min(config.ssh_login_workers, workers)}", flush=True)
     runner = BatchRunner(config, mode, report, report_path)
     try:
         runner.run(devices, scripts, workers)
