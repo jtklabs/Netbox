@@ -47,7 +47,8 @@ with a read-only UID check and selects the working launcher before sending the
 script. It does not change the login shell or elevate with sudo. Accounts denied
 Bash access or returning a non-root UID fail at `shell_detect`, before dispatch.
 An execution failure never triggers a retry through the other shell.
-It requires the standard BIG-IP `php`, `bigstart`, and Unix file utilities.
+It requires the standard BIG-IP `php`, `bigstart`, GNU `timeout`, `pgrep`,
+`pkill`, and Unix file utilities. Commands run as root; no sudo prompt is used.
 It rejects a target without a BIG-IP `/VERSION` file or the PHP INI directory.
 
 By default, `F5_HOST_KEY_POLICY=accept-new` accepts previously unknown SSH host
@@ -146,7 +147,9 @@ The job queries `bigstart status httpd` and `bigstart status httpd_sam` directly
 and recognizes both daemontools and SysV output. The aggregate service list can
 omit these services on some releases. A failed, ambiguous,
 or unrecognized discovery result fails the precheck rather than silently skipping
-the service. `httpd` must always be running. Automatic selection detects service
+the service. A check requires `httpd` to be running. Apply can recover a stopped
+or unresponsive `httpd` after acquiring the device lock and before installing
+the file. Automatic selection detects service
 state, not module provisioning: mark known APM/SSLO hosts as required to catch a
 service that should be running but is down. Skipping a stopped service does not
 prove it is unused. The job never starts an inactive optional service.
@@ -171,6 +174,37 @@ in your staging environment before a production rollout.
 Unchanged file bytes skip installation, but an explicit `--apply` still restarts
 the selected services. This ensures an earlier interrupted reload is not silently
 treated as complete. Use `--check` when only verification is needed.
+
+Restart and start commands have a 45-second limit, followed by up to 30 seconds
+of running-state checks. Status commands are bounded too. If the `httpd` restart
+fails, times out, or fails its status checks, the job:
+
+1. Attempts `bigstart stop httpd` with a 15-second limit.
+2. Runs `pkill -KILL -x httpd`, targeting the exact process name. No matching
+   process is acceptable; the service may already have stopped.
+3. Waits up to 10 seconds for those processes to disappear. A kill error or
+   surviving process fails recovery; it does not start over a surviving daemon.
+4. Runs `bigstart start httpd` and verifies its running status before continuing.
+
+GNU `timeout` allows five additional seconds before killing a service-control
+command that ignores termination. Forced termination is limited to `httpd`;
+`httpd_sam` uses a bounded normal restart. Recovery can interrupt management
+sessions. F5 documents killing remaining httpd processes and starting the service
+as a workaround for [bug 775845](https://cdn.f5.com/product/bugtracker/ID775845.html),
+which concerns a failed restart through iControl REST; this job does not diagnose
+that specific bug.
+
+The same recovery logic is used during rollback. A stopped `httpd` at the start
+of `--apply` is recovered under the device lock before any INI changes. If that
+recovery fails, the job stops scheduling new devices. `--check` never starts,
+stops, or kills a service. A stale lock from an interrupted earlier run still
+requires inspection as described below.
+
+`F5_COMMAND_TIMEOUT` defaults to 900 seconds. Apply uses at least 900 seconds,
+even with an older `.env` set to 300, so bounded recovery and rollback have time
+to finish. Check uses the configured timeout directly. A lost SSH connection
+can still make the result uncertain. Running status is not an HTTP transaction
+test and does not establish that every GUI or application endpoint responds.
 
 When a detected failure occurs after installing a changed file, the job attempts
 to restore the original file (or remove the newly created file) and restart the
@@ -246,6 +280,9 @@ Complete successful apply example, also available in
   "services": ["httpd"],
   "httpd_sam_state": "absent",
   "httpd_sam_decision": "skip",
+  "httpd_recovery": "not_needed",
+  "httpd_recovery_attempts": 0,
+  "httpd_force_killed": false,
   "stage": "complete",
   "previous_sha256": "absent",
   "sha256": "6a777b534aa1e2f6862ee3d40a42816745e111c024e9619eb18db2de958a97536",
@@ -300,6 +337,9 @@ This example is also in [`examples/webhook-failed.json`](examples/webhook-failed
 | `error`, `failed_stage` | Optional sanitized error identifier and failure stage |
 | `services` | Optional array of selected services (`httpd`, optionally `httpd_sam`); present after successful discovery |
 | `httpd_sam_state`, `httpd_sam_decision` | Optional discovery fields described below |
+| `httpd_recovery` | Optional last recovery state: `not_needed`, `attempted`, `recovered`, or `failed`; overall `status` still determines the job outcome |
+| `httpd_recovery_attempts` | Optional integer count across initial recovery, apply, and rollback (0–3) |
+| `httpd_force_killed` | Optional boolean: true if an exact-name httpd SIGKILL command succeeded during this attempt |
 | `previous_sha256` | Optional original file hash, or `absent` |
 | `sha256` | Optional installed file hash after successful apply verification |
 | `backup` | Optional directory on the device containing the backup/original-absence marker |
@@ -403,3 +443,9 @@ with a nonexistent known-hosts file also reached all four devices using the
 webhooks, configuration writes, or service restarts occurred. Separate password
 CSV checks reached three devices; lab01 rejected its saved password with both
 CSV and `--host`, independently of host-key policy.
+
+Hung-restart recovery is covered by simulated appliances with blocked restart
+and stop subprocesses, failed health checks, failed SIGKILL/start operations,
+surviving processes, initially stopped httpd, and rollback. Live lab inspection
+confirmed GNU timeout support and separate httpd/httpd_sam executable names.
+No live forced kill or restart was performed for this recovery change.
