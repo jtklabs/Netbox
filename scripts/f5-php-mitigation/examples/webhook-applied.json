@@ -25,5 +25,7 @@
   "remote_exit_code": 0,
   "started_at": "2026-10-22T00:00:00+00:00",
   "finished_at": "2026-10-22T00:00:04+00:00",
-  "duration_seconds": 4.0
+  "duration_seconds": 4.0,
+  "login_shell": "tmsh",
+  "script_exit_code": 0
 }

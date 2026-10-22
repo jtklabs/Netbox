@@ -244,6 +244,8 @@ def parse_result(code: int, output: str, mode: str) -> dict:
             # Only copy narrowly validated protocol fields into reports.
             if key in {"stage", "failed_stage", "error", "status"} and re.fullmatch(r"[a-z_]{1,80}", value):
                 parsed[key] = value
+            elif key == "script_exit_code" and re.fullmatch(r"[0-9]{1,3}", value) and int(value) <= 255:
+                parsed[key] = int(value)
             elif key == "changed" and value in {"true", "false"}:
                 parsed[key] = value == "true"
             elif key in {"sha256", "previous_sha256"} and (re.fullmatch(r"[a-f0-9]{64}", value) or value == "absent"):
@@ -258,7 +260,13 @@ def parse_result(code: int, output: str, mode: str) -> dict:
                 parsed[key] = value
     status = parsed.get("status")
     valid = status in REMOTE_STATUSES
-    valid &= (code == 0) == (status in SUCCESS | {"needs_change"})
+    # TMSH can return zero even when its child Bash command fails. Require the
+    # script's terminal exit marker and still reject an SSH failure on success.
+    script_code = parsed.get("script_exit_code")
+    valid &= script_code is not None
+    valid &= (script_code == 0) == (status in SUCCESS | {"needs_change"})
+    valid &= code == 0 or (script_code is not None and script_code != 0)
+    valid &= bool(output.splitlines()) and output.splitlines()[-1] == f"F5JOB\tscript_exit_code\t{script_code}"
     valid &= not (mode == "apply" and status in {"compliant", "needs_change"})
     valid &= not (mode == "check" and status == "applied")
     valid &= not (status == "applied" and parsed.get("stage") != "complete")
@@ -267,6 +275,35 @@ def parse_result(code: int, output: str, mode: str) -> dict:
         parsed["error"] = "incomplete_or_invalid_remote_result"
     parsed["remote_exit_code"] = code
     return parsed
+
+
+class ShellAccessError(Exception):
+    """A sanitized preflight failure; no mitigation was dispatched."""
+
+
+def detect_shell(transport, timeout: int) -> tuple[str, str]:
+    """Probe shell access without writes, then select exactly one script launcher."""
+    marker = "F5SHELL_" + uuid.uuid4().hex + ":"
+    probe = shlex.quote(f"printf {marker}; id -u")
+    candidates = (
+        ("bash", "/bin/bash -c " + probe, "/bin/bash -s"),
+        ("tmsh", "run /util bash -c " + probe, "run /util bash -c '/bin/bash -s'"),
+    )
+    for shell, command, launcher in candidates:
+        channel = transport.open_session(timeout=timeout)
+        try:
+            channel.settimeout(timeout)
+            channel.exec_command(command)
+            channel.shutdown_write()
+            code, output = read_channel(channel, timeout)
+        finally:
+            channel.close()
+        match = re.search(r"^" + re.escape(marker) + r"([0-9]+)\r?$", output, re.MULTILINE)
+        if code == 0 and match:
+            if match.group(1) != "0":
+                raise ShellAccessError("root_privileges_required")
+            return shell, launcher
+    raise ShellAccessError("bash_access_unavailable")
 
 
 def execute_device(device: Device, config: Config, mode: str, script: str) -> dict:
@@ -284,16 +321,19 @@ def execute_device(device: Device, config: Config, mode: str, script: str) -> di
             allow_agent=False, timeout=config.connect_timeout,
             banner_timeout=config.connect_timeout, auth_timeout=config.connect_timeout,
         )
-        result["stage"] = "execute"
+        result["stage"] = "shell_detect"
         transport = client.get_transport()
         if transport is None:
             raise ConnectionError("Missing SSH transport")
         transport.set_keepalive(15)
+        shell, launcher = detect_shell(transport, config.connect_timeout)
+        result["login_shell"] = shell
+        result["stage"] = "execute"
         channel = transport.open_session(timeout=config.connect_timeout)
         channel.settimeout(config.connect_timeout)
         # Set started before dispatch: a lost reply may hide successful dispatch.
         started = True
-        channel.exec_command("/bin/bash -s")
+        channel.exec_command(launcher)
         channel.sendall(script.encode("utf-8"))
         channel.shutdown_write()
         code, output = read_channel(channel, config.command_timeout)
@@ -302,6 +342,8 @@ def execute_device(device: Device, config: Config, mode: str, script: str) -> di
         result["error"] = "ssh_authentication_failed"
     except paramiko.BadHostKeyException:
         result["error"] = "ssh_host_key_mismatch"
+    except ShellAccessError as exc:
+        result["error"] = str(exc)
     except (TimeoutError, socket.timeout):
         result["error"] = "ssh_timeout"
         result["status"] = "unknown" if started and mode == "apply" else "failed"
@@ -359,6 +401,8 @@ def print_report(results: list[dict], report_path: Path, mode: str) -> None:
             print(f"  Error: {result['error']} (stage: {result.get('failed_stage', result.get('stage'))})")
         if result.get("backup"):
             print(f"  Device backup: {result['backup']}")
+        if result.get("login_shell"):
+            print(f"  SSH shell: {result['login_shell']}")
         if result.get("httpd_sam_decision"):
             print(f"  httpd_sam decision: {result['httpd_sam_decision']} "
                   f"(detected state: {result.get('httpd_sam_state', 'unknown')})")
