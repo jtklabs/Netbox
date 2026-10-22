@@ -41,8 +41,12 @@ chmod 600 .env
 ```
 
 Edit `.env`. Supply `F5_USERNAME` and either `F5_PASSWORD` or `F5_SSH_KEY`, plus
-`WEBHOOK_URL`. The SSH account needs root privileges and **Advanced Shell
-(bash)** access. The job does not elevate with sudo or change the user's shell.
+`WEBHOOK_URL`. The SSH account needs root privileges and access to Bash, either
+as its login shell or through TMSH's `run /util bash`. The job probes both routes
+with a read-only UID check and selects the working launcher before sending the
+script. It does not change the login shell or elevate with sudo. Accounts denied
+Bash access or returning a non-root UID fail at `shell_detect`, before dispatch.
+An execution failure never triggers a retry through the other shell.
 It requires the standard BIG-IP `php`, `bigstart`, and Unix file utilities.
 It rejects a target without a BIG-IP `/VERSION` file or the PHP INI directory.
 
@@ -125,7 +129,9 @@ An explicit CSV value overrides the flag. `--httpd-sam` remains an alias for
 `--require-httpd-sam`. **Behavior change:** an old CSV value of `false` now means
 automatic selection; it no longer excludes a running `httpd_sam` from restart.
 
-The job reads `bigstart status` to discover service state. A failed, ambiguous,
+The job queries `bigstart status httpd` and `bigstart status httpd_sam` directly
+and recognizes both daemontools and SysV output. The aggregate service list can
+omit these services on some releases. A failed, ambiguous,
 or unrecognized discovery result fails the precheck rather than silently skipping
 the service. `httpd` must always be running. Automatic selection detects service
 state, not module provisioning: mark known APM/SSLO hosts as required to catch a
@@ -231,6 +237,8 @@ Complete successful apply example, also available in
   "previous_sha256": "absent",
   "sha256": "6a777b534aa1e2f6862ee3d40a42816745e111c024e9619eb18db2de958a97536",
   "backup": "/var/tmp/K000163821.aB12cD34",
+  "login_shell": "tmsh",
+  "script_exit_code": 0,
   "remote_exit_code": 0,
   "started_at": "2026-10-22T00:00:00+00:00",
   "finished_at": "2026-10-22T00:00:04+00:00",
@@ -282,7 +290,12 @@ This example is also in [`examples/webhook-failed.json`](examples/webhook-failed
 | `previous_sha256` | Optional original file hash, or `absent` |
 | `sha256` | Optional installed file hash after successful apply verification |
 | `backup` | Optional directory on the device containing the backup/original-absence marker |
-| `remote_exit_code` | Optional SSH command exit status, when available |
+| `login_shell` | Optional detected command route: `bash` or `tmsh` |
+| `script_exit_code` | Optional exit marker emitted by the inner Bash script; zero on completion, nonzero on a handled failure |
+| `remote_exit_code` | Optional SSH command exit status; TMSH can return zero even when the inner script fails |
+
+A complete terminal script marker is required to accept an outcome. A zero SSH
+exit status alone is insufficient, including when TMSH launches Bash.
 
 Fields through `stage` in the table are always present in emitted events.
 Optional fields can be absent, especially when SSH fails. The payload does not
@@ -357,5 +370,14 @@ python -m unittest discover -s tests -v
 
 Tests use mocked SSH/webhooks and a temporary filesystem with simulated BIG-IP
 utilities for installation, rollback, locking and service failures. They never
-connect to real devices or send external webhooks. A staging BIG-IP check/apply
-is still needed before claiming live-device compatibility.
+connect to real devices or send external webhooks.
+
+Live read-only validation on f5-lab03 (October 22, 2026 UTC) completed through its
+root Bash SSH login and through the device's real TMSH interpreter. Both returned
+`needs_change`, detected the absent mitigation file, and skipped unprovisioned
+`httpd_sam`. Requiring that stopped service returned the expected preflight
+failure through both routes, including when TMSH returned SSH exit code zero.
+The TMSH interpreter test wraps SSH commands in `tmsh -c`; it does
+not establish password authentication for a separate TMSH login account. Live
+installation, rollback, service restarts, and external webhook delivery have not
+been exercised as part of this validation.

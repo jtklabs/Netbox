@@ -94,18 +94,31 @@ class ProtocolTests(unittest.TestCase):
     def test_success_requires_complete_marker(self):
         output = "F5JOB\tstatus\tapplied\n"
         self.assertEqual(job.parse_result(0, output, "apply")["status"], "unknown")
-        output += "F5JOB\tstage\tcomplete\nF5JOB\tchanged\ttrue\n"
+        output += "F5JOB\tstage\tcomplete\nF5JOB\tchanged\ttrue\nF5JOB\tscript_exit_code\t0\n"
         result = job.parse_result(0, output, "apply")
         self.assertEqual(result["status"], "applied")
         self.assertTrue(result["changed"])
         self.assertEqual(job.parse_result(1, output, "apply")["status"], "unknown")
+
+    def test_tmsh_zero_exit_preserves_inner_failure(self):
+        output = "F5JOB\tstatus\tfailed\nF5JOB\terror\texpected_httpd_sam_not_running\nF5JOB\tscript_exit_code\t1\n"
+        result = job.parse_result(0, output, "apply")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "expected_httpd_sam_not_running")
+        self.assertEqual(result["script_exit_code"], 1)
+        self.assertEqual(result["remote_exit_code"], 0)
+
+    def test_missing_terminal_marker_never_reports_success(self):
+        for mode, status in [("check", "compliant"), ("apply", "applied")]:
+            output = f"F5JOB\tstatus\t{status}\nF5JOB\tstage\tcomplete\n"
+            self.assertNotEqual(job.parse_result(0, output, mode)["status"], status)
 
     def test_drops_raw_output_and_unsafe_protocol_values(self):
         result = job.parse_result(1, "a secret\nF5JOB\terror\ttoken=secret\nF5JOB\tstatus\tfailed\n", "apply")
         self.assertNotIn("secret", json.dumps(result))
 
     def test_failure_contains_rollback_and_stage(self):
-        result = job.parse_result(1, "F5JOB\tstatus\tfailed_rolled_back\nF5JOB\tfailed_stage\trestart\n", "apply")
+        result = job.parse_result(1, "F5JOB\tstatus\tfailed_rolled_back\nF5JOB\tfailed_stage\trestart\nF5JOB\tscript_exit_code\t1\n", "apply")
         self.assertEqual(result["status"], "failed_rolled_back")
         self.assertEqual(result["failed_stage"], "restart")
 
@@ -125,6 +138,44 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn("@@", script)
 
 
+class ShellTests(unittest.TestCase):
+    def probe(self, replies):
+        transport = MagicMock()
+        channels = [MagicMock() for _ in replies]
+        transport.open_session.side_effect = channels
+        with patch.object(job.uuid, "uuid4") as uuid, patch.object(job, "read_channel", side_effect=replies):
+            uuid.return_value.hex = "fixed"
+            result = job.detect_shell(transport, 1)
+        return result, channels
+
+    def test_bash(self):
+        result, channels = self.probe([(0, "F5SHELL_fixed:0\n")])
+        self.assertEqual(result, ("bash", "/bin/bash -s"))
+        channels[0].close.assert_called_once()
+
+    def test_tmsh_fallback_handles_zero_exit_on_invalid_bash_command(self):
+        result, channels = self.probe([(0, "Syntax Error\n"), (0, "F5SHELL_fixed:0\n")])
+        self.assertEqual(result, ("tmsh", "run /util bash -c '/bin/bash -s'"))
+        self.assertTrue(channels[1].exec_command.call_args.args[0].startswith("run /util bash -c "))
+        for channel in channels:
+            channel.sendall.assert_not_called()
+            channel.close.assert_called_once()
+
+    def test_nonroot_and_no_bash_are_rejected_before_dispatch(self):
+        for replies, error in [([(0, "F5SHELL_fixed:500\n")], "root_privileges_required"),
+                               ([(0, "Syntax Error"), (0, "Permission denied")], "bash_access_unavailable")]:
+            with self.subTest(error=error), self.assertRaisesRegex(job.ShellAccessError, error):
+                self.probe(replies)
+
+    def test_probe_failure_never_sends_mitigation(self):
+        with patch.object(job.paramiko, "SSHClient") as constructor, \
+             patch.object(job, "read_channel", return_value=(0, "Permission denied")):
+            result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "do-not-send")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["stage"], "shell_detect")
+        constructor.return_value.get_transport.return_value.open_session.return_value.sendall.assert_not_called()
+
+
 class ChannelTests(unittest.TestCase):
     def test_drains_stderr_alongside_stdout(self):
         channel = MagicMock()
@@ -137,13 +188,16 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(job.read_channel(channel, 1), (0, "result"))
 
     def test_timeout_after_dispatch_is_unknown(self):
-        with patch.object(job.paramiko, "SSHClient") as constructor, patch.object(job, "read_channel", side_effect=TimeoutError):
+        with patch.object(job.paramiko, "SSHClient") as constructor, patch.object(job, "read_channel", side_effect=TimeoutError), \
+             patch.object(job, "detect_shell", return_value=("bash", "/bin/bash -s")) as detect:
             result = job.execute_device(job.Device("192.0.2.1"), config(), "apply", "exit 0")
             client = constructor.return_value
             self.assertIsInstance(client.set_missing_host_key_policy.call_args.args[0], job.paramiko.RejectPolicy)
             self.assertFalse(client.connect.call_args.kwargs["allow_agent"])
             self.assertEqual(result["status"], "unknown")
             client.close.assert_called_once()
+            detect.assert_called_once()
+            client.get_transport.return_value.open_session.return_value.exec_command.assert_called_once_with("/bin/bash -s")
 
     def test_authentication_failure_is_not_unknown(self):
         with patch.object(job.paramiko, "SSHClient") as constructor:
@@ -432,20 +486,22 @@ elif name == "bigstart":
     service = sys.argv[2] if len(sys.argv) > 2 else None
     if action == "status":
         if service is None:
+            # Real lab aggregate output omits both httpd and httpd_sam.
+            print("alertd run (pid 100) 10 seconds"); sys.exit(0)
+        if service == "httpd_sam":
             if os.environ.get("SIM_DISCOVERY_FAIL"): sys.exit(1)
             if os.environ.get("SIM_DISCOVERY_EMPTY"): sys.exit(0)
-            print("httpd run (pid 123) 10 seconds")
             state = os.environ.get("SIM_SAM", "absent")
-            if state == "running": print("httpd_sam run (pid 456) 10 seconds")
-            elif state == "stopped": print("httpd_sam down, normally up")
-            elif state == "disabled": print("httpd_sam disabled")
-            elif state == "unknown": print("httpd_sam unexpected-state")
-            elif state == "duplicate": print("httpd_sam down\\nhttpd_sam run (pid 456) 10 seconds")
-            sys.exit(0)
+            if state == "absent": print("Couldn't find service: httpd_sam"); sys.exit(0)
+            if state == "stopped": print("httpd_sam down, Not provisioned"); sys.exit(0)
+            if state == "disabled": print("httpd_sam disabled"); sys.exit(0)
+            if state == "unknown": print("httpd_sam unexpected-state"); sys.exit(0)
+            if state == "duplicate": print("httpd_sam down\\nhttpd_sam run (pid 456) 10 seconds"); sys.exit(0)
         if os.environ.get("SIM_DOWN"): print(service + " down"); sys.exit(1)
         if service == "httpd_sam" and (root / "sam_restart_failed").exists():
             print("httpd_sam down"); sys.exit(1)
-        print(service + " run (pid 123) 10 seconds")
+        if os.environ.get("SIM_SYSV"): print(service + " (pid 4129) is running...")
+        else: print(service + " run (pid 123) 10 seconds")
     elif action == "restart":
         with (root / "restarts").open("a") as f: f.write(service + "\\n")
         if service == "httpd_sam" and os.environ.get("SIM_SAM_RESTART_FAIL"):
@@ -485,6 +541,12 @@ elif name == "bigstart":
         self.assertEqual(backup.read_text(), "old configuration\n")
         self.assertEqual((self.root / "restarts").read_text(), "httpd\nhttpd_sam\n")
         self.assertFalse((self.root / "var/run/K000163821.lock").exists())
+
+    def test_sysv_status_and_omitted_aggregate_services(self):
+        result = self.run_remote(SIM_SYSV="1", SIM_SAM="running")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((self.root / "restarts").read_text(), "httpd\nhttpd_sam\n")
+        self.assertEqual(job.parse_result(0, result.stdout, "apply")["status"], "applied")
 
     def test_auto_selects_running_sam_without_flag(self):
         result = self.run_remote(SIM_SAM="running")

@@ -28,8 +28,11 @@ trap cleanup EXIT
 healthy() {
     local output
     output=$(bigstart status "$1" 2>/dev/null) || return 1
-    # bigstart reports '<service> run (pid ...) ...' for a running service.
-    printf '%s\n' "$output" | grep -Eq "^[[:space:]]*$1[[:space:]]+run[[:space:]]+\\(pid[[:space:]]+[0-9]+\\)"
+    printf '%s\n' "$output" | running_line "$1"
+}
+running_line() {
+    # BIG-IP uses both daemontools and SysV-style status lines.
+    grep -Eq "^[[:space:]]*$1[[:space:]]+(run[[:space:]]+\\(pid[[:space:]]+[0-9]+\\)|\\(pid[[:space:]]+[0-9]+\\)[[:space:]]+is[[:space:]]+running([.[:space:]]|$))"
 }
 wait_healthy() {
     local n
@@ -85,7 +88,8 @@ on_error() {
         emit status failed
     fi
     emit changed "$changed"
-    exit "${rc:-1}"
+    emit script_exit_code "$rc"
+    exit "$rc"
 }
 trap on_error ERR HUP INT TERM
 emit stage preflight
@@ -97,19 +101,17 @@ emit stage preflight
 for command in bigstart php sha256sum base64 mktemp install; do
     command -v "$command" >/dev/null || fail missing_required_command
 done
-# Discover optional services from a successful full inventory. A failed lookup
-# must never be interpreted as an absent/unused service.
+# Query services directly: the aggregate inventory omits SysV services on
+# some BIG-IP releases. Unknown-service responses may themselves exit zero.
 healthy httpd || fail required_service_not_running
 emit httpd_sam_state unknown
 emit httpd_sam_decision blocked
-snapshot=$(bigstart status 2>/dev/null) || fail service_discovery_failed
-printf '%s\n' "$snapshot" | grep -Eq '^[[:space:]]*httpd[[:space:]]+run[[:space:]]+\(pid[[:space:]]+[0-9]+\)' || fail service_discovery_invalid
-sam_line=$(printf '%s\n' "$snapshot" | awk '$1 == "httpd_sam" {print}')
-if [[ -z "$sam_line" ]]; then
+sam_line=$(bigstart status httpd_sam 2>&1) || fail service_discovery_failed
+if [[ "$sam_line" == "Couldn't find service: httpd_sam" ]]; then
     sam_state=absent
 elif [[ "$sam_line" == *$'\n'* ]]; then
     fail httpd_sam_status_ambiguous
-elif printf '%s\n' "$sam_line" | grep -Eq '^[[:space:]]*httpd_sam[[:space:]]+run[[:space:]]+\(pid[[:space:]]+[0-9]+\)'; then
+elif printf '%s\n' "$sam_line" | running_line httpd_sam; then
     sam_state=running
 elif printf '%s\n' "$sam_line" | grep -Eq '^[[:space:]]*httpd_sam[[:space:]]+(down|disabled)([[:space:],]|$)'; then
     sam_state=stopped
@@ -143,6 +145,7 @@ if [[ "$MODE" == check ]]; then
         emit status needs_change
     fi
     emit changed false
+    emit script_exit_code 0
     exit 0
 fi
 
@@ -185,3 +188,4 @@ emit sha256 "$EXPECTED"
 emit changed "$changed"
 emit status applied
 emit stage complete
+emit script_exit_code 0
