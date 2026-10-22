@@ -1,0 +1,29 @@
+name: F5 PHP mitigation
+on:
+  pull_request:
+    paths:
+      - 'scripts/f5-php-mitigation/**'
+      - '.github/workflows/f5-php-mitigation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/f5-php-mitigation/**'
+      - '.github/workflows/f5-php-mitigation.yml'
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: scripts/f5-php-mitigation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test without contacting devices or webhooks
+        run: python -m unittest discover -s tests -v
