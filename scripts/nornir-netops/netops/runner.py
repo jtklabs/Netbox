@@ -81,7 +81,15 @@ def detect_platform(task: Task) -> Result:
         if extras.get(passthrough) is not None:
             params[passthrough] = extras[passthrough]
 
-    guess = SSHDetect(**params).autodetect()
+    from .credential_profiles import authenticate
+    def detect():
+        params.update(username=host.username, password=host.password)
+        extras = host.get_connection_parameters('netmiko').extras or {}
+        for key in ('secret', 'use_keys', 'key_file', 'allow_agent'):
+            if key in extras:
+                params[key] = extras[key]
+        return SSHDetect(**params).autodetect()
+    guess = authenticate(host, detect)
     if not guess:
         raise ValueError(
             "could not autodetect the platform; set the platform column in the CSV"

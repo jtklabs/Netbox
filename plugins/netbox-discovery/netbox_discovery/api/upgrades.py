@@ -63,7 +63,14 @@ class ScheduleSerializer(serializers.Serializer):
     preview = serializers.BooleanField(default=False)
 
 
+class CredentialHealthSerializer(serializers.Serializer):
+    profiles = serializers.ListField(child=serializers.RegexField(r'^[a-z][a-z0-9_]{0,31}$'), max_length=10)
+    status = serializers.ChoiceField(choices=('legacy', 'incomplete', 'ready'))
+    message = serializers.CharField(max_length=300)
+
+
 class CheckInSerializer(serializers.Serializer):
+    credential_health = CredentialHealthSerializer(required=False)
     supports_f5_rollback = serializers.BooleanField(default=False)
     supports_cancellation = serializers.BooleanField(default=False)
     worker_version = serializers.CharField(max_length=50, allow_blank=True, default="")
@@ -145,6 +152,8 @@ class UpgradeCheckInView(QueueView):
         name = data['name'].removeprefix('poller-')
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
         poller.touch(version=data['worker_version'], summary='Upgrade worker checked in', upgrade=True)
+        poller.credential_health = data.get('credential_health', {})
+        poller.save(update_fields=['credential_health'])
         jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'],
                            supports_cancellation=data['supports_cancellation'], supports_f5_rollback=data['supports_f5_rollback'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})

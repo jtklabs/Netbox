@@ -624,6 +624,82 @@ Real environment variables win over the file, so a one-off
 `NET_PASS=... ./configure.py ...` still works. `--no-env-file` ignores it
 entirely.
 
+### Multiple device accounts
+
+Deploy named accounts from your vault into the worker's `.env`. The same file
+is used by scheduled upgrades, standards jobs and interactive NetOps commands:
+
+```dotenv
+NET_CREDENTIAL_PROFILES=primary,legacy,local
+NET_CREDENTIAL_MAX_ATTEMPTS=3
+NET_PRIMARY_USER=account_one
+NET_PRIMARY_PASS='vault-managed value'
+NET_PRIMARY_ENABLE='optional vault-managed value'
+NET_LEGACY_USER=account_two
+NET_LEGACY_PASS='vault-managed value'
+NET_LOCAL_USER=account_three
+NET_LOCAL_PASS='vault-managed value'
+```
+
+Names must be lowercase letters, digits or underscores, starting with a letter
+(up to 32 characters). Each profile needs its own user/password; an omitted
+enable secret stays empty and never inherits one from another account. Up to
+ten profiles may be configured, with a maximum of three attempts per selection
+(`NET_CREDENTIAL_MAX_ATTEMPTS=1`, `2` or `3`).
+
+**The accounts are not all tried every time.** NetBox remembers the successful
+profile per device and transport (SSH or HTTPS). The next worker tries that one
+first. Only a confirmed login rejection permits trying the next eligible profile.
+Timeouts, lost connections, enable failures and HTTP 403 stop immediately. A
+successful connection pins the account for the rest of the run, including
+reconnects and queued remediation subprocesses. No configuration command is
+replayed with another account.
+
+On the device page, **Device credentials → Set credential preferences** can pin
+a profile. Assigned profiles stop on failure unless **Allow fallback** is checked.
+Automatic selection uses the last successful profile, then the deployment order.
+A saved or assigned profile missing from a worker is a deployment error, not a
+reason to guess with a different account. NetBox serializes selection for a
+device/transport; failed verification has a 15-minute shared cooldown. A worker
+that dies during selection leaves a 10-minute lease before another can try.
+These limits do not replace your AAA lockout policy; reduce attempts as needed,
+particularly when one central account's failures accumulate across devices.
+
+This mode requires NetBox device inventory (or a queued NetBox job), the updated
+discovery plugin and migration `0027`, a write-enabled NetBox token, device view
+access, and either `netbox_discovery.run_upgradejob` or `dcim.change_device`.
+Workers fail closed if selection cannot be coordinated or recorded. Direct IP
+and CSV runs can still use the existing single-account credentials; profile
+discovery deliberately requires a shared NetBox device identity.
+
+Run a read-only access pass before upgrades:
+
+```bash
+./configure.py validate-access --netbox --netbox-autofilter --poller branch-east
+./configure.py validate-access --netbox --limit core-sw1
+```
+
+This checks login and privileged CLI access where applicable; F5 checks a
+read-only system endpoint. It does not prove every command is authorized.
+Existing platform upgrade preflight checks still apply. The device panel shows
+the last authenticated profile/time; reports and upgrade job summaries include
+the profile name. Worker check-ins report configured profile names and readiness
+on the poller page. No passwords, enable secrets or login tokens are sent to
+NetBox.
+
+Deploy the plugin/migration first, then worker version 0.2.25 or later, then
+enable profiles. Have the vault deployment write the complete environment file
+atomically, owned by the worker service account with mode `0600`, on every
+applicable poller/upgrader. After rotation, let active jobs finish and start a
+fresh worker process so it reads the new file. Real process environment values
+override `.env`, so update/remove stale service-level exports too.
+
+When profiles are enabled they replace legacy `NET_USER`/`NET_PASS` and AWS
+device-login resolution. Explicit CLI credentials, SSH key authentication and
+explicit CSV credentials retain the existing single-account behavior. NetBox API
+credentials remain separate. SNMPv3 discovery retains its existing credential
+configuration; these are the SSH/HTTPS device accounts.
+
 ### AWS Secrets Manager
 
 All Secrets Manager reads use a 5-second connection timeout, a 10-second read

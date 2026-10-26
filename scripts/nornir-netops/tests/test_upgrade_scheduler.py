@@ -203,7 +203,8 @@ def test_idle_tick_never_loads_device_credentials_or_creates_reports(tmp_path, m
     login.assert_not_called()
     from netops import __version__
     client.post.assert_called_once_with('check-in/', {'name': 'lab', 'limit': 3, 'apply': False,
-                                                   'worker_version': __version__, 'supports_cancellation': True, 'supports_f5_rollback': True})
+                                                   'worker_version': __version__, 'supports_cancellation': True, 'supports_f5_rollback': True,
+                                                   'credential_health': {'profiles': [], 'status': 'legacy', 'message': 'Using single-account settings'}})
 
 
 @pytest.mark.parametrize('operation,apply,stage_only', [('audit', False, False), ('stage', True, True), ('upgrade', True, False)])

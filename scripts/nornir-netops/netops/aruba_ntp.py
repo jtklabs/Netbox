@@ -103,6 +103,9 @@ class Client:
                                             verify=False,
                                             allow_redirects=False, **kwargs)
             if not 200 <= response.status_code < 300:
+                if response.status_code in (401, 403):
+                    from .errors import DeviceHTTPError
+                    raise DeviceHTTPError('Aruba', method, path, response.status_code)
                 raise RuntimeError(f'Aruba {method} {path} failed (HTTP {response.status_code})')
             document = response.json()
         except requests.RequestException:
@@ -112,6 +115,14 @@ class Client:
         return checked(document, require_result=method == 'POST')
 
     def __enter__(self):
+        from .credential_profiles import authenticate
+        try:
+            return authenticate(self.host, self._authenticate, transport='https')
+        except Exception:
+            self.session.close()
+            raise
+
+    def _authenticate(self):
         from .debuglog import protect
 
         try:

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -181,13 +181,16 @@ def fetch_aws_secret(spec: AwsSecretSpec) -> Dict[str, str]:
 @dataclass
 class Credentials:
     username: Optional[str] = None
-    password: Optional[str] = None
-    secret: Optional[str] = None
+    password: Optional[str] = field(default=None, repr=False)
+    secret: Optional[str] = field(default=None, repr=False)
     #: Human-readable provenance, printed so an operator can see which identity
     #: a run used without ever printing the password.
     source: str = "none"
+    profiles: tuple = field(default=(), repr=False)
 
     def describe(self) -> str:
+        if self.profiles:
+            return 'environment profiles: ' + ', '.join(p.name for p in self.profiles)
         who = self.username or "(per-device)"
         return f"{who} via {self.source}"
 
@@ -202,6 +205,9 @@ def resolve(
     key_file: Optional[str] = None,
 ) -> Credentials:
     """Combine the sources into one fleet-wide credential."""
+    if os.environ.get('NET_CREDENTIAL_PROFILES') and not any((username, password, secret, key_file)):
+        from .credential_profiles import load_profiles
+        return Credentials(profiles=load_profiles(), source='environment profiles')
     sources = []
     resolved = Credentials(username=username, password=password, secret=secret)
     if any((username, password, secret)):

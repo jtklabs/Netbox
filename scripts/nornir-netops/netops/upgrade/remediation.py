@@ -93,6 +93,9 @@ def child_environment(args):
         # AWS outranks environment credentials in the CLI. Resolution already
         # happened in the worker, so do not fetch a different login in children.
         env['NET_AWS_SECRET'] = ''
+        if not getattr(credentials, 'profiles', ()):
+            # Pin the already selected per-device identity across dry run/apply.
+            env['NET_CREDENTIAL_PROFILES'] = ''
     for field, variable in (('key_file', 'NET_KEY_FILE'), ('port', 'NET_PORT'),
                             ('conn_timeout', 'NET_CONN_TIMEOUT'), ('f5_port', 'NETOPS_F5_PORT'),
                             ('f5_timeout', 'NETOPS_F5_TIMEOUT'), ('f5_login_provider', 'NETOPS_F5_LOGIN_PROVIDER')):

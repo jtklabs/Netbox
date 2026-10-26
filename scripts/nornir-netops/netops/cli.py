@@ -461,6 +461,10 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="run due NetBox jobs, refilling free slots until idle (for cron)",
                                    formatter_class=HelpFormatter)
     upgrade_arguments(poll_upgrades, scheduled=True)
+    access = subs.add_parser('validate-access', parents=[_discover_arguments()],
+                            help='verify device login and privileged access without changing configuration')
+    from .features.waf import add_connection_arguments as access_connection_arguments
+    access_connection_arguments(access)
     poll_upgrades.add_argument("--queue-state-dir", default=os.environ.get("NETOPS_UPGRADE_QUEUE_STATE_DIR"),
                                help="private lock/progress spool directory; retain between cron runs")
 
@@ -971,6 +975,9 @@ def _run(argv: List[str], style: Style, log: DebugLog, env_note: Optional[str] =
 
     if args.command == "selftest":
         return selftest()
+    if args.command == 'validate-access':
+        from .credential_profiles import run_validation
+        return run_validation(args, style)
     if args.command == "upgrade":
         from .upgrade.cli import run
         return run(args, style)
@@ -1756,6 +1763,8 @@ def _connect(args: argparse.Namespace, style: Style):
                 conn_timeout=args.conn_timeout,
             )
         targets = _apply_filters(nr, args)
+        from .credential_profiles import prepare
+        prepare(targets, credentials, getattr(args, '_netbox_client', None))
         if args.netbox and args.netbox_autofilter:
             print(style.dim(f"NetBox autofilter: {args.poller}, {len(targets.inventory.hosts)} device(s) selected"))
     except (InventoryError, NetBoxError, CredentialError, StandardsError, ValueError) as exc:

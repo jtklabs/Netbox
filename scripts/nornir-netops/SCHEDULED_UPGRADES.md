@@ -5,6 +5,12 @@ and ready-to-adapt saved standards profiles with their configuration definitions
 
 NetBox holds the schedule; remote workers pull it over outbound HTTPS. Nothing in NetBox connects to a switch. The worker lives alongside `configure.py`, shares its `.env`, AWS Secrets Manager login, and upgrade engine, and exits when its running jobs finish and a queue check finds no eligible work.
 
+Workers without Secrets Manager access can use [vault-deployed credential
+profiles](README.md#multiple-device-accounts). Deploy the same named accounts to
+each worker's protected `.env`; NetBox remembers the successful profile per
+device and reports each poller's credential readiness. Run `validate-access`
+before the upgrade window to discover accounts without changing configuration.
+
 `--workers` limits concurrently executing jobs. While a slot is free, the worker
 checks for newly scheduled jobs every `--poll-interval` seconds (30 by default);
 it also checks immediately when a running job finishes. Each claim requests only
