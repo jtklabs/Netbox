@@ -152,9 +152,8 @@ class UpgradeCheckInView(QueueView):
         name = data['name'].removeprefix('poller-')
         poller, _ = DiscoveryPoller.objects.get_or_create(name=name)
         poller.touch(version=data['worker_version'], summary='Upgrade worker checked in', upgrade=True)
-        if 'credential_health' in data:
-            poller.credential_health = data['credential_health']
-            poller.save(update_fields=['credential_health'])
+        poller.credential_health = data.get('credential_health', {})
+        poller.save(update_fields=['credential_health'])
         jobs = queue.claim(request.user, poller, data['limit'], data['apply'], worker_version=data['worker_version'],
                            supports_cancellation=data['supports_cancellation'], supports_f5_rollback=data['supports_f5_rollback'])
         return Response({'jobs': [queue.assignment(job) for job in jobs]})

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from django.test import TestCase
+from django.test import TransactionTestCase
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -82,6 +83,12 @@ class DeviceCredentialTest(UpgradeFixture, TestCase):
         self.client.force_authenticate(user)
         self.assertEqual(self.begin().status_code, 403)
 
+    def test_read_only_api_token_cannot_reserve_attempts(self):
+        from users.models import Token
+        self.client.force_authenticate(self.user, Token(user=self.user, write_enabled=False))
+        self.assertEqual(self.begin().status_code, 403)
+        self.assertFalse(DeviceCredentialState.objects.exists())
+
     def test_device_panel_and_preferences_form(self):
         self.client.force_login(self.user)
         url = reverse('plugins:netbox_discovery:device_credentials', args=[self.device.pk])
@@ -116,3 +123,32 @@ class DeviceCredentialTest(UpgradeFixture, TestCase):
         response = self.client.get(self.poller.get_absolute_url())
         self.assertContains(response, 'primary, legacy, local')
         self.assertContains(response, 'ready')
+        self.client.post('/api/plugins/discovery/upgrade-jobs/check-in/', {'name': 'lab'}, format='json')
+        self.poller.refresh_from_db()
+        self.assertEqual(self.poller.credential_health, {})
+
+
+class ConcurrentCredentialTest(UpgradeFixture, TransactionTestCase):
+    def test_two_workers_cannot_both_reserve_first_contact(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import close_old_connections
+        from netbox_discovery.api.credentials import exchange
+        self.setup_data()
+        barrier = Barrier(2)
+        device_id = self.device.pk
+
+        def begin():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                return exchange(device_id, {'action': 'begin', 'transport': 'ssh',
+                                            'profiles': ['primary', 'legacy', 'local'], 'max_attempts': 3})
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: begin(), range(2)))
+        self.assertEqual(sum('token' in result for result in results), 1)
+        self.assertEqual(sum('error' in result for result in results), 1)
+        self.assertEqual(DeviceCredentialState.objects.filter(device_id=device_id).count(), 1)
