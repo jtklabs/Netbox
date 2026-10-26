@@ -32,7 +32,9 @@ class DeviceCredentialTest(UpgradeFixture, TestCase):
         self.assertEqual(self.finish(lease['token'], ['primary', 'legacy'], 'legacy', 'authenticated').status_code, 200)
         self.assertEqual(self.state().selected_profile, 'legacy')
         self.assertIsNotNone(self.state().verified_at)
-        self.assertEqual(self.begin().data['profiles'], ['legacy', 'primary', 'local'])
+        saved = self.begin().data
+        self.assertEqual(saved['profiles'], ['legacy'])
+        self.assertTrue(saved['pinned'])
 
     def test_excludes_parallel_workers_and_cools_down_failed_discovery(self):
         lease = self.begin().data
@@ -55,9 +57,35 @@ class DeviceCredentialTest(UpgradeFixture, TestCase):
         DeviceCredentialState.objects.create(device=self.device, transport='ssh', assigned_profile='local')
         self.assertEqual(self.begin().data['profiles'], ['local'])
 
-    def test_explicit_profile_can_opt_into_fallback(self):
-        DeviceCredentialState.objects.create(device=self.device, transport='ssh', assigned_profile='local', allow_fallback=True)
-        self.assertEqual(self.begin(max_attempts=2).data['profiles'], ['local', 'primary'])
+    def test_saved_profile_survives_rejections_timeouts_and_cooldowns(self):
+        verified_at = timezone.now()
+        DeviceCredentialState.objects.create(device=self.device, transport='ssh', selected_profile='legacy', verified_at=verified_at)
+        for status in ('rejected', 'unavailable', 'rejected'):
+            lease = self.begin().data
+            self.assertEqual(lease['profiles'], ['legacy'])
+            self.finish(lease['token'], ['legacy'], status=status)
+            state = self.state()
+            self.assertEqual(state.selected_profile, 'legacy')
+            self.assertEqual(state.verified_at, verified_at)
+            self.assertIn('cooldown', self.begin().data['error'])
+            DeviceCredentialState.objects.update(cooldown_until=timezone.now() - timedelta(seconds=1))
+        lease = self.begin().data
+        self.finish(lease['token'], ['legacy'], 'legacy', 'authenticated')
+        self.assertEqual(self.state().selected_profile, 'legacy')
+        self.assertIsNone(self.state().cooldown_until)
+
+    def test_saved_profile_cannot_be_replaced_by_a_different_success_report(self):
+        DeviceCredentialState.objects.create(device=self.device, transport='ssh', selected_profile='legacy')
+        lease = self.begin().data
+        self.assertIn('error', self.finish(lease['token'], ['legacy', 'local'], 'local', 'authenticated').data)
+        self.assertEqual(self.state().selected_profile, 'legacy')
+
+    def test_old_fallback_lease_cannot_replace_saved_profile(self):
+        DeviceCredentialState.objects.create(device=self.device, transport='ssh', selected_profile='legacy')
+        lease = self.begin().data
+        DeviceCredentialState.objects.update(candidates=['legacy', 'local'])
+        self.assertIn('rediscovery', self.finish(lease['token'], ['legacy', 'local'], 'local', 'authenticated').data['error'])
+        self.assertEqual(self.state().selected_profile, 'legacy')
 
     def test_missing_saved_profile_is_deployment_failure_not_guessing(self):
         DeviceCredentialState.objects.create(device=self.device, transport='ssh', selected_profile='local')
@@ -97,10 +125,28 @@ class DeviceCredentialTest(UpgradeFixture, TestCase):
         response = self.client.post(url, {'transport': 'ssh', 'assigned_profile': 'legacy'})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.state().assigned_profile, 'legacy')
-        self.assertFalse(self.state().allow_fallback)
+        self.assertNotContains(self.client.get(url), 'Allow fallback')
+        self.assertContains(self.client.get(url), 'Rediscover credentials')
         response = self.client.get(self.device.get_absolute_url())
         self.assertContains(response, 'Device credentials')
         self.assertContains(response, 'legacy')
+
+    def test_explicit_rediscovery_clears_assignment_and_saved_profile(self):
+        DeviceCredentialState.objects.create(device=self.device, transport='ssh', assigned_profile='local', selected_profile='legacy')
+        self.client.force_login(self.user)
+        url = reverse('plugins:netbox_discovery:device_credentials', args=[self.device.pk])
+        # Simply saving preferences does not discard the known working account.
+        self.client.post(url, {'transport': 'ssh', 'assigned_profile': ''})
+        self.assertEqual(self.state().selected_profile, 'legacy')
+        response = self.client.post(url, {'transport': 'ssh', 'assigned_profile': 'local', 'forget_selection': True})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.state().assigned_profile, '')
+        self.assertEqual(self.state().selected_profile, '')
+        lease = self.begin().data
+        self.assertEqual(lease['profiles'], ['primary', 'legacy', 'local'])
+        self.assertFalse(lease['pinned'])
+        self.finish(lease['token'], ['primary'], 'primary', 'authenticated')
+        self.assertEqual(self.begin().data['profiles'], ['primary'])
 
     def test_preferences_cannot_bypass_active_selection_or_cooldown(self):
         self.client.force_login(self.user)

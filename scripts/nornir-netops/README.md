@@ -648,16 +648,25 @@ ten profiles may be configured, with a maximum of three attempts per selection
 (`NET_CREDENTIAL_MAX_ATTEMPTS=1`, `2` or `3`).
 
 **The accounts are not all tried every time.** NetBox remembers the successful
-profile per device and transport (SSH or HTTPS). The next worker tries that one
-first. Only a confirmed login rejection permits trying the next eligible profile.
-Timeouts, lost connections, enable failures and HTTP 403 stop immediately. A
-successful connection pins the account for the rest of the run, including
-reconnects and queued remediation subprocesses. No configuration command is
-replayed with another account.
+profile per device and transport (SSH or HTTPS) in its database. Every worker
+uses only that saved profile until an operator explicitly requests rediscovery
+or assigns another profile. Rejections, timeouts and reboots never clear or
+replace it. The reboot reconnect loop retries the same account within the
+existing upgrade timeout; it does not try other accounts. Queued remediation
+subprocesses also keep the selected identity.
 
-On the device page, **Device credentials → Set credential preferences** can pin
-a profile. Assigned profiles stop on failure unless **Allow fallback** is checked.
-Automatic selection uses the last successful profile, then the deployment order.
+Only a device with no saved or assigned profile tries profiles in deployment
+order. During that discovery, a confirmed login rejection permits the next
+eligible profile; timeouts, lost connections, enable failures and HTTP 403 stop
+immediately. A successful login is saved and ends discovery. No configuration
+command is replayed with another account.
+
+On the device page, **Device credentials → Set credential preferences** can assign
+a profile or explicitly request **Rediscover credentials**. Rediscovery clears
+both the assignment and saved selection for the chosen transport; the next
+connection discovers and saves an account again. Simply leaving the assignment
+blank keeps the saved selection. Automatic fallback from a saved or assigned
+profile is not supported, including for previously enabled fallback preferences.
 A saved or assigned profile missing from a worker is a deployment error, not a
 reason to guess with a different account. NetBox serializes selection for a
 device/transport; failed verification has a 15-minute shared cooldown. A worker
@@ -666,7 +675,7 @@ These limits do not replace your AAA lockout policy; reduce attempts as needed,
 particularly when one central account's failures accumulate across devices.
 
 This mode requires NetBox device inventory (or a queued NetBox job), the updated
-discovery plugin and migration `0027`, a write-enabled NetBox token, device view
+discovery plugin through migration `0028`, a write-enabled NetBox token, device view
 access, and either `netbox_discovery.run_upgradejob` or `dcim.change_device`.
 Workers fail closed if selection cannot be coordinated or recorded. Direct IP
 and CSV runs can still use the existing single-account credentials; profile
@@ -687,7 +696,7 @@ the profile name. Worker check-ins report configured profile names and readiness
 on the poller page. No passwords, enable secrets or login tokens are sent to
 NetBox.
 
-Deploy the plugin/migration first, then worker version 0.2.25 or later, then
+Deploy the plugin/migration first, then worker version 0.2.26 or later, then
 enable profiles. Have the vault deployment write the complete environment file
 atomically, owned by the worker service account with mode `0600`, on every
 applicable poller/upgrader. After rotation, let active jobs finish and start a

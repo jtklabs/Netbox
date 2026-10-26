@@ -27,9 +27,8 @@ class Store:
         if payload['action'] == 'begin':
             profiles = list(payload['profiles'])
             if self.preferred:
-                profiles.remove(self.preferred)
-                profiles.insert(0, self.preferred)
-            return {'token': 'private-lease', 'profiles': profiles[:payload['max_attempts']]}
+                profiles = [self.preferred]
+            return {'token': 'private-lease', 'profiles': profiles[:payload['max_attempts']], 'pinned': bool(self.preferred)}
         self.preferred = payload['profile'] or self.preferred
         return {'status': payload['status']}
 
@@ -56,6 +55,34 @@ def test_discovers_then_other_worker_uses_saved_profile_first():
     assert second.run(lambda: second.host.username) == 'user-two'
     assert store.calls[-1]['attempted'] == ['legacy']
     assert not any(value in repr(store.calls) for p in PROFILES for value in (p.username, p.password))
+
+
+@pytest.mark.parametrize('error', [NetmikoAuthenticationException('Authentication failed.'),
+                                  DeviceHTTPError('F5', 'POST', '/login', 401), TimeoutError('Still booting')])
+def test_saved_account_is_retained_across_failed_runs(error):
+    store = Store('legacy')
+    failed = selector(store)
+    connection = Mock(side_effect=error)
+    with pytest.raises((CredentialError, TimeoutError)):
+        failed.run(connection)
+    connection.assert_called_once()
+    assert store.calls[-1]['attempted'] == ['legacy']
+    assert store.preferred == 'legacy'
+    recovered = selector(store)
+    assert recovered.run(lambda: recovered.host.username) == 'user-two'
+    assert store.calls[-1]['attempted'] == ['legacy']
+
+
+def test_reboot_reconnect_retries_use_same_account_without_rediscovery():
+    selected = selector(Store('legacy'))
+    assert selected.run(lambda: 'initial connection') == 'initial connection'
+    calls = len(selected.client.calls)
+    for error in (NetmikoAuthenticationException('Authentication failed.'), TimeoutError('Still booting')):
+        with pytest.raises(type(error)):
+            selected.run(Mock(side_effect=error))
+        assert selected.host.username == 'user-two'
+    assert selected.run(lambda: 'reconnected') == 'reconnected'
+    assert len(selected.client.calls) == calls
 
 
 @pytest.mark.parametrize('error', [TimeoutError('unreachable'),

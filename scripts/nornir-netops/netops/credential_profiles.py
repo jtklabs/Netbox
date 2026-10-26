@@ -122,7 +122,10 @@ class Selector:
                 self.host.data['credential_profile'] = name
                 print(f'{self.host.name}: authenticated with credential profile {name}', flush=True)
                 return connection
-            self.error = 'Device rejected the eligible credential profiles; shared cooldown is active'
+            self.error = ('The saved or assigned credential profile was rejected; selection is unchanged. '
+                          'Rediscovery must be requested explicitly in NetBox; shared cooldown is active'
+                          if lease.get('pinned') else
+                          'Device rejected the eligible credential profiles; shared cooldown is active')
             raise CredentialError(self.error)
         finally:
             # A failed writeback stops the caller before it can send commands.
