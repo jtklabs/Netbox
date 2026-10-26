@@ -13,9 +13,10 @@ from .models import DeviceCredentialState
 class CredentialForm(forms.Form):
     transport = forms.ChoiceField(choices=(('ssh', 'SSH'), ('https', 'HTTPS')))
     assigned_profile = forms.RegexField(r'^[a-z][a-z0-9_]{0,31}$', required=False,
-                                       help_text='Leave blank to discover automatically. Enter the name deployed in the worker environment.')
-    allow_fallback = forms.BooleanField(required=False, help_text='Allow other profiles after an assigned account is rejected.')
-    forget_selection = forms.BooleanField(required=False, help_text='Forget the previously discovered profile. Does not bypass an active cooldown.')
+                                       help_text='Use this profile exclusively. Leave blank to keep the saved selection, or discover if none is saved.')
+    forget_selection = forms.BooleanField(
+        label='Rediscover credentials', required=False,
+        help_text='Clear both the assigned and saved profile. The next connection will discover an account and save it. Does not bypass an active cooldown.')
 
 
 class DeviceCredentialEditView(LoginRequiredMixin, View):
@@ -23,8 +24,7 @@ class DeviceCredentialEditView(LoginRequiredMixin, View):
         device = get_object_or_404(Device.objects.restrict(request.user, 'change'), pk=pk)
         transport = request.GET.get('transport', 'ssh')
         state = DeviceCredentialState.objects.filter(device=device, transport=transport).first()
-        form = CredentialForm(initial={'transport': transport, 'assigned_profile': state.assigned_profile if state else '',
-                                       'allow_fallback': state.allow_fallback if state else False})
+        form = CredentialForm(initial={'transport': transport, 'assigned_profile': state.assigned_profile if state else ''})
         return render(request, 'netbox_discovery/device_credentials.html', {'object': device, 'form': form})
 
     @transaction.atomic
@@ -37,8 +37,8 @@ class DeviceCredentialEditView(LoginRequiredMixin, View):
                 form.add_error(None, 'Credential verification is running. Retry after it finishes.')
             else:
                 state.assigned_profile = form.cleaned_data['assigned_profile']
-                state.allow_fallback = form.cleaned_data['allow_fallback']
                 if form.cleaned_data['forget_selection']:
+                    state.assigned_profile = ''
                     state.selected_profile, state.verified_at, state.status = '', None, 'unknown'
                 state.save()
                 messages.success(request, 'Credential preferences saved.')

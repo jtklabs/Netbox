@@ -50,16 +50,16 @@ def exchange(device_id, data):
         preferred = state.assigned_profile or state.selected_profile
         if preferred and preferred not in profiles:
             return {'error': f'Profile {preferred!r} missing on this poller; deploy it from the vault'}
-        ordered = ([preferred] if preferred else []) + [p for p in profiles if p != preferred]
-        if state.assigned_profile and not state.allow_fallback:
-            ordered = [state.assigned_profile]
+        # A rebooting device may reject even valid credentials. Never interpret
+        # a failed login as permission to replace a saved/assigned identity.
+        ordered = [preferred] if preferred else profiles
         state.candidates = ordered[:data['max_attempts']]
         state.lease_token = uuid.uuid4()
         # Crash protection: another worker cannot immediately repeat the attempts.
         state.lease_until = now + timedelta(minutes=10)
         state.status = 'checking'
         state.save()
-        return {'token': str(state.lease_token), 'profiles': state.candidates}
+        return {'token': str(state.lease_token), 'profiles': state.candidates, 'pinned': bool(preferred)}
     if (not state.lease_token or state.lease_token != data['token']
             or not state.lease_until or state.lease_until <= now):
         return {'error': 'Credential verification lease expired or does not match; retry later'}
@@ -70,6 +70,11 @@ def exchange(device_id, data):
         return {'error': 'Successful profile does not match the last attempt'}
     if data['status'] != 'authenticated' and data['profile']:
         return {'error': 'Failed verification cannot select a profile'}
+    preferred = state.assigned_profile or state.selected_profile
+    if preferred and any(profile != preferred for profile in attempted):
+        # Reject results from fallback leases issued before this policy was
+        # deployed too. A prior authorization cannot replace a saved identity.
+        return {'error': 'Saved credential selection is fixed; request rediscovery explicitly'}
     state.attempted, state.status = attempted, data['status']
     if state.status == 'authenticated':
         state.selected_profile = data['profile']
