@@ -50,11 +50,16 @@ class Reporter:
                                "stage_image" if getattr(self.run.args, "stage_only", False) else "upgrade"),
                  "stage": stage, "message": message}
         event["event_id"] = f"{event['run_id']}:{host.name}:{sequence}"
+        if host.data.get('credential_profile'):
+            event['credential_profile'] = host.data['credential_profile']
+            payload = dict(payload or {}, credential_profile=host.data['credential_profile'])
         if self.run.document.get("schedule"):
             event["scheduled_job_id"] = self.run.document["schedule"]["job_id"]
             event["batch_id"] = self.run.document["schedule"].get("batch_id")
         if payload and "progress_summary" in payload:
             event["summary"] = payload["progress_summary"]
+        if host.data.get('credential_profile'):
+            event['summary'] = dict(event.get('summary', {}), credential_profile=host.data['credential_profile'])
         # The archive is written before HTTP delivery and before device writes.
         with self.run.lock:
             previous = self.run.records.get(host.name, {}).get("upgrade_events", [])

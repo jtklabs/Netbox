@@ -19,6 +19,7 @@ router.register('stripped-domains', StrippedDomainViewSet)
 urlpatterns = router.urls
 
 from django.urls import path
+from .credentials import DeviceCredentialView
 from .upgrades import (UpgradeJobViewSet, ScheduleView, UpgradeCheckInView, UpgradeReportView, UpgradeCancelView, UpgradeRollbackView, UpgradeForceValidationView,
                        UpgradeGroupViewSet, UpgradeDependencyViewSet, UpgradeHoldView, UpgradeReleaseView,
                        UpgradeReleaseBatchView, UpgradeRefreshGroupsView, UpgradeRequeueView, PrestagePolicyViewSet,
@@ -39,6 +40,7 @@ router.register('platform-profiles', PlatformProfileViewSet)
 router.register('audit-schedules', AuditScheduleViewSet)
 router.register('audit-runs', AuditRunViewSet)
 urlpatterns = [
+    path('device-credentials/<int:pk>/', DeviceCredentialView.as_view(), name='device-credentials'),
     path('upgrade-jobs/schedule/', ScheduleView.as_view(), name='upgradejob-schedule'),
     path('upgrade-jobs/check-in/', UpgradeCheckInView.as_view(), name='upgradejob-check-in'),
     path('upgrade-jobs/release-batch/', UpgradeReleaseBatchView.as_view(), name='upgradejob-release-batch'),

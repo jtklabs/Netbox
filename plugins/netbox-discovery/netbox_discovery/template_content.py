@@ -83,4 +83,19 @@ class DeviceUCSBackups(PluginTemplateExtension):
         return self.render('netbox_discovery/inc/ucs_backups.html', extra_context={'backups': backups}) if backups else ''
 
 
-template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles, DeviceRunStandards, DeviceUCSBackups]
+class DeviceCredentials(PluginTemplateExtension):
+    models = ['dcim.device']
+
+    def right_page(self):
+        from dcim.models import Device
+        from .models import DeviceCredentialState
+        user, device = self.context['request'].user, self.context['object']
+        if not Device.objects.restrict(user, 'view').filter(pk=device.pk).exists():
+            return ''
+        return self.render('netbox_discovery/inc/device_credentials.html', extra_context={
+            'credential_states': DeviceCredentialState.objects.filter(device=device).order_by('transport'),
+            'can_change_credentials': Device.objects.restrict(user, 'change').filter(pk=device.pk).exists(),
+        })
+
+
+template_extensions = [DeviceCommandOutputs, DeviceTypeJobProfiles, PlatformJobProfiles, DeviceRunStandards, DeviceUCSBackups, DeviceCredentials]

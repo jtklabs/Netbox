@@ -605,6 +605,7 @@ def claim(user, poller, limit, apply, worker_version="", supports_cancellation=F
 
 def assignment(job):
     return {'id': job.pk, 'device_id': job.device_id, 'device': job.device_name,
+            'device_platform': job.device.platform.slug if job.device and job.device.platform else '',
             'hostname': job.address, 'profile': job.profile, 'operation': job.operation,
             'standards_snapshot': job.standards_snapshot,
             'rollback_plan': job.rollback_plan, 'rollback_of': job.rollback_of_id,

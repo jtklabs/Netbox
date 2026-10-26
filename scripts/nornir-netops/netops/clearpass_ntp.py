@@ -41,6 +41,15 @@ class Client:
         self.connection = None
 
     def __enter__(self):
+        from .credential_profiles import authenticate
+        try:
+            return authenticate(self.host, self._open)
+        except Exception:
+            if self.connection:
+                self.connection.disconnect()
+            raise
+
+    def _open(self):
         from netmiko.terminal_server import TerminalServerSSH
         from .debuglog import protect
 

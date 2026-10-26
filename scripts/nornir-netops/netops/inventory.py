@@ -156,6 +156,7 @@ class CSVInventory:
                     username=row.get("username"),
                     password=row.get("password"),
                     data={
+                        "_explicit_credentials": bool(row.get('username') or row.get('password')),
                         "source_line": number,
                         **{k: v for k, v in row.items() if k not in RESERVED_COLUMNS},
                     },
@@ -298,5 +299,5 @@ def missing_credentials(nr: Nornir, key_file: Optional[str] = None) -> List[str]
     return sorted(
         name
         for name, host in nr.inventory.hosts.items()
-        if not host.username or (not key_file and not host.password)
+        if not hasattr(host, 'selector') and (not host.username or (not key_file and not host.password))
     )

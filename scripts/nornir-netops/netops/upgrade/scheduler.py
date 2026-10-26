@@ -224,6 +224,12 @@ def execute_job(task, args, client, outbox):
                 if not reporter.emit(task.host, 'queued', 'Scheduled job claimed from NetBox'):
                     raise ValueError('NetBox did not authorize the device connection; no device work started')
                 if job['operation'] in remediation.CONFIG_OPERATIONS:
+                    selector = getattr(task.host, 'selector', None)
+                    if selector:
+                        from ..credential_profiles import validate_access
+                        validate_access(task, args)
+                        args.device_credentials = selector.credentials()
+                        task.host.close_connections()
                     failed, changed, outcome = remediation.run_job(
                         task, job, args, lambda stage, message, payload=None: reporter.emit(task.host, stage, message, payload))
                     code = 1 if failed or reporter.delivery_failed else 0
@@ -258,11 +264,16 @@ def run_claimed_job(job, args, credentials, client, outbox):
     args.device_credentials = credentials
     key = f'{job["device"]} [job {job["id"]}]'
     records = {key: {'hostname': job['hostname'], 'platform': platform_for(job.get('profile'))}}
+    if getattr(credentials, 'profiles', ()) and job['operation'] in remediation.CONFIG_OPERATIONS:
+        from ..netbox import platform_of
+        records[key]['platform'] = platform_of({'platform': {'slug': job.get('device_platform', '')}})
     nr = init_from_records(records, credentials.username, credentials.password, credentials.secret,
                            args.key_file, args.port, 1, args.conn_timeout)
     try:
         for host in nr.inventory.hosts.values():
             host.data.update(upgrade_job=job, netbox_id=job['device_id'])
+        from ..credential_profiles import prepare
+        prepare(nr, credentials, client)
         if missing_credentials(nr, args.key_file):
             raise ValueError('Device credentials are incomplete')
         return nr.run(task=execute_job, args=args, client=client, outbox=outbox).failed
@@ -272,6 +283,7 @@ def run_claimed_job(job, args, credentials, client, outbox):
 
 def run_queue(args, client, outbox, login):
     """Hold the caller's tick lock; claim only free slots, never queue locally."""
+    from ..credential_profiles import profile_health
     from ..debuglog import protect
 
     active, credentials, failed = {}, None, False
@@ -296,7 +308,8 @@ def run_queue(args, client, outbox, login):
                             return 1
                     else:
                         response = client.post('check-in/', {'name': args.poller, 'limit': free, 'apply': args.apply,
-                                                             'worker_version': __version__, 'supports_cancellation': True, 'supports_f5_rollback': True})
+                                                             'worker_version': __version__, 'supports_cancellation': True, 'supports_f5_rollback': True,
+                                                             'credential_health': profile_health()})
                         jobs = response.get('jobs')
                         if not isinstance(jobs, list) or len(jobs) > free or any(not isinstance(j, dict) for j in jobs):
                             raise NetBoxError('Upgrade queue returned an invalid batch')

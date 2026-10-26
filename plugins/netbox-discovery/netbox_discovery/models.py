@@ -34,6 +34,25 @@ __all__ = (
 )
 
 
+class DeviceCredentialState(models.Model):
+    """Shared account selection metadata. Never stores credentials."""
+    device = models.ForeignKey('dcim.Device', on_delete=models.CASCADE, related_name='credential_states')
+    transport = models.CharField(max_length=5, choices=(('ssh', 'SSH'), ('https', 'HTTPS')))
+    assigned_profile = models.CharField(max_length=32, blank=True)
+    allow_fallback = models.BooleanField(default=False)
+    selected_profile = models.CharField(max_length=32, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='unknown')
+    attempted = models.JSONField(default=list)
+    lease_token = models.UUIDField(null=True)
+    lease_until = models.DateTimeField(null=True)
+    candidates = models.JSONField(default=list)
+    cooldown_until = models.DateTimeField(null=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=('device', 'transport'), name='unique_device_credential_transport')]
+
+
 class DiscoveryPoller(PrimaryModel):
     """A remote SNMP poller, and when it was last heard from.
 
@@ -50,6 +69,8 @@ class DiscoveryPoller(PrimaryModel):
     Rows are created by the pollers themselves on first check-in. Nobody has to
     register a poller by hand before it can work.
     """
+
+    credential_health = models.JSONField(default=dict, blank=True, editable=False)
 
     name = models.CharField(
         max_length=100, unique=True,

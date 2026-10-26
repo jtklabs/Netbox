@@ -147,6 +147,8 @@ def action(args, desired, host, record):
 
 def device_document(name, record, args, desired, host):
     row = dict(record)
+    if host and host.data.get('credential_profile'):
+        row['credential_profile'] = host.data['credential_profile']
     if host and host.data.get("poller_selection"):
         row["poller_selection"] = host.data["poller_selection"]
     row.update(action(args, desired, host, row))

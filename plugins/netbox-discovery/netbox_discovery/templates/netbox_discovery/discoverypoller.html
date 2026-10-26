@@ -23,6 +23,8 @@
                 {% endif %}
               </td></tr>
             <tr><th>Worker version</th><td>{{ object.worker_version|default:'Not reported' }}</td></tr>
+            <tr><th>Credential profiles</th><td>{{ object.credential_health.profiles|join:", "|default:'Not reported' }}</td></tr>
+            <tr><th>Credential readiness</th><td>{{ object.credential_health.status|default:'Not reported' }}{% if object.credential_health.message %}: {{ object.credential_health.message }}{% endif %}</td></tr>
             <tr><th>Scanner version</th><td>{{ object.version|placeholder }}</td></tr>
             <tr><th>Upgrade / standards check-in</th><td>{% if object.upgrade_last_seen_at %}{{ object.upgrade_last_seen_at }} ({{ object.upgrade_last_seen_at|timesince }} ago){% else %}Never checked in{% endif %}</td></tr>
             <tr><th>Last run</th><td>{{ object.last_scan_summary|placeholder }}</td></tr>

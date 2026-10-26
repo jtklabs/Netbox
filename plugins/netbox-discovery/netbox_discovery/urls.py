@@ -1,4 +1,5 @@
 from django.urls import path
+from .credential_views import DeviceCredentialEditView
 from .upgrade_backups import UpgradeBackupDownloadView
 from netbox.views.generic import ObjectChangeLogView
 
@@ -16,6 +17,7 @@ from netbox_discovery.models import (
 # views and get_absolute_url() both derive the name that way, and a mismatch
 # fails at reverse() time rather than at import time.
 urlpatterns = [
+    path('device-credentials/<int:pk>/', DeviceCredentialEditView.as_view(), name='device_credentials'),
     path('onboarding/', views.OnboardingRequestListView.as_view(),
          name='onboardingrequest_list'),
     path('onboarding/add/', views.OnboardingRequestEditView.as_view(),

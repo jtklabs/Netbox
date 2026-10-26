@@ -31,6 +31,7 @@ class Client:
             address = f"[{address}]"
         self.base = f"https://{address}:{port}"
         self.username = host.username
+        self.host = host
         self.password = host.password
         self.verify_tls = False
         self.timeout = timeout
@@ -78,6 +79,11 @@ class Client:
         return document
 
     def authenticate(self):
+        from .credential_profiles import authenticate
+        return authenticate(self.host, self._authenticate, transport='https')
+
+    def _authenticate(self):
+        self.username, self.password = self.host.username, self.host.password
         # Never attach the expired token to the credential-based login request.
         self.token = None
         self.session.headers.pop("X-F5-Auth-Token", None)
