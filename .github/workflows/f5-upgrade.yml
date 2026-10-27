@@ -1,0 +1,38 @@
+name: F5 SSH upgrade service
+on:
+  pull_request:
+    paths:
+      - 'services/f5-upgrade/**'
+      - '.github/workflows/f5-upgrade.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/f5-upgrade/**'
+      - '.github/workflows/f5-upgrade.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    defaults:
+      run:
+        working-directory: services/f5-upgrade
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.lock
+      - run: python -m pip install -e '.[test]'
+      - run: python -m pytest -q
+      - run: ruff check . && ruff format --check .
+      - run: node --check f5_upgrade/static/app.js
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t f5-ssh-upgrade:test services/f5-upgrade
+      - run: docker run --rm f5-ssh-upgrade:test f5-upgrade --help

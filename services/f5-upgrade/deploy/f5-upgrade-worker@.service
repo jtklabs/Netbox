@@ -1,0 +1,22 @@
+[Unit]
+Description=F5 SSH upgrade worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=f5upgrade
+Group=f5upgrade
+WorkingDirectory=/opt/f5-upgrade
+EnvironmentFile=/etc/f5-upgrade/service.env
+ExecStart=/opt/f5-upgrade/.venv/bin/f5-upgrade worker
+Restart=on-failure
+TimeoutStopSec=2h
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/f5-upgrade /var/backups/f5-upgrade
+
+[Install]
+WantedBy=multi-user.target
