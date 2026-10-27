@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!pyproject.toml
+!requirements.lock
+!f5_upgrade/
+!f5_upgrade/**
+**/__pycache__
+*.pyc

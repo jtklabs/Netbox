@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>F5 Upgrade Control</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <span class="eyebrow">NETWORK OPERATIONS</span>
+        <h1>F5 Upgrade Control</h1>
+        <p>SSH upgrades, durable jobs, and a recorded path back.</p>
+      </div>
+      <a href="/docs">API reference ↗</a>
+    </header>
+    <main>
+      <section id="login">
+        <h2>Connect</h2>
+        <form id="auth">
+          <label
+            >Bearer token
+            <input
+              id="token"
+              type="password"
+              required
+              autocomplete="off"
+              minlength="32" /></label
+          ><button>Connect</button>
+        </form>
+        <p class="hint">
+          The token stays in this tab’s memory. Configure credentials and SSH
+          host keys on the server.
+        </p>
+      </section>
+      <p id="message" role="status" aria-live="polite"></p>
+      <div id="workspace" hidden>
+        <div class="columns">
+          <section>
+            <h2>New job</h2>
+            <form id="new-job">
+              <label
+                >Device
+                <select id="device" required></select
+              ></label>
+              <div class="checks">
+                <label
+                  ><input type="checkbox" id="transfer" /> Transfer
+                  images</label
+                ><label
+                  ><input type="checkbox" id="install" /> Install
+                  software</label
+                ><label
+                  ><input type="checkbox" id="reboot" /> Reboot into target
+                  volume</label
+                ><label
+                  ><input type="checkbox" id="create_ucs" /> Create UCS
+                  backup</label
+                ><label
+                  ><input type="checkbox" id="ucs_unencrypted" /> Create UCS
+                  without encryption</label
+                ><label
+                  ><input type="checkbox" id="images_on_device" /> Images
+                  already on device</label
+                ><label
+                  ><input type="checkbox" id="drain" /> Drain virtual addresses
+                  before reboot</label
+                >
+              </div>
+              <label
+                >Target boot volume
+                <input id="target_volume" placeholder="HD1.2" /></label
+              ><label
+                >Allowed source versions (comma separated)
+                <input
+                  id="allowed_source_versions"
+                  placeholder="16.1.5, 17.1.1" /></label
+              ><label
+                >Images (ordered JSON array)
+                <textarea id="images" rows="6" spellcheck="false">[]</textarea>
+              </label>
+              <p class="hint">
+                Each image needs name, sha256, version, build, and kind (image
+                or hotfix). Install implies transfer and UCS backup.
+              </p>
+              <details>
+                <summary>Backup, drain and verification options</summary>
+                <label
+                  >Backup directory under server backup root
+                  <input
+                    id="backup_directory"
+                    placeholder="Uses device ID by default" /></label
+                ><label
+                  >Expected version (required for reboot without install)
+                  <input id="expected_version" /></label
+                ><label>Expected build <input id="expected_build" /></label>
+                <div class="pair">
+                  <label
+                    >Drain to connection count
+                    <input
+                      id="drain_connections"
+                      type="number"
+                      min="0"
+                      placeholder="0 by default" /></label
+                  ><label
+                    >Or percent to drain
+                    <input
+                      id="drain_percent"
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="any"
+                      placeholder="90 = remove 90%"
+                  /></label>
+                </div>
+                <label
+                  >Drain timeout, seconds
+                  <input
+                    id="drain_timeout"
+                    type="number"
+                    min="0"
+                    value="300" /></label
+                ><label
+                  ><input id="reboot_on_drain_timeout" type="checkbox" /> Reboot
+                  even if drain times out</label
+                ><label
+                  >Install timeout, seconds
+                  <input
+                    id="install_timeout"
+                    type="number"
+                    min="60"
+                    value="3600" /></label
+                ><label
+                  >Reboot timeout, seconds
+                  <input
+                    id="reboot_timeout"
+                    type="number"
+                    min="60"
+                    value="900" /></label
+                ><label
+                  >Validation settling time, seconds
+                  <input
+                    id="validation_timeout"
+                    type="number"
+                    min="0"
+                    value="180"
+                /></label>
+              </details>
+              <div class="actions">
+                <button type="button" id="preview">Preview steps</button
+                ><button type="submit">Queue job</button>
+              </div>
+            </form>
+            <pre id="plan" aria-live="polite"></pre>
+          </section>
+          <section>
+            <div class="heading">
+              <h2>Jobs</h2>
+              <button id="refresh" type="button">Refresh</button>
+            </div>
+            <p class="hint">
+              Updates every five seconds · one job per device or HA lock group
+            </p>
+            <div id="jobs"></div>
+          </section>
+        </div>
+        <section id="detail" hidden>
+          <div class="heading">
+            <h2 id="detail-title">Job</h2>
+            <div class="actions">
+              <button id="cancel">Cancel queued job</button
+              ><button id="rollback">Roll back to previous volume</button
+              ><button id="backup">Download UCS</button>
+            </div>
+          </div>
+          <p id="detail-status"></p>
+          <div id="counts"></div>
+          <h3>Execution events</h3>
+          <pre id="events"></pre>
+          <details>
+            <summary>Full job report</summary>
+            <pre id="report"></pre>
+          </details>
+          <p class="hint">
+            Recovery required means the device remains locked. Stop the owning
+            worker, inspect the device and restore any drained addresses before
+            using the API recovery resolution endpoint.
+          </p>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
