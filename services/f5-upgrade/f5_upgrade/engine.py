@@ -84,7 +84,16 @@ class Runner:
                 self.event("transfer_completed", image=image.name)
             if self.ssh.remote_digest(remote) != image.sha256:
                 raise DeviceError("device image SHA-256 mismatch: " + image.name)
-            self.device.verify_image(image)
+            # The software catalog can lag behind an SFTP rename while F5 scans the image.
+            deadline = self.clock() + 120
+            while True:
+                try:
+                    self.device.verify_image(image)
+                    break
+                except DeviceError:
+                    if self.clock() >= deadline:
+                        raise
+                    self.wait(5)
             self.event("image_verified", image=image.name)
 
     def install(self, request):
@@ -195,7 +204,15 @@ class Runner:
     def postvalidate(self, baseline, timeout):
         deadline = self.clock() + timeout
         while True:
-            snapshot = self.device.snapshot()
+            try:
+                snapshot = self.device.snapshot()
+            except DeviceError:
+                # SSH and software status may return before LTM/ASM is ready after boot.
+                if self.clock() >= deadline:
+                    raise
+                self.event("post_validation_waiting_for_device")
+                self.wait(min(10, max(0, deadline - self.clock())))
+                continue
             issues = compare(baseline, snapshot)
             self.result["post_validation"] = snapshot
             self.result["validation_issues"] = issues

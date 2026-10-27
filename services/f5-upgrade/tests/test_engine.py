@@ -206,3 +206,35 @@ def test_rollback_rejects_changed_device(settings, store):
     Runner(settings, store, job, "rollback", fake, clock.sleep, clock.clock).run()
     assert store.get(r["id"])["status"] == "failed"
     assert fake.reboots == ["HD1.2"]
+
+
+def test_post_boot_validation_waits_for_services(settings, store):
+    fake = FakeDevice()
+    original = fake.snapshot
+    attempts = []
+
+    def snapshot_after_boot():
+        if fake.reboots and not attempts:
+            attempts.append(True)
+            raise DeviceError("ASM is starting")
+        return original()
+
+    fake.snapshot = snapshot_after_boot
+    job, _ = execute(settings, store, reboot_options(validation_timeout=30), fake)
+    assert job["status"] == "succeeded"
+    assert any(e["step"] == "post_validation_waiting_for_device" for e in store.events(job["id"]))
+
+
+def test_transferred_image_waits_for_catalog(settings, store, image):
+    fake = FakeDevice()
+    attempts = []
+
+    def verify_image(spec):
+        attempts.append(spec.name)
+        if len(attempts) == 1:
+            raise DeviceError("image catalog still scanning")
+
+    fake.verify_image = verify_image
+    job, _ = execute(settings, store, {"transfer": True, "images": [image]}, fake)
+    assert job["status"] == "succeeded"
+    assert len(attempts) == 2
