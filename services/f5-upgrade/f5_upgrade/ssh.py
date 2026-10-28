@@ -1,4 +1,5 @@
 import hashlib
+import io
 import os
 import re
 import shlex
@@ -7,15 +8,27 @@ from pathlib import Path
 
 import paramiko
 
+from .credentials import AuthenticationRejected, Selector, Vault
+from .store import Store
+
 
 class DeviceError(Exception):
     """Deliberately excludes remote output and credentials from public errors."""
 
 
 class SSH:
-    def __init__(self, settings, device, guard=lambda: None):
+    def __init__(self, settings, device, guard=lambda: None, credential_profiles=None, audit=None):
         self.settings, self.device, self.guard = settings, device, guard
         self.client = None
+        self.transfer_guard = guard
+        self.progress = lambda done, total: None
+        self.selector = Selector(
+            Vault(Store(settings.data_dir / "jobs.sqlite3"), settings.credential_key_file),
+            "ssh",
+            device.host,
+            credential_profiles if credential_profiles is not None else device.credential_profiles,
+            audit,
+        )
 
     def connect(self):
         self.guard()
@@ -26,25 +39,79 @@ class SSH:
         client.load_host_keys(str(self.settings.known_hosts))
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
         d = self.device
+        base = dict(
+            hostname=d.host,
+            port=d.port,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=15,
+            auth_timeout=15,
+            banner_timeout=15,
+        )
+
+        def authenticate(c):
+            pkey = None
+            if c.get("private_key"):
+                for keytype in (paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey):
+                    try:
+                        pkey = keytype.from_private_key(
+                            io.StringIO(c["private_key"]), password=c.get("passphrase")
+                        )
+                        break
+                    except (paramiko.SSHException, ValueError):
+                        pass
+                if pkey is None:
+                    raise DeviceError("SSH private key could not be loaded")
+            try:
+                client.connect(**base, username=c["username"], password=c.get("password"), pkey=pkey)
+            except (paramiko.BadAuthenticationType, paramiko.ssh_exception.PartialAuthentication):
+                client.close()
+                raise DeviceError(
+                    "SSH authentication method is not supported or requires another factor"
+                ) from None
+            except paramiko.AuthenticationException:
+                client.close()
+                raise AuthenticationRejected() from None
+            return client
+
         try:
-            client.connect(
-                d.host,
-                port=d.port,
-                username=d.username,
-                key_filename=d.key_file,
-                password=os.environ.get(d.password_env) if d.password_env else None,
-                passphrase=os.environ.get(d.key_passphrase_env) if d.key_passphrase_env else None,
-                look_for_keys=False,
-                allow_agent=False,
-                timeout=15,
-                auth_timeout=15,
-                banner_timeout=15,
+            has_profiles = self.selector.names is not None or any(
+                c["kind"] == "ssh" for c in self.selector.vault.list()
             )
-        except Exception:
+            if has_profiles:
+                self.selector.run(authenticate, aliases=(d.id,))
+            else:
+                self.selector.secrets.update(
+                    value
+                    for value in (
+                        os.environ.get(d.password_env or ""),
+                        os.environ.get(d.key_passphrase_env or ""),
+                    )
+                    if value
+                )
+                client.connect(
+                    **base,
+                    username=d.username,
+                    key_filename=d.key_file,
+                    password=os.environ.get(d.password_env) if d.password_env else None,
+                    passphrase=os.environ.get(d.key_passphrase_env) if d.key_passphrase_env else None,
+                )
+                self.selector.last = "legacy:" + d.id
+                self.selector.audit(
+                    {
+                        "profile": self.selector.last,
+                        "revision": 0,
+                        "transport": "ssh",
+                        "target": d.host,
+                        "outcome": "authenticated",
+                        "source": "environment",
+                    }
+                )
+        except Exception as exc:
             client.close()
-            raise DeviceError(
-                "SSH connection failed; check host key, reachability and credential profile"
-            ) from None
+            if isinstance(exc, DeviceError):
+                raise
+            raise DeviceError("SSH authentication or connection failed; see credential attempts") from None
         self.client = client
         return client
 
@@ -53,7 +120,7 @@ class SSH:
             self.client.close()
         self.client = None
 
-    def shell(self, command, timeout=120, stdin_text=None):
+    def execute(self, command, timeout=120, stdin_text=None):
         self.guard()
         channel = self.connect().get_transport().open_session(timeout=15)
         channel.settimeout(15)
@@ -83,14 +150,26 @@ class SSH:
                 time.sleep(0.05)
             code = channel.recv_exit_status()
             value = output.decode("utf-8", errors="replace")
-            if code != 0 or errors or re.search(r"(?im)^.*(?:syntax error|\berror:|\bfailed\b)", value):
-                raise DeviceError("SSH command failed; remote output withheld")
-            return value
+            return {
+                "exit_code": code,
+                "stdout": self.selector.redact(value),
+                "stderr": self.selector.redact(errors.decode("utf-8", errors="replace")),
+            }
         except (EOFError, OSError, paramiko.SSHException):
             self.close()
             raise DeviceError("SSH command interrupted; outcome may be unknown") from None
         finally:
             channel.close()
+
+    def shell(self, command, timeout=120, stdin_text=None):
+        result = self.execute(command, timeout, stdin_text)
+        if (
+            result["exit_code"] != 0
+            or result["stderr"]
+            or re.search(r"(?im)^.*(?:syntax error|\berror:|\bfailed\b)", result["stdout"])
+        ):
+            raise DeviceError("SSH command failed; remote output withheld")
+        return result["stdout"]
 
     def tmsh(self, command, timeout=120, secret=False):
         if secret:
@@ -105,7 +184,8 @@ class SSH:
             deadline = time.monotonic() + 7200
 
             def progress(done, total):
-                self.guard()
+                self.transfer_guard()
+                self.progress(done, total)
                 if time.monotonic() > deadline:
                     raise DeviceError("image transfer timed out")
 
@@ -125,7 +205,8 @@ class SSH:
                     os.chmod(temporary, 0o600)
 
                     def progress(done, total):
-                        self.guard()
+                        self.transfer_guard()
+                        self.progress(done, total)
                         if time.monotonic() > deadline:
                             raise DeviceError("UCS download timed out")
 

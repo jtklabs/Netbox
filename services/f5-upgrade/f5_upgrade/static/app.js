@@ -1,6 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-let token = "",
+let selectedJob = null,
+  jsonPending = "",
+  jsonKey = "",
+  token = "",
   selected = null,
   polling = false,
   pendingBody = "",
@@ -65,6 +68,11 @@ function request() {
   ].forEach((k) => {
     if ($(k).value.trim()) r[k] = $(k).value.trim();
   });
+  if ($("credential_profiles").value.trim())
+    r.credential_profiles = $("credential_profiles")
+      .value.split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
   return r;
 }
 async function refresh() {
@@ -85,9 +93,41 @@ async function refresh() {
       detail.className = "status";
       detail.textContent = `${j.status.replaceAll("_", " ")} · ${new Date(j.created * 1000).toLocaleString()} · ${j.id.slice(0, 8)}`;
       b.append(title, detail);
-      b.onclick = () => select(j.id).catch((e) => message(e.message, true));
+      b.onclick = async () => {
+        try {
+          await select(j.id);
+          $("detail").scrollIntoView({ behavior: "smooth" });
+        } catch (e) {
+          message(e.message, true);
+        }
+      };
       $("jobs").append(b);
     });
+    const [batches, workers, credentials] = await Promise.all([
+      api("upgrade-batches"),
+      api("workers"),
+      api("credentials"),
+    ]);
+    $("batches").replaceChildren();
+    batches.forEach((batch) => {
+      const button = document.createElement("button");
+      button.className = "job";
+      button.textContent = `${batch.name} · ${batch.status} · ${batch.device_count} devices`;
+      button.onclick = async () => {
+        try {
+          $("batch-report").textContent = JSON.stringify(
+            await api("upgrade-batches/" + batch.id),
+            null,
+            2,
+          );
+        } catch (e) {
+          message(e.message, true);
+        }
+      };
+      $("batches").append(button);
+    });
+    $("workers").textContent = JSON.stringify(workers, null, 2);
+    $("credentials").textContent = JSON.stringify(credentials, null, 2);
     if (selected) await select(selected);
   } catch (e) {
     message(e.message, true);
@@ -99,6 +139,8 @@ async function select(id) {
   selected = id;
   const j = await api("jobs/" + id),
     events = await api("jobs/" + id + "/events?limit=1000");
+  if (selected !== id) return;
+  selectedJob = j;
   $("detail").hidden = false;
   $("detail-title").textContent = j.device + " · " + j.kind;
   $("detail-status").textContent =
@@ -107,10 +149,35 @@ async function select(id) {
     " · " +
     j.id +
     (j.result.error ? " · " + j.result.error : "");
-  $("cancel").disabled = j.status !== "queued";
+  $("cancel").disabled = !["queued", "running", "needs_review"].includes(
+    j.status,
+  );
+  const gate = j.validation_gates?.findLast((g) => g.state === "open");
+  $("gate-summary").textContent = gate
+    ? `Waiting for ${gate.phase} · revision ${gate.revision}`
+    : "No validation decision is pending.";
+  $("accept-validation").disabled = $("retry-validation").disabled =
+    !gate || j.status !== "needs_review";
+  $("mark-done").disabled = [
+    "succeeded",
+    "completed_with_warnings",
+    "manually_completed",
+  ].includes(j.status);
+  $("resolve").disabled =
+    !j.lock_held ||
+    !["recovery_required", "failed", "manually_completed"].includes(j.status);
+  $("credential-summary").textContent =
+    `Credentials used: ${(j.credential_summary?.profiles_used || []).join(", ") || "none recorded"}${j.credential_summary?.multiple_profiles_used ? " · Multiple profiles were used; inspect the credential audit in the report." : ""}`;
   $("rollback").disabled =
     !j.result.rollback ||
-    !["succeeded", "failed", "resolved"].includes(j.status);
+    ![
+      "succeeded",
+      "completed_with_warnings",
+      "failed",
+      "resolved",
+      "recovery_required",
+      "manually_completed",
+    ].includes(j.status);
   $("backup").disabled = !j.result.backup;
   $("report").textContent = JSON.stringify(j, null, 2);
   $("events").textContent = events
@@ -156,12 +223,12 @@ $("auth").onsubmit = async (e) => {
   token = $("token").value;
   try {
     const ds = await api("devices");
-    $("device").replaceChildren();
+    $("inventory").replaceChildren();
     ds.forEach((d) => {
       const o = document.createElement("option");
       o.value = d.id;
       o.textContent = d.id + " · " + d.host;
-      $("device").append(o);
+      $("inventory").append(o);
     });
     $("token").value = "";
     $("login").hidden = true;
@@ -226,7 +293,7 @@ $("rollback").onclick = async () => {
     const j = await api(
       "jobs/" + selected + "/rollback",
       "POST",
-      {},
+      { worker_stopped: $("worker-stopped").checked },
       "rollback-" + selected,
     );
     selected = j.id;
@@ -253,3 +320,150 @@ $("backup").onclick = async () => {
   }
 };
 setInterval(refresh, 5000);
+
+const examples = {
+  "upgrade-batches": {
+    name: "Change123",
+    defaults: {
+      install: true,
+      reboot: true,
+      allowed_source_versions: ["16.1.5"],
+      images: [
+        {
+          name: "BIGIP-target.iso",
+          sha256: "REPLACE_WITH_SHA256",
+          kind: "image",
+          version: "17.1.2",
+          build: "0.0.5",
+        },
+      ],
+      standalone_drain: {
+        enabled: true,
+        remaining_connections: 100,
+        timeout_seconds: 600,
+      },
+      validation_policy: {
+        noncritical_differences: "warn",
+        on_timeout: "needs_review",
+      },
+    },
+    waves: [
+      { wave: 1, upgrade_at_a_time: 2, ips: ["192.0.2.10", "192.0.2.11"] },
+      { wave: 2, upgrade_at_a_time: 1, ips: ["192.0.2.12"] },
+    ],
+  },
+  "ssh/jobs": {
+    device: "192.0.2.10",
+    commands: [{ command: "tmsh show sys version", timeout_seconds: 60 }],
+  },
+  "http/jobs": {
+    target: "panorama",
+    requests: [
+      {
+        method: "POST",
+        path: "/api/",
+        form: {
+          type: "op",
+          target: "FIREWALL_SERIAL",
+          cmd: "<show><system><info/></system></show>",
+        },
+      },
+    ],
+  },
+  "snmp/walks": { device_ip: "192.0.2.10", oids: ["1.3.6.1.2.1.1"] },
+};
+$("json-example").onclick = () => {
+  $("json-body").value = JSON.stringify(
+    examples[$("json-kind").value],
+    null,
+    2,
+  );
+};
+$("json-submit").onsubmit = async (e) => {
+  e.preventDefault();
+  const button = e.submitter;
+  button.disabled = true;
+  try {
+    const body = JSON.parse($("json-body").value),
+      path = $("json-kind").value,
+      signature = path + JSON.stringify(body);
+    if (signature !== jsonPending) {
+      jsonPending = signature;
+      jsonKey = crypto.randomUUID();
+    }
+    const result = await api(path, "POST", body, jsonKey);
+    $("json-result").textContent = JSON.stringify(result, null, 2);
+    jsonPending = "";
+    jsonKey = "";
+    if (path !== "upgrade-batches") selected = result.id;
+    message("Queued: " + result.id);
+    await refresh();
+  } catch (err) {
+    message(err.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+async function decision(action) {
+  if (!$("operator-controls").reportValidity()) return;
+  try {
+    const gate = selectedJob.validation_gates.findLast(
+      (g) => g.state === "open",
+    );
+    await api(
+      "jobs/" + selected + "/validation-decisions",
+      "POST",
+      {
+        action,
+        gate_id: gate.id,
+        validation_revision: gate.revision,
+        operator: $("operator").value,
+        reason: $("reason").value,
+      },
+      gate.id + "-" + action,
+    );
+    message("Decision saved; a worker will apply it.");
+    await refresh();
+  } catch (e) {
+    message(e.message, true);
+  }
+}
+$("accept-validation").onclick = () => decision("accept");
+$("retry-validation").onclick = () => decision("retry");
+$("mark-done").onclick = async () => {
+  if (!$("operator-controls").reportValidity()) return;
+  try {
+    await api("jobs/" + selected + "/mark-done", "POST", {
+      operator: $("operator").value,
+      reason: $("reason").value,
+    });
+    message(
+      "Completion recorded. A running worker must acknowledge cancellation; unresolved reservations remain held.",
+    );
+    await refresh();
+  } catch (e) {
+    message(e.message, true);
+  }
+};
+$("resolve").onclick = async () => {
+  if (!$("operator-controls").reportValidity()) return;
+  if (!$("worker-stopped").checked) {
+    message(
+      "Confirm the worker is stopped and the device inspected before releasing recovery.",
+      true,
+    );
+    return;
+  }
+  try {
+    await api("jobs/" + selected + "/resolve", "POST", {
+      worker_stopped: true,
+      device_inspected: true,
+      note: $("operator").value + ": " + $("reason").value,
+    });
+    await refresh();
+  } catch (e) {
+    message(e.message, true);
+  }
+};
+
+$("operator-controls").onsubmit = (e) => e.preventDefault();

@@ -77,11 +77,17 @@ def health(text, kind):
             "enabled": enabled,
             "up": availability == "available" and enabled == "enabled",
         }
+        if kind == "pool":
+            count = field(body, "active-member-cnt", field(body, "active-members"))
+            if count is not None:
+                records[key]["active_members"] = int(count)
         if kind == "virtual":
             current = required(body, "clientside.cur-conns")
             if not re.fullmatch(r"\d+", current):
                 raise DeviceError("connection count must be an unscaled integer")
             records[key]["connections"] = int(current)
+    if kind == "node":
+        records = {k: v for k, v in records.items() if "_auto" not in k}
     return {"up": sum(x["up"] for x in records.values()), "total": len(records), "objects": records}
 
 
@@ -179,7 +185,24 @@ class BigIP:
             if level == "none"
             else blocks(self.ssh.tmsh("cd /; list /asm policy recursive one-line"), "asm policy")
         )
+        from . import f5_operations as ops
+
+        config, errors = ops.details(self)
+        ready = True
+        if level != "none":
+            try:
+                ready = ops.readiness(self)
+            except DeviceError:
+                ready = False
+                errors["asm_readiness"] = "unavailable"
         return {
+            "configuration": config,
+            "collection_errors": errors,
+            "asm_ready": ready,
+            "waf_policy_attributes": {
+                key: {k: field(body, k) for k in ("active", "enforcement-mode", "type")}
+                for key, body in policies.items()
+            },
             "active": active,
             "boot_id": self.boot_id(),
             "waf_policies": len(policies),
@@ -187,6 +210,41 @@ class BigIP:
             "asm_provision": level,
             **categories,
         }
+
+    def topology(self):
+        from . import f5_operations as ops
+
+        return ops.topology(self)
+
+    def owners(self):
+        from . import f5_operations as ops
+
+        return ops.owners(self)
+
+    def platform(self):
+        from . import f5_operations as ops
+
+        return ops.platform(self)
+
+    def license_date(self):
+        from . import f5_operations as ops
+
+        return ops.license_date(self)
+
+    def free_bytes(self):
+        from . import f5_operations as ops
+
+        return ops.free_bytes(self)
+
+    def start_copy(self, source, target, job_id):
+        from . import f5_operations as ops
+
+        return ops.start_copy(self, source, target, job_id)
+
+    def copy_status(self, directory):
+        from . import f5_operations as ops
+
+        return ops.copy_status(self, directory)
 
     def connections(self):
         return sum(v["connections"] for v in self.stats("virtual")["objects"].values())
@@ -244,3 +302,58 @@ def compare(before, after):
         if lost:
             issues.append(f"{category}: {len(lost)} previously up objects are no longer up")
     return issues
+
+
+def differences(before, after, drained=False):
+    """Stable identities and explicit field deltas; counters do not affect validation."""
+    import copy
+
+    before, after = copy.deepcopy(before), copy.deepcopy(after)
+    result = []
+    if drained:
+        for key in drained:
+            if key in before["virtual_ips"]["objects"] and key in after["virtual_ips"]["objects"]:
+                for f in ("enabled", "up"):
+                    after["virtual_ips"]["objects"][key][f] = before["virtual_ips"]["objects"][key][f]
+        for key, obj in after["virtual_servers"]["objects"].items():
+            if obj.get("enabled") == "disabled-by-parent" and key in before["virtual_servers"]["objects"]:
+                original = before["virtual_servers"]["objects"][key]
+                for field_name in ("enabled", "availability", "up"):
+                    obj[field_name] = original[field_name]
+    for category in ("virtual_servers", "pools", "nodes", "virtual_ips"):
+        old, new = before[category]["objects"], after[category]["objects"]
+        for key in sorted(old.keys() | new.keys()):
+            if key not in old or key not in new:
+                result.append(
+                    {"category": category, "object": key, "change": "added" if key in new else "removed"}
+                )
+            else:
+                changes = {
+                    f: {"before": old[key].get(f), "after": new[key].get(f)}
+                    for f in old[key].keys() | new[key].keys()
+                    if f != "connections" and old[key].get(f) != new[key].get(f)
+                }
+                if changes:
+                    result.append(
+                        {"category": category, "object": key, "change": "changed", "fields": changes}
+                    )
+    for category in sorted(set(before.get("configuration", {})) | set(after.get("configuration", {}))):
+        old, new = before.get("configuration", {}).get(category), after.get("configuration", {}).get(category)
+        if old != new:
+            result.append({"category": category, "change": "changed", "before": old, "after": new})
+    if before["waf_policy_names"] != after["waf_policy_names"] or before.get(
+        "waf_policy_attributes"
+    ) != after.get("waf_policy_attributes"):
+        result.append(
+            {
+                "category": "waf_policies",
+                "change": "changed",
+                "before": before["waf_policy_names"],
+                "after": after["waf_policy_names"],
+                "attributes_before": before.get("waf_policy_attributes"),
+                "attributes_after": after.get("waf_policy_attributes"),
+            }
+        )
+    for category, error in after.get("collection_errors", {}).items():
+        result.append({"category": category, "change": "unavailable", "message": error})
+    return result

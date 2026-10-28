@@ -16,7 +16,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/f5-upgrade /var/backups/f5-upgrade
+ReadWritePaths=/var/lib/f5-upgrade /var/backups/f5-upgrade /srv/f5-images
 
 [Install]
 WantedBy=multi-user.target

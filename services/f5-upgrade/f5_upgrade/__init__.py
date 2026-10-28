@@ -1,1 +1,1 @@
-"""Standalone SSH upgrade service."""
+__version__ = "0.3.0"

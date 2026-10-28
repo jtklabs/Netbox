@@ -1,304 +1,530 @@
-# F5 SSH upgrade service
+# Remote execution service
 
-A standalone implementation for BIG-IP upgrades controlled through a versioned
-HTTP API, CLI, or web console. **Every upgrade operation uses SSH/SFTP and tmsh;
-there are no iControl REST calls.** It has no dependency on NetBox or the older
-F5 scripts in this repository.
+A standalone remote for a central controller, with a versioned API, web console,
+CLI and durable SQLite queue. It runs F5 upgrades over **SSH/SFTP only**, arbitrary
+SSH commands, HTTPS requests (including Panorama requests targeting a firewall),
+and asynchronous SNMP v3 walks. It has no NetBox dependency.
 
-The server stores jobs, events, pre/post reports, worker ownership, and original
-boot volumes in SQLite. UCS archives live in a separate local backup directory.
-Multiple worker processes or containers share these directories on **one host**.
-Upgrades run concurrently; one device or configured HA group has only one running
-upgrade job. SNMP v3 walks use UDP and share the durable worker queue. SQLite WAL must use a local filesystem, not NFS/SMB or multi-host replicas.
+The main application submits jobs and polls their results. F5 upgrade sequencing,
+reconnection, HA checks, backups, validation and rollback live on the remote.
+For generic commands, the main application interprets the returned output and
+submits a **separate** remediation job, optionally linked with `parent_job_id`.
 
-## Upgrade job controls
+API and worker processes share one local SQLite database, image cache, backup
+root and credential keyring. Scale workers on **one host** with Docker or systemd.
+SQLite WAL must not be placed on NFS/SMB or shared between hosts. Separate remotes
+have independent reservations: the central application must assign an entire HA
+pair/batch to one remote and prevent overlap across remotes.
 
-All upgrade JSON options have corresponding CLI flags (`_` becomes `-`). Boolean CLI
-flags also support `--no-...`. Use `POST /api/v1/plan` or `f5-upgrade plan` to see
-inherited steps without connecting to a device. Jobs default to a read-only
-pre/post validation; **install and reboot are opt-in**.
+## API contract
 
-| Option | Behavior |
+All `/api/v1` routes require `Authorization: Bearer <F5_API_TOKEN>`. The token
+is a shared service identity loaded from `.env` or the service environment.
+`/docs` and `/openapi.json` expose the schema; `/healthz` reports API availability.
+`GET /api/v1/workers` reports worker heartbeats separately. The web console at `/`
+keeps the token only in tab memory and uses the same API.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/devices` | Optional inventory IDs and connection addresses |
+| POST | `/api/v1/plan` | Normalize a single upgrade and show inherited steps without device access |
+| POST | `/api/v1/jobs` | Queue one F5 upgrade/backup/validation job |
+| POST | `/api/v1/upgrade-batches` | Queue ordered waves with per-wave concurrency |
+| GET | `/api/v1/upgrade-batches` or `/{id}` | Batch membership, wave progress and item results |
+| POST | `/api/v1/ssh/jobs` | Queue one or more SSH commands |
+| POST | `/api/v1/http/jobs` | Queue one or more HTTPS requests |
+| GET | `/api/v1/http/targets` | Configured HTTP targets |
+| POST | `/api/v1/snmp/walks` | Queue SNMP v3 OID subtree walks |
+| GET | `/api/v1/snmp/walks/{id}` | Walk status and per-root progress |
+| GET | `/api/v1/snmp/walks/{id}/results?after=0&limit=500` | Paginated partial/final rows |
+| GET | `/api/v1/jobs?limit=100&offset=0` or `/jobs/{id}` | Jobs and full results/credential audit |
+| GET | `/api/v1/jobs/{id}/events?after=0&limit=500` | Ordered events; advance cursor to last `seq` |
+| GET | `/api/v1/jobs/{id}/backup` | Download completed UCS backup |
+| POST | `/api/v1/jobs/{id}/cancel` | Durable cancellation request |
+| POST | `/api/v1/jobs/{id}/validation-decisions` | Accept/retry a particular validation gate |
+| POST | `/api/v1/jobs/{id}/mark-done` | Manually complete an item for the wave barrier |
+| POST | `/api/v1/jobs/{id}/rollback` | Reboot to the original recorded volume |
+| POST | `/api/v1/jobs/{id}/resolve` | Release an inspected recovery reservation |
+| GET | `/api/v1/credentials` | Credential metadata only |
+| PUT | `/api/v1/credentials/{profile}` | Idempotent full replacement/upsert |
+| POST | `/api/v1/credentials/rotate` | Re-encrypt records using the first key in the keyring |
+
+Job creation returns HTTP `202` with an `id`, `kind`, `status`, normalized
+`request`, `result`, `lock_held`, credential audit and validation gates. Poll
+`GET /api/v1/jobs/{id}`. Batch creation returns a batch ID and `status_url`, child
+job IDs, wave progress and item statuses. No synchronous device work occurs in
+API handlers.
+
+Use a durable, unique `Idempotency-Key` for each submission, batch, rollback or
+validation decision. Reuse the **same key and body** after a lost API response.
+A conflicting reuse returns `409`. Invalid input is `422`, missing resources
+`404`, and invalid authentication `401`. Validation errors exclude submitted
+values so malformed credential requests do not echo passwords.
+
+Terminal job states are `succeeded`, `completed_with_warnings`, `failed`,
+`cancelled`, `recovery_required`, `resolved` and `manually_completed`.
+`needs_review` waits for an operator decision; it is not completion.
+`queued` and `running` need continued polling. A terminal state may still hold
+reservations: inspect `lock_held`. Batch `needs_attention` requires action on its
+items; `completed` means every item passed its wave barrier.
+
+## Upgrade payload
+
+```json
+{
+  "name": "Change123",
+  "defaults": {
+    "install": true,
+    "reboot": true,
+    "allowed_source_versions": ["16.1.5"],
+    "images": [{
+      "name": "BIGIP-approved.iso",
+      "kind": "image",
+      "version": "17.1.2",
+      "build": "0.0.5",
+      "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+    }],
+    "backup_directory": "Change123",
+    "standalone_drain": {
+      "enabled": true,
+      "remaining_connections": 100,
+      "timeout_seconds": 600,
+      "reboot_on_timeout": true
+    },
+    "ha_policy": {
+      "allow_active_first": true,
+      "require_healthy_peer": true,
+      "sync_after_upgrade": true
+    },
+    "validation_policy": {
+      "noncritical_differences": "warn",
+      "on_timeout": "needs_review",
+      "consecutive_passes": 2,
+      "settling_seconds": 30
+    },
+    "validation_timeout": 600
+  },
+  "waves": [
+    {"wave": 1, "upgrade_at_a_time": 2, "ips": ["192.0.2.10", "192.0.2.11", "192.0.2.12"]},
+    {"wave": 2, "upgrade_at_a_time": 1, "ips": ["192.0.2.20", "192.0.2.21"]}
+  ],
+  "overrides": {
+    "192.0.2.12": {"target_volume": "HD1.3", "credential_profiles": ["ssh-local"]}
+  }
+}
+```
+
+Send this to `/api/v1/upgrade-batches`. For a single job, send the defaults plus
+`"device":"192.0.2.10"` to `/api/v1/jobs`. Device can be an inventory ID or IP.
+Version/build examples are illustrative; your allowlist is the upgrade policy,
+not an embedded vendor compatibility database.
+
+Omit `target_volume` to discover a destination: prefer an inactive complete
+volume matching the final requested version/build, otherwise reuse the lowest
+eligible inactive volume for installation, otherwise create the next volume on
+the active disk. A reboot-only request requires a matching existing volume.
+The active volume is always preserved as the rollback target. The selected volume
+is recorded in `result.target_volume`. Never pass an administrative partition
+such as `/Common` as a boot volume.
+
+Omit `credential_profiles` to try all enabled, eligible profiles for that
+transport, ordered by `priority` then profile ID. An explicit list restricts the
+attempts and establishes their initial order. A connection prefers its last
+successful profile on reconnect, then falls back after authentication rejection.
+Inventory/HTTP target defaults may restrict the eligible profiles for a target.
+
+| Upgrade option | Behavior/default |
 | --- | --- |
-| `device` | ID in the server's device inventory; no arbitrary hosts or commands in jobs |
-| `transfer` | Copy ordered images from `F5_IMAGE_ROOT` to `/shared/images` over SFTP; verify SHA-256 |
-| `images` | Ordered array of `{name, sha256, version, build, kind}`; kind is `image` or `hotfix` |
-| `images_on_device` | Skip inherited upload for install; still verify remote checksum and metadata |
-| `create_ucs` | Save configuration, create UCS, download it and verify size and SHA-256 |
-| `ucs_unencrypted` | Implies UCS creation; omit the UCS encryption passphrase, retaining private keys |
-| `backup_directory` | Implies UCS creation; relative directory under `F5_BACKUP_ROOT`; defaults to device ID |
-| `install` | Implies UCS backup and transfer (unless images are already on device), then installs images in order |
-| `target_volume` | Explicit inactive boot volume, such as `HD1.2`; creates it if needed |
-| `allowed_source_versions` | Exact running-version allowlist, required for install/reboot; no wildcards |
-| `expected_version`, `expected_build` | Required for reboot of an already staged volume; inherited from the final image for install |
-| `reboot` | Reboot to the target and verify a new boot identity, active volume, version, and build |
-| `drain` | Requires reboot; temporarily disable currently enabled **virtual addresses** in all partitions |
-| `drain_connections` | Implies drain; reboot once total current clientside virtual-server connections are at or below this count |
-| `drain_percent` | Implies drain; percentage to **remove** from the initial count; mutually exclusive with count |
-| `drain_timeout` | Maximum wait after disabling addresses, seconds; default 300 |
-| `reboot_on_drain_timeout` | Explicitly reboot when drain times out; default false (restore addresses and stop) |
-| `install_timeout` | Per-image installation wait, seconds; default 3600 |
-| `reboot_timeout` | Wait for verified new boot, seconds; default 900 |
-| `validation_timeout` | Let monitors settle before reporting health differences, seconds; default 180 |
+| `transfer` | Upload images from `F5_IMAGE_ROOT`; verify SHA-256 and vendor catalog metadata |
+| `images` | Ordered `{name,sha256,version,build,kind}`; optional HTTPS `source_url` downloads to local cache |
+| `images_on_device` | Skip inherited upload; still verify checksum/metadata |
+| `create_ucs` | Save config, create UCS, download and verify size/checksum |
+| `ucs_unencrypted` | Implies UCS; no encryption passphrase, private keys remain included |
+| `ucs_credential` | Optional UCS passphrase profile; otherwise first eligible UCS profile |
+| `backup_directory` | Relative directory beneath `F5_BACKUP_ROOT`; implies UCS |
+| `install` | Implies UCS, transfer unless already on device, image checks, installation and configuration copy |
+| `reboot` | Implies UCS and configuration copy; verify new boot identity and exact volume/version/build |
+| `expected_version`, `expected_build` | Required for reboot-only; inferred from final image when installing |
+| `allowed_source_versions` | Required exact running-version allowlist for install/reboot |
+| `approved_models` | Optional allowlist matching marketing name or platform ID |
+| `license_check_date` | Optional minimum license service-check date, `YYYY-MM-DD` |
+| `minimum_free_bytes` | Required free reserve on image filesystem; default 1,500,000,000 bytes |
+| `cleanup_images` | Opt-in deletion of catalogued old installers, excluding requested images, if space is insufficient |
+| `install_timeout` | Per-image install and configuration-copy timeout; default 3600 seconds |
+| `reboot_timeout` | Verified reboot timeout; default 900 seconds |
+| `validation_timeout` | Bounded validation window; default 600, maximum 86400 seconds |
 
-For example, 1,000 initial connections with `drain_percent: 90` means a threshold
-of 100 remaining. A zero baseline produces a zero threshold. With no threshold,
-drain defaults to zero connections. Counts sum `clientside.cur-conns` across all
-virtual servers; these are clientside LTM flows, not a full system connection-table
-count or a guarantee about stateless traffic.
+The installer reuses an exact final version/build when available. **It always
+saves the current configuration and runs `cpcfg --source=<current> <target>`,
+including reused volumes.** It requires a verified zero exit status. Copy progress
+and its private on-device log directory are recorded. An ambiguous install/copy
+is never automatically replayed.
 
-Draining runs `modify /ltm virtual-address <address> enabled no`; it never disables
-virtual servers. It records all original address states and each mutation intent
-before sending commands. Previously disabled addresses remain disabled. Address
-changes are not saved or synced; the configuration is saved before installation
-and before draining. On a verified reboot, changed addresses are restored. On a
-pre-reboot error, restoration is attempted immediately. An uncertain reboot or
-lost worker leaves explicit recovery information instead of issuing blind cleanup.
-The drain method rejects automatic config sync, which could propagate address
-disables to peers. Avoid other config saves/syncs during the job.
+Verified images already on the device skip SFTP upload. HTTPS cache downloads
+require SHA-256, verified TLS and no redirects or embedded credentials. A download
+is limited to 30 GiB/two hours and committed atomically. SFTP uses a temporary
+remote filename and verifies it before rename. Transfer progress includes bytes
+and percentage. Installer cleanup never deletes boot volumes.
 
-An installation stage whose target already has the exact requested version/build
-is recorded as `install_already_complete` and skipped. It does not refresh the
-configuration on that previously staged volume; review post-validation when booting it.
+### Drain and HA behavior
 
-Encrypted UCS is the default. Set the device's `ucs_passphrase_env` on every
-worker. The passphrase travels through SSH stdin, not a remote process argument,
-and is never put in the job database or event log. Unencrypted UCS is explicitly
-requested with `ucs_unencrypted`; it is not `no-private-key`. Downloaded backups
-have private permissions and UUID filenames. The server never accepts a client
-supplied absolute backup path. Mount an alternate backup root if necessary.
+Standalone draining disables **virtual addresses**, never virtual servers. It
+records original enabled states and changes only enabled addresses. Choose a
+remaining count or `reduction_percent` (not both) in `standalone_drain`.
+A 90% reduction from 1,000 connections means 100 remaining. Counts sum clientside
+virtual-server connections; they are not a complete system connection-table count.
 
-## Docker
+The flat fields `drain`, `drain_connections`, `drain_percent`, `drain_timeout`, and
+`reboot_on_drain_timeout` remain supported. Their default timeout is 300 seconds;
+`standalone_drain.timeout_seconds` defaults to 600. With no threshold, drain to zero.
+Draining requires reboot. Timeout restores addresses and stops unless forced
+reboot on timeout was explicitly selected.
 
-From this directory:
+Disabled states are saved and copied into the target so traffic stays drained
+through reboot and validation. After successful or manually accepted validation,
+restore only addresses disabled by this job, save, and collect the final snapshot.
+Before reboot, cancellation/error attempts restoration. Uncertain boots retain
+recovery state and reservations instead of issuing blind cleanup.
+
+HA discovery verifies a two-member sync-failover pair through both members and
+locks the cluster plus both management endpoints across workers and batches.
+Only submitted members are upgraded. The current active member may run first:
+verify healthy peer/traffic ownership, explicitly fail over to it, confirm the
+handoff, then reboot. HA jobs **do not disable shared virtual addresses**.
+Before upgrading the second member, verify that the upgraded peer has completed
+validation and can carry traffic. Mixed-version handoffs need that saved peer
+validation. Sync is deferred while versions/builds differ; when equal, use the
+active member as the sync source and verify completion. Unknown topology,
+active-active groups, unhealthy peers and changing ownership stop the operation.
+
+Within each wave, devices are claimed in submitted order when eligible, up to
+`upgrade_at_a_time`; a reserved pair cannot overlap. A later wave starts only
+after every previous item is `succeeded`, `completed_with_warnings` or
+`manually_completed`. A validation pause frees a worker slot but retains device
+and HA reservations. This permits unrelated devices to progress.
+
+### Validation and manual control
+
+Pre/post reports include WAF policy counts, names and attributes; ASM readiness;
+up/total and per-object state for virtual servers, pools, nodes and virtual IPs;
+pool active members; VLANs, self IPs, routes, management routes/IPs, provisioning,
+interfaces, trunks, iRule names and certificate expiry fields. Collection gaps
+are explicit. Dynamic `_auto` nodes are excluded from stable inventory comparisons.
+
+Object deltas are reported individually. Minor monitor or inventory differences
+are **warnings by default**, so a few nodes going down cannot trap the wave.
+ASM readiness, boot identity/version and HA health are blocking checks. Validation
+has bounded settling/retries. `on_timeout` chooses `needs_review` (default) or
+`fail`. Strict environments may select `noncritical_differences: require_review`
+and set `ltm_min_unchanged_percent`/`waf_min_unchanged_percent`; both default to 100.
+Other configuration changes still require review in strict mode. Two consecutive
+acceptable samples are the default; a zero-second validation window takes one.
+No-reboot jobs validate the current runtime, not the staged software.
+
+A waiting job exposes a gate with `id`, `revision`, `phase` and `findings`. Send:
+
+```http
+POST /api/v1/jobs/JOB_ID/validation-decisions
+Idempotency-Key: change123-accept-gate1
+Content-Type: application/json
+
+{"action":"accept","gate_id":"GATE_UUID","validation_revision":1,"operator":"jason","reason":"Validated application traffic manually"}
+```
+
+`retry` runs that validation again. `accept` records the waiver and continues with
+the remaining restoration/traffic/sync steps. It does **not** reinstall or reboot.
+The decision transitions `pending` → `applied`, with stale revisions rejected.
+The audit retains the findings and operator reason; acceptance is not a fake pass.
+
+`POST /jobs/{id}/mark-done` takes `{"operator":"jason","reason":"..."}`.
+It advances the wave barrier for a stopped item but **retains unresolved
+reservations**. For a running item it requests cancellation first; the worker
+must acknowledge before status becomes `manually_completed`. Unrelated devices
+may continue, but its HA peer stays blocked until recovery is reconciled.
+
+`POST /jobs/{id}/cancel` cancels queued jobs immediately. Running workers observe
+safe checkpoints: transfers can stop; install/cpcfg must finish; drains restore
+before reboot; a requested reboot must reconnect/verify first. Cancellation after
+reboot retains recovery for inspection. Killing a worker never means a remote
+command stopped. Missing heartbeats fence SSH/HTTP/F5 jobs as `recovery_required`;
+there is no automatic replay. `SIGTERM` gracefully finishes the current job.
+
+To release recovery, stop the owning worker, inspect any in-flight device commands,
+boot state and saved drain state, then send:
+
+```json
+{"worker_stopped":true,"device_inspected":true,"note":"Worker stopped; device and address states reconciled"}
+```
+
+Use `/jobs/{id}/resolve`. These are operator attestations, not remotely proven
+facts. Resolving a manually completed item preserves its wave completion status.
+
+Optional `validation_policy.waf_request_check: true` checks for new WAF traffic
+after restoration. Standby units and units without policies skip it. Configure a
+read-only inventory `waf_request_command` that emits JSON
+`{"id":"request-id","timestamp":"2026-10-28T12:00:00+00:00"}` over SSH from your
+local request-log adapter. The timestamp must be timezone-aware and between the
+reboot request and now. No HTTP calls or log-byte-growth guesses are used.
+Without an adapter/new request, the bounded gate requires manual validation;
+request logging and incoming traffic must exist for automatic proof.
+
+### Rollback
+
+The original active volume/version/build is saved before mutation. Submit `{}`
+to `/jobs/{id}/rollback` with its own idempotency key. The linked job checks that
+the device still runs the upgrade target and the original volume is intact,
+performs a healthy HA handoff when needed, reboots to the original volume,
+restores tracked drain state and validates. An uncertain source job holding a
+reservation requires `{"worker_stopped":true}`; ownership transfers atomically
+to the rollback job. A staged-only job must actually boot its target first.
+
+Rollback does not import UCS, recreate deleted partitions, or automatically
+carry later configuration changes back. Keep database, backups and keyring as a
+recovery set. Back up SQLite with its online backup API, or stop all processes
+before copying its database/WAL files. No automatic purge removes rollback history.
+
+## Generic SSH and HTTP jobs
+
+```json
+{"device":"192.0.2.10","commands":[{"command":"tmsh show sys version","timeout_seconds":60},{"command":"tmsh list sys provision","timeout_seconds":60}],"stop_on_error":true}
+```
+
+Submit to `/ssh/jobs`. Results contain each command index, stdout, stderr, exit
+code, elapsed seconds and authenticated profile. Nonzero exit is failure; the
+output is not interpreted as a remediation rule. `stop_on_error:false` continues
+the sequence. Maximum 100 operations, 32 MiB command/job results and a configurable
+`job_timeout` (default 7200 seconds). A lost/timeout command response is fenced,
+not retried. Closing SSH cannot guarantee the command stopped on the device.
+
+Configure HTTPS targets in `F5_HTTP_TARGETS_FILE` (see
+`http-targets.example.json`). Each has a fixed HTTPS origin and an explicitly
+read-only authentication probe. This probe is required even for GET jobs because
+some device APIs perform operations through GET. TLS certificates are verified;
+`ca_file` supports a private CA. Redirects and environment proxies are disabled.
+
+For Panorama, provision an HTTP profile using `scheme:header`, `header:X-PAN-KEY`
+and an encrypted API key in `token`. The example probe uses `type=version`.
+Then submit this to `/http/jobs`:
+
+```json
+{"target":"panorama","requests":[{"method":"POST","path":"/api/","form":{"type":"op","target":"FIREWALL_SERIAL","cmd":"<show><system><info/></system></show>"}}]}
+```
+
+The probe selects a credential **before** sending an operation. An HTTP 401 or
+Panorama authentication rejection can move to the next profile. Permission errors,
+network failures, and ambiguous operation replies do not trigger credential replay.
+The actual operation is sent once. Results include HTTP status, response body,
+selected content/location/retry headers, duration and profile. HTTP 2xx determines
+transport success; the main application must interpret vendor body errors.
+Responses are bounded to 4 MiB each/32 MiB per job. Basic, bearer and named-header
+credentials are supported. Use `params`, `form`, `json_body` or `body` as appropriate;
+paths must remain relative to the configured target. Authentication belongs in
+profiles rather than submitted headers. `parent_job_id` links follow-up jobs.
+
+## Encrypted credentials and Ansible
+
+Device credentials are encrypted in SQLite with authenticated Fernet encryption.
+The independent keyring file is owner-only and configured by
+`F5_CREDENTIAL_KEY_FILE`. It contains one Fernet key per line; the first encrypts,
+all can decrypt. Back up it separately from the database. This protects a stolen
+DB copy, not a compromised remote/root account: the running service can decrypt.
+
+Generate once with `f5-upgrade init-key /path/credentials.key`. Upsert profiles
+using the API; GET returns only ID, kind, priority, enabled, revision and timestamp.
+Identical PUTs do not bump revisions; changed secrets/metadata do. Omit profiles
+from requests for automatic selection; `targets` can limit them to exact IPs or
+inventory/HTTP target IDs. Disable a profile with a full PUT containing
+`enabled:false`. Existing established sessions finish; reconnects read current
+profile revisions without restarting workers.
+
+Example credential bodies for `PUT /api/v1/credentials/PROFILE_ID`:
+
+```json
+{"kind":"ssh","username":"root","password":"SECRET","priority":20,"targets":["192.0.2.10"]}
+```
+
+```json
+{"kind":"snmp","username":"reader","security_level":"authPriv","auth_protocol":"SHA256","auth_password":"SECRET_AT_LEAST_8_BYTES","priv_password":"SECRET_AT_LEAST_8_BYTES"}
+```
+
+```json
+{"kind":"http","scheme":"header","header":"X-PAN-KEY","token":"SECRET"}
+```
+
+```json
+{"kind":"ucs","passphrase":"SECRET"}
+```
+
+SSH also accepts private-key PEM in `private_key` and its optional `passphrase`.
+HTTP basic uses `scheme:basic`, `username`, `password`; bearer uses `token`.
+UCS encryption selects the first eligible passphrase profile, since archive
+creation has no remote authentication test. A specified `ucs_credential`
+restricts that choice. Unencrypted UCS must be explicitly requested.
+
+Authentication fallbacks record profile ID, revision, target, protocol, phase,
+time and outcome. `credential_summary.profiles_used`, `current_profile`, and
+`multiple_profiles_used` distinguish successful credentials from rejected attempts.
+The complete `credential_usage` history identifies TACACS before reboot and local
+credentials afterward. Known secret strings are redacted from generic command
+responses; treat arbitrary device output as sensitive regardless. Do not embed
+secrets in commands or HTTP payloads, which are retained as job requests.
+
+Only positive authentication rejection triggers fallback; transport/host-key/
+permission failures do not. Rejected target/profile revisions cool down for
+60 seconds, shared across workers. SNMP agents may silently discard bad digests;
+a timeout alone cannot prove bad credentials and does not trigger guessing.
+All eligible profiles are tried when no selection is specified. Pin a smaller
+list per job or target when appropriate for device authentication policies.
+
+For key rotation: atomically write an owner-only keyring containing **new key
+first, old keys after it**; call `/credentials/rotate`; retain old keys until all
+processes/backup recovery needs are accounted for, then remove them. Rotation
+rewrites ciphertext transactionally without changing credential IDs or revisions.
+Never overwrite the only key before rotating the database.
+
+`deploy/ansible/deploy.yml` provisions Ubuntu 24.04/RHEL 9, systemd API/workers,
+private directories, a key generated **only if missing**, and idempotent credential
+upserts over the remote's loopback API. Supply `executor_api_token` and
+`executor_credentials` from **Ansible Vault**, not plaintext repository variables.
+Credential tasks have `no_log:true`; only the API token/key path is in service.env.
+
+```yaml
+# Encrypt this file with ansible-vault before storing it.
+executor_api_token: REPLACE_WITH_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS
+executor_workers: 3
+executor_credentials:
+  ssh-tacacs:
+    kind: ssh
+    username: automation
+    password: REPLACE_WITH_SECRET
+    priority: 10
+  ssh-local:
+    kind: ssh
+    username: root
+    password: REPLACE_WITH_SECRET
+    priority: 20
+  ucs:
+    kind: ucs
+    passphrase: REPLACE_WITH_SECRET
+```
+
+```bash
+ansible-playbook -i inventory deploy/ansible/deploy.yml -e @vault.yml --ask-vault-pass
+```
+
+Set `executor_devices`, `executor_http_targets`, and verified
+`executor_known_hosts` for your environment. Existing workers drain before code
+updates; new workers start after credential provisioning. The playbook does not
+set up your external TLS proxy. To change credentials without redeploying code,
+use the same `ansible.builtin.uri` PUT task with `no_log:true`; full replacements
+are idempotent. Rebuilt remotes can generate a fresh key and repopulate credentials
+from Vault, but lost job/backup volumes cannot reconstruct rollback history.
+
+Legacy inventory references (`password_env`, `key_file`, `key_passphrase_env`,
+`ucs_passphrase_env`) and SNMP profile files remain supported for migration.
+Once encrypted profiles of a protocol exist, automatic selection uses them.
+Explicit legacy SNMP `profile` can still select a configured environment profile.
+New deployments should use encrypted profiles.
+
+## SNMP v3 walks
+
+Submit an IPv4/IPv6 address and numeric OID subtrees to `/snmp/walks`:
+
+```json
+{"device_ip":"192.0.2.10","oids":["1.3.6.1.2.1.1","1.3.6.1.4.1.3375"]}
+```
+
+`credential_profiles` optionally restricts selection. SNMP v3 only: authPriv,
+authNoPriv or noAuthNoPriv, SHA/SHA224/SHA256/SHA384/SHA512, AES128 privacy.
+Authentication/privacy passphrases need at least eight UTF-8 bytes. Profiles
+support a context name. Credentials never appear in walk job requests.
+
+Walks use GETNEXT, one root at a time, and stop at the subtree boundary. To retrieve
+a scalar instance, walk its parent. Roots can overlap; results retain `root_oid`.
+An accessible empty subtree succeeds, but SNMP cannot distinguish absent data
+from data hidden by the agent's access controls.
+
+Poll the job and `/snmp/walks/{id}/results?after=0&limit=500`. Rows contain
+`seq,root_oid,oid,type,value,encoding`; the page contains `finished`, `has_more`
+and `next_cursor`. Advance `after` to `next_cursor`. Stop only when `finished`
+is true **and** `has_more` is false. Empty live pages require continued polling.
+Octet strings are base64; integers/counters and other textual values are strings
+to preserve precision. IP addresses are dotted text.
+
+Bounds: 1–64 roots; port 161 default; per-request timeout 2 seconds (0.1–30),
+retries 1 (0–5); job timeout 300 seconds (1–3600); maximum rows 10000
+(1–100000). A fixed 16 MiB result limit also applies. Limits/timeouts fail the job
+with partial results retained. Authentication fallback is allowed before a root
+produces data; partial roots are never replayed with another identity.
+
+Walks to the same IP/port serialize; SNMP reads may overlap upgrades and observe
+transitional state. Stale SNMP workers fail and release their read reservations.
+Cancellation retains committed rows. Job/result retention is manual.
+
+## Deployment and CLI
+
+Python 3.11+ is required. Ubuntu 24.04 supplies 3.12; use the Python 3.11 suite
+on RHEL 9.2+. Install pinned `requirements.lock`, then the package with `--no-deps`.
+Native systemd units and environment example are in `deploy/`; the Ansible
+playbook automates this setup. API/workers must share the same paths and user.
+The image/cache directory must be writable for URL downloads.
+
+Docker, from this directory:
 
 ```bash
 cp .env.example .env
-mkdir -p config/ssh images
-cp devices.example.json config/devices.json
+mkdir -p config images
+printf '[]\n' > config/devices.json
+cp http-targets.example.json config/http-targets.json
+# Populate token in .env, target configuration and VERIFIED config/known_hosts.
+# Generate config/credentials.key once using the installed CLI, or the image:
+docker compose build
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+  -v "$PWD/config:/key-output:z" api f5-upgrade init-key /key-output/credentials.key
+# Set private key/config ownership to container UID 10001; never world-readable.
+# Also grant UID 10001 write access to images/ for the cache.
 chmod 600 .env
-# Fill in .env and config/devices.json. Place keys and a verified known_hosts
-# file in config/. Container UID 10001 must be able to read them.
-# Copy approved image files into images/.
-docker compose up -d --build --scale worker=3
+docker compose up -d --scale worker=3
 ```
 
-Open `http://127.0.0.1:8080/` for the web console, `/docs` for interactive OpenAPI
-documentation, and `/openapi.json` for the integration schema. Use the bearer token
-from `.env`. The console stores it only in memory for the current tab. Use an HTTPS
-reverse proxy for remote API clients; change `F5_BIND_ADDRESS` only as needed.
-The health endpoint reports API availability, not worker/device readiness.
+Use an HTTPS reverse proxy for central API access; default bind is loopback.
+Persist `data`, `backups`, and the external keyring. Do not use `down -v` if job
+history is needed. SELinux mounts use `:z` for sharing. Containers run as UID 10001.
 
-Use verified SSH host keys, including `[host]:port` syntax for nonstandard ports.
-Unknown or changed host keys are rejected. SSH profiles support `key_file`, optional
-`key_passphrase_env`, or `password_env`. Inventory contains secret environment
-variable names, never the passwords themselves. The account needs a bash login
-shell, tmsh administrator rights, SFTP, and access to images and UCS files. Root
-or an equivalently authorized operational account is needed; no implicit sudo
-or restricted-tmsh-shell bypass is attempted.
-
-Persist both named volumes (`data`, `backups`). Do not run `docker compose down -v`
-when you need retained jobs or rollback records. Containers share `:z` bind mounts
-for SELinux. Match the files' read permissions to UID 10001 without making private
-keys world-readable. The image uses Python 3.12 and runs without root privileges.
-
-## Ubuntu 24.04 / Red Hat Enterprise Linux 9
-
-Python 3.11 or newer is required. Ubuntu 24.04 supplies Python 3.12; on RHEL 9,
-install the Python 3.11 package suite (RHEL 9.2+) rather than its default Python 3.9. See the [Red Hat Python installation guide](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/installing_and_using_dynamic_programming_languages/index).
-Install this directory at `/opt/f5-upgrade`:
+SSH uses verified known_hosts and rejects unknown/changed keys. The device account
+needs bash, SFTP, tmsh administrator rights and filesystem access for images/UCS;
+no implicit sudo or restricted-shell bypass is attempted. Use canonical inventory
+addresses and do not change identities/lock groups while jobs are active.
 
 ```bash
-# Ubuntu:
-sudo apt-get install python3-venv python3-pip
-# RHEL 9 alternative:
-# sudo dnf install python3.11 python3.11-pip
-
-cd /opt/f5-upgrade
-python3 -m venv .venv          # use python3.11 on RHEL
-.venv/bin/pip install -r requirements.lock
-.venv/bin/pip install --no-deps .
-sudo useradd --system --home /var/lib/f5-upgrade --shell /usr/sbin/nologin f5upgrade
-sudo install -d -o f5upgrade -g f5upgrade -m 700 /var/lib/f5-upgrade /var/backups/f5-upgrade
-sudo install -d -m 750 -o root -g f5upgrade /etc/f5-upgrade /srv/f5-images
-sudo install -m 600 deploy/service.env.example /etc/f5-upgrade/service.env
-# Populate service.env, devices.json, known_hosts and SSH key files.
-# Native inventory key_file paths must point to /etc/f5-upgrade/..., not /config/...
-# Make inventory/host keys/private keys readable by the f5upgrade account.
-sudo install -m 644 deploy/f5-upgrade-api.service deploy/f5-upgrade-worker@.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now f5-upgrade-api f5-upgrade-worker@1 f5-upgrade-worker@2
-```
-
-`systemd` reads the root-only environment file. Interactive commands load `.env`
-(or `--env-file PATH`); existing environment variables win. Both API and workers
-must use the same inventory, database, image root and backup root. Put both members
-of a pair in the same `lock_group`, and use one canonical inventory entry for each
-appliance. Do not edit inventory identity/address/lock groups while jobs exist in
-the queue or are running; cancel pending jobs and complete/reconcile active jobs
-first. The scheduler does not discover that two different DNS aliases are one F5.
-
-The worker finishes its current job on SIGTERM before exiting. If forcibly killed,
-an upgrade lock remains until an operator resolves recovery. Stale SNMP walks
-fail and release their locks automatically; committed rows remain available. Keep workers running for
-queued jobs; the API itself never runs upgrade commands.
-
-## API integration
-
-All `/api/v1` routes require `Authorization: Bearer <token>`. No cookies or CORS
-allowlist are used. Authentication is a single shared service identity. Remote
-errors omit command output so credentials and configuration do not leak into logs.
-
-| Method | Endpoint | Result |
-| --- | --- | --- |
-| GET | `/api/v1/devices` | Available inventory IDs and lock groups |
-| POST | `/api/v1/plan` | Normalized request and ordered inherited steps; no device commands |
-| POST | `/api/v1/snmp/walks` | `202` and persistent SNMP v3 job ID |
-| GET | `/api/v1/snmp/walks/{id}` | Walk status and per-OID progress/errors |
-| GET | `/api/v1/snmp/walks/{id}/results?after=0&limit=500` | Cursor-paginated result rows, including partial data |
-| POST | `/api/v1/jobs` | `202` and persistent queued job |
-| GET | `/api/v1/jobs?limit=100&offset=0` | Jobs, newest first |
-| GET | `/api/v1/jobs/{id}` | Status, normalized request, result and pre/post reports |
-| GET | `/api/v1/jobs/{id}/events?after=0&limit=500` | Ordered event page; next cursor is last `seq` |
-| GET | `/api/v1/jobs/{id}/backup` | Authenticated UCS download |
-| POST | `/api/v1/jobs/{id}/cancel` | Cancel queued job; running jobs cannot be blindly cancelled |
-| POST | `/api/v1/jobs/{id}/rollback` | `202`; queue return to original volume |
-| POST | `/api/v1/jobs/{id}/resolve` | Explicit operator recovery acknowledgment and lock release |
-
-Use a unique `Idempotency-Key` for job creation and rollback. Reuse the same key
-and identical body if a request times out: the server returns the original job.
-Using that key with different parameters returns `409`. Invalid job arguments are
-`422`, missing resources `404`, and missing/invalid tokens `401`. Idempotency is
-optional for interactive callers but strongly recommended for integrations.
-
-```python
-import os
-import uuid
-import httpx
-
-headers = {"Authorization": "Bearer " + os.environ["F5_API_TOKEN"]}
-request = {
-    "device": "bigip-a",
-    "install": True,
-    "reboot": True,
-    "target_volume": "HD1.2",
-    "allowed_source_versions": ["16.1.5"],
-    "images": [
-        {
-            "name": "BIGIP-approved.iso",
-            "sha256": os.environ["APPROVED_IMAGE_SHA256"],
-            "version": "17.1.2",
-            "build": "0.0.5",
-            "kind": "image",
-        }
-    ],
-    "backup_directory": "maintenance/site-a",
-    "drain_percent": 90,
-    "drain_timeout": 600,
-    "reboot_on_drain_timeout": True,
-}
-# Persist this key in the integrating application before sending.
-key = str(uuid.uuid4())
-with httpx.Client(base_url="https://upgrade.example.net", headers=headers) as api:
-    plan = api.post("/api/v1/plan", json=request)
-    plan.raise_for_status()
-    response = api.post("/api/v1/jobs", json=request, headers={"Idempotency-Key": key})
-    response.raise_for_status()
-    job_id = response.json()["id"]
-    # Poll until succeeded, failed, cancelled, recovery_required or resolved.
-    job = api.get(f"/api/v1/jobs/{job_id}").json()
-    # When a rollback is wanted, persist and reuse a separate idempotency key:
-    # api.post(f"/api/v1/jobs/{job_id}/rollback", json={},
-    #          headers={"Idempotency-Key": rollback_key})
-```
-
-Version/build examples are illustrative, not approved upgrade paths. Validate
-vendor-supported source/target compatibility, platform support, license/service
-check dates and available disk space before scheduling. The allowlist is your
-explicit policy, not an embedded F5 compatibility database.
-
-CLI examples (credentials come from `.env`):
-
-```bash
-f5-upgrade devices
-f5-upgrade plan --device bigip-a --install --images approved-images.json \
-  --target-volume HD1.2 --allowed-source-version 16.1.5 --no-reboot
-f5-upgrade submit --device bigip-a --install --images approved-images.json \
-  --target-volume HD1.2 --allowed-source-version 16.1.5 --reboot \
-  --drain-percent 90 --drain-timeout 600 --reboot-on-drain-timeout \
-  --backup-directory maintenance/site-a --idempotency-key change-123-bigip-a
-f5-upgrade submit --device bigip-a --create-ucs --ucs-unencrypted
+f5-upgrade plan --device 192.0.2.10 --install --images images.json \
+  --allowed-source-version 16.1.5 --no-reboot
+f5-upgrade request --kind batch --file batch.json --idempotency-key change123
+f5-upgrade request --kind ssh --file commands.json
+f5-upgrade request --kind http --file requests.json
+f5-upgrade request --kind snmp --file walk.json
+f5-upgrade credential-put ssh-local --file -       # JSON from stdin
 f5-upgrade job JOB_UUID
-f5-upgrade events JOB_UUID
-f5-upgrade rollback JOB_UUID --idempotency-key change-123-bigip-a-rollback
-```
-
-## Validation, rollback and recovery
-
-Reports include WAF policy names/counts and per-object plus up/total counts for
-virtual servers, pools, nodes and virtual addresses (the `virtual_ips` category).
-All partitions are queried recursively. "Up" requires availability `available`
-and enabled state `enabled`; unknown/unchecked status does not count as up.
-ASM not provisioned is a recorded zero; an ASM command failure is a failed
-collection, not zero. Object inventory changes and any previously up object
-becoming unhealthy produce a failed validation even if aggregate up counts match.
-No-reboot jobs capture a post-operation snapshot of the current boot volume;
-they cannot validate the runtime health of software not yet booted.
-
-Rollback is generated automatically from the pre-upgrade record, and is executed
-only when requested. It reboots to the saved original volume, verifies its
-version/build, restores any tracked address drain state, and validates against the
-original baseline. It refuses to act if the current active volume/version/build
-no longer match the upgrade job's target, or the original volume has been replaced.
-A staged-only job must first actually boot its target before rollback applies.
-Rollback does not import a UCS or reconstruct a deleted partition. The original
-partition must remain intact; configuration changes made after the upgrade are
-not carried back automatically.
-
-States: `queued → running → succeeded | failed | recovery_required`. `cancelled`
-is only for queued jobs; `resolved` means an operator has reconciled recovery,
-not that the original job succeeded. After a known completed operation, health
-regressions produce `failed` and retain the device/group lock (`lock_held: true`),
-blocking follow-on upgrades. A rollback job may take over that known-failed job’s
-lock immediately. Alternatively, use the recovery resolution endpoint after
-inspection. If that rollback itself fails or is interrupted, it retains the lock. An exception after a
-mutation or a worker with no heartbeat for 120 seconds produces `recovery_required`
-and retains its device/group lock. No automatic retry is performed across a crash.
-
-To recover, stop the recorded worker process/container, inspect the device and
-its software installation/boot state, and restore any address changes recorded in
-`result.drain.address_states` that remain on the current volume. Then:
-
-```bash
+f5-upgrade batch BATCH_UUID
+f5-upgrade cancel JOB_UUID
+f5-upgrade validation JOB_UUID --action accept --gate-id GATE_UUID --revision 1 \
+  --operator jason --reason 'Application traffic verified'
+f5-upgrade mark-done JOB_UUID --operator jason --reason 'Handled manually'
+f5-upgrade rollback JOB_UUID --idempotency-key change123-rollback
 f5-upgrade resolve JOB_UUID --worker-stopped --device-inspected \
-  --note 'Worker stopped; boot and address states inspected and reconciled'
-# If currently running that job's upgrade target, request rollback as above.
+  --note 'Worker stopped; boot and address state reconciled'
 ```
 
-The same API request body is
-`{"worker_stopped":true,"device_inspected":true,"note":"..."}`. These are operator
-attestations: the API cannot prove a remote worker has been stopped. Do not release
-a lock while an old SSH command, install, or reboot is still in flight. Resolving
-a job never issues device commands or marks the original work successful.
+Use `request --file -` for stdin. Flat upgrade options have named CLI flags;
+JSON exposes every advanced policy. Set `F5_API_URL`/`F5_API_TOKEN` in `.env`
+or use `--url`/`--env-file`. Secrets are never command-line credential arguments.
 
-Backup the database with SQLite's online backup API or stop all API/workers before
-copying the database and WAL files together. Keep backups and jobs as one retention
-set. No automatic retention purge removes rollback records or UCS archives.
+## Verification and platform scope
 
-## Scope and validation
-
-This release targets individual BIG-IP appliances and VEs with bash, SFTP and
-tmsh. Slot-qualified chassis output is rejected; F5OS, multi-blade VIPRION,
-vCMP host orchestration, HA failover sequencing and cross-host workers are not
-implemented. HA members can be serialized with `lock_group`, but peer readiness
-and traffic failover remain the caller's responsibility.
-
-Automated tests use synthetic tmsh fixtures, mocked SSH/device behavior and actual
-SQLite concurrency. They cover requests, authentication, checksum checks, drain
-restoration, post-validation regression, verified reboot, rollback and crash
-fencing. **A real-device upgrade/rollback acceptance test is still required for
-your exact TMOS releases before production use.** Unrecognized output fails the
-job rather than silently reporting healthy counts.
+Tests cover SQLite concurrency and wave barriers, credential encryption/rotation,
+fallback/audit, cancellation, manual continuation without replay, HA active-first
+handoff, HTTP operation fencing, image/config/drain/rollback sequencing, synthetic
+F5 parsers, and real SNMP v3 loopback exchanges. Run:
 
 ```bash
 pip install -e '.[test]'
@@ -308,110 +534,15 @@ ruff format --check .
 node --check f5_upgrade/static/app.js
 ```
 
-Command references:
-[F5 virtual-address](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_virtual-address.html),
-[F5 UCS](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_ucs.html),
-[F5 image installation](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_image.html),
-[F5 boot volumes](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_volume.html).
+Real-appliance acceptance on your exact TMOS versions is still required. Supported
+scope is single-system BIG-IP appliances/VE and verified two-member active/standby
+pairs. F5OS, VIPRION slot orchestration, vCMP hosts, active-active traffic groups
+and multi-host shared queues are not implemented. Unrecognized critical device
+output fails closed. The WAF traffic gate requires the configured log adapter or
+manual acceptance; it does not assume a universal SSH request-log interface.
 
-## Asynchronous SNMP v3 walks
-
-Submit an IPv4/IPv6 address and an array of numeric OID subtrees. No inventory
-entry or F5-specific MIB is needed. Walks are SNMP v3 only, using GETNEXT over UDP
-from the worker to the target (default port 161). SSH is used for upgrade operations.
-Each root is walked separately, in request order, and stops at its subtree boundary.
-These are subtree walks, not GET requests: to retrieve a scalar instance such as
-`sysDescr.0`, walk its parent `1.3.6.1.2.1.1.1`.
-
-Copy `snmp-profiles.example.json` into `config/snmp-profiles.json` and set
-`F5_SNMP_PROFILES_FILE=/config/snmp-profiles.json` in Docker's `.env`.
-For native installations, use `/etc/f5-upgrade/snmp-profiles.json`. Set
-`F5_SNMP_AUTH_PASSWORD` and `F5_SNMP_PRIV_PASSWORD` in the same environment file.
-API and workers need the same profiles; workers need the referenced secrets.
-Restart API/workers after changing configuration. Leave this optional variable
-unset to keep SNMP submission disabled on an existing installation. An SNMP-only
-installation can use an empty `[]` device inventory.
-
-Profiles contain environment variable **names**, never literal passwords.
-`authPriv` with SHA256 and AES128 is the default. Authentication protocols are
-`SHA` (SHA-1), `SHA224`, `SHA256`, `SHA384`, and `SHA512`; privacy is `AES128`.
-For `authNoPriv`, omit `priv_password_env`. For `noAuthNoPriv`, omit both password
-references. Passphrases must contain at least eight UTF-8 bytes. Profiles can set
-`context_name`. API requests select a profile by ID, defaulting to `default`;
-credentials are never accepted in a walk request or saved in job records.
-
-```http
-POST /api/v1/snmp/walks
-Authorization: Bearer <token>
-Content-Type: application/json
-Idempotency-Key: walk-request-001
-
-{
-  "device_ip": "192.0.2.10",
-  "oids": ["1.3.6.1.2.1.1", "1.3.6.1.4.1.3375"],
-  "profile": "default"
-}
-```
-
-The `202` response uses the normal job envelope, including `id`, `kind: snmp_walk`,
-`status: queued`, and normalized `request`. Persist the ID and poll:
-
-- `GET /api/v1/snmp/walks/{id}` for status and `result.oids`, including each root's status, row count and error.
-- `GET /api/v1/snmp/walks/{id}/results?after=0&limit=500` for rows.
-
-```json
-{
-  "id": "<job-id>",
-  "status": "succeeded",
-  "finished": true,
-  "rows": [
-    {
-      "seq": 42,
-      "root_oid": "1.3.6.1.2.1.1",
-      "oid": "1.3.6.1.2.1.1.1.0",
-      "type": "OctetString",
-      "value": "QklHLUlQ",
-      "encoding": "base64"
-    }
-  ],
-  "next_cursor": 42,
-  "has_more": false
-}
-```
-
-Pass `next_cursor` as `after` on the next request. Cursors are opaque, monotonically
-increasing integers, not row counts. Continue polling the same cursor after an
-empty page. Stop only when `finished` is true **and** `has_more` is false. While a
-job runs, `has_more: false` only means no additional rows are currently committed.
-Use a short delay (for example, one second) between empty-page polls.
-
-Values are strings to preserve large Counter64 integers exactly. Octet strings
-(including ordinary textual SNMP strings) use base64 to preserve raw bytes;
-other values use `encoding: text` with their ASN.1 type. IP addresses are dotted
-text. Overlapping roots can return duplicate OIDs, distinguished by `root_oid`.
-An empty accessible subtree succeeds with zero rows; SNMP cannot distinguish an
-absent subtree from one hidden by the agent's access controls.
-
-| Request option | Default | Bounds / meaning |
-| --- | --- | --- |
-| `oids` | Required | 1–64 unique numeric roots; optional leading dot |
-| `port` | 161 | 1–65535 |
-| `timeout` | 2 | 0.1–30 seconds per SNMP request |
-| `retries` | 1 | 0–5 retries per request |
-| `job_timeout` | 300 | 1–3600 seconds for the whole running job, excluding queue time |
-| `max_rows` | 10000 | 1–100000 rows across all roots |
-
-Results also have a fixed 16 MiB serialized-data limit per job. Hitting a row/byte
-limit sets `result.truncated: true` and fails the job; hitting its time limit also
-fails it. Committed partial rows remain downloadable. Individual SNMP engine/PDU
-errors are reported per root, and subsequent roots are attempted while time and
-space remain. `succeeded` means every requested root finished. Failed, cancelled,
-and stale-worker jobs are terminal; they are never silently replayed.
-
-The existing bearer token, idempotency keys, generic job listing, job events, and
-queued-job cancellation apply. Walks have no rollback action. Workers serialize
-walks to the same canonical IP/port while allowing different targets concurrently.
-SNMP locks are independent of upgrade locks, so reads may overlap an upgrade and
-observe transitional state. Add workers using the existing Docker/systemd setup;
-no broker or additional database is needed. Job/result retention is currently
-manual; keep the SQLite volume sized for retained walk history.
+Command references: [virtual addresses](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_virtual-address.html),
+[UCS](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_ucs.html),
+[software installation](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_image.html),
+[volumes](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_volume.html),
+[traffic groups](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/cm/cm_traffic-group.html).

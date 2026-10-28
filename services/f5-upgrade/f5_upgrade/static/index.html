@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>F5 Upgrade Control</title>
+    <title>Remote Execution Control</title>
     <link rel="stylesheet" href="/static/style.css" />
     <script src="/static/app.js" defer></script>
   </head>
@@ -11,8 +11,8 @@
     <header>
       <div>
         <span class="eyebrow">NETWORK OPERATIONS</span>
-        <h1>F5 Upgrade Control</h1>
-        <p>SSH upgrades, durable jobs, and a recorded path back.</p>
+        <h1>Remote Execution Control</h1>
+        <p>F5 upgrades, SSH commands, HTTP requests and SNMP v3 walks.</p>
       </div>
       <a href="/docs">API reference ↗</a>
     </header>
@@ -43,8 +43,20 @@
             <form id="new-job">
               <label
                 >Device
-                <select id="device" required></select
+                <input
+                  id="device"
+                  list="inventory"
+                  required
+                  placeholder="Inventory ID or device IP" /><datalist
+                  id="inventory"
+                ></datalist
               ></label>
+              <label
+                >SSH credential profiles (optional, comma separated)
+                <input
+                  id="credential_profiles"
+                  placeholder="Automatically try eligible profiles"
+              /></label>
               <div class="checks">
                 <label
                   ><input type="checkbox" id="transfer" /> Transfer
@@ -71,7 +83,9 @@
               </div>
               <label
                 >Target boot volume
-                <input id="target_volume" placeholder="HD1.2" /></label
+                <input
+                  id="target_volume"
+                  placeholder="Automatic when omitted" /></label
               ><label
                 >Allowed source versions (comma separated)
                 <input
@@ -140,12 +154,12 @@
                     min="60"
                     value="900" /></label
                 ><label
-                  >Validation settling time, seconds
+                  >Validation timeout, seconds
                   <input
                     id="validation_timeout"
                     type="number"
                     min="0"
-                    value="180"
+                    value="600"
                 /></label>
               </details>
               <div class="actions">
@@ -166,16 +180,78 @@
             <div id="jobs"></div>
           </section>
         </div>
+        <section>
+          <h2>API job submission</h2>
+          <p class="hint">
+            Use JSON to submit waves, commands, HTTP requests or SNMP walks.
+            Authentication stays in server-side credential profiles.
+          </p>
+          <form id="json-submit">
+            <label
+              >Job type
+              <select id="json-kind">
+                <option value="upgrade-batches">Upgrade batch</option>
+                <option value="ssh/jobs">SSH commands</option>
+                <option value="http/jobs">HTTP requests</option>
+                <option value="snmp/walks">SNMP v3 walks</option>
+              </select></label
+            >
+            <button type="button" id="json-example">Load example</button>
+            <label
+              >Request JSON
+              <textarea
+                id="json-body"
+                rows="12"
+                spellcheck="false"
+                required
+              ></textarea>
+            </label>
+            <button>Submit job</button>
+          </form>
+          <pre id="json-result"></pre>
+          <h3>Batches</h3>
+          <div id="batches"></div>
+          <pre id="batch-report"></pre>
+          <details>
+            <summary>Workers and credential profiles</summary>
+            <pre id="workers"></pre>
+            <pre id="credentials"></pre>
+          </details>
+        </section>
         <section id="detail" hidden>
           <div class="heading">
             <h2 id="detail-title">Job</h2>
             <div class="actions">
-              <button id="cancel">Cancel queued job</button
+              <button id="cancel">Request cancellation</button
               ><button id="rollback">Roll back to previous volume</button
               ><button id="backup">Download UCS</button>
             </div>
           </div>
           <p id="detail-status"></p>
+          <p id="credential-summary"></p>
+          <form id="operator-controls">
+            <div class="pair">
+              <label>Operator <input id="operator" required /></label>
+              <label>Reason <input id="reason" required minlength="5" /></label>
+            </div>
+            <p id="gate-summary"></p>
+            <div class="actions">
+              <button type="button" id="accept-validation">
+                Accept validation
+              </button>
+              <button type="button" id="retry-validation">
+                Retry validation
+              </button>
+              <button type="button" id="mark-done">Mark item done</button>
+            </div>
+            <label
+              ><input type="checkbox" id="worker-stopped" /> I have stopped the
+              previous worker and inspected the device</label
+            >
+            <button type="button" id="resolve">
+              Release recovery reservation
+            </button>
+          </form>
           <div id="counts"></div>
           <h3>Execution events</h3>
           <pre id="events"></pre>
