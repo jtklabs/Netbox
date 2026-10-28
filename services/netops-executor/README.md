@@ -619,7 +619,7 @@ workers as the largest `upgrade_at_a_time` (`executor_workers`, or
 | `stage_only` | Prechecks, backups and staging only; a later full job reuses the staged images |
 | `config_backup`, `tech_support` | Default true: save each member's running configuration XML and a tech support file under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |
 | `ha_policy.upgrade_order` | `standby_first` (default) or `active_first` |
-| `ha_policy.disable_preemption` | Default false: when true, disable preemption and commit before the first suspend, then restore and commit after both members validate |
+| `ha_policy.disable_preemption` | Default true: disable preemption and commit before the first suspend, then restore and commit after both members validate; false leaves preemption alone |
 | `ha_policy.failback` | Default true: return traffic to the other member when the member left carrying it fails validation |
 | `ha_policy.require_running_sync` | Default true: same-version pairs must report running configuration synchronized |
 | `job_wait_timeout` | Wait for running firewall jobs before starting; default 600 seconds |
@@ -647,11 +647,11 @@ Steps, in order:
    file (`type=export&category=tech-support`). Download them with
    `GET /api/v1/jobs/{id}/artifacts/{name}`.
 5. **Stage** every required image on each member to be upgraded.
-6. **Disable preemption** when `ha_policy.disable_preemption` is true. Members whose
-   HA state reports preemptive `yes` get `preemptive no` in their local HA election
-   settings, committed and read back. Without the flag preemption is left alone; a
-   suspended member never preempts, but a higher-priority member can take traffic
-   back as soon as it is made functional.
+6. **Disable preemption** (`ha_policy.disable_preemption`, default true). Members
+   whose HA state reports preemptive `yes` get `preemptive no` in their local HA
+   election settings, committed and read back. With the flag false, preemption is
+   left alone; a suspended member never preempts, but a higher-priority member can
+   take traffic back as soon as it is made functional.
 7. **Upgrade each member in order.** `standby_first` takes the passive member
    (active-secondary in active/active) first:
    1. Suspend it. Suspending a member that carries traffic is a **handoff**: the

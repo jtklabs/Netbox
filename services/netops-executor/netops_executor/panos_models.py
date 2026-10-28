@@ -50,7 +50,7 @@ class PanosHAPolicy(Model):
     )
     require_running_sync: bool = True
     disable_preemption: bool = Field(
-        default=False,
+        default=True,
         description="Before the first suspend, set preemptive no on members that have it enabled and commit; restore and commit after both members validate.",
     )
     failback: bool = Field(
