@@ -1,19 +1,19 @@
 # F5 SSH upgrade service
 
 A standalone implementation for BIG-IP upgrades controlled through a versioned
-HTTP API, CLI, or web console. **Every device operation uses SSH/SFTP and tmsh;
+HTTP API, CLI, or web console. **Every upgrade operation uses SSH/SFTP and tmsh;
 there are no iControl REST calls.** It has no dependency on NetBox or the older
 F5 scripts in this repository.
 
 The server stores jobs, events, pre/post reports, worker ownership, and original
 boot volumes in SQLite. UCS archives live in a separate local backup directory.
 Multiple worker processes or containers share these directories on **one host**.
-Devices run concurrently; one device or configured HA group has only one running
-job. SQLite WAL must use a local filesystem, not NFS/SMB or multi-host replicas.
+Upgrades run concurrently; one device or configured HA group has only one running
+upgrade job. SNMP v3 walks use UDP and share the durable worker queue. SQLite WAL must use a local filesystem, not NFS/SMB or multi-host replicas.
 
-## Job controls
+## Upgrade job controls
 
-All JSON options have corresponding CLI flags (`_` becomes `-`). Boolean CLI
+All upgrade JSON options have corresponding CLI flags (`_` becomes `-`). Boolean CLI
 flags also support `--no-...`. Use `POST /api/v1/plan` or `f5-upgrade plan` to see
 inherited steps without connecting to a device. Jobs default to a read-only
 pre/post validation; **install and reboot are opt-in**.
@@ -139,7 +139,8 @@ the queue or are running; cancel pending jobs and complete/reconcile active jobs
 first. The scheduler does not discover that two different DNS aliases are one F5.
 
 The worker finishes its current job on SIGTERM before exiting. If forcibly killed,
-the lock remains until an operator resolves recovery. Keep workers running for
+an upgrade lock remains until an operator resolves recovery. Stale SNMP walks
+fail and release their locks automatically; committed rows remain available. Keep workers running for
 queued jobs; the API itself never runs upgrade commands.
 
 ## API integration
@@ -152,6 +153,9 @@ errors omit command output so credentials and configuration do not leak into log
 | --- | --- | --- |
 | GET | `/api/v1/devices` | Available inventory IDs and lock groups |
 | POST | `/api/v1/plan` | Normalized request and ordered inherited steps; no device commands |
+| POST | `/api/v1/snmp/walks` | `202` and persistent SNMP v3 job ID |
+| GET | `/api/v1/snmp/walks/{id}` | Walk status and per-OID progress/errors |
+| GET | `/api/v1/snmp/walks/{id}/results?after=0&limit=500` | Cursor-paginated result rows, including partial data |
 | POST | `/api/v1/jobs` | `202` and persistent queued job |
 | GET | `/api/v1/jobs?limit=100&offset=0` | Jobs, newest first |
 | GET | `/api/v1/jobs/{id}` | Status, normalized request, result and pre/post reports |
@@ -309,3 +313,105 @@ Command references:
 [F5 UCS](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_ucs.html),
 [F5 image installation](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_image.html),
 [F5 boot volumes](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_software_volume.html).
+
+## Asynchronous SNMP v3 walks
+
+Submit an IPv4/IPv6 address and an array of numeric OID subtrees. No inventory
+entry or F5-specific MIB is needed. Walks are SNMP v3 only, using GETNEXT over UDP
+from the worker to the target (default port 161). SSH is used for upgrade operations.
+Each root is walked separately, in request order, and stops at its subtree boundary.
+These are subtree walks, not GET requests: to retrieve a scalar instance such as
+`sysDescr.0`, walk its parent `1.3.6.1.2.1.1.1`.
+
+Copy `snmp-profiles.example.json` into `config/snmp-profiles.json` and set
+`F5_SNMP_PROFILES_FILE=/config/snmp-profiles.json` in Docker's `.env`.
+For native installations, use `/etc/f5-upgrade/snmp-profiles.json`. Set
+`F5_SNMP_AUTH_PASSWORD` and `F5_SNMP_PRIV_PASSWORD` in the same environment file.
+API and workers need the same profiles; workers need the referenced secrets.
+Restart API/workers after changing configuration. Leave this optional variable
+unset to keep SNMP submission disabled on an existing installation. An SNMP-only
+installation can use an empty `[]` device inventory.
+
+Profiles contain environment variable **names**, never literal passwords.
+`authPriv` with SHA256 and AES128 is the default. Authentication protocols are
+`SHA` (SHA-1), `SHA224`, `SHA256`, `SHA384`, and `SHA512`; privacy is `AES128`.
+For `authNoPriv`, omit `priv_password_env`. For `noAuthNoPriv`, omit both password
+references. Passphrases must contain at least eight UTF-8 bytes. Profiles can set
+`context_name`. API requests select a profile by ID, defaulting to `default`;
+credentials are never accepted in a walk request or saved in job records.
+
+```http
+POST /api/v1/snmp/walks
+Authorization: Bearer <token>
+Content-Type: application/json
+Idempotency-Key: walk-request-001
+
+{
+  "device_ip": "192.0.2.10",
+  "oids": ["1.3.6.1.2.1.1", "1.3.6.1.4.1.3375"],
+  "profile": "default"
+}
+```
+
+The `202` response uses the normal job envelope, including `id`, `kind: snmp_walk`,
+`status: queued`, and normalized `request`. Persist the ID and poll:
+
+- `GET /api/v1/snmp/walks/{id}` for status and `result.oids`, including each root's status, row count and error.
+- `GET /api/v1/snmp/walks/{id}/results?after=0&limit=500` for rows.
+
+```json
+{
+  "id": "<job-id>",
+  "status": "succeeded",
+  "finished": true,
+  "rows": [
+    {
+      "seq": 42,
+      "root_oid": "1.3.6.1.2.1.1",
+      "oid": "1.3.6.1.2.1.1.1.0",
+      "type": "OctetString",
+      "value": "QklHLUlQ",
+      "encoding": "base64"
+    }
+  ],
+  "next_cursor": 42,
+  "has_more": false
+}
+```
+
+Pass `next_cursor` as `after` on the next request. Cursors are opaque, monotonically
+increasing integers, not row counts. Continue polling the same cursor after an
+empty page. Stop only when `finished` is true **and** `has_more` is false. While a
+job runs, `has_more: false` only means no additional rows are currently committed.
+Use a short delay (for example, one second) between empty-page polls.
+
+Values are strings to preserve large Counter64 integers exactly. Octet strings
+(including ordinary textual SNMP strings) use base64 to preserve raw bytes;
+other values use `encoding: text` with their ASN.1 type. IP addresses are dotted
+text. Overlapping roots can return duplicate OIDs, distinguished by `root_oid`.
+An empty accessible subtree succeeds with zero rows; SNMP cannot distinguish an
+absent subtree from one hidden by the agent's access controls.
+
+| Request option | Default | Bounds / meaning |
+| --- | --- | --- |
+| `oids` | Required | 1–64 unique numeric roots; optional leading dot |
+| `port` | 161 | 1–65535 |
+| `timeout` | 2 | 0.1–30 seconds per SNMP request |
+| `retries` | 1 | 0–5 retries per request |
+| `job_timeout` | 300 | 1–3600 seconds for the whole running job, excluding queue time |
+| `max_rows` | 10000 | 1–100000 rows across all roots |
+
+Results also have a fixed 16 MiB serialized-data limit per job. Hitting a row/byte
+limit sets `result.truncated: true` and fails the job; hitting its time limit also
+fails it. Committed partial rows remain downloadable. Individual SNMP engine/PDU
+errors are reported per root, and subsequent roots are attempted while time and
+space remain. `succeeded` means every requested root finished. Failed, cancelled,
+and stale-worker jobs are terminal; they are never silently replayed.
+
+The existing bearer token, idempotency keys, generic job listing, job events, and
+queued-job cancellation apply. Walks have no rollback action. Workers serialize
+walks to the same canonical IP/port while allowing different targets concurrently.
+SNMP locks are independent of upgrade locks, so reads may overlap an upgrade and
+observe transitional state. Add workers using the existing Docker/systemd setup;
+no broker or additional database is needed. Job/result retention is currently
+manual; keep the SQLite volume sized for retained walk history.

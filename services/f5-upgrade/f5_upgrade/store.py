@@ -33,6 +33,12 @@ class Store:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL,
                     time REAL NOT NULL, step TEXT NOT NULL, data TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS snmp_rows (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL,
+                    root_oid TEXT NOT NULL, oid TEXT NOT NULL, type TEXT NOT NULL,
+                    value TEXT NOT NULL, encoding TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS snmp_rows_job ON snmp_rows(job, seq);
                 CREATE INDEX IF NOT EXISTS events_job ON events(job, seq);
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, created);
             """)
@@ -105,7 +111,17 @@ class Store:
                 """INSERT INTO jobs
                 (id,device,lock_key,kind,parent,request,status,created,updated,idempotency_key)
                 VALUES (?,?,?,?,?,?,'queued',?,?,?)""",
-                (job_id, request["device"], lock_key, kind, parent, payload, now, now, key),
+                (
+                    job_id,
+                    request.get("device", request.get("device_ip")),
+                    lock_key,
+                    kind,
+                    parent,
+                    payload,
+                    now,
+                    now,
+                    key,
+                ),
             )
         return self.get(job_id)
 
@@ -151,10 +167,26 @@ class Store:
 
     def reap(self, seconds):
         with self.connect() as db:
-            # Locks deliberately survive stale workers: do not run a second job on an ambiguous device.
+            db.execute("BEGIN IMMEDIATE")
+            stale = db.execute(
+                "SELECT id,result FROM jobs WHERE kind='snmp_walk' AND status='running' AND heartbeat<?",
+                (time.time() - seconds,),
+            ).fetchall()
+            for row in stale:
+                result = json.loads(row["result"])
+                result["error"] = "SNMP worker heartbeat expired; partial results retained"
+                for item in result.get("oids", []):
+                    if item["status"] in ("pending", "running"):
+                        item.update(status="failed", error="worker heartbeat expired")
+                db.execute(
+                    "UPDATE jobs SET status='failed',result=?,updated=? WHERE id=?",
+                    (json.dumps(result), time.time(), row["id"]),
+                )
+                db.execute("DELETE FROM locks WHERE job=?", (row["id"],))
+            # Locks deliberately survive stale SSH workers: do not run a second job on an ambiguous device.
             db.execute(
                 """UPDATE jobs SET status='recovery_required',updated=?
-                WHERE status='running' AND heartbeat<?""",
+                WHERE status='running' AND kind!='snmp_walk' AND heartbeat<?""",
                 (time.time(), time.time() - seconds),
             )
 
@@ -216,3 +248,45 @@ class Store:
                 (job, time.time(), "operator_resolution", json.dumps(resolution)),
             )
         return self.get(job)
+
+    def append_snmp_rows(self, job, worker, rows, result):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owned = db.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND worker=? AND status='running' AND kind='snmp_walk'",
+                (job, worker),
+            ).fetchone()
+            if not owned:
+                raise LostOwnership("job is no longer owned")
+            db.executemany(
+                "INSERT INTO snmp_rows(job,root_oid,oid,type,value,encoding) VALUES (?,?,?,?,?,?)",
+                [(job, r["root_oid"], r["oid"], r["type"], r["value"], r["encoding"]) for r in rows],
+            )
+            db.execute(
+                "UPDATE jobs SET result=?,updated=? WHERE id=?", (json.dumps(result), time.time(), job)
+            )
+
+    def snmp_results(self, job, after=0, limit=500):
+        # Read status and rows from one snapshot: terminal=true must include all committed rows.
+        with self.connect() as db:
+            db.execute("BEGIN")
+            state = db.execute("SELECT kind,status FROM jobs WHERE id=?", (job,)).fetchone()
+            if state is None or state["kind"] != "snmp_walk":
+                raise KeyError("SNMP job not found")
+            rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT seq,root_oid,oid,type,value,encoding FROM snmp_rows WHERE job=? AND seq>? ORDER BY seq LIMIT ?",
+                    (job, after, limit + 1),
+                )
+            ]
+            more = len(rows) > limit
+            rows = rows[:limit]
+            return {
+                "id": job,
+                "status": state["status"],
+                "finished": state["status"] not in ("queued", "running"),
+                "rows": rows,
+                "next_cursor": rows[-1]["seq"] if rows else after,
+                "has_more": more,
+            }

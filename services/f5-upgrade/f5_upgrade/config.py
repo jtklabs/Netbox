@@ -1,12 +1,13 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
 
 from .models import Model, Name
+from .snmp_models import SnmpProfile
 
 
 class Device(Model):
@@ -30,6 +31,7 @@ class Settings:
     known_hosts: Path
     devices: dict[str, Device]
     stale_seconds: int = 120
+    snmp_profiles: dict[str, SnmpProfile] = field(default_factory=dict)
 
     @classmethod
     def load(cls):
@@ -52,6 +54,12 @@ class Settings:
             Path(os.getenv("F5_KNOWN_HOSTS", "known_hosts")),
             {d.id: d for d in devices},
         )
+        profile_file = os.getenv("F5_SNMP_PROFILES_FILE")
+        if profile_file:
+            profiles = [SnmpProfile.model_validate(p) for p in json.loads(Path(profile_file).read_text())]
+            if len({p.id for p in profiles}) != len(profiles):
+                raise ValueError("duplicate SNMP profile IDs")
+            result.snmp_profiles = {p.id: p for p in profiles}
         result.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         result.backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return result

@@ -6,6 +6,7 @@ import uuid
 
 from .config import Settings
 from .engine import Runner
+from .snmp import SnmpRunner
 from .store import Store
 
 
@@ -20,7 +21,8 @@ def process(settings, store, job, worker):
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
     try:
-        Runner(settings, store, job, worker).run()
+        runner = SnmpRunner if job["kind"] == "snmp_walk" else Runner
+        runner(settings, store, job, worker).run()
     finally:
         done.set()
         thread.join(timeout=15)
