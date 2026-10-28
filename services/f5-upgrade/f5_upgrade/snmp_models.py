@@ -33,12 +33,19 @@ class SnmpProfile(Model):
 class SnmpWalkRequest(Model):
     device_ip: IPvAnyAddress
     oids: list[str] = Field(min_length=1, max_length=64)
-    profile: Name = "default"
+    profile: Name | None = None
+    credential_profiles: list[Name] | None = Field(default=None, min_length=1, max_length=10)
     port: int = Field(default=161, ge=1, le=65535)
     timeout: float = Field(default=2, ge=0.1, le=30)
     retries: int = Field(default=1, ge=0, le=5)
     job_timeout: int = Field(default=300, ge=1, le=3600)
     max_rows: int = Field(default=10000, ge=1, le=100000)
+
+    @model_validator(mode="after")
+    def select_profiles(self):
+        if self.profile and self.credential_profiles:
+            raise ValueError("use profile or credential_profiles, not both")
+        return self
 
     @field_validator("device_ip")
     @classmethod

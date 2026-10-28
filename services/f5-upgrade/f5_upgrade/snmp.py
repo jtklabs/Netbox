@@ -8,8 +8,9 @@ import os
 from pysnmp.hlapi.v3arch import asyncio as snmp
 from pysnmp.proto import rfc1902
 
+from .credentials import AuthenticationRejected, Selector, Vault
 from .snmp_models import SnmpWalkRequest
-from .store import LostOwnership
+from .store import CancelRequested, LostOwnership
 
 MAX_RESULT_BYTES = 16 * 1024 * 1024
 
@@ -66,6 +67,14 @@ class SnmpRunner:
     def __init__(self, settings, store, job, worker):
         self.settings, self.store, self.job, self.worker = settings, store, job, worker
         self.request = SnmpWalkRequest.model_validate(job["request"])
+        names = self.request.credential_profiles or ([self.request.profile] if self.request.profile else None)
+        self.selector = Selector(
+            Vault(store, settings.credential_key_file),
+            "snmp",
+            str(self.request.device_ip),
+            names,
+            lambda data: store.credential_event(job["id"], worker, data),
+        )
         self.result = {
             "rows": 0,
             "bytes": 0,
@@ -84,6 +93,13 @@ class SnmpRunner:
             self.store.finish(self.job["id"], self.worker, "succeeded" if success else "failed")
         except LostOwnership:
             return
+        except CancelRequested:
+            self.result["error"] = "cancelled; partial results retained"
+            for item in self.result["oids"]:
+                if item["status"] in ("pending", "running"):
+                    item["status"] = "cancelled"
+            self.record("snmp_cancelled")
+            self.store.finish(self.job["id"], self.worker, "cancelled")
         except Exception:
             # Library exceptions can contain credential material; never persist their text.
             self.result["error"] = "SNMP worker failed; check server profile configuration"
@@ -100,8 +116,18 @@ class SnmpRunner:
         engine = snmp.SnmpEngine()
         try:
             async with asyncio.timeout(self.request.job_timeout):
-                profile = self.settings.snmp_profiles[self.request.profile]
-                auth = credentials(profile)
+                use_vault = bool(self.request.credential_profiles) or any(
+                    c["kind"] == "snmp" for c in self.selector.vault.list()
+                )
+                if (
+                    self.request.profile in self.settings.snmp_profiles
+                    and not self.request.credential_profiles
+                ):
+                    use_vault = False
+                profile = (
+                    None if use_vault else self.settings.snmp_profiles[self.request.profile or "default"]
+                )
+                auth = None if use_vault else credentials(profile)
                 transport = (
                     snmp.Udp6TransportTarget
                     if self.request.device_ip.version == 6
@@ -113,13 +139,39 @@ class SnmpRunner:
                     retries=self.request.retries,
                 )
                 for item in self.result["oids"]:
-                    self.store.guard(self.job["id"], self.worker)
+                    self.store.checkpoint(self.job["id"], self.worker)
                     item["status"] = "running"
                     self.record("snmp_oid_started")
                     try:
-                        await self.walk_oid(engine, auth, target, profile.context_name, item)
+                        if use_vault:
+
+                            async def authenticated_walk(c):
+                                protocols = {
+                                    "SHA": snmp.usmHMACSHAAuthProtocol,
+                                    "SHA224": snmp.usmHMAC128SHA224AuthProtocol,
+                                    "SHA256": snmp.usmHMAC192SHA256AuthProtocol,
+                                    "SHA384": snmp.usmHMAC256SHA384AuthProtocol,
+                                    "SHA512": snmp.usmHMAC384SHA512AuthProtocol,
+                                }
+                                auth_data = snmp.UsmUserData(
+                                    c["username"],
+                                    authKey=c.get("auth_password"),
+                                    privKey=c.get("priv_password"),
+                                    authProtocol=protocols[c["auth_protocol"]]
+                                    if c["security_level"] != "noAuthNoPriv"
+                                    else snmp.usmNoAuthProtocol,
+                                    privProtocol=snmp.usmAesCfb128Protocol
+                                    if c["security_level"] == "authPriv"
+                                    else snmp.usmNoPrivProtocol,
+                                )
+                                self.current_credential = c
+                                await self.walk_oid(engine, auth_data, target, c["context_name"], item)
+
+                            await self.selector.run_async(authenticated_walk)
+                        else:
+                            await self.walk_oid(engine, auth, target, profile.context_name, item)
                         item["status"] = "succeeded"
-                    except WalkError as exc:
+                    except (WalkError, AuthenticationRejected) as exc:
                         item.update(status="failed", error=str(exc))
                     self.record("snmp_oid_finished")
                     if self.result.get("truncated"):
@@ -149,12 +201,33 @@ class SnmpRunner:
         )
         try:
             async for indication, status, index, bindings in iterator:
-                self.store.guard(self.job["id"], self.worker)
+                self.store.checkpoint(self.job["id"], self.worker)
+                if (
+                    indication
+                    and type(indication).__name__
+                    in ("UnknownUserName", "WrongDigest", "DecryptionError", "UnsupportedSecurityLevel")
+                    and item["rows"] == 0
+                ):
+                    raise AuthenticationRejected("SNMP v3 credentials rejected")
                 if indication:
                     # Class names describe timeout/auth/transport failures without exposing secrets.
                     raise WalkError("SNMP engine error: " + type(indication).__name__)
                 if status:
                     raise WalkError(f"SNMP PDU error {int(status)} at binding {int(index)}")
+                if hasattr(self, "current_credential") and not item.get("credential_profile"):
+                    c = self.current_credential
+                    item["credential_profile"] = c["id"]
+                    self.store.credential_event(
+                        self.job["id"],
+                        self.worker,
+                        {
+                            "profile": c["id"],
+                            "revision": c["revision"],
+                            "transport": "snmp",
+                            "target": str(self.request.device_ip),
+                            "outcome": "authenticated",
+                        },
+                    )
                 rows = [serialize(root, oid, value) for oid, value in bindings]
                 size = len(json.dumps(rows).encode())
                 if (

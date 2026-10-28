@@ -124,6 +124,27 @@ class FakeDevice:
         self.new_boot = True
         self.auto_sync = False
 
+    def topology(self):
+        return {
+            "self": "/Common/lab",
+            "cluster": None,
+            "members": [{"name": "/Common/lab", "host": "192.0.2.10"}],
+            "role": "active",
+            "groups": [],
+            "auto_sync": self.auto_sync,
+            "sync": "standalone",
+        }
+
+    def free_bytes(self):
+        return 100 * 1024**3
+
+    def start_copy(self, source, target, job):
+        self.ssh.commands.append(("cpcfg " + source + " " + target, {}))
+        return "/var/tmp/f5-upgrade-" + job
+
+    def copy_status(self, directory):
+        return True
+
     def snapshot(self):
         return copy.deepcopy(self.snap)
 

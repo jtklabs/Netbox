@@ -4,12 +4,17 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from pydantic import Field
 
+from . import __version__
 from .config import Settings, under
-from .models import JobRequest, Model, RecoveryResolution, RollbackRequest
+from .credentials import Credential, Vault
+from .execution_models import Batch, HTTPJob, ManualCompletion, SSHJob, ValidationDecision
+from .models import JobRequest, Model, Name, RecoveryResolution, RollbackRequest
 from .snmp_models import SnmpResults, SnmpWalkRequest
 from .store import Conflict, Store
 
@@ -19,16 +24,59 @@ class JobResponse(Model):
     device: str
     lock_key: str
     lock_held: bool
-    kind: Literal["upgrade", "rollback", "snmp_walk"]
+    kind: Literal["upgrade", "rollback", "snmp_walk", "ssh", "http"]
     parent: str | None
     request: dict
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled", "recovery_required", "resolved"]
+    status: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "recovery_required",
+        "resolved",
+        "needs_review",
+        "completed_with_warnings",
+        "manually_completed",
+    ]
     created: float
     updated: float
     worker: str | None
     heartbeat: float | None
     result: dict
     idempotency_key: str | None
+    credential_usage: list[dict] = Field(default_factory=list)
+    credential_summary: dict = Field(default_factory=dict)
+    control: dict = Field(default_factory=dict)
+    validation_gates: list[dict] = Field(default_factory=list)
+
+
+class BatchItem(Model):
+    id: str
+    device: str
+    status: str
+    result: dict
+    wave: int
+    ordinal: int
+
+
+class BatchResponse(Model):
+    id: str
+    name: str
+    status: Literal["completed", "needs_attention", "in_progress"]
+    device_count: int
+    jobs: list[BatchItem]
+    waves: list[dict]
+    status_url: str
+
+
+class CredentialMetadata(Model):
+    id: str
+    kind: Literal["ssh", "http", "snmp", "ucs"]
+    priority: int
+    enabled: bool
+    revision: int
+    updated: float
 
 
 class EventResponse(Model):
@@ -49,8 +97,9 @@ def create_app(settings=None):
     os.umask(0o077)
     settings = settings or Settings.load()
     store = Store(settings.data_dir / "jobs.sqlite3")
-    app = FastAPI(title="F5 SSH Upgrade API", version="1.1.0", docs_url="/docs", redoc_url=None)
+    app = FastAPI(title="Remote Execution API", version=__version__, docs_url="/docs", redoc_url=None)
     app.state.store = store
+    vault = Vault(store, settings.credential_key_file)
     bearer = HTTPBearer(auto_error=False)
 
     def auth(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
@@ -60,6 +109,14 @@ def create_app(settings=None):
             raise HTTPException(401, "valid bearer token required", headers={"WWW-Authenticate": "Bearer"})
 
     authenticated = [Depends(auth)]
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # Pydantic's default response echoes submitted values, including passwords.
+        return JSONResponse(
+            {"detail": [{"loc": e["loc"], "type": e["type"], "msg": e["msg"]} for e in exc.errors()]},
+            status_code=422,
+        )
 
     @app.exception_handler(KeyError)
     async def missing(request, exc):
@@ -83,9 +140,10 @@ def create_app(settings=None):
         return response
 
     def lock_key(device_id):
-        if device_id not in settings.devices:
-            raise HTTPException(422, "unknown inventory device")
-        d = settings.devices[device_id]
+        try:
+            d = settings.device(device_id)
+        except ValueError:
+            raise HTTPException(422, "device must be an inventory ID or IP address") from None
         return "group:" + d.lock_group if d.lock_group else "device:" + d.id
 
     def planned(request):
@@ -125,7 +183,11 @@ def create_app(settings=None):
         request: SnmpWalkRequest,
         idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
     ):
-        if request.profile not in settings.snmp_profiles:
+        if (
+            request.profile
+            and request.profile not in settings.snmp_profiles
+            and not any(p["id"] == request.profile and p["kind"] == "snmp" for p in vault.list())
+        ):
             raise HTTPException(422, "unknown SNMP v3 profile")
         return store.submit(
             request.model_dump(mode="json"),
@@ -188,9 +250,19 @@ def create_app(settings=None):
         idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
     ):
         original = store.get(job_id)
-        if original["kind"] == "snmp_walk":
-            raise Conflict("SNMP walks have no rollback target")
-        payload = {**request.model_dump(), "device": original["device"]}
+        if original["kind"] != "upgrade":
+            raise Conflict("only F5 upgrades have a rollback target")
+        if (
+            original["status"] in ("recovery_required", "manually_completed")
+            and original["lock_held"]
+            and not request.worker_stopped
+        ):
+            raise Conflict("rollback of an uncertain job requires worker_stopped=true")
+        payload = {
+            **request.model_dump(),
+            "device": original["device"],
+            "credential_profiles": original["request"].get("credential_profiles"),
+        }
         return store.submit(
             payload, lock_key(original["device"]), idempotency_key, kind="rollback", parent=job_id
         )
@@ -204,6 +276,91 @@ def create_app(settings=None):
         if not path.is_file():
             raise HTTPException(404, "backup file is unavailable")
         return FileResponse(path, filename=job_id + ".ucs", media_type="application/octet-stream")
+
+    @app.get("/api/v1/credentials", dependencies=authenticated, response_model=list[CredentialMetadata])
+    def credentials():
+        return vault.list()
+
+    @app.put("/api/v1/credentials/{profile}", dependencies=authenticated, response_model=CredentialMetadata)
+    def credential(profile: Name, request: Credential):
+        return vault.put(profile, request)
+
+    @app.post("/api/v1/credentials/rotate", dependencies=authenticated)
+    def rotate():
+        return vault.rotate()
+
+    @app.get("/api/v1/http/targets", dependencies=authenticated)
+    def http_targets():
+        return [
+            {"id": t.id, "base_url": t.base_url, "auth_probe_configured": bool(t.auth_probe_path)}
+            for t in settings.http_targets.values()
+        ]
+
+    @app.get("/api/v1/workers", dependencies=authenticated)
+    def workers():
+        return store.worker_list(settings.stale_seconds)
+
+    @app.post("/api/v1/ssh/jobs", dependencies=authenticated, status_code=202, response_model=JobResponse)
+    def ssh_job(
+        request: SSHJob, idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None
+    ):
+        return store.submit(
+            request.model_dump(),
+            lock_key(request.device),
+            idempotency_key,
+            kind="ssh",
+            parent=request.parent_job_id,
+        )
+
+    @app.post("/api/v1/http/jobs", dependencies=authenticated, status_code=202, response_model=JobResponse)
+    def http_job(
+        request: HTTPJob, idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None
+    ):
+        if request.target not in settings.http_targets:
+            raise HTTPException(422, "unknown HTTP target")
+        return store.submit(
+            {**request.model_dump(), "device": request.target},
+            "http:" + request.target,
+            idempotency_key,
+            kind="http",
+            parent=request.parent_job_id,
+        )
+
+    @app.post(
+        "/api/v1/upgrade-batches", dependencies=authenticated, status_code=202, response_model=BatchResponse
+    )
+    def batch(
+        request: Batch, idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None
+    ):
+        for wave in request.waves:
+            for ip in wave.ips:
+                planned(request.request_for(ip))
+        return store.create_batch(request, idempotency_key, lock_key)
+
+    @app.get("/api/v1/upgrade-batches", dependencies=authenticated, response_model=list[BatchResponse])
+    def batches(limit: int = Query(default=50, ge=1, le=500)):
+        with store.connect() as db:
+            return [
+                store._batch(db, row[0])
+                for row in db.execute("SELECT id FROM batches ORDER BY created DESC LIMIT ?", (limit,))
+            ]
+
+    @app.get("/api/v1/upgrade-batches/{batch_id}", dependencies=authenticated, response_model=BatchResponse)
+    def batch_status(batch_id: str):
+        store.reap(settings.stale_seconds)
+        return store.batch(batch_id)
+
+    @app.post("/api/v1/jobs/{job_id}/validation-decisions", dependencies=authenticated, status_code=202)
+    def decision(
+        job_id: str,
+        request: ValidationDecision,
+        idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
+    ):
+        return store.decide(job_id, request, idempotency_key)
+
+    @app.post("/api/v1/jobs/{job_id}/mark-done", dependencies=authenticated, response_model=JobResponse)
+    def mark_done(job_id: str, request: ManualCompletion):
+        return store.mark_done(job_id, request)
 
     static = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static), name="static")

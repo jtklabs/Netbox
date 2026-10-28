@@ -171,8 +171,8 @@ def test_post_validation_detects_individual_regression(settings, store):
 
     fake.reboot = reboot
     j, _ = execute(settings, store, reboot_options(validation_timeout=0), fake)
-    assert j["status"] == "failed"
-    assert any("previously up" in i for i in j["result"]["validation_issues"])
+    assert j["status"] == "completed_with_warnings"
+    assert any(i["category"] == "pools" for i in j["result"]["validation_differences"])
 
 
 def test_wrong_image_digest_prevents_install(settings, store, image):

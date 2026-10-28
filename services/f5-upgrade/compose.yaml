@@ -13,7 +13,7 @@ x-service: &service
   volumes:
     - data:/data
     - backups:/backups
-    - ./images:/images:ro,z
+    - ./images:/images:z
     - ./config:/config:ro,z
   read_only: true
   tmpfs: [/tmp]

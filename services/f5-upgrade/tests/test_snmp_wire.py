@@ -13,15 +13,16 @@ from f5_upgrade.snmp_models import SnmpProfile, SnmpWalkRequest
 
 
 @pytest.mark.parametrize(
-    "level,ipv6,bad_password",
+    "level,ipv6,bad_password,encrypted",
     [
-        ("authPriv", False, False),
-        ("authNoPriv", False, False),
-        ("noAuthNoPriv", True, False),
-        ("authPriv", False, True),
+        ("authPriv", False, False, False),
+        ("authPriv", False, False, True),
+        ("authNoPriv", False, False, False),
+        ("noAuthNoPriv", True, False, False),
+        ("authPriv", False, True, False),
     ],
 )
-def test_loopback_v3(settings, store, monkeypatch, level, ipv6, bad_password):
+def test_loopback_v3(settings, store, monkeypatch, level, ipv6, bad_password, encrypted):
     monkeypatch.setenv("TEST_SNMP_AUTH", "wrong-passphrase" if bad_password else "loopback-auth-passphrase")
     monkeypatch.setenv("TEST_SNMP_PRIV", "loopback-priv-passphrase")
     settings.snmp_profiles = {
@@ -33,6 +34,34 @@ def test_loopback_v3(settings, store, monkeypatch, level, ipv6, bad_password):
             priv_password_env="TEST_SNMP_PRIV" if level == "authPriv" else None,
         )
     }
+
+    if encrypted:
+        from test_controls_credentials import vault_for
+
+        from f5_upgrade.credentials import Credential
+
+        vault = vault_for(settings, store)
+        vault.put(
+            "unknown",
+            Credential(
+                kind="snmp",
+                username="unknown-user",
+                auth_password="loopback-auth-passphrase",
+                priv_password="loopback-priv-passphrase",
+                priority=1,
+            ),
+        )
+        vault.put(
+            "valid",
+            Credential(
+                kind="snmp",
+                username="test-reader",
+                auth_password="loopback-auth-passphrase",
+                priv_password="loopback-priv-passphrase",
+                priority=2,
+            ),
+        )
+        settings.snmp_profiles = {}
 
     async def exercise():
         agent = engine.SnmpEngine()
@@ -72,6 +101,10 @@ def test_loopback_v3(settings, store, monkeypatch, level, ipv6, bad_password):
             assert rows
             assert all(row["oid"].startswith("1.3.6.1.2.1.1.") for row in rows)
             assert runner.result["oids"][1]["rows"] == 0
+            if encrypted:
+                audit = store.get(job["id"])["credential_usage"]
+                assert any(c["profile"] == "unknown" and c["outcome"] == "rejected" for c in audit)
+                assert store.get(job["id"])["credential_summary"]["profiles_used"] == ["valid"]
         finally:
             responder.close(agent)
             agent.close_dispatcher()
