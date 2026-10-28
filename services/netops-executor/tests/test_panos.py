@@ -508,7 +508,7 @@ def test_unrestored_bgp_opens_gate_and_accept_continues_without_replay(settings,
 
 def test_active_passive_upgrades_standby_first_then_validates_the_failover(settings, store, panorama):
     a, b = pair(panorama, preemptive="yes")
-    job = run(settings, store, a.serial)
+    job = run(settings, store, a.serial, ha_policy={"disable_preemption": True})
     assert job["status"] == "succeeded", job["result"]
     assert a.version == b.version == TARGET
     assert b.writes == ["suspend", "install " + TARGET, "restart", "functional"]
@@ -555,6 +555,16 @@ def test_failed_handoff_returns_traffic_to_the_original_active(settings, store, 
     assert a.writes.count("suspend") == 2
 
 
+def test_preemption_is_untouched_unless_requested(settings, store, panorama):
+    a, b = pair(panorama, preemptive="yes")
+    job = run(settings, store, a.serial, tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert "preemption" not in job["result"] and a.preemptive == "yes"
+    assert not any(w.startswith("preemptive-") or w == "commit" for w in a.writes + b.writes)
+    plan = PanosUpgradeRequest(serial=a.serial, target_version=TARGET, allowed_source_versions=["10.2.9-h1"])
+    assert "ha_disable_preemption_and_commit" not in plan.plan()
+
+
 def test_active_active_upgrades_each_member_with_survivor_validation(settings, store, panorama):
     a, b = pair(panorama, mode="Active-Active")
     job = run(settings, store, a.serial, tech_support=False)
@@ -569,7 +579,7 @@ def test_active_active_upgrades_each_member_with_survivor_validation(settings, s
 def test_install_failure_returns_member_to_service_and_restores_preemption(settings, store, panorama):
     a, b = pair(panorama, preemptive="yes")
     b.install_result = "FAIL"
-    job = run(settings, store, a.serial, tech_support=False)
+    job = run(settings, store, a.serial, tech_support=False, ha_policy={"disable_preemption": True})
     assert job["status"] == "failed", job["result"]
     assert "install of 11.1.6-h3 on 0079510002 failed" in job["result"]["error"]
     assert b.writes == ["suspend", "install " + TARGET, "functional"]

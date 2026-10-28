@@ -862,12 +862,14 @@ class PanosRunner:
                 self.step("stage:" + item["serial"], lambda s=item["serial"]: self.stage(s))
             if r.stage_only:
                 return
-            if self.ha["enabled"]:
+            preemption = self.ha["enabled"] and r.ha_policy.disable_preemption
+            if preemption:
                 self.step("preemption_disable", lambda: self.preemption("no"))
             for item in plan:
                 self.upgrade_member(item["serial"], item["handoff"])
-            if self.ha["enabled"]:
+            if preemption:
                 self.step("preemption_restore", lambda: self.preemption(None))
+            if self.ha["enabled"]:
                 self.step("validate_final", lambda: self.validate("validate_final", self.pair_sample))
         self.result["validated_version"] = r.target_version
         self.result["validation_accepted"] = True

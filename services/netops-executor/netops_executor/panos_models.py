@@ -49,6 +49,10 @@ class PanosHAPolicy(Model):
         description="standby_first upgrades the passive (active/passive) or active-secondary (active/active) member first, validates it, then fails over to it.",
     )
     require_running_sync: bool = True
+    disable_preemption: bool = Field(
+        default=False,
+        description="Before the first suspend, set preemptive no on members that have it enabled and commit; restore and commit after both members validate.",
+    )
     failback: bool = Field(
         default=True,
         description="When the member left carrying traffic fails validation after a failover, return traffic to the other member before stopping.",
@@ -124,17 +128,21 @@ class PanosUpgradeRequest(ScheduledRequest):
             steps += ["software_check", "download"]
         if self.stage_only:
             return steps
-        return steps + [
-            "ha_disable_preemption_and_commit",
-            "ha_suspend_or_handoff_with_survivor_validation",
-            "install",
-            "reboot",
-            "validate_system",
-            "ha_functional",
-            "validate_pair_or_traffic",
-            "ha_restore_preemption_and_commit",
-            "validate_final",
-        ]
+        preemption = self.ha_policy.disable_preemption
+        return (
+            steps
+            + (["ha_disable_preemption_and_commit"] if preemption else [])
+            + [
+                "ha_suspend_or_handoff_with_survivor_validation",
+                "install",
+                "reboot",
+                "validate_system",
+                "ha_functional",
+                "validate_pair_or_traffic",
+            ]
+            + (["ha_restore_preemption_and_commit"] if preemption else [])
+            + ["validate_final"]
+        )
 
 
 class PanosWave(Model):
