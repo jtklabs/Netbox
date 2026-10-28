@@ -1,4 +1,7 @@
-"""Unattended PAN-OS upgrades through Panorama. Ambiguous writes are never replayed."""
+"""Unattended PAN-OS upgrades through Panorama. Ambiguous writes are never replayed.
+
+An HA pair is one unit of work: a job for either member upgrades both, one at a time.
+"""
 
 import os
 import time
@@ -7,6 +10,7 @@ from datetime import datetime, timezone
 from .config import under
 from .panos import (
     FUNCTIONAL,
+    HA_ELECTION,
     RESTART,
     SUSPEND,
     Firewall,
@@ -15,12 +19,13 @@ from .panos import (
     PanosUnavailable,
     download,
     install,
+    repository_download,
+    repository_upload,
 )
 from .panos_models import PanosUpgradeRequest, feature_release
 from .ssh import digest
 from .store import CancelRequested, Deferred, LostOwnership, NeedsReview
 
-SYSTEM, TRAFFIC = "panos_system_validation", "panos_traffic_validation"
 TRAFFIC_CATEGORIES = ("interfaces", "routes", "bgp_peers", "ipsec_tunnels", "sessions", "arp")
 # Values that mean an object carries traffic; baseline objects in this state must recover.
 RESTORED = {"interfaces": {"up"}, "bgp_peers": {"established"}, "ipsec_tunnels": {"active"}}
@@ -73,14 +78,32 @@ def compare(baseline, current, policy):
     return critical, findings, metrics
 
 
+def functional(state):
+    return state in ("active", "passive") or state.startswith("active-")
+
+
+def staged(member):
+    """True once a member may boot or run software that was not validated: an install or reboot."""
+    return bool(
+        member.get("reboot_requested_at")
+        or member.get("install", {}).get("status") in ("started", "completed")
+    )
+
+
+def carries(state):
+    """Active/passive "active", or "active-primary"/"active-secondary" in active/active."""
+    return state == "active" or state.startswith("active-")
+
+
 class PanosRunner:
     def __init__(self, settings, store, job, worker, panorama=None, sleep=time.sleep, clock=time.monotonic):
         self.settings, self.store, self.job, self.worker = settings, store, job, worker
         self.sleep, self.clock = sleep, clock
         self.result = job["result"]
         self.phase = "connect"
-        self.request = self.firewall = self.peer = None
+        self.request = self.decision = None
         self.panorama = panorama
+        self.firewalls = {}
 
     def setup(self):
         # Inside run(): a removed Panorama target or credential fails this job, never the worker.
@@ -96,7 +119,11 @@ class PanosRunner:
                 self.guard,
                 self.audit,
             )
-        self.firewall = Firewall(self.panorama, self.request.serial)
+
+    def fw(self, serial):
+        if serial not in self.firewalls:
+            self.firewalls[serial] = Firewall(self.panorama, serial)
+        return self.firewalls[serial]
 
     def guard(self):
         self.store.guard(self.job["id"], self.worker)
@@ -122,20 +149,47 @@ class PanosRunner:
         self.guard()
 
     @property
-    def clustered(self):
-        return bool(self.result.get("ha", {}).get("enabled"))
+    def ha(self):
+        return self.result["ha"]
 
-    def peer_firewall(self):
-        if self.peer is None:
-            self.peer = Firewall(self.panorama, self.result["ha"]["peer"])
-        return self.peer
+    @property
+    def members(self):
+        return self.ha["members"]
+
+    def member(self, serial):
+        return self.result.setdefault("members", {}).setdefault(serial, {})
+
+    def peer_of(self, serial):
+        return next(s for s in self.members if s != serial)
+
+    def version(self, serial):
+        member = self.member(serial)
+        return member.get("boot_verified", {}).get("version") or member["source"]["version"]
+
+    def step(self, key, action):
+        """Run each named step once; a review continuation resumes after the completed ones."""
+        done = self.result.setdefault("completed_steps", [])
+        if key not in done:
+            action()
+            done.append(key)
+            self.event("step_completed", name=key)
+
+    def take(self, phase):
+        """Consume the operator decision for the gate this phase opened, if any."""
+        if not self.decision or self.decision["phase"] != phase:
+            return None
+        decision, self.decision = self.decision, None
+        action = decision["decision"]["action"]
+        if action == "accept":
+            self.result.setdefault("manual_validations", []).append({**decision["decision"], "phase": phase})
+            self.event("manual_validation_applied", gate_id=decision["id"], phase=phase)
+        return action
 
     def unsafe(self):
         # A staged image boots on the next restart; a suspended unit carries no traffic.
-        return bool(
-            self.result.get("ha_suspended")
-            or self.result.get("reboot_requested_at")
-            or self.result.get("install", {}).get("status") in ("started", "completed")
+        members = self.result.get("members", {}).values()
+        return any(m.get("suspended") or staged(m) for m in members) or any(
+            p["current"] != p["original"] for p in self.result.get("preemption", {}).values()
         )
 
     def reserve(self):
@@ -150,11 +204,16 @@ class PanosRunner:
                 raise PanosError("firewall is not managed by this Panorama")
             if not entry["connected"]:
                 raise PanosError("firewall is not connected to Panorama")
-            ha = self.firewall.ha_state()
+            ha = self.fw(serial).ha_state()
             peer = entry["ha_peer"] if ha["enabled"] else None
             if ha["enabled"] and not peer:
                 raise PanosError("HA is enabled but Panorama does not report the peer serial")
-            topology = {"enabled": ha["enabled"], "peer": peer, "mode": ha["mode"]}
+            topology = {
+                "enabled": ha["enabled"],
+                "peer": peer,
+                "mode": ha["mode"],
+                "members": [serial, peer] if peer else [serial],
+            }
         peer = topology["peer"]
         keys = [self.job["lock_key"], "panos:" + serial]
         if peer:
@@ -165,13 +224,6 @@ class PanosRunner:
             self.store.defer(self.job["id"], self.worker)
         self.result["ha"] = topology
         self.event("resources_reserved", keys=keys)
-
-    def active_firewall(self, ha):
-        if not ha["enabled"] or ha["local"] == "active":
-            return self.firewall
-        if ha["peer_state"] == "active":
-            return self.peer_firewall()
-        raise PanosError("no active HA member is available for traffic validation")
 
     def traffic(self, firewall):
         data, gaps = {}, []
@@ -193,121 +245,174 @@ class PanosRunner:
         data["gaps"] = gaps
         return data
 
-    def ha_preflight(self, failover=True):
-        r = self.request
-        ha = self.firewall.ha_state()
-        if not ha["enabled"]:
-            return ha
-        if ha["mode"] != "active-passive":
-            raise PanosError("only active/passive HA pairs are supported")
-        if ha["peer_conn"] != "up":
-            raise PanosError("HA peer connection is not up")
-        if sorted([ha["local"], ha["peer_state"]]) != ["active", "passive"]:
-            raise PanosError("HA requires one active and one passive member")
-        peer = self.panorama.device(self.result["ha"]["peer"])
-        if not peer or not peer["connected"]:
-            raise PanosError("HA peer is not connected to Panorama")
-        local_version = self.firewall.system_info()["sw_version"]
-        same = local_version == peer["sw_version"]
-        if same and r.ha_policy.require_running_sync and ha["running_sync"] != "synchronized":
-            raise PanosError("HA running configuration is not synchronized")
-        if failover and ha["local"] == "active":
-            if not r.ha_policy.allow_active_first:
-                raise PanosError("active-first upgrade is disabled by this request")
-            if (
-                not same
-                and r.ha_policy.mixed_version_failover == "require_validated_peer"
-                and not self.store.validated_panos_peer(self.job["id"], peer["serial"], peer["sw_version"])
-            ):
-                raise PanosError("mixed-version failover needs a validated upgrade of the peer")
-        self.result["ha_preflight"] = {
-            "local": ha["local"],
-            "peer": peer["serial"],
-            "peer_version": peer["sw_version"],
-            "running_sync": ha["running_sync"],
-            "preemptive": ha["preemptive"],
-        }
-        self.event("ha_preflight_completed")
-        return ha
-
-    def wait_for_jobs(self):
+    def wait_for_jobs(self, firewall):
         deadline = self.clock() + self.request.job_wait_timeout
         while True:
-            running = [j for j in self.firewall.jobs() if j["status"] in ("ACT", "PEND")]
+            running = [j for j in firewall.jobs() if j["status"] in ("ACT", "PEND")]
             if not running:
                 return
             if self.clock() >= deadline:
-                raise PanosError("firewall jobs are still running: " + ", ".join(j["type"] for j in running))
+                raise PanosError(
+                    firewall.serial + " jobs are still running: " + ", ".join(j["type"] for j in running)
+                )
             self.event(
-                "waiting_for_firewall_jobs", jobs=[{"id": j["id"], "type": j["type"]} for j in running]
+                "waiting_for_firewall_jobs",
+                serial=firewall.serial,
+                jobs=[{"id": j["id"], "type": j["type"]} for j in running],
             )
             self.checkpoint()
             self.wait(15)
 
-    def prevalidate(self):
+    def precheck(self, serial):
         r = self.request
-        info = self.firewall.system_info()
-        if info["serial"] and info["serial"] != r.serial:
-            raise PanosError("firewall reported a different serial")
+        firewall = self.fw(serial)
+        info = firewall.system_info()
+        if info["serial"] and info["serial"] != serial:
+            raise PanosError(serial + " reported a different serial")
         if info["operational_mode"] not in ("", "normal"):
-            raise PanosError("firewall operational mode is " + info["operational_mode"])
-        self.result["source"] = {
+            raise PanosError(serial + " operational mode is " + info["operational_mode"])
+        entry = self.panorama.device(serial)
+        if not entry or not entry["connected"]:
+            raise PanosError(serial + " is not connected to Panorama")
+        self.member(serial)["source"] = {
             "version": info["sw_version"],
             "model": info["model"],
             "hostname": info["hostname"],
             "app_version": info["app_version"],
+            "threat_version": info["threat_version"],
+            "av_version": info["av_version"],
+            "family": r.software_family or entry["family"],
         }
         if r.approved_models and info["model"] not in r.approved_models:
-            raise PanosError("hardware model is not approved: " + info["model"])
-        upgrading = info["sw_version"] != r.target_version
-        if upgrading and info["sw_version"] not in r.allowed_source_versions:
-            raise PanosError("running version " + info["sw_version"] + " is outside allowed_source_versions")
-        if not self.firewall.chassis_ready():
-            raise PanosError("chassis is not ready")
-        self.wait_for_jobs()
-        if self.firewall.pending_changes():
-            raise PanosError("firewall has uncommitted local changes")
-        # Fail before backup or download when the later HA failover would be refused.
-        ha = self.ha_preflight(failover=upgrading and not r.stage_only)
-        active = self.active_firewall(ha)
-        self.result["pre_validation"] = {
-            "unit": info,
-            "traffic": self.traffic(active),
-            "traffic_source": active.serial,
-        }
-        self.event("pre_validation_completed", gaps=self.result["pre_validation"]["traffic"]["gaps"])
-        return info
+            raise PanosError(serial + " hardware model is not approved: " + info["model"])
+        if info["sw_version"] != r.target_version:
+            if info["sw_version"] not in r.allowed_source_versions:
+                raise PanosError(
+                    serial + " running version " + info["sw_version"] + " is outside allowed_source_versions"
+                )
+            if r.software_source == "panorama" and not self.member(serial)["source"]["family"]:
+                raise PanosError(
+                    "Panorama did not report the platform family of " + serial + "; set software_family"
+                )
+        if not firewall.chassis_ready():
+            raise PanosError(serial + " chassis is not ready")
+        self.wait_for_jobs(firewall)
+        if firewall.pending_changes():
+            raise PanosError(serial + " has uncommitted local changes")
 
-    def backup(self):
+    def ha_preflight(self):
+        states = {s: self.fw(s).ha_state() for s in self.members}
+        mode = states[self.request.serial]["mode"]
+        if mode not in ("active-passive", "active-active"):
+            raise PanosError("unsupported HA mode: " + (mode or "unknown"))
+        for serial, ha in states.items():
+            if not ha["enabled"]:
+                raise PanosError(serial + " does not report HA enabled")
+            if ha["peer_conn"] != "up":
+                raise PanosError(serial + " HA peer connection is not up")
+            self.member(serial).update(role=ha["local"], preemptive=ha["preemptive"])
+        roles = sorted(ha["local"] for ha in states.values())
+        if mode == "active-passive" and roles != ["active", "passive"]:
+            raise PanosError("active/passive HA requires one active and one passive member")
+        if mode == "active-active" and not all(r.startswith("active-") for r in roles):
+            raise PanosError("active/active HA requires both members active")
+        same = len({self.version(s) for s in self.members}) == 1
+        if same and self.request.ha_policy.require_running_sync:
+            if any(ha["running_sync"] != "synchronized" for ha in states.values()):
+                raise PanosError("HA running configuration is not synchronized")
+        self.ha["mode"] = mode
+        self.event("ha_preflight_completed", roles={s: ha["local"] for s, ha in states.items()})
+
+    def baseline(self):
+        if not self.ha["enabled"]:
+            return {self.request.serial: self.traffic(self.fw(self.request.serial))}
+        if self.ha["mode"] == "active-passive":
+            # Only the active member carries traffic; it is the pair's reference.
+            active = next(s for s in self.members if self.member(s)["role"] == "active")
+            return {"pair": self.traffic(self.fw(active)), "pair_source": active}
+        return {s: self.traffic(self.fw(s)) for s in self.members}
+
+    def upgrade_plan(self):
         r = self.request
-        if not r.config_backup:
-            return
-        directory = under(self.settings.backup_root, r.backup_directory or "panos/" + r.serial)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path = directory / (self.job["id"] + ".xml")
-        self.event("config_backup_started")
-        data = self.firewall.running_config()
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        self.result["backup"] = {
+        pending = [s for s in self.members if self.version(s) != r.target_version]
+        if not self.ha["enabled"]:
+            return [{"serial": s, "handoff": False} for s in pending]
+        standby_first = r.ha_policy.upgrade_order == "standby_first"
+
+        def rank(serial):
+            standby = self.member(serial)["role"] in ("passive", "active-secondary")
+            return 0 if standby == standby_first else 1
+
+        plan = []
+        for index, serial in enumerate(sorted(pending, key=rank)):
+            # Only a passive member upgraded before any failover moves no traffic when suspended.
+            quiet = (
+                self.ha["mode"] == "active-passive"
+                and self.member(serial)["role"] == "passive"
+                and index == 0
+            )
+            plan.append({"serial": serial, "handoff": not quiet})
+        return plan
+
+    def prevalidate(self):
+        for serial in self.members:
+            self.precheck(serial)
+        if self.ha["enabled"]:
+            self.ha_preflight()
+        self.result["pre_validation"] = {"traffic": self.baseline()}
+        self.result["upgrade_plan"] = self.upgrade_plan()
+        self.event("pre_validation_completed", plan=self.result["upgrade_plan"])
+
+    def artifact(self, serial, kind, path):
+        item = {
+            "name": path.name,
+            "serial": serial,
+            "kind": kind,
             "path": str(path.relative_to(self.settings.backup_root.resolve())),
             "sha256": digest(path),
             "bytes": path.stat().st_size,
-            "format": "panos-running-config-xml",
         }
-        self.event("config_backup_completed")
+        self.result.setdefault("artifacts", []).append(item)
+        if kind == "config" and "backup" not in self.result:
+            self.result["backup"] = {**item, "format": "panos-running-config-xml"}
+        self.event(kind + "_backup_completed", serial=serial, bytes=item["bytes"])
 
-    def wait_job(self, job_id, timeout, label, cancellable):
+    def backup(self, serial):
+        r = self.request
+        if not (r.config_backup or r.tech_support):
+            return
+        directory = under(self.settings.backup_root, r.backup_directory or "panos/" + serial)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        firewall = self.fw(serial)
+        prefix = self.job["id"] + "-" + serial
+        if r.config_backup:
+            self.event("config_backup_started", serial=serial)
+            path = directory / (prefix + "-running-config.xml")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(firewall.running_config())
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.artifact(serial, "config", path)
+        if r.tech_support:
+            self.event("tech_support_backup_started", serial=serial)
+            path = directory / (prefix + "-techsupport.tgz")
+
+            def wait(seconds):
+                self.checkpoint()
+                self.wait(seconds)
+
+            firewall.tech_support(path, r.tech_support_timeout, wait, self.clock)
+            self.artifact(serial, "tech_support", path)
+
+    def wait_job(self, job_id, timeout, label, cancellable, node):
         deadline = self.clock() + timeout
         last = None
         while True:
             if cancellable:
                 self.checkpoint()
             try:
-                job = self.firewall.job(job_id)
+                job = node.job(job_id)
                 if job["status"] == "FIN":
                     return job
                 if job["progress"] != last:
@@ -320,47 +425,130 @@ class PanosRunner:
                 raise PanosError(label + " job " + str(job_id) + " did not finish before timeout")
             self.wait(10)
 
-    def stage(self):
+    def required_versions(self, serial):
         r = self.request
-        self.phase = "software_check"
-        self.checkpoint()
-        versions = self.firewall.software(refresh=True)
         needed = list(r.download_versions)
-        current = self.result["source"]["version"]
         base = feature_release(r.target_version) + ".0"
-        if r.auto_base_image and feature_release(current) != feature_release(r.target_version):
+        if r.auto_base_image and feature_release(self.version(serial)) != feature_release(r.target_version):
             if r.target_version != base and base not in needed:
                 needed.insert(0, base)
-        needed.append(r.target_version)
+        return needed + [r.target_version]
+
+    def stage(self, serial):
+        needed = self.required_versions(serial)
+        self.checkpoint()
+        if self.request.software_source == "panorama":
+            self.push_from_panorama(serial, needed)
+        else:
+            self.download_on_firewall(serial, needed)
+        versions = self.fw(serial).software()
+        missing = [v for v in needed if not versions.get(v, {}).get("downloaded")]
+        if missing:
+            raise PanosError(serial + " does not report software as downloaded: " + ", ".join(missing))
+        self.event("software_staged", serial=serial, versions=needed)
+
+    def download_on_firewall(self, serial, needed):
+        r = self.request
+        firewall = self.fw(serial)
+        self.phase = "software_check"
+        versions = firewall.software(refresh=True)
         missing = [v for v in needed if v not in versions]
         if missing:
-            raise PanosError("software not offered to this firewall: " + ", ".join(missing))
-        self.result["software"] = {
+            raise PanosError("software not offered to " + serial + ": " + ", ".join(missing))
+        self.member(serial)["software"] = {
+            "source": "update_server",
             "required": needed,
             "already_downloaded": [v for v in needed if versions[v]["downloaded"]],
         }
-        self.event("software_check_completed")
+        self.event("software_check_completed", serial=serial)
         for version in needed:
             if versions[version]["downloaded"]:
                 continue
             self.checkpoint()
-            self.event("software_download_started", version=version)
-            job_id = self.firewall.enqueue(download(version))
-            job = self.wait_job(job_id, r.download_timeout, "software_download", cancellable=True)
+            self.event("software_download_started", serial=serial, version=version)
+            job_id = firewall.enqueue(download(version))
+            job = self.wait_job(job_id, r.download_timeout, "software_download", True, firewall)
             if job["result"] != "OK":
-                raise PanosError("download of " + version + " failed: " + job["details"])
-            self.event("software_download_completed", version=version, job=job_id)
-        versions = self.firewall.software()
-        missing = [v for v in needed if not versions.get(v, {}).get("downloaded")]
-        if missing:
-            raise PanosError("software is not reported as downloaded: " + ", ".join(missing))
-        self.event("software_staged", versions=needed)
+                raise PanosError("download of " + version + " to " + serial + " failed: " + job["details"])
+            self.event("software_download_completed", serial=serial, version=version, job=job_id)
 
-    def wait_ha(self, done, timeout, error):
+    def push_from_panorama(self, serial, needed):
+        r = self.request
+        self.phase = "panorama_repository"
+        # No update-server check on the firewall: it may have no internet access.
+        versions = self.fw(serial).software()
+        family = self.member(serial)["source"]["family"]
+        files = {v: "PanOS_" + family + "-" + v for v in needed}
+        self.member(serial)["software"] = {
+            "source": "panorama",
+            "required": needed,
+            "files": files,
+            "already_downloaded": [v for v in needed if versions.get(v, {}).get("downloaded")],
+        }
+        self.event("software_check_completed", serial=serial)
+        for version in needed:
+            if versions.get(version, {}).get("downloaded"):
+                continue
+            self.repository_file(files[version])
+            self.checkpoint()
+            self.event("software_upload_started", serial=serial, version=version, file=files[version])
+            job_id = self.panorama.enqueue(repository_upload(files[version], serial))
+            job = self.wait_job(job_id, r.download_timeout, "software_upload", True, self.panorama)
+            if job["result"] != "OK":
+                raise PanosError(
+                    "upload of " + files[version] + " to " + serial + " failed: " + job["details"]
+                )
+            self.event("software_upload_completed", serial=serial, version=version, job=job_id)
+
+    def repository_file(self, filename):
+        """Make sure Panorama's shared software repository holds filename."""
+        r = self.request
+        files = self.panorama.repository()
+        if files.get(filename, {}).get("available"):
+            return
+        if not r.panorama_download:
+            raise PanosError(filename + " is not in Panorama's software repository")
+        if filename not in files:
+            try:
+                files = self.panorama.repository(refresh=True)
+            except PanosUnavailable:
+                raise
+            except PanosError as exc:
+                # An offline Panorama can still hold manually uploaded files.
+                self.event("panorama_software_check_failed", error=str(exc)[:300])
+            if filename not in files:
+                raise PanosError("Panorama does not offer " + filename + "; upload it or set software_family")
+            if files[filename]["available"]:
+                return
+        self.event("panorama_download_started", file=filename)
+        try:
+            job_id = self.panorama.enqueue(repository_download(filename))
+        except PanosUnavailable:
+            raise
+        except PanosError:
+            # Another job may already be downloading the same file into the shared repository.
+            if not any(
+                j["status"] in ("ACT", "PEND") and "downl" in j["type"].lower() for j in self.panorama.jobs()
+            ):
+                raise
+            deadline = self.clock() + r.download_timeout
+            while not self.panorama.repository().get(filename, {}).get("available"):
+                if self.clock() >= deadline:
+                    raise PanosError("Panorama download of " + filename + " did not finish before timeout")
+                self.checkpoint()
+                self.wait(15)
+            self.event("panorama_download_completed", file=filename, shared=True)
+            return
+        job = self.wait_job(job_id, r.download_timeout, "panorama_download", True, self.panorama)
+        if job["result"] != "OK":
+            raise PanosError("Panorama download of " + filename + " failed: " + job["details"])
+        self.event("panorama_download_completed", file=filename, job=job_id)
+
+    def wait_ha(self, serial, done, timeout, error):
         deadline = self.clock() + timeout
         while True:
             try:
-                ha = self.firewall.ha_state()
+                ha = self.fw(serial).ha_state()
                 if done(ha):
                     return ha
             except PanosError:
@@ -369,67 +557,131 @@ class PanosRunner:
                 raise PanosError(error)
             self.wait(5)
 
-    def suspend(self):
-        if not self.clustered:
+    def preemption(self, value):
+        """Set preemption on members that had it enabled (value "no"), or restore it (None)."""
+        r = self.request
+        state = self.result.setdefault("preemption", {})
+        for serial in self.members:
+            original = self.member(serial).get("preemptive")
+            entry = state.setdefault(serial, {"original": original, "current": original})
+            wanted = value if value is not None else entry["original"]
+            if original != "yes" or entry["current"] == wanted:
+                continue
+            firewall = self.fw(serial)
+            self.checkpoint()
+            entry["current"] = "changing"
+            self.intent("preemption_" + ("disable" if wanted == "no" else "restore"), serial=serial)
+            firewall.set_config(HA_ELECTION, "<preemptive>" + wanted + "</preemptive>")
+            job = self.wait_job(firewall.commit(), r.commit_timeout, "commit", False, firewall)
+            if job["result"] != "OK":
+                raise PanosError("commit on " + serial + " failed: " + job["details"])
+            self.wait_ha(
+                serial,
+                lambda h: h["preemptive"] == wanted,
+                120,
+                serial + " does not report preemptive " + wanted,
+            )
+            entry["current"] = wanted
+            self.event("preemption_committed", serial=serial, preemptive=wanted)
+
+    def suspend(self, serial):
+        member = self.member(serial)
+        if member.get("suspended"):
             return
-        ha = self.ha_preflight()
-        self.checkpoint()
-        self.result["ha_suspended"] = True
-        self.intent("ha_suspend", previous_state=ha["local"])
-        self.firewall.command(SUSPEND)
+        # Never suspend both members: the peer must be functional and ready to carry traffic.
+        other = self.fw(self.peer_of(serial)).ha_state()
+        if not functional(other["local"]) or other["peer_conn"] != "up":
+            raise PanosError("refusing to suspend " + serial + ": its peer is not functional")
+        member["suspended"] = True
+        self.intent("ha_suspend", serial=serial)
+        self.fw(serial).command(SUSPEND)
         self.wait_ha(
-            lambda h: h["local"] == "suspended" and h["peer_state"] == "active",
+            serial,
+            lambda h: h["local"] == "suspended" and carries(h["peer_state"]),
             300,
-            "HA suspend did not complete with the peer active",
+            serial + " HA suspend did not complete with its peer active",
         )
-        self.event("ha_suspended")
+        self.event("ha_suspended", serial=serial)
 
-    def return_to_service(self):
-        if not self.result.get("ha_suspended"):
+    def make_functional(self, serial):
+        member = self.member(serial)
+        if not member.get("suspended"):
             return
-        self.intent("ha_functional")
-        self.firewall.command(FUNCTIONAL)
+        self.intent("ha_functional", serial=serial)
+        self.fw(serial).command(FUNCTIONAL)
         self.wait_ha(
-            lambda h: h["local"] in ("active", "passive") and h["peer_conn"] == "up",
+            serial,
+            lambda h: functional(h["local"]) and h["peer_conn"] == "up",
             600,
-            "firewall did not return to a functional HA state",
+            serial + " did not return to a functional HA state",
         )
-        self.result["ha_suspended"] = False
-        self.event("ha_functional")
+        member["suspended"] = False
+        self.event("ha_functional", serial=serial)
 
-    def install(self):
-        r = self.request
+    def failback(self, serial, survivor):
+        # Traffic returns to the member that was carrying it; the failing survivor stays suspended.
+        self.event("failback_started", serial=serial, survivor=survivor)
+        self.make_functional(serial)
+        self.suspend(survivor)
+        self.event("failback_completed", serial=serial, survivor=survivor)
+
+    def handoff(self, serial):
+        """Move traffic off serial, then prove its peer carries it before serial is upgraded."""
+        survivor = self.peer_of(serial)
+        phase = "handoff:" + serial
+        action = self.take(phase)
+        if action:
+            # A gate here followed any failback: return the survivor to service and hand off again.
+            self.make_functional(survivor)
         self.checkpoint()
-        self.result["install"] = {"version": r.target_version, "status": "started"}
-        self.intent("install", version=r.target_version)
-        job_id = self.firewall.enqueue(install(r.target_version))
-        self.result["install"]["job"] = job_id
-        self.event("install_enqueued", job=job_id)
+        self.suspend(serial)
+        if action == "accept":
+            return
+        self.validate(
+            phase,
+            lambda: self.pair_sample(suspended={serial}),
+            failback=(lambda: self.failback(serial, survivor)) if self.request.ha_policy.failback else None,
+        )
+
+    def install(self, serial):
+        r = self.request
+        firewall = self.fw(serial)
+        self.checkpoint()
+        member = self.member(serial)
+        member["install"] = {"version": r.target_version, "status": "started"}
+        self.intent("install", serial=serial, version=r.target_version)
+        job_id = firewall.enqueue(install(r.target_version))
+        member["install"]["job"] = job_id
+        self.event("install_enqueued", serial=serial, job=job_id)
         # An install cannot safely be interrupted. Observe completion before honoring cancellation.
-        job = self.wait_job(job_id, r.install_timeout, "install", cancellable=False)
+        job = self.wait_job(job_id, r.install_timeout, "install", False, firewall)
         if job["result"] != "OK":
-            self.result["install"]["status"] = "failed"
-            raise PanosError("install of " + r.target_version + " failed: " + job["details"])
-        self.result["install"]["status"] = "completed"
-        self.event("install_completed", job=job_id)
+            member["install"]["status"] = "failed"
+            raise PanosError(
+                "install of " + r.target_version + " on " + serial + " failed: " + job["details"]
+            )
+        member["install"]["status"] = "completed"
+        self.event("install_completed", serial=serial, job=job_id)
         self.checkpoint()
 
-    def reboot(self):
+    def reboot(self, serial):
         r = self.request
+        firewall = self.fw(serial)
+        member = self.member(serial)
         self.checkpoint()
-        self.result["reboot_requested_at"] = datetime.now(timezone.utc).isoformat()
+        member["reboot_requested_at"] = datetime.now(timezone.utc).isoformat()
         start = self.clock()
-        self.intent("reboot", version=r.target_version)
+        self.intent("reboot", serial=serial, version=r.target_version)
         try:
-            self.firewall.command(RESTART)
+            firewall.command(RESTART)
         except PanosUnavailable:
             # Restart can drop the proxied session. Only a new boot on the target verifies it.
-            self.event("reboot_response_uncertain")
+            self.event("reboot_response_uncertain", serial=serial)
         deadline = start + r.reboot_timeout
         while self.clock() < deadline:
             self.wait(15)
             try:
-                info = self.firewall.system_info()
+                info = firewall.system_info()
             except PanosError:
                 continue
             uptime = info["uptime_seconds"]
@@ -438,12 +690,14 @@ class PanosRunner:
                 and uptime is not None
                 and uptime <= self.clock() - start + 120
             ):
-                self.result["boot_verified"] = {"version": info["sw_version"], "uptime_seconds": uptime}
-                self.event("reboot_completed")
+                member["boot_verified"] = {"version": info["sw_version"], "uptime_seconds": uptime}
+                self.event("reboot_completed", serial=serial)
                 return
-        raise PanosError("a new boot on the target version was not verified before timeout")
+        raise PanosError(serial + ": a new boot on the target version was not verified before timeout")
 
-    def validate(self, phase, sample):
+    def validate(self, phase, sample, failback=None):
+        if self.take(phase) == "accept":
+            return
         policy, timeout = self.request.validation_policy, self.request.validation_timeout
         deadline = self.clock() + timeout
         passes = 0
@@ -469,6 +723,8 @@ class PanosRunner:
             if passes >= (policy.consecutive_passes if timeout else 1):
                 return
             if self.clock() >= deadline:
+                if failback:
+                    failback()
                 if policy.on_timeout == "fail":
                     raise PanosError(phase + " timed out; findings recorded")
                 self.store.open_gate(
@@ -480,68 +736,88 @@ class PanosRunner:
                 )
             self.wait(min(policy.sample_interval_seconds, max(0, deadline - self.clock())))
 
-    def system_sample(self):
+    def system_sample(self, serial):
         r = self.request
+        firewall = self.fw(serial)
         critical, findings = [], []
-        info = self.firewall.system_info()
+        info = firewall.system_info()
         if info["sw_version"] != r.target_version:
             critical.append("running version is " + info["sw_version"])
         if info["operational_mode"] not in ("", "normal"):
             critical.append("operational mode is " + info["operational_mode"])
-        if not self.firewall.chassis_ready():
+        if not firewall.chassis_ready():
             critical.append("chassis is not ready")
         commits = sorted(
-            (j for j in self.firewall.jobs() if j["type"].lower() == "autocom"), key=lambda j: j["id"]
+            (j for j in firewall.jobs() if j["type"].lower() == "autocom"), key=lambda j: j["id"]
         )
         if not commits:
-            findings.append({"category": "auto_commit", "change": "no auto-commit job reported"})
+            findings.append(
+                {"category": "auto_commit", "change": "no auto-commit job reported", "serial": serial}
+            )
         elif commits[-1]["status"] != "FIN":
             critical.append("auto-commit is still running")
         elif commits[-1]["result"] != "OK":
             critical.append("auto-commit failed: " + commits[-1]["details"][:300])
-        entry = self.panorama.device(r.serial)
+        entry = self.panorama.device(serial)
         if not entry or not entry["connected"]:
             critical.append("firewall is not connected to Panorama")
         elif entry["sw_version"] != r.target_version:
             critical.append("Panorama reports version " + entry["sw_version"])
-        baseline = self.result["pre_validation"]["unit"]
+        source = self.member(serial)["source"]
         for key in ("app_version", "threat_version", "av_version"):
-            if baseline.get(key) and info.get(key) and baseline[key] != info[key]:
-                findings.append({"category": "content", "change": key + " changed", "objects": [info[key]]})
-        self.result["post_system"] = info
-        return critical, findings
+            if source.get(key) and info.get(key) and source[key] != info[key]:
+                findings.append(
+                    {
+                        "category": "content",
+                        "change": key + " changed",
+                        "objects": [info[key]],
+                        "serial": serial,
+                    }
+                )
+        self.member(serial)["post_system"] = info
+        return [serial + ": " + c for c in critical], findings
 
-    def traffic_sample(self):
+    def pair_sample(self, suspended=frozenset()):
+        """HA state of every member plus traffic on each member that should carry it."""
         r = self.request
-        critical = []
-        ha = self.firewall.ha_state()
-        if ha["enabled"]:
-            if ha["local"] not in ("active", "passive"):
-                critical.append("HA state is " + (ha["local"] or "unknown"))
-            if ha["peer_conn"] != "up":
-                critical.append("HA peer connection is " + (ha["peer_conn"] or "unknown"))
-            if sorted([ha["local"], ha["peer_state"]]) != ["active", "passive"]:
-                critical.append("HA requires one active and one passive member")
+        critical, findings = [], []
+        carriers = [r.serial]
+        if self.ha["enabled"]:
+            states = {s: self.fw(s).ha_state() for s in self.members}
+            for serial, ha in states.items():
+                if serial in suspended:
+                    if ha["local"] != "suspended":
+                        critical.append(serial + " is not suspended")
+                elif not functional(ha["local"]):
+                    critical.append(serial + " HA state is " + (ha["local"] or "unknown"))
+                elif ha["peer_conn"] != "up":
+                    critical.append(serial + " HA peer connection is " + (ha["peer_conn"] or "unknown"))
+            serving = [s for s in self.members if s not in suspended]
+            carriers = [s for s in serving if carries(states[s]["local"])]
+            if self.ha["mode"] == "active-passive" and len(carriers) != 1:
+                critical.append("active/passive HA requires exactly one active member")
+            if self.ha["mode"] == "active-active" and carriers != serving:
+                critical.append("every functional active/active member must be active")
             if (
-                ha["local_version"]
-                and ha["local_version"] == ha["peer_version"]
+                not suspended
+                and len({self.version(s) for s in self.members}) == 1
                 and r.ha_policy.require_running_sync
-                and ha["running_sync"] != "synchronized"
+                and any(ha["running_sync"] != "synchronized" for ha in states.values())
             ):
                 critical.append("HA running configuration is not synchronized")
             if critical:
                 return critical, []
-        active = self.active_firewall(ha)
-        current = self.traffic(active)
-        failures, findings, metrics = compare(
-            self.result["pre_validation"]["traffic"], current, r.validation_policy
-        )
-        self.result["post_validation"] = {
-            "traffic": current,
-            "traffic_source": active.serial,
-            "metrics": metrics,
-        }
-        return critical + failures, findings
+        baselines = self.result["pre_validation"]["traffic"]
+        post = self.result.setdefault("post_validation", {})
+        for serial in carriers:
+            current = self.traffic(self.fw(serial))
+            failures, items, metrics = compare(
+                baselines.get(serial, baselines.get("pair")), current, r.validation_policy
+            )
+            critical += [serial + ": " + f for f in failures]
+            findings += [{**f, "serial": serial} for f in items]
+            post[serial] = {"traffic": current, "metrics": metrics}
+        return critical, findings
 
     def settle(self):
         remaining = self.request.validation_policy.settling_seconds
@@ -550,56 +826,63 @@ class PanosRunner:
             self.wait(min(15, remaining))
             remaining -= min(15, remaining)
 
-    def accept(self, version):
-        self.result["validated_version"] = version
-        self.result["validation_accepted"] = True
+    def upgrade_member(self, serial, handoff):
+        ha = self.ha["enabled"]
+        if handoff:
+            self.step("handoff:" + serial, lambda: self.handoff(serial))
+        elif ha:
+            self.step("suspend:" + serial, lambda: self.suspend(serial))
+        self.step("install:" + serial, lambda: self.install(serial))
+        self.step("reboot:" + serial, lambda: self.reboot(serial))
+        self.step("settle:" + serial, self.settle)
+        phase = "validate_system:" + serial
+        self.step(phase, lambda: self.validate(phase, lambda: self.system_sample(serial)))
+        if ha:
+            self.step("functional:" + serial, lambda: self.make_functional(serial))
+        phase = "validate_traffic:" + serial
+        self.step(phase, lambda: self.validate(phase, self.pair_sample))
+        self.member(serial)["validated"] = True
 
     def upgrade(self):
         self.setup()
         r = self.request
         self.reserve()
         self.checkpoint()
-        decision = self.store.apply_decision(self.job["id"], self.worker)
-        if decision:
-            accepted = decision["decision"]["action"] == "accept"
-            if accepted:
-                self.result.setdefault("manual_validations", []).append(decision["decision"])
-                self.event("manual_validation_applied", gate_id=decision["id"])
-            if decision["phase"] == SYSTEM:
-                if not accepted:
-                    self.validate(SYSTEM, self.system_sample)
-                self.return_to_service()
-                self.validate(TRAFFIC, self.traffic_sample)
-            elif decision["phase"] == TRAFFIC and not accepted:
-                self.validate(TRAFFIC, self.traffic_sample)
-            self.accept(r.target_version)
-            return
+        self.decision = self.store.apply_decision(self.job["id"], self.worker)
         self.result["plan"] = r.plan()
-        info = self.prevalidate()
-        if info["sw_version"] == r.target_version:
+        self.step("prevalidate", self.prevalidate)
+        plan = self.result["upgrade_plan"]
+        if not plan:
             self.result["already_on_target"] = True
-            self.event("already_on_target")
-            self.validate(TRAFFIC, self.traffic_sample)
-            self.accept(r.target_version)
-            return
-        self.backup()
-        self.stage()
-        if r.stage_only:
-            return
-        self.suspend()
-        self.install()
-        self.reboot()
-        self.settle()
-        self.validate(SYSTEM, self.system_sample)
-        self.return_to_service()
-        self.validate(TRAFFIC, self.traffic_sample)
-        self.accept(r.target_version)
+            self.step("validate_current", lambda: self.validate("validate_current", self.pair_sample))
+        else:
+            for item in plan:
+                self.step("backup:" + item["serial"], lambda s=item["serial"]: self.backup(s))
+            for item in plan:
+                self.step("stage:" + item["serial"], lambda s=item["serial"]: self.stage(s))
+            if r.stage_only:
+                return
+            if self.ha["enabled"]:
+                self.step("preemption_disable", lambda: self.preemption("no"))
+            for item in plan:
+                self.upgrade_member(item["serial"], item["handoff"])
+            if self.ha["enabled"]:
+                self.step("preemption_restore", lambda: self.preemption(None))
+                self.step("validate_final", lambda: self.validate("validate_final", self.pair_sample))
+        self.result["validated_version"] = r.target_version
+        self.result["validation_accepted"] = True
 
     def restore_service(self):
-        # Before reboot, an unchanged running image can return to service. After reboot, an
-        # unvalidated unit stays suspended so its peer keeps carrying traffic.
-        if self.result.get("ha_suspended") and not self.result.get("reboot_requested_at"):
-            self.return_to_service()
+        # Before an install or reboot, an unchanged member returns to service and preemption is
+        # restored. Upgraded but unvalidated members stay suspended so the peer keeps traffic.
+        members = self.result.get("members", {})
+        for serial, member in members.items():
+            if member.get("suspended") and not staged(member):
+                self.make_functional(serial)
+        if not any(staged(m) for m in members.values()) and any(
+            p["current"] != p["original"] for p in self.result.get("preemption", {}).values()
+        ):
+            self.preemption(None)
 
     def run(self):
         try:
@@ -640,7 +923,7 @@ class PanosRunner:
                 except LostOwnership:
                     raise
                 except Exception:
-                    self.result["ha_restore_failed"] = True
+                    self.result["restore_failed"] = True
                 self.event("failed", message=message)
                 self.store.finish(
                     self.job["id"], self.worker, "recovery_required" if self.unsafe() else "failed"

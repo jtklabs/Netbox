@@ -44,9 +44,15 @@ class PanosValidationPolicy(Model):
 
 
 class PanosHAPolicy(Model):
-    allow_active_first: bool = True
+    upgrade_order: Literal["standby_first", "active_first"] = Field(
+        default="standby_first",
+        description="standby_first upgrades the passive (active/passive) or active-secondary (active/active) member first, validates it, then fails over to it.",
+    )
     require_running_sync: bool = True
-    mixed_version_failover: Literal["require_validated_peer", "allow"] = "require_validated_peer"
+    failback: bool = Field(
+        default=True,
+        description="When the member left carrying traffic fails validation after a failover, return traffic to the other member before stopping.",
+    )
 
 
 class PanosUpgradeRequest(ScheduledRequest):
@@ -63,16 +69,34 @@ class PanosUpgradeRequest(ScheduledRequest):
         default=True,
         description="Download the X.Y.0 base image first when the target is a maintenance release of another feature release.",
     )
+    software_source: Literal["panorama", "update_server"] = Field(
+        default="panorama",
+        description="panorama pushes images from Panorama's software repository, so firewalls need no internet access; update_server makes each firewall download its own.",
+    )
+    panorama_download: bool = Field(
+        default=True,
+        description="Let Panorama download a missing image from its update server; false requires the file already in Panorama's repository.",
+    )
+    software_family: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9]{1,16}$",
+        description="Override the platform family Panorama reports, used in image filenames such as PanOS_3200-11.1.6-h3.",
+    )
     allowed_source_versions: list[PanosVersion] = Field(min_length=1, max_length=200)
     approved_models: list[str] = Field(default_factory=list, max_length=100)
     stage_only: bool = Field(
         default=False, description="Run prechecks and downloads; never install or reboot."
     )
     config_backup: bool = True
+    tech_support: bool = Field(
+        default=True, description="Save a tech support file from each member before changes."
+    )
     backup_directory: str | None = Field(default=None, max_length=240)
     validation_policy: PanosValidationPolicy = Field(default_factory=PanosValidationPolicy)
     ha_policy: PanosHAPolicy = Field(default_factory=PanosHAPolicy)
     job_wait_timeout: int = Field(default=600, ge=0, le=7200)
+    tech_support_timeout: int = Field(default=1800, ge=60, le=7200)
+    commit_timeout: int = Field(default=900, ge=60, le=7200)
     download_timeout: int = Field(default=3600, ge=60, le=14400)
     install_timeout: int = Field(default=3600, ge=60, le=14400)
     reboot_timeout: int = Field(default=2700, ge=300, le=7200)
@@ -90,19 +114,26 @@ class PanosUpgradeRequest(ScheduledRequest):
         return self
 
     def plan(self):
+        """Steps per member; an HA pair runs them for each member that is not on the target."""
         steps = ["discover_ha", "prevalidate"]
-        if self.config_backup:
-            steps += ["config_backup"]
-        steps += ["software_check", "download"]
+        if self.config_backup or self.tech_support:
+            steps += ["backup"]
+        if self.software_source == "panorama":
+            steps += ["panorama_repository", "upload_to_firewall"]
+        else:
+            steps += ["software_check", "download"]
         if self.stage_only:
             return steps
         return steps + [
-            "ha_suspend_if_clustered",
+            "ha_disable_preemption_and_commit",
+            "ha_suspend_or_handoff_with_survivor_validation",
             "install",
             "reboot",
             "validate_system",
-            "ha_functional_if_clustered",
-            "validate_traffic",
+            "ha_functional",
+            "validate_pair_or_traffic",
+            "ha_restore_preemption_and_commit",
+            "validate_final",
         ]
 
 

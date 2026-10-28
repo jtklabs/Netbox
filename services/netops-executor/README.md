@@ -45,7 +45,8 @@ keeps the token only in tab memory and uses the same API.
 | GET | `/api/v1/snmp/walks/{id}/results?after=0&limit=500` | Paginated partial/final rows |
 | GET | `/api/v1/jobs?limit=100&offset=0` or `/jobs/{id}` | Jobs and full results/credential audit |
 | GET | `/api/v1/jobs/{id}/events?after=0&limit=500` | Ordered events; advance cursor to last `seq` |
-| GET | `/api/v1/jobs/{id}/backup` | Download completed UCS backup |
+| GET | `/api/v1/jobs/{id}/backup` | Download completed UCS backup (or the first PAN-OS config backup) |
+| GET | `/api/v1/jobs/{id}/artifacts/{name}` | Download a saved PAN-OS running config or tech support file |
 | POST | `/api/v1/jobs/{id}/cancel` | Durable cancellation request |
 | POST | `/api/v1/jobs/{id}/validation-decisions` | Accept/retry a particular validation gate |
 | POST | `/api/v1/jobs/{id}/mark-done` | Manually complete an item for the wave barrier |
@@ -550,18 +551,26 @@ before copying its database/WAL files. No automatic purge removes rollback histo
 
 ## PAN-OS upgrades through Panorama
 
-Every firewall operation is a Panorama XML API `type=op` request with
-`target=<firewall serial>`, following Palo Alto Networks'
-[HA upgrade through Panorama](https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-panorama-api/pan-os-xml-api-use-cases/upgrade-pan-os-on-multiple-ha-firewalls-through-panorama-api)
-use case. The remote needs HTTPS to Panorama only. Each firewall downloads software
-from its configured update server (`request system software download`), so
-firewalls need update-server reachability, directly or through their configured
-proxy. Pushing images from Panorama's own software repository is not implemented.
+Every firewall operation is a Panorama XML API request with `target=<firewall
+serial>`, so the remote needs HTTPS to Panorama only. By default, software is
+**pushed from Panorama's software repository** ("Panorama > Device Deployment >
+Software"), so firewalls need no internet access: `request batch software upload
+file <PanOS_<family>-<version>> devices <serial>`. The platform family comes from
+Panorama's device list (`PanOS_3200-11.1.6-h3`, `PanOS_vm-11.1.6-h3`); override it
+with `software_family`. A file missing from the repository is downloaded by
+Panorama (`request batch software download file`) unless `panorama_download` is
+false; an offline Panorama can use files uploaded to it manually. Concurrent jobs
+that need the same file wait for one shared repository download. With
+`software_source: update_server`, each firewall instead downloads from its own
+update server (`request system software download`). Installation always runs on
+the firewall (`request system software install version`) after it reports the
+image as downloaded.
 
 Provision the Panorama HTTP target and its API key profile as described under
 [Generic SSH and HTTP jobs](#generic-ssh-and-http-jobs) (`scheme:header`,
 `header:X-PAN-KEY`, read-only `type=version` probe). The key's Panorama admin role
-needs operational requests for the managed firewalls. Then send this to
+needs operational, configuration, commit and export requests for the managed
+firewalls, plus Panorama's batch software requests. Then send this to
 `/api/v1/panos/upgrade-batches`:
 
 ```json
@@ -589,87 +598,117 @@ A batch holds up to 1,000 serials. Wave barriers, start windows, `defaults`,
 `/api/v1/upgrade-batches/{id}` (`kind: panos_upgrade`). Put a small canary wave
 first. A failed or `needs_review` item stops later waves but not its own wave.
 For one firewall, send the defaults plus `"serial"` to `/api/v1/panos/jobs`.
-Concurrency is also bounded by worker processes: a PAN-OS job holds a worker while
-it waits for downloads, install and reboot, so run at least as many workers as the
-largest `upgrade_at_a_time` (`executor_workers`, or `--scale worker=N`).
+
+**An HA pair is one unit of work.** The job for either member upgrades both, one at
+a time, and reserves both. When the batch also lists the peer, the peer's item runs
+afterwards, finds the pair on the target and only validates. A job holds a worker
+while it waits for backups, transfers, installs and reboots, so run at least as many
+workers as the largest `upgrade_at_a_time` (`executor_workers`, or
+`--scale worker=N`).
 
 | Option | Behavior/default |
 | --- | --- |
 | `target_version` | Version to install, such as `11.1.6-h3` |
-| `allowed_source_versions` | Required exact running-version allowlist; a firewall already on the target only validates |
-| `download_versions` | Extra versions to download, not install, such as intermediate base images for a skip-version upgrade |
-| `auto_base_image` | Default true: download `X.Y.0` first when the target is a maintenance release of another feature release |
+| `allowed_source_versions` | Required exact running-version allowlist; members already on the target only validate |
+| `software_source` | `panorama` (default) or `update_server` |
+| `panorama_download` | Default true: Panorama downloads a missing file into its repository |
+| `software_family` | Override the family used in Panorama filenames |
+| `download_versions` | Extra versions to stage, not install, such as intermediate base images for a skip-version upgrade |
+| `auto_base_image` | Default true: stage `X.Y.0` first when the target is a maintenance release of another feature release |
 | `approved_models` | Optional model allowlist matching `show system info` |
-| `stage_only` | Prechecks, backup and downloads only; a later full job reuses the downloaded images |
-| `config_backup` | Default true: save the running configuration XML under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |
-| `ha_policy` | `allow_active_first` (true), `require_running_sync` (true), `mixed_version_failover` (`require_validated_peer` or `allow`) |
+| `stage_only` | Prechecks, backups and staging only; a later full job reuses the staged images |
+| `config_backup`, `tech_support` | Default true: save each member's running configuration XML and a tech support file under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |
+| `ha_policy.upgrade_order` | `standby_first` (default) or `active_first` |
+| `ha_policy.failback` | Default true: return traffic to the other member when the member left carrying it fails validation |
+| `ha_policy.require_running_sync` | Default true: same-version pairs must report running configuration synchronized |
 | `job_wait_timeout` | Wait for running firewall jobs before starting; default 600 seconds |
-| `download_timeout`, `install_timeout` | Per firewall job; default 3600 seconds each |
+| `tech_support_timeout`, `commit_timeout` | Defaults 1800 and 900 seconds |
+| `download_timeout`, `install_timeout` | Per transfer or install job; default 3600 seconds each |
 | `reboot_timeout` | Verified reboot window; default 2700, maximum 7200 seconds |
-| `validation_timeout` | Bounded validation window per phase; default 900 seconds |
+| `validation_timeout` | Bounded window for each validation step; default 900 seconds |
 
 Steps, in order:
 
 1. **Discover and reserve.** Panorama's `show devices all` must list the firewall as
-   connected. HA peers come from Panorama's `ha/peer/serial`. Both members and the
-   pair are reserved, so peers never upgrade at the same time.
-2. **Prechecks** (failure here changes nothing and releases the reservation): serial,
+   connected. The HA peer comes from Panorama's `ha/peer/serial`.
+2. **Prechecks for every member** (failure here changes nothing): serial,
    `operational-mode normal`, allowed source version, approved model, chassis ready,
-   no running firewall jobs, no uncommitted local changes (`check pending-changes`).
-   HA pairs must be active/passive with the peer connection up, one active and one
-   passive member, the peer connected to Panorama and running configuration
-   synchronized when both run the same version.
-3. **Baseline** from the member carrying traffic: hardware interface link states,
-   legacy routing-table routes, BGP peer states, IPsec tunnel states, active session
-   count and ARP count. A command that fails, such as routes with the Advanced
-   Routing Engine, is recorded as a gap and never compared.
-4. **Backup, software check and downloads.** Missing images are downloaded and the
-   firewall must then report them as downloaded.
-5. **HA suspend.** The member being upgraded is suspended. An active member fails
-   over to its peer first; when the peer already runs other software, it must have
-   a validated `panos_upgrade` job for that version, unless `mixed_version_failover`
-   is `allow`.
-6. **Install and reboot.** A new boot is verified by the target version and an uptime
-   shorter than the time since the restart request.
-7. **System validation** (still suspended): target version, chassis ready, latest
-   auto-commit finished `OK`, connected to Panorama on the target version. Content
-   version changes are reported.
-8. **Return to service.** `request high-availability state functional`, then wait for
-   an active or passive state with the peer connection up.
-9. **Traffic validation** against the baseline, on whichever member is now active.
-   With `restore_required` (default), every baseline interface that was up, BGP
-   peer that was Established and IPsec tunnel that was active must recover. Routes
-   must stay at `min_route_percent` (default 90) of the baseline. Session and ARP
-   counts fail only an explicit `min_session_percent`/`min_arp_percent`. Other
-   differences (added/removed routes, state changes) are warnings. HA pairs on the
-   same version must report one active and one passive member, with running
-   configuration synchronized.
+   no running firewall jobs, no uncommitted local changes (`check pending-changes`),
+   connected to Panorama. HA pairs must be active/passive (one active, one passive)
+   or active/active (both active), with peer connections up and running
+   configuration synchronized when both run the same version.
+3. **Baseline:** hardware interface link states, legacy routing-table routes, BGP
+   peer states, IPsec tunnel states, active session count and ARP count. An
+   active/passive pair has one baseline from its active member; active/active
+   members and standalone firewalls each have their own. A command that fails, such
+   as routes with the Advanced Routing Engine, is recorded as a gap and never compared.
+4. **Backups** of each member to be upgraded: running configuration and tech support
+   file (`type=export&category=tech-support`). Download them with
+   `GET /api/v1/jobs/{id}/artifacts/{name}`.
+5. **Stage** every required image on each member to be upgraded.
+6. **Disable preemption.** Members whose HA state reports preemptive `yes` get
+   `preemptive no` in their local HA election settings, committed and read back.
+7. **Upgrade each member in order.** `standby_first` takes the passive member
+   (active-secondary in active/active) first:
+   1. Suspend it. Suspending a member that carries traffic is a **handoff**: the
+      peer must then pass traffic validation against the baseline while carrying
+      everything. A member is never suspended unless its peer is functional.
+   2. Install, then reboot. A new boot is verified by the target version and an
+      uptime shorter than the time since the restart request.
+   3. **System validation** while still suspended: target version, chassis ready,
+      latest auto-commit finished `OK`, connected to Panorama on the target. Content
+      version changes are reported.
+   4. Make it functional (`request high-availability state functional`), then
+      validate the pair: every member functional with its peer connection up, one
+      active member (active/passive) or every functional member active
+      (active/active), and traffic on each active member against its baseline.
 
-Validation samples every `sample_interval_seconds` (15) after `settling_seconds`
-(60) and needs `consecutive_passes` (2) clean samples. On timeout, `on_timeout`
-selects `needs_review` (default) or `fail`. `noncritical_differences:
-require_review` also gates on warnings. Gates are named
-`panos_system_validation` and `panos_traffic_validation` and use the existing
-validation-decision endpoint: `retry` samples again, and `accept` records the
-waiver and continues. Accepting a system gate makes the unit functional and runs
-traffic validation. A decision never repeats download, install or reboot.
+   In an active/passive pair this means: upgrade the standby, validate it, fail
+   over to it by suspending the active, validate the upgraded member carrying
+   traffic, then upgrade the former active.
+8. **Restore preemption** where it was enabled, commit, and run a final pair
+   validation, which also requires synchronized running configuration.
 
-Failures before install, and installs the firewall reports as failed, end as
-`failed` and release the reservation; a suspended member returns to service first.
-An install with an unknown outcome, a staged image or a reboot without passing
-validation ends as `recovery_required` and keeps both HA reservations. After a reboot an
-unvalidated member **stays suspended**, so its peer keeps carrying traffic. Inspect
-the firewall, make it functional manually if appropriate, then resolve the job.
-Cancellation during prechecks or downloads is clean. An install is never interrupted;
-cancellation is honored after it finishes. Results contain `pre_validation`,
-`post_system`, `post_validation` with route/session metrics, `validation_findings`,
-`software`, `install`, `boot_verified`, `backup` and `validated_version`.
-`GET /api/v1/jobs/{id}/backup` downloads the saved XML.
+Traffic validation: with `restore_required` (default), every baseline interface
+that was up, BGP peer that was Established and IPsec tunnel that was active must
+recover. Routes must stay at `min_route_percent` (default 90) of the baseline.
+Session and ARP counts fail only an explicit `min_session_percent`/`min_arp_percent`.
+Other differences (added/removed routes, state changes) are warnings. Samples run
+every `sample_interval_seconds` (15), after `settling_seconds` (60) following a
+reboot, and need `consecutive_passes` (2) clean samples. On timeout, `on_timeout`
+selects `needs_review` (default) or `fail`; `noncritical_differences:
+require_review` also gates on warnings.
 
-Palo Alto recommends disabling HA preemption during upgrades. With preemption
-enabled, a higher-priority member can take traffic back after it is made functional.
-Mixed-version pairs may not synchronize sessions across a feature-release
-difference, so the second failover can drop sessions.
+**Failback.** If the member left carrying traffic after a handoff fails
+validation, the job makes the suspended member functional again and suspends the
+failing one before it stops. In the standby-first order that returns traffic to the
+original active member on its original software, with the upgraded member
+suspended for inspection.
+
+Review gates are named after the step (`handoff:<serial>`,
+`validate_system:<serial>`, `validate_traffic:<serial>`, `validate_final`,
+`validate_current`) and use the existing validation-decision endpoint. `retry`
+samples again; for a handoff gate it returns the failed-back member to service and
+hands off again. `accept` records the waiver and continues. A decision resumes
+after the completed steps and never repeats a backup, transfer, install or reboot.
+
+Failures before any install, and installs the firewall reports as failed, end as
+`failed` and release the reservations: suspended members return to service and
+preemption is restored first. An install with an unknown outcome, a staged image or
+a reboot that did not pass validation ends as `recovery_required`. Both HA
+reservations stay held, preemption stays disabled, and an upgraded but unvalidated
+member **stays suspended** so its peer keeps carrying traffic. Inspect the
+firewalls, make them functional and restore preemption manually if appropriate,
+then resolve the job. Cancellation during prechecks, backups or staging is clean.
+An install is never interrupted; cancellation is honored after it finishes. Results
+contain per-member `members` (role, source, software, install, boot, validation),
+`upgrade_plan`, `completed_steps`, `preemption`, `artifacts`, `pre_validation`,
+`post_validation`, `validation_findings` and `validated_version`.
+
+Preemption is restored by setting the original value locally. If HA election
+settings come from a Panorama template, this leaves a local override equal to the
+template value. Mixed-version pairs may not synchronize sessions across a
+feature-release difference, so a handoff can drop sessions.
 
 ## Generic SSH and HTTP jobs
 
@@ -1002,13 +1041,17 @@ output fails closed. The WAF traffic gate requires the configured log adapter or
 manual acceptance; it does not assume a universal SSH request-log interface.
 
 PAN-OS upgrades are tested against a simulated Panorama and firewalls only, built
-from Palo Alto's documented XML API commands and response shapes. They have not run
+from Palo Alto's documented XML API commands and response shapes. The Panorama
+batch software XML (`request batch software info|check|download|upload`) comes from
+published community automation rather than the API reference. None of it has run
 against real Panorama or firewalls. Lab acceptance on your PAN-OS and Panorama
-versions, especially HA suspend persistence across reboot, auto-commit reporting and
-the `show devices all` HA peer fields, is required before production use. Supported
-scope is standalone firewalls and active/passive pairs managed by one Panorama.
-Active/active HA, firewall clusters, Advanced Routing Engine route comparison and
-Panorama-hosted software images are not implemented.
+versions is required before production use, especially for repository filenames,
+the `target` parameter on config/commit/export requests, HA suspend persistence
+across reboot, active/active state names, auto-commit reporting and the
+`show devices all` HA peer fields. Supported scope is standalone firewalls and
+active/passive or active/active pairs managed by one Panorama. Firewall clusters,
+Advanced Routing Engine route comparison and automatic downgrade are not
+implemented.
 
 Command references: [virtual addresses](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_virtual-address.html),
 [UCS](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/sys/sys_ucs.html),

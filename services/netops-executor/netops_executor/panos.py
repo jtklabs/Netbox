@@ -1,5 +1,6 @@
 """Panorama XML API client. Firewall operations are proxied with target=<serial>."""
 
+import os
 import re
 import ssl
 import time
@@ -31,6 +32,12 @@ FUNCTIONAL = (
     "<request><high-availability><state><functional></functional></state></high-availability></request>"
 )
 RESTART = "<request><restart><system></system></restart></request>"
+# Firewall-local HA election settings. HA settings are not synchronized between peers.
+HA_ELECTION = "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/high-availability/group/election-option"
+COMMIT = "<commit></commit>"
+# Panorama's software repository for managed firewalls ("Panorama > Device Deployment > Software").
+REPOSITORY_INFO = "<request><batch><software><info></info></software></batch></request>"
+REPOSITORY_CHECK = "<request><batch><software><check></check></software></batch></request>"
 
 
 def show_job(job_id):
@@ -51,6 +58,25 @@ def install(version):
         "<request><system><software><install><version>"
         + version
         + "</version></install></software></system></request>"
+    )
+
+
+def repository_download(filename):
+    # Filenames are built only from validated family and version patterns.
+    return (
+        "<request><batch><software><download><file>"
+        + filename
+        + "</file></download></software></batch></request>"
+    )
+
+
+def repository_upload(filename, serial):
+    return (
+        "<request><batch><software><upload><file>"
+        + filename
+        + "</file><devices>"
+        + serial
+        + "</devices></upload></software></batch></request>"
     )
 
 
@@ -83,7 +109,47 @@ def uptime_seconds(value):
     return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
 
 
-class Panorama:
+def job_id(result):
+    value = text(result, "job")
+    if not value.isdigit():
+        raise PanosError("operation was accepted without a job ID: " + "".join(result.itertext())[:300])
+    return int(value)
+
+
+class Jobs:
+    """Job helpers shared by Panorama's own operations and proxied firewall operations."""
+
+    @staticmethod
+    def parse_job(job):
+        return {
+            "id": int(text(job, "id", "0") or 0),
+            "type": text(job, "type"),
+            "status": text(job, "status").upper(),
+            "result": text(job, "result").upper(),
+            "progress": text(job, "progress"),
+            "details": " ".join(t.strip() for t in job.find("details").itertext() if t.strip())[:2000]
+            if job.find("details") is not None
+            else "",
+        }
+
+    def jobs(self):
+        return [self.parse_job(job) for job in self.op(JOBS).findall("job")]
+
+    def job(self, job_id):
+        job = self.op(show_job(job_id)).find("job")
+        if job is None:
+            raise PanosError("job " + str(job_id) + " was not reported")
+        return self.parse_job(job)
+
+    def enqueue(self, cmd):
+        """Send a job-producing write once and return the job ID."""
+        return job_id(self.op(cmd, timeout=120))
+
+    def command(self, cmd):
+        return " ".join(t.strip() for t in self.op(cmd, timeout=120).itertext() if t.strip())[:1000]
+
+
+class Panorama(Jobs):
     def __init__(self, settings, store, target_id, profiles, guard, audit):
         self.target = settings.http_targets[target_id]
         if not self.target.auth_probe_path:
@@ -122,19 +188,42 @@ class Panorama:
                 raise PanosError("Panorama authentication failed: " + str(exc)) from None
         return self.auth
 
-    def op(self, cmd, target=None, timeout=60, limit=16 * 1024 * 1024):
+    def op(self, cmd, target=None, **kwargs):
+        return self.request({"type": "op", "cmd": cmd, **({"target": target} if target else {})}, **kwargs)
+
+    def request(self, form, timeout=60, limit=16 * 1024 * 1024, destination=None):
+        """POST one API request. With destination, a binary attachment streams to that file."""
         options = self.connect()
-        form = {"type": "op", "cmd": cmd, **({"target": target} if target else {})}
         try:
             with self.client.stream("POST", "/api/", data=form, timeout=timeout, **options) as response:
-                content = bytearray()
-                deadline = time.monotonic() + timeout
-                for chunk in response.iter_bytes():
-                    self.guard()
-                    content.extend(chunk)
-                    if len(content) > limit or time.monotonic() > deadline:
-                        raise PanosUnavailable("Panorama response exceeded size or duration limit")
                 status = response.status_code
+                binary = (
+                    destination is not None
+                    and 200 <= status < 300
+                    and "xml" not in response.headers.get("content-type", "")
+                )
+                stream = (
+                    os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+                    if binary
+                    else None
+                )
+                content, size = bytearray(), 0
+                deadline = time.monotonic() + timeout
+                try:
+                    for chunk in response.iter_bytes():
+                        self.guard()
+                        size += len(chunk)
+                        if size > limit or time.monotonic() > deadline:
+                            raise PanosUnavailable("Panorama response exceeded size or duration limit")
+                        if stream:
+                            stream.write(chunk)
+                        else:
+                            content.extend(chunk)
+                finally:
+                    if stream:
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                        stream.close()
         except httpx.HTTPError as exc:
             raise PanosUnavailable("Panorama request failed (" + type(exc).__name__ + ")") from None
         if status in (401, 403):
@@ -143,6 +232,8 @@ class Panorama:
             raise PanosError("Panorama rejected the API credential (HTTP " + str(status) + ")")
         if not 200 <= status < 300:
             raise PanosError("Panorama returned HTTP " + str(status))
+        if binary:
+            return size
         try:
             root = ET.fromstring(content)
         except ET.ParseError:
@@ -162,10 +253,24 @@ class Panorama:
                     "hostname": text(entry, "hostname"),
                     "model": text(entry, "model"),
                     "sw_version": text(entry, "sw-version"),
+                    "family": text(entry, "family"),
                     "ha_state": text(entry, "ha/state").lower(),
                     "ha_peer": text(entry, "ha/peer/serial") or None,
                 }
         return None
+
+    def repository(self, refresh=False):
+        """Firewall software files held by Panorama, keyed by filename."""
+        files = {}
+        for entry in self.op(REPOSITORY_CHECK if refresh else REPOSITORY_INFO, timeout=300).iter("entry"):
+            filename = text(entry, "filename") or entry.get("name") or ""
+            if filename.startswith("PanOS_"):
+                files[filename] = {
+                    "version": text(entry, "version"),
+                    # Manually uploaded files can report uploaded rather than downloaded.
+                    "available": "yes" in (text(entry, "downloaded"), text(entry, "uploaded")),
+                }
+        return files
 
     def close(self):
         if self.client is not None:
@@ -173,12 +278,46 @@ class Panorama:
             self.client = None
 
 
-class Firewall:
+class Firewall(Jobs):
     def __init__(self, panorama, serial):
         self.panorama, self.serial = panorama, serial
 
+    def request(self, form, **kwargs):
+        return self.panorama.request({**form, "target": self.serial}, **kwargs)
+
     def op(self, cmd, **kwargs):
-        return self.panorama.op(cmd, target=self.serial, **kwargs)
+        return self.request({"type": "op", "cmd": cmd}, **kwargs)
+
+    def set_config(self, xpath, element):
+        self.request({"type": "config", "action": "set", "xpath": xpath, "element": element}, timeout=120)
+
+    def commit(self):
+        """Commit the candidate configuration once and return the commit job ID."""
+        return job_id(self.request({"type": "commit", "cmd": COMMIT}, timeout=120))
+
+    def tech_support(self, destination, timeout, wait, clock=time.monotonic):
+        """Generate a tech support file and stream it to destination; return its size."""
+        export = {"type": "export", "category": "tech-support"}
+        job = job_id(self.request(export, timeout=120))
+        deadline = clock() + timeout
+        while True:
+            status = text(
+                self.request({**export, "action": "status", "job-id": str(job)}), "job/status"
+            ).upper()
+            if status == "FIN":
+                break
+            if clock() > deadline:
+                raise PanosError("tech support generation did not finish before timeout")
+            wait(15)
+        size = self.request(
+            {**export, "action": "get", "job-id": str(job)},
+            timeout=timeout,
+            limit=4 * 1024**3,
+            destination=destination,
+        )
+        if not isinstance(size, int) or size == 0:
+            raise PanosError("tech support export returned no file")
+        return size
 
     def system_info(self):
         system = self.op(SYSTEM_INFO).find("system")
@@ -227,39 +366,6 @@ class Firewall:
         if value not in ("yes", "no"):
             raise PanosError("check pending-changes returned an unrecognized value")
         return value == "yes"
-
-    @staticmethod
-    def parse_job(job):
-        return {
-            "id": int(text(job, "id", "0") or 0),
-            "type": text(job, "type"),
-            "status": text(job, "status").upper(),
-            "result": text(job, "result").upper(),
-            "progress": text(job, "progress"),
-            "details": " ".join(t.strip() for t in job.find("details").itertext() if t.strip())[:2000]
-            if job.find("details") is not None
-            else "",
-        }
-
-    def jobs(self):
-        return [self.parse_job(job) for job in self.op(JOBS).findall("job")]
-
-    def job(self, job_id):
-        job = self.op(show_job(job_id)).find("job")
-        if job is None:
-            raise PanosError("job " + str(job_id) + " was not reported")
-        return self.parse_job(job)
-
-    def enqueue(self, cmd):
-        """Send a job-producing write once and return the firewall job ID."""
-        result = self.op(cmd, timeout=120)
-        value = text(result, "job")
-        if not value.isdigit():
-            raise PanosError("operation was accepted without a job ID: " + "".join(result.itertext())[:300])
-        return int(value)
-
-    def command(self, cmd):
-        return " ".join(t.strip() for t in self.op(cmd, timeout=120).itertext() if t.strip())[:1000]
 
     def software(self, refresh=False):
         versions = {}

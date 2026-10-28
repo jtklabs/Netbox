@@ -359,6 +359,17 @@ def create_app(settings=None):
             raise HTTPException(404, "backup file is unavailable")
         return FileResponse(path, filename=job_id + path.suffix, media_type="application/octet-stream")
 
+    @app.get("/api/v1/jobs/{job_id}/artifacts/{name}", dependencies=authenticated)
+    def artifact(job_id: str, name: str):
+        """Download a saved pre-upgrade file such as a PAN-OS running config or tech support file."""
+        item = next((a for a in store.get(job_id)["result"].get("artifacts", []) if a["name"] == name), None)
+        if not item:
+            raise HTTPException(404, "no such artifact")
+        path = under(settings.backup_root, item["path"])
+        if not path.is_file():
+            raise HTTPException(404, "artifact file is unavailable")
+        return FileResponse(path, filename=item["name"], media_type="application/octet-stream")
+
     @app.get("/api/v1/credentials", dependencies=authenticated, response_model=list[CredentialMetadata])
     def credentials():
         return vault.list()

@@ -784,20 +784,6 @@ class Store:
                     return all(verified.get(k) == active.get(k) for k in ("volume", "version", "build"))
         return False
 
-    def validated_panos_peer(self, current, serial, version):
-        with self.connect() as db:
-            rows = db.execute(
-                "SELECT status,result FROM jobs WHERE kind='panos_upgrade' AND device=? AND id!=? AND status IN ('succeeded','completed_with_warnings','manually_completed') AND NOT EXISTS(SELECT 1 FROM locks WHERE job=jobs.id) ORDER BY updated DESC",
-                (serial, current),
-            ).fetchall()
-            for row in rows:
-                result = json.loads(row["result"])
-                # Manual completion advances a wave; it does not prove the peer passed validation.
-                if not result.get("validation_accepted") or not result.get("validated_version"):
-                    continue
-                return result["validated_version"] == version
-        return False
-
     def worker_seen(self, worker, job=None, state="available"):
         with self.connect() as db:
             db.execute(
