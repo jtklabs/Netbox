@@ -1044,17 +1044,20 @@ and multi-host shared queues are not implemented. Unrecognized critical device
 output fails closed. The WAF traffic gate requires the configured log adapter or
 manual acceptance; it does not assume a universal SSH request-log interface.
 
-PAN-OS upgrades are tested against a simulated Panorama and firewalls only, built
-from Palo Alto's documented XML API commands and response shapes. The Panorama
-batch software XML (`request batch software info|check|download|upload`) comes from
-published community automation rather than the API reference. None of it has run
-against real Panorama or firewalls. Lab acceptance on your PAN-OS and Panorama
-versions is required before production use, especially for repository filenames,
-the `target` parameter on config/commit/export requests, HA suspend persistence
-across reboot, active/active state names, auto-commit reporting and the
-`show devices all` HA peer fields. Supported scope is standalone firewalls and
-active/passive or active/active pairs managed by one Panorama. Firewall clusters,
-Advanced Routing Engine route comparison and automatic downgrade are not
+PAN-OS upgrades are tested against a simulated Panorama and firewalls, and partly
+against a PA-VM 12.1.6 active/passive lab pair without a Panorama using
+`tests/lab/panos_direct.py`. That harness runs the real runner and sends every
+proxied request straight to the firewall's XML API; only Panorama's own commands are
+emulated. Lab-verified on 12.1.6: prechecks, HA state parsing (including disabled
+config sync), traffic baselines, running config and tech support export, HA election
+set and commit, and the standby-first suspend, functional, failover and validation
+sequence. Not yet verified on real devices: Panorama's device list fields, the batch
+software commands (taken from published community automation rather than the API
+reference), the `target` relay itself, install and reboot on a newer image, HA suspend
+persistence across reboot and active/active state names. Lab acceptance through a
+real Panorama is required before production use. Supported scope is standalone
+firewalls and active/passive or active/active pairs managed by one Panorama. Firewall
+clusters, Advanced Routing Engine route comparison and automatic downgrade are not
 implemented.
 
 Command references: [virtual addresses](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_virtual-address.html),

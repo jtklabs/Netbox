@@ -66,10 +66,22 @@ def test_discover_reads_both_firewalls_without_writes(tmp_path, monkeypatch):
 
 
 def test_ha_cycle_runs_standby_first_failover_and_restores_preemption(tmp_path, monkeypatch):
-    report, a, b = harness(tmp_path, monkeypatch, "ha-cycle", "--allow-writes", "--no-tech-support")
+    report, a, b = harness(
+        tmp_path, monkeypatch, "ha-cycle", "--allow-writes", "--no-tech-support", "--commit-check"
+    )
     assert report["status"] == "succeeded", report
-    assert b.writes == ["suspend", "functional"]
-    assert a.writes == ["preemptive-no", "commit", "suspend", "functional", "preemptive-yes", "commit"]
+    assert report["commit_check"][b.serial] == {"preemptive": "no", "commit": "OK", "details": "Commit OK"}
+    assert b.writes == ["preemptive-no", "commit", "suspend", "functional"]
+    assert a.writes == [
+        "preemptive-yes",
+        "commit",
+        "preemptive-no",
+        "commit",
+        "suspend",
+        "functional",
+        "preemptive-yes",
+        "commit",
+    ]
     assert report["survivor_state"] == "active"
 
 

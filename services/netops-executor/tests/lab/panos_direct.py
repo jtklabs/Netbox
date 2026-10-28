@@ -21,6 +21,7 @@ Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgr
 
 import argparse
 import json
+import os
 import sys
 import time
 import types
@@ -270,6 +271,22 @@ def run_job(args, settings, store, images, sleep, clock):
                 s for s in runner.members if runner.member(s)["role"] in ("passive", "active-secondary")
             )
             active = runner.peer_of(standby)
+            if args.commit_check:
+                # Same-value set and commit: proves the HA election xpath and commit job path without
+                # changing behavior when preemption is already off.
+                checks = runner.result["commit_check"] = {}
+                for member in runner.members:
+                    value = runner.member(member)["preemptive"]
+                    fw = runner.fw(member)
+                    fw.set_config(panos.HA_ELECTION, "<preemptive>" + value + "</preemptive>")
+                    commit = runner.wait_job(fw.commit(), 900, "commit", False, fw)
+                    checks[member] = {
+                        "preemptive": value,
+                        "commit": commit["result"],
+                        "details": commit["details"][:300],
+                    }
+                    if commit["result"] != "OK":
+                        raise PanosError("commit check failed on " + member)
             runner.preemption("no")
             runner.suspend(standby)
             runner.validate("lab_standby_suspended", lambda: runner.pair_sample(suspended={standby}))
@@ -330,6 +347,7 @@ def summary(job):
         },
         "suspended_after_reboot": result.get("suspended_after_reboot"),
         "survivor_state": result.get("survivor_state"),
+        "commit_check": result.get("commit_check"),
         "gates": [{"phase": g["phase"], "findings": g["findings"]} for g in job["validation_gates"]],
     }
 
@@ -351,7 +369,13 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic):
         "--insecure", action="store_true", help="Skip TLS verification for self-signed lab certificates"
     )
     p.add_argument("--allow-writes", action="store_true")
+    p.add_argument(
+        "--commit-check",
+        action="store_true",
+        help="ha-cycle: set each member's current preemptive value and commit, to exercise the config/commit path",
+    )
     args = p.parse_args(argv)
+    os.umask(0o077)
     if args.mode in WRITES and not args.allow_writes:
         raise SystemExit(args.mode + " changes firewalls; pass --allow-writes after taking checkpoints")
     if args.insecure:
