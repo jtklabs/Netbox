@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, under
 from .models import JobRequest, Model, RecoveryResolution, RollbackRequest
+from .snmp_models import SnmpResults, SnmpWalkRequest
 from .store import Conflict, Store
 
 
@@ -18,7 +19,7 @@ class JobResponse(Model):
     device: str
     lock_key: str
     lock_held: bool
-    kind: Literal["upgrade", "rollback"]
+    kind: Literal["upgrade", "rollback", "snmp_walk"]
     parent: str | None
     request: dict
     status: Literal["queued", "running", "succeeded", "failed", "cancelled", "recovery_required", "resolved"]
@@ -48,7 +49,7 @@ def create_app(settings=None):
     os.umask(0o077)
     settings = settings or Settings.load()
     store = Store(settings.data_dir / "jobs.sqlite3")
-    app = FastAPI(title="F5 SSH Upgrade API", version="1.0.0", docs_url="/docs", redoc_url=None)
+    app = FastAPI(title="F5 SSH Upgrade API", version="1.1.0", docs_url="/docs", redoc_url=None)
     app.state.store = store
     bearer = HTTPBearer(auto_error=False)
 
@@ -119,6 +120,37 @@ def create_app(settings=None):
         p = planned(request)
         return store.submit(request.model_dump(), p.lock_key, idempotency_key)
 
+    @app.post("/api/v1/snmp/walks", dependencies=authenticated, status_code=202, response_model=JobResponse)
+    def submit_walk(
+        request: SnmpWalkRequest,
+        idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
+    ):
+        if request.profile not in settings.snmp_profiles:
+            raise HTTPException(422, "unknown SNMP v3 profile")
+        return store.submit(
+            request.model_dump(mode="json"),
+            f"snmp:{request.device_ip}:{request.port}",
+            idempotency_key,
+            kind="snmp_walk",
+        )
+
+    @app.get("/api/v1/snmp/walks/{job_id}", dependencies=authenticated, response_model=JobResponse)
+    def walk_job(job_id: str):
+        store.reap(settings.stale_seconds)
+        result = store.get(job_id)
+        if result["kind"] != "snmp_walk":
+            raise HTTPException(404, "SNMP job not found")
+        return result
+
+    @app.get("/api/v1/snmp/walks/{job_id}/results", dependencies=authenticated, response_model=SnmpResults)
+    def walk_results(
+        job_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=500, ge=1, le=1000),
+    ):
+        store.reap(settings.stale_seconds)
+        return store.snmp_results(job_id, after, limit)
+
     @app.get("/api/v1/jobs", dependencies=authenticated, response_model=list[JobResponse])
     def jobs(limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0)):
         store.reap(settings.stale_seconds)
@@ -156,6 +188,8 @@ def create_app(settings=None):
         idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
     ):
         original = store.get(job_id)
+        if original["kind"] == "snmp_walk":
+            raise Conflict("SNMP walks have no rollback target")
         payload = {**request.model_dump(), "device": original["device"]}
         return store.submit(
             payload, lock_key(original["device"]), idempotency_key, kind="rollback", parent=job_id
