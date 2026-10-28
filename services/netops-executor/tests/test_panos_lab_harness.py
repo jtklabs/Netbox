@@ -35,6 +35,7 @@ class DirectTransport:
 def harness(tmp_path, monkeypatch, *args):
     a, b = FakeFirewall("0079510001", preemptive="yes"), FakeFirewall("0079510002")
     a.family = b.family = "vm"
+    a.mgmt_ip, b.mgmt_ip = "10.0.0.1", "10.0.0.2"
     FakePair(a, b)
     client = httpx.Client
     monkeypatch.setattr(

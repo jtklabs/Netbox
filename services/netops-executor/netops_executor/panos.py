@@ -359,6 +359,9 @@ class Firewall(Jobs):
             "peer_conn": text(group, "peer-info/conn-status").lower(),
             "peer_version": text(group, "peer-info/build-rel"),
             "running_sync": text(group, "running-sync").lower(),
+            # "no" when HA configuration synchronization is disabled; running-sync then never converges.
+            "sync_enabled": text(group, "running-sync-enabled").lower(),
+            "peer_mgmt_ip": text(group, "peer-info/mgmt-ip").split("/")[0],
         }
 
     def pending_changes(self):
@@ -368,8 +371,17 @@ class Firewall(Jobs):
         return value == "yes"
 
     def software(self, refresh=False):
+        try:
+            result = self.op(SOFTWARE_CHECK if refresh else SOFTWARE_INFO, timeout=300)
+        except PanosUnavailable:
+            raise
+        except PanosError as exc:
+            # A firewall that never reached an update server has no list yet (seen on PAN-OS 12.1.6).
+            if not refresh and "no update information available" in str(exc).lower():
+                return {}
+            raise
         versions = {}
-        for entry in self.op(SOFTWARE_CHECK if refresh else SOFTWARE_INFO, timeout=300).iter("entry"):
+        for entry in result.iter("entry"):
             version = text(entry, "version")
             if version:
                 versions[version] = {

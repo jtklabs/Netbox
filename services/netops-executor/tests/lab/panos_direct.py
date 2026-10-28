@@ -26,6 +26,7 @@ import time
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -55,8 +56,17 @@ class DirectPanorama(Panorama):
     def request(self, form, **kwargs):
         if form.get("target"):
             proxied = {k: v for k, v in form.items() if k != "target"}
-            return self.clients[form["target"]].request(proxied, **kwargs)
+            result = self.clients[form["target"]].request(proxied, **kwargs)
+            if isinstance(result, ET.Element):
+                # Unlicensed lab VMs report serial "unknown"; Panorama-managed firewalls always have one.
+                for node in result.iter("serial"):
+                    if (node.text or "").strip() == "unknown":
+                        node.text = form["target"]
+            return result
         return self.emulate(form["cmd"])
+
+    def address(self, serial):
+        return urlsplit(self.clients[serial].target.base_url).hostname
 
     def emulate(self, cmd):
         result = ET.Element("result")
@@ -74,7 +84,8 @@ class DirectPanorama(Panorama):
                 ET.SubElement(entry, "connected").text = "yes"
                 for key in ("model", "sw-version", "family", "hostname"):
                     ET.SubElement(entry, key).text = text(system, key)
-                peer = next((s for s in self.clients if s != serial), None)
+                # Panorama reports ha/peer/serial; here the peer is the firewall at the peer mgmt IP.
+                peer = next((s for s in self.clients if self.address(s) == ha["peer_mgmt_ip"]), None)
                 if ha["enabled"] and peer:
                     node = ET.SubElement(entry, "ha")
                     ET.SubElement(node, "state").text = ha["local"]
@@ -150,6 +161,8 @@ class DirectPanorama(Panorama):
 
 def build(args):
     work = Path(args.workdir).expanduser().resolve()
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    work.chmod(0o700)
     for folder in ("data", "images", "backups"):
         (work / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
     settings = Settings(
@@ -184,8 +197,9 @@ def direct(settings, store, images, guard=lambda: None, audit=lambda _: None):
     for target in settings.http_targets:
         client = Panorama(settings, store, target, [target], guard, audit)
         serial = text(client.op(panos.SYSTEM_INFO).find("system"), "serial")
-        if not serial:
-            raise SystemExit(target + " did not report a serial")
+        if serial in ("", "unknown"):
+            address = urlsplit(client.target.base_url).hostname
+            serial = "LAB" + "".join(f"{int(octet):03d}" for octet in address.split("."))
         clients[serial] = client
     return DirectPanorama(clients, images)
 

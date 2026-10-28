@@ -30,6 +30,9 @@ class FakeFirewall:
         self.uptime = 10 * 86400
         self.software = {v: v == version for v in ("10.2.9-h1", "11.1.0", TARGET)}
         self.internet = False
+        self.update_info = True
+        self.mgmt_ip = "192.0.2." + serial[-2:]
+        self.sync_enabled, self.sync_override = "yes", None
         self.installed = None
         self.jobs = {}
         self.pending = False
@@ -74,14 +77,15 @@ class FakeFirewall:
         if not self.pair:
             return "<enabled>no</enabled>"
         state, peer = self.pair.state, self.peer
-        sync = "synchronized" if self.version == peer.version else "not synchronized"
+        sync = self.sync_override or ("synchronized" if self.version == peer.version else "not synchronized")
         return (
             f"<enabled>yes</enabled><group><mode>{self.pair.mode}</mode>"
             f"<local-info><state>{state[self.serial]}</state><build-rel>{self.version}</build-rel>"
             f"<preemptive>{self.preemptive}</preemptive></local-info>"
-            f"<peer-info><conn-status>{'down' if peer.rebooting else 'up'}</conn-status>"
+            f"<peer-info><mgmt-ip>{peer.mgmt_ip}/24</mgmt-ip><conn-status>{'down' if peer.rebooting else 'up'}</conn-status>"
             f"<state>{state[peer.serial]}</state><build-rel>{peer.version}</build-rel></peer-info>"
-            f"<running-sync>{sync}</running-sync></group>"
+            f"<running-sync>{sync}</running-sync>"
+            f"<running-sync-enabled>{self.sync_enabled}</running-sync-enabled></group>"
         )
 
     def handle_form(self, form):
@@ -134,6 +138,8 @@ class FakeFirewall:
             return self.job_xml(int(field(cmd, "id")))
         if cmd == panos.SOFTWARE_CHECK and not self.internet:
             return None
+        if cmd == panos.SOFTWARE_INFO and not self.update_info:
+            return ("error", "No update information available")
         if cmd in (panos.SOFTWARE_CHECK, panos.SOFTWARE_INFO):
             return (
                 "<sw-updates><versions>"
@@ -332,10 +338,11 @@ class FakePanorama:
             )
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         body = (self.firewalls[form["target"]] if "target" in form else self).handle_form(form)
-        if body is None:
+        if body is None or isinstance(body, tuple):
+            detail = body[1] if body else "operation failed"
             return httpx.Response(
                 200,
-                text='<response status="error"><msg><line>operation failed</line></msg></response>',
+                text=f'<response status="error"><msg><line>{detail}</line></msg></response>',
             )
         if isinstance(body, bytes):
             return httpx.Response(200, content=body, headers={"content-type": "application/octet-stream"})
@@ -425,6 +432,28 @@ def test_standalone_push_from_panorama_without_firewall_internet(settings, store
     name = next(a["name"] for a in job["result"]["artifacts"] if a["kind"] == "tech_support")
     assert client.get(f"/api/v1/jobs/{job['id']}/artifacts/{name}").content == b"tech-support-archive"
     assert client.get(f"/api/v1/jobs/{job['id']}/artifacts/missing").status_code == 404
+
+
+def test_firewall_without_update_information_relies_on_upload_jobs(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    fw.update_info = False
+    job = run(settings, store, fw.serial, tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    software = job["result"]["members"][fw.serial]["software"]
+    assert software["verified_by"] == "panorama_upload_job" and software["uploaded"] == ["11.1.0", TARGET]
+    assert fw.writes == ["install " + TARGET, "restart"]
+
+
+def test_config_sync_disabled_pair_passes_but_out_of_sync_pair_is_blocked(settings, store, panorama):
+    a, b = pair(panorama)
+    a.sync_override = b.sync_override = "not synchronized"
+    job = run(settings, store, a.serial, tech_support=False)
+    assert job["status"] == "failed" and "not synchronized" in job["result"]["error"]
+    assert a.writes == b.writes == []
+    a.sync_enabled = b.sync_enabled = "no"
+    job = run(settings, store, a.serial, tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert job["result"]["ha"]["config_sync"] == "disabled"
 
 
 def test_update_server_source_downloads_on_the_firewall(settings, store, panorama):

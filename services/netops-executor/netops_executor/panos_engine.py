@@ -90,6 +90,11 @@ def staged(member):
     )
 
 
+def unsynchronized(states):
+    """Running configuration is out of sync on a member that has HA config sync enabled."""
+    return any(h["sync_enabled"] != "no" and h["running_sync"] != "synchronized" for h in states)
+
+
 def carries(state):
     """Active/passive "active", or "active-primary"/"active-secondary" in active/active."""
     return state == "active" or state.startswith("active-")
@@ -317,9 +322,11 @@ class PanosRunner:
         if mode == "active-active" and not all(r.startswith("active-") for r in roles):
             raise PanosError("active/active HA requires both members active")
         same = len({self.version(s) for s in self.members}) == 1
-        if same and self.request.ha_policy.require_running_sync:
-            if any(ha["running_sync"] != "synchronized" for ha in states.values()):
-                raise PanosError("HA running configuration is not synchronized")
+        if same and self.request.ha_policy.require_running_sync and unsynchronized(states.values()):
+            raise PanosError("HA running configuration is not synchronized")
+        self.ha["config_sync"] = (
+            "disabled" if any(h["sync_enabled"] == "no" for h in states.values()) else "enabled"
+        )
         self.ha["mode"] = mode
         self.event("ha_preflight_completed", roles={s: ha["local"] for s, ha in states.items()})
 
@@ -443,7 +450,13 @@ class PanosRunner:
             self.download_on_firewall(serial, needed)
         versions = self.fw(serial).software()
         missing = [v for v in needed if not versions.get(v, {}).get("downloaded")]
-        if missing:
+        uploaded = self.member(serial)["software"].get("uploaded", [])
+        if missing and not versions and set(missing) <= set(uploaded):
+            # Without update information the firewall lists nothing, even after an upload. The
+            # Panorama upload job is the evidence; the install job fails if an image is absent.
+            self.member(serial)["software"]["verified_by"] = "panorama_upload_job"
+            self.event("software_listing_unavailable", serial=serial, versions=missing)
+        elif missing:
             raise PanosError(serial + " does not report software as downloaded: " + ", ".join(missing))
         self.event("software_staged", serial=serial, versions=needed)
 
@@ -484,6 +497,7 @@ class PanosRunner:
             "required": needed,
             "files": files,
             "already_downloaded": [v for v in needed if versions.get(v, {}).get("downloaded")],
+            "uploaded": [],
         }
         self.event("software_check_completed", serial=serial)
         for version in needed:
@@ -498,6 +512,7 @@ class PanosRunner:
                 raise PanosError(
                     "upload of " + files[version] + " to " + serial + " failed: " + job["details"]
                 )
+            self.member(serial)["software"]["uploaded"].append(version)
             self.event("software_upload_completed", serial=serial, version=version, job=job_id)
 
     def repository_file(self, filename):
@@ -802,7 +817,7 @@ class PanosRunner:
                 not suspended
                 and len({self.version(s) for s in self.members}) == 1
                 and r.ha_policy.require_running_sync
-                and any(ha["running_sync"] != "synchronized" for ha in states.values())
+                and unsynchronized(states.values())
             ):
                 critical.append("HA running configuration is not synchronized")
             if critical:
