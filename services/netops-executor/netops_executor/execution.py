@@ -16,6 +16,44 @@ from .ssh import SSH
 from .store import CancelRequested, Deferred, LostOwnership
 
 
+def credential_options(selector, c):
+    if c["scheme"] == "basic":
+        selector.secrets.add(base64.b64encode((c["username"] + ":" + c["password"]).encode()).decode())
+        return {"auth": (c["username"], c["password"])}
+    return {"headers": {c["header"]: ("Bearer " if c["scheme"] == "bearer" else "") + c["token"]}}
+
+
+def probe(client, target, options, timeout, guard):
+    # Probe separately so a write is never used to test a series of credentials.
+    with client.stream(
+        target.auth_probe_method,
+        target.auth_probe_path,
+        params=target.auth_probe_params,
+        timeout=min(timeout, 30),
+        **options,
+    ) as response:
+        content = bytearray()
+        probe_deadline = time.monotonic() + 30
+        for chunk in response.iter_bytes():
+            guard()
+            content.extend(chunk)
+            if len(content) > 4 * 1024 * 1024 or time.monotonic() > probe_deadline:
+                raise ValueError("authentication probe exceeded bounds")
+        if response.status_code == 401:
+            raise AuthenticationRejected()
+        if not 200 <= response.status_code < 300:
+            raise ValueError("HTTP authentication probe did not succeed")
+        if content.lstrip().startswith(b"<"):
+            try:
+                root = ET.fromstring(content)
+            except ET.ParseError:
+                raise ValueError("authentication probe returned malformed XML") from None
+            if root.tag == "response" and root.get("status") == "error":
+                if root.get("code") in ("403", "16"):
+                    raise AuthenticationRejected()
+                raise ValueError("Panorama authentication probe reported an application error")
+
+
 class ExecutionRunner:
     def __init__(self, settings, store, job, worker):
         self.settings, self.store, self.job, self.worker = settings, store, job, worker
@@ -123,14 +161,6 @@ class ExecutionRunner:
         verify = ssl.create_default_context(cafile=target.ca_file) if target.ca_file else True
         success = True
 
-        def options(c):
-            if c["scheme"] == "basic":
-                selector.secrets.add(
-                    base64.b64encode((c["username"] + ":" + c["password"]).encode()).decode()
-                )
-                return {"auth": (c["username"], c["password"])}
-            return {"headers": {c["header"]: ("Bearer " if c["scheme"] == "bearer" else "") + c["token"]}}
-
         with httpx.Client(
             base_url=target.base_url, verify=verify, follow_redirects=False, trust_env=False
         ) as client:
@@ -142,43 +172,14 @@ class ExecutionRunner:
                 selected = {}
 
                 def authenticate(c):
-                    # Probe separately so a write is never used to test a series of credentials.
-                    path = target.auth_probe_path or operation.path
-                    params = target.auth_probe_params if target.auth_probe_path else operation.params
-                    with client.stream(
-                        target.auth_probe_method if target.auth_probe_path else "GET",
-                        path,
-                        params=params,
-                        timeout=min(operation.timeout_seconds, 30),
-                        **options(c),
-                    ) as response:
-                        content = bytearray()
-                        probe_deadline = time.monotonic() + 30
-                        for chunk in response.iter_bytes():
-                            self.guard()
-                            content.extend(chunk)
-                            if len(content) > 4 * 1024 * 1024 or time.monotonic() > probe_deadline:
-                                raise ValueError("authentication probe exceeded bounds")
-                        if response.status_code == 401:
-                            raise AuthenticationRejected()
-                        if not 200 <= response.status_code < 300:
-                            raise ValueError("HTTP authentication probe did not succeed")
-                        if content.lstrip().startswith(b"<"):
-                            try:
-                                root = ET.fromstring(content)
-                            except ET.ParseError:
-                                raise ValueError("authentication probe returned malformed XML") from None
-                            if root.tag == "response" and root.get("status") == "error":
-                                if root.get("code") in ("403", "16"):
-                                    raise AuthenticationRejected()
-                                raise ValueError(
-                                    "Panorama authentication probe reported an application error"
-                                )
+                    probe(
+                        client, target, credential_options(selector, c), operation.timeout_seconds, self.guard
+                    )
                     selected.update(c)
                     return True
 
                 selector.run(authenticate)
-                auth_options = options(selected)
+                auth_options = credential_options(selector, selected)
                 auth_options["headers"] = {**operation.headers, **auth_options.get("headers", {})}
                 self.uncertain = True
                 self.result["in_flight"] = index

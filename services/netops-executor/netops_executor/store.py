@@ -252,7 +252,7 @@ class Store:
                 VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?)""",
                 (
                     job_id,
-                    request.get("device", request.get("device_ip")),
+                    request.get("device", request.get("device_ip", request.get("serial"))),
                     lock_key,
                     kind,
                     parent,
@@ -583,7 +583,7 @@ class Store:
                 (job, time.time(), json.dumps(data)),
             )
 
-    def create_batch(self, batch, key, lock_key):
+    def create_batch(self, batch, key, lock_key, kind="upgrade"):
         payload = batch.model_dump_json(
             exclude={key for key in ("start_at", "latest_start_at") if getattr(batch, key) is None}
         )
@@ -601,17 +601,18 @@ class Store:
             db.execute("INSERT INTO batches VALUES (?,?,?,?)", (batch_id, payload, key, now))
             ordinal = 0
             for wave in batch.waves:
-                for ip in wave.ips:
+                for member in wave.members:
                     request, start_at, latest_start_at = self.scheduled_request(
-                        batch.request_for(ip).model_dump(mode="json")
+                        batch.request_for(member).model_dump(mode="json")
                     )
                     job = str(uuid.uuid4())
                     db.execute(
-                        "INSERT INTO jobs(id,device,lock_key,kind,request,status,created,updated,start_at,latest_start_at) VALUES (?,?,?,'upgrade',?,'queued',?,?,?,?)",
+                        "INSERT INTO jobs(id,device,lock_key,kind,request,status,created,updated,start_at,latest_start_at) VALUES (?,?,?,?,?,'queued',?,?,?,?)",
                         (
                             job,
-                            ip,
-                            lock_key(ip),
+                            member,
+                            lock_key(member),
+                            kind,
                             json.dumps(request),
                             now + ordinal * 0.000001,
                             now,
@@ -633,7 +634,7 @@ class Store:
         jobs = [
             dict(r)
             for r in db.execute(
-                "SELECT j.id,j.device,j.status,j.result,j.start_at,j.latest_start_at,j.started_at,m.wave,m.ordinal FROM jobs j JOIN batch_members m ON m.job=j.id WHERE m.batch=? ORDER BY m.ordinal",
+                "SELECT j.id,j.device,j.kind,j.status,j.result,j.start_at,j.latest_start_at,j.started_at,m.wave,m.ordinal FROM jobs j JOIN batch_members m ON m.job=j.id WHERE m.batch=? ORDER BY m.ordinal",
                 (batch,),
             )
         ]
@@ -661,6 +662,7 @@ class Store:
         return {
             "waves": waves,
             "id": batch,
+            "kind": jobs[0]["kind"] if jobs else "upgrade",
             "name": json.loads(row["request"])["name"],
             "start_at": json.loads(row["request"]).get("start_at"),
             "latest_start_at": json.loads(row["request"]).get("latest_start_at"),
@@ -780,6 +782,20 @@ class Store:
                     if not verified:
                         continue
                     return all(verified.get(k) == active.get(k) for k in ("volume", "version", "build"))
+        return False
+
+    def validated_panos_peer(self, current, serial, version):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT status,result FROM jobs WHERE kind='panos_upgrade' AND device=? AND id!=? AND status IN ('succeeded','completed_with_warnings','manually_completed') AND NOT EXISTS(SELECT 1 FROM locks WHERE job=jobs.id) ORDER BY updated DESC",
+                (serial, current),
+            ).fetchall()
+            for row in rows:
+                result = json.loads(row["result"])
+                # Manual completion advances a wave; it does not prove the peer passed validation.
+                if not result.get("validation_accepted") or not result.get("validated_version"):
+                    continue
+                return result["validated_version"] == version
         return False
 
     def worker_seen(self, worker, job=None, state="available"):

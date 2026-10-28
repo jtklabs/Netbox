@@ -16,6 +16,7 @@ from .config import Settings, under
 from .credentials import Credential, Vault
 from .execution_models import Batch, HTTPJob, ManualCompletion, SSHJob, ValidationDecision
 from .models import JobRequest, Model, Name, RecoveryResolution, RollbackRequest
+from .panos_models import PanosBatch, PanosUpgradeRequest
 from .platforms import NETWORK_TYPES, validate_commands
 from .snmp_models import SnmpResults, SnmpWalkRequest
 from .store import Conflict, Store
@@ -26,7 +27,7 @@ class JobResponse(Model):
     device: str
     lock_key: str
     lock_held: bool
-    kind: Literal["upgrade", "rollback", "snmp_walk", "ssh", "http", "cipher_scan"]
+    kind: Literal["upgrade", "rollback", "snmp_walk", "ssh", "http", "cipher_scan", "panos_upgrade"]
     parent: str | None
     request: dict
     status: Literal[
@@ -68,6 +69,7 @@ class CipherScanJobResponse(JobResponse):
 class BatchItem(Model):
     id: str
     device: str
+    kind: str = "upgrade"
     status: str
     result: dict
     wave: int
@@ -79,6 +81,7 @@ class BatchItem(Model):
 
 class BatchResponse(Model):
     id: str
+    kind: Literal["upgrade", "panos_upgrade"] = "upgrade"
     name: str
     status: Literal["completed", "needs_attention", "in_progress"]
     device_count: int
@@ -108,6 +111,12 @@ class EventResponse(Model):
 
 class PlanResponse(Model):
     request: JobRequest
+    steps: list[str]
+    lock_key: str
+
+
+class PanosPlanResponse(Model):
+    request: PanosUpgradeRequest
     steps: list[str]
     lock_key: str
 
@@ -173,6 +182,19 @@ def create_app(settings=None):
             except ValueError:
                 raise HTTPException(422, "backup directory escapes BACKUP_ROOT") from None
         return PlanResponse(request=request, steps=request.plan(), lock_key=key)
+
+    def panos_planned(request):
+        target = settings.http_targets.get(request.panorama)
+        if target is None:
+            raise HTTPException(422, "unknown Panorama HTTP target")
+        if not target.auth_probe_path:
+            raise HTTPException(422, "Panorama target requires a read-only authentication probe")
+        if request.backup_directory:
+            try:
+                under(settings.backup_root, request.backup_directory)
+            except ValueError:
+                raise HTTPException(422, "backup directory escapes BACKUP_ROOT") from None
+        return PanosPlanResponse(request=request, steps=request.plan(), lock_key="panos:" + request.serial)
 
     @app.get("/healthz")
     def healthz():
@@ -335,7 +357,7 @@ def create_app(settings=None):
         path = under(settings.backup_root, result["path"])
         if not path.is_file():
             raise HTTPException(404, "backup file is unavailable")
-        return FileResponse(path, filename=job_id + ".ucs", media_type="application/octet-stream")
+        return FileResponse(path, filename=job_id + path.suffix, media_type="application/octet-stream")
 
     @app.get("/api/v1/credentials", dependencies=authenticated, response_model=list[CredentialMetadata])
     def credentials():
@@ -423,6 +445,56 @@ def create_app(settings=None):
     def batch_status(batch_id: str):
         store.reap(settings.stale_seconds)
         return store.batch(batch_id)
+
+    panos_tags = ["PAN-OS upgrades"]
+
+    @app.post(
+        "/api/v1/panos/plan",
+        dependencies=authenticated,
+        response_model=PanosPlanResponse,
+        tags=panos_tags,
+        summary="Normalize a PAN-OS upgrade and show its steps without device access",
+    )
+    def panos_plan(request: PanosUpgradeRequest):
+        return panos_planned(request)
+
+    @app.post(
+        "/api/v1/panos/jobs",
+        dependencies=authenticated,
+        status_code=202,
+        response_model=JobResponse,
+        tags=panos_tags,
+        summary="Queue one PAN-OS firewall upgrade through Panorama",
+        description="Prechecks, software staging, HA suspend, install, reboot and post-validation run on a worker. Poll GET /api/v1/jobs/{job_id}. Supports Idempotency-Key.",
+    )
+    def panos_job(
+        request: PanosUpgradeRequest,
+        idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
+    ):
+        p = panos_planned(request)
+        return store.submit(
+            request.model_dump(mode="json"), p.lock_key, idempotency_key, kind="panos_upgrade"
+        )
+
+    @app.post(
+        "/api/v1/panos/upgrade-batches",
+        dependencies=authenticated,
+        status_code=202,
+        response_model=BatchResponse,
+        tags=panos_tags,
+        summary="Queue ordered waves of PAN-OS firewall upgrades by serial",
+        description="Each wave starts only after every earlier item passed validation or was marked done. upgrade_at_a_time bounds concurrency within a wave; HA peers never overlap.",
+    )
+    def panos_batch(
+        request: PanosBatch,
+        idempotency_key: Annotated[str | None, Header(min_length=1, max_length=160)] = None,
+    ):
+        for wave in request.waves:
+            for serial in wave.serials:
+                panos_planned(request.request_for(serial))
+        return store.create_batch(
+            request, idempotency_key, lambda serial: "panos:" + serial, kind="panos_upgrade"
+        )
 
     @app.post("/api/v1/jobs/{job_id}/validation-decisions", dependencies=authenticated, status_code=202)
     def decision(
