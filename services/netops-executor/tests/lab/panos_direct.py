@@ -1,0 +1,369 @@
+"""Run the real PAN-OS upgrade runner against lab firewalls without a Panorama.
+
+Requests that production sends through Panorama with target=<serial> go straight to that
+firewall's XML API, unchanged. Only Panorama's own commands are emulated: the device list
+comes from each firewall's system info and HA state, and the software repository is a
+local directory of PanOS_<family>-<version> files imported with type=import&category=software.
+This exercises every firewall command and parser the product sends; Panorama's device
+list fields, batch software commands and target relay remain unverified.
+Each firewall has its own API key profile, so a completed upgrade reports
+completed_with_warnings for multiple credential profiles.
+
+Not collected by pytest. Read-only modes need no flag. Modes that change a firewall need
+--allow-writes; take Hyper-V checkpoints of both firewalls first.
+
+    python tests/lab/panos_direct.py --insecure \\
+        --firewall 10.50.10.168=~/.config/netops-lab/pan-10.50.10.168.key \\
+        --firewall 10.50.10.169=~/.config/netops-lab/pan-10.50.10.169.key discover
+
+Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgrade (writes).
+"""
+
+import argparse
+import json
+import sys
+import time
+import types
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import httpx
+
+from netops_executor import panos
+from netops_executor.config import HTTPTarget, Settings
+from netops_executor.credentials import Credential, Vault, initialize_key
+from netops_executor.panos import Firewall, Panorama, PanosError, text
+from netops_executor.panos_engine import PanosRunner, carries
+from netops_executor.panos_models import PanosUpgradeRequest
+from netops_executor.store import NeedsReview, Store
+
+WRITES = ("ha-cycle", "reboot-suspended", "upgrade")
+
+
+def field(cmd, name):
+    return cmd.split("<" + name + ">")[1].split("<")[0]
+
+
+class DirectPanorama(Panorama):
+    """Stands in for Panorama: proxied requests go to each firewall's own API."""
+
+    def __init__(self, clients, images):
+        self.clients, self.images = clients, images
+        self.selector = next(iter(clients.values())).selector
+        self.jobs = {}
+
+    def request(self, form, **kwargs):
+        if form.get("target"):
+            proxied = {k: v for k, v in form.items() if k != "target"}
+            return self.clients[form["target"]].request(proxied, **kwargs)
+        return self.emulate(form["cmd"])
+
+    def emulate(self, cmd):
+        result = ET.Element("result")
+        if cmd == panos.DEVICES:
+            devices = ET.SubElement(result, "devices")
+            for serial, client in self.clients.items():
+                entry = ET.SubElement(devices, "entry", name=serial)
+                ET.SubElement(entry, "serial").text = serial
+                try:
+                    system = client.op(panos.SYSTEM_INFO).find("system")
+                    ha = Firewall(self, serial).ha_state()
+                except PanosError:
+                    ET.SubElement(entry, "connected").text = "no"
+                    continue
+                ET.SubElement(entry, "connected").text = "yes"
+                for key in ("model", "sw-version", "family", "hostname"):
+                    ET.SubElement(entry, key).text = text(system, key)
+                peer = next((s for s in self.clients if s != serial), None)
+                if ha["enabled"] and peer:
+                    node = ET.SubElement(entry, "ha")
+                    ET.SubElement(node, "state").text = ha["local"]
+                    ET.SubElement(ET.SubElement(node, "peer"), "serial").text = peer
+            return result
+        if cmd in (panos.REPOSITORY_INFO, panos.REPOSITORY_CHECK):
+            versions = ET.SubElement(ET.SubElement(result, "sw-updates"), "versions")
+            for path in sorted(self.images.glob("PanOS_*")):
+                entry = ET.SubElement(versions, "entry")
+                ET.SubElement(entry, "version").text = path.name.split("-", 1)[1]
+                ET.SubElement(entry, "filename").text = path.name
+                ET.SubElement(entry, "downloaded").text = "yes"
+            return result
+        if cmd.startswith("<request><batch><software><download>"):
+            raise PanosError("direct lab mode has no Panorama update server; add the file to --images")
+        if cmd.startswith("<request><batch><software><upload>"):
+            return self.upload(field(cmd, "file"), field(cmd, "devices"))
+        if cmd == panos.JOBS:
+            for job_id in self.jobs:
+                result.append(self.job_element(job_id))
+            return result
+        if cmd.startswith("<show><jobs><id>"):
+            result.append(self.job_element(int(field(cmd, "id"))))
+            return result
+        raise PanosError("unsupported Panorama command in direct lab mode: " + cmd[:80])
+
+    def upload(self, filename, serial):
+        path = self.images / filename
+        if not path.is_file():
+            raise PanosError(filename + " is not in " + str(self.images))
+        client = self.clients[serial]
+        auth = client.connect()
+        with path.open("rb") as stream:
+            response = client.client.post(
+                "/api/",
+                params={"type": "import", "category": "software"},
+                files={"file": (filename, stream)},
+                timeout=3600,
+                **auth,
+            )
+        try:
+            root = ET.fromstring(response.content)
+            ok = root.get("status") == "success"
+            details = panos.message(root)
+        except ET.ParseError:
+            ok, details = False, "HTTP " + str(response.status_code)
+        self.jobs[len(self.jobs) + 1] = {
+            "type": "SWUpload",
+            "result": "OK" if ok else "FAIL",
+            "details": details,
+        }
+        result = ET.Element("result")
+        ET.SubElement(result, "job").text = str(len(self.jobs))
+        return result
+
+    def job_element(self, job_id):
+        job = self.jobs[job_id]
+        node = ET.Element("job")
+        for key, value in (
+            ("id", job_id),
+            ("type", job["type"]),
+            ("status", "FIN"),
+            ("result", job["result"]),
+        ):
+            ET.SubElement(node, key).text = str(value)
+        ET.SubElement(ET.SubElement(node, "details"), "line").text = job["details"]
+        return node
+
+    def close(self):
+        for client in self.clients.values():
+            client.close()
+
+
+def build(args):
+    work = Path(args.workdir).expanduser().resolve()
+    for folder in ("data", "images", "backups"):
+        (work / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
+    settings = Settings(
+        "lab-" + "x" * 40, work / "data", work / "images", work / "backups", work / "known_hosts", {}
+    )
+    settings.credential_key_file = work / "vault.key"
+    if not settings.credential_key_file.exists():
+        initialize_key(settings.credential_key_file)
+    store = Store(work / "data" / "jobs.sqlite3")
+    vault = Vault(store, settings.credential_key_file)
+    for spec in args.firewall:
+        address, key_file = spec.split("=", 1)
+        target = "fw-" + address
+        settings.http_targets[target] = HTTPTarget(
+            id=target,
+            base_url="https://" + address,
+            auth_probe_path="/api/",
+            auth_probe_params={"type": "version"},
+        )
+        token = Path(key_file).expanduser().read_text().strip()
+        if not token:
+            raise SystemExit("empty API key file: " + key_file)
+        vault.put(
+            target,
+            Credential(kind="http", scheme="header", header="X-PAN-KEY", token=token, targets=[target]),
+        )
+    return settings, store
+
+
+def direct(settings, store, images, guard=lambda: None, audit=lambda _: None):
+    clients = {}
+    for target in settings.http_targets:
+        client = Panorama(settings, store, target, [target], guard, audit)
+        serial = text(client.op(panos.SYSTEM_INFO).find("system"), "serial")
+        if not serial:
+            raise SystemExit(target + " did not report a serial")
+        clients[serial] = client
+    return DirectPanorama(clients, images)
+
+
+def discover(panorama):
+    report = {"devices": [], "firewalls": {}}
+    report["devices"] = [panorama.device(serial) for serial in panorama.clients]
+    for serial in panorama.clients:
+        fw = Firewall(panorama, serial)
+        item = report["firewalls"][serial] = {}
+        for name, read in (
+            ("system_info", fw.system_info),
+            ("ha_state", fw.ha_state),
+            ("chassis_ready", fw.chassis_ready),
+            ("pending_changes", fw.pending_changes),
+            ("jobs", lambda: fw.jobs()[-5:]),
+            ("software", fw.software),
+            ("interfaces", fw.interfaces),
+            ("routes", lambda: len(fw.routes())),
+            ("bgp_peers", fw.bgp_peers),
+            ("ipsec_tunnels", fw.tunnels),
+            ("sessions", fw.session_count),
+            ("arp", fw.arp_count),
+        ):
+            try:
+                item[name] = read()
+            except PanosError as exc:
+                item[name] = {"error": str(exc)}
+    return report
+
+
+def run_job(args, settings, store, images, sleep, clock):
+    probe = direct(settings, store, images)
+    serial = next(iter(probe.clients))
+    current = Firewall(probe, serial).system_info()["sw_version"]
+    probe.close()
+    options = {
+        "serial": serial,
+        "panorama": "lab-direct",
+        "target_version": args.target or current,
+        "allowed_source_versions": args.allowed_source or [current],
+        "tech_support": args.tech_support,
+        "validation_timeout": args.validation_timeout,
+    }
+    if args.family:
+        options["software_family"] = args.family
+    request = PanosUpgradeRequest.model_validate(options)
+    store.submit(request.model_dump(mode="json"), "panos:" + serial, kind="panos_upgrade")
+    worker = "lab-harness"
+    job = store.claim(worker)
+    runner = PanosRunner(settings, store, job, worker, sleep=sleep, clock=clock)
+    runner.panorama = direct(settings, store, images, runner.guard, runner.audit)
+    if args.mode == "upgrade":
+        runner.run()
+        return store.get(job["id"])
+    status = "succeeded"
+    try:
+        runner.setup()
+        runner.reserve()
+        runner.prevalidate()
+        if args.mode == "backup":
+            for member in runner.members:
+                runner.backup(member)
+        if args.mode in ("ha-cycle", "reboot-suspended"):
+            if not runner.ha["enabled"]:
+                raise PanosError("HA is not enabled on " + serial)
+            standby = next(
+                s for s in runner.members if runner.member(s)["role"] in ("passive", "active-secondary")
+            )
+            active = runner.peer_of(standby)
+            runner.preemption("no")
+            runner.suspend(standby)
+            runner.validate("lab_standby_suspended", lambda: runner.pair_sample(suspended={standby}))
+            if args.mode == "reboot-suspended":
+                # Same-version restart: verifies a new boot and whether suspension survives it.
+                runner.reboot(standby)
+                runner.result["suspended_after_reboot"] = runner.fw(standby).ha_state()["local"]
+                runner.validate("lab_standby_rebooted", lambda: runner.pair_sample(suspended={standby}))
+            runner.make_functional(standby)
+            runner.validate("lab_standby_functional", runner.pair_sample)
+            if args.mode == "ha-cycle":
+                runner.handoff(active)
+                survivor = runner.fw(standby).ha_state()
+                runner.result["survivor_state"] = survivor["local"]
+                assert carries(survivor["local"])
+                runner.make_functional(active)
+                runner.validate("lab_active_functional", runner.pair_sample)
+            runner.preemption(None)
+            runner.validate("lab_final", runner.pair_sample)
+    except NeedsReview:
+        status = "needs_review"
+    except Exception as exc:
+        runner.result["error"] = str(exc) if isinstance(exc, PanosError) else repr(exc)
+        status = "failed"
+        try:
+            runner.restore_service()
+        except Exception as restore:
+            runner.result["restore_error"] = repr(restore)
+    finally:
+        try:
+            runner.event("lab_" + args.mode + "_" + status)
+            store.finish(job["id"], worker, status)
+        except Exception:
+            pass
+        runner.panorama.close()
+    return store.get(job["id"])
+
+
+def summary(job):
+    result = job["result"]
+    return {
+        "status": job["status"],
+        "error": result.get("error"),
+        "issues": result.get("validation_issues"),
+        "differences": result.get("validation_differences"),
+        "ha": result.get("ha"),
+        "members": {
+            s: {k: m.get(k) for k in ("role", "preemptive", "source", "suspended", "boot_verified")}
+            for s, m in result.get("members", {}).items()
+        },
+        "preemption": result.get("preemption"),
+        "upgrade_plan": result.get("upgrade_plan"),
+        "artifacts": result.get("artifacts"),
+        "gaps": {
+            k: v.get("gaps")
+            for k, v in result.get("pre_validation", {}).get("traffic", {}).items()
+            if isinstance(v, dict)
+        },
+        "suspended_after_reboot": result.get("suspended_after_reboot"),
+        "survivor_state": result.get("survivor_state"),
+        "gates": [{"phase": g["phase"], "findings": g["findings"]} for g in job["validation_gates"]],
+    }
+
+
+def main(argv=None, sleep=time.sleep, clock=time.monotonic):
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("mode", choices=["discover", "readiness", "backup", *WRITES])
+    p.add_argument("--firewall", action="append", required=True, help="ADDRESS=API_KEY_FILE")
+    p.add_argument(
+        "--workdir", default="~/.config/netops-lab/run", help="Private job store, vault and backups"
+    )
+    p.add_argument("--images", default=None, help="Directory of PanOS_<family>-<version> files")
+    p.add_argument("--target")
+    p.add_argument("--allowed-source", action="append")
+    p.add_argument("--family")
+    p.add_argument("--tech-support", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--validation-timeout", type=int, default=900)
+    p.add_argument(
+        "--insecure", action="store_true", help="Skip TLS verification for self-signed lab certificates"
+    )
+    p.add_argument("--allow-writes", action="store_true")
+    args = p.parse_args(argv)
+    if args.mode in WRITES and not args.allow_writes:
+        raise SystemExit(args.mode + " changes firewalls; pass --allow-writes after taking checkpoints")
+    if args.insecure:
+        real = httpx.Client
+
+        def client(**kwargs):
+            return real(**{**kwargs, "verify": False})
+
+        panos.httpx = types.SimpleNamespace(Client=client, HTTPError=httpx.HTTPError)
+    settings, store = build(args)
+    images = Path(args.images).expanduser() if args.images else settings.image_root
+    if args.mode == "discover":
+        panorama = direct(settings, store, images)
+        try:
+            report = discover(panorama)
+        finally:
+            panorama.close()
+    else:
+        job = run_job(args, settings, store, images, sleep, clock)
+        out = Path(args.workdir).expanduser() / ("result-" + args.mode + ".json")
+        out.write_text(json.dumps(job, indent=2, default=str))
+        report = summary(job)
+    json.dump(report, sys.stdout, indent=2, default=str)
+    print()
+    return report
+
+
+if __name__ == "__main__":
+    main()

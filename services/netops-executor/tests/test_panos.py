@@ -119,7 +119,7 @@ class FakeFirewall:
             return (
                 f"<system><hostname>fw-{self.serial}</hostname><serial>{self.serial}</serial>"
                 f"<model>{self.model}</model><sw-version>{self.version}</sw-version>"
-                f"<app-version>8800-8000</app-version><uptime>{uptime}</uptime>"
+                f"<app-version>8800-8000</app-version><family>{self.family}</family><uptime>{uptime}</uptime>"
                 "<operational-mode>normal</operational-mode></system>"
             )
         if cmd == panos.CHASSIS_READY:
