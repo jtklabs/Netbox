@@ -4,7 +4,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .models import Model, Name, ScheduledRequest
 
@@ -32,6 +32,31 @@ def within_window(batch, request):
             "latest_start_at": min(deadlines) if deadlines else None,
         }
     )
+
+
+class PanosImage(Model):
+    """A PanOS_<family>-<version> image the executor holds or downloads, verified by SHA-256."""
+
+    name: Annotated[
+        str, Field(pattern=r"^PanOS_[A-Za-z0-9]{1,16}-\d{1,2}\.\d{1,2}\.\d{1,3}(?:-[a-z]{1,3}\d{1,4})?$")
+    ]
+    sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    source_url: str | None = Field(
+        default=None, max_length=4096, description="Optional HTTPS download source"
+    )
+
+    @field_validator("sha256", mode="before")
+    @classmethod
+    def lower(cls, value):
+        return value.lower() if isinstance(value, str) else value
+
+    @property
+    def family(self):
+        return self.name.split("_", 1)[1].split("-", 1)[0]
+
+    @property
+    def version(self):
+        return self.name.split("-", 1)[1]
 
 
 class PanosValidationPolicy(Model):
@@ -122,9 +147,19 @@ class PanosUpgradeRequest(ScheduledRequest):
         default=True,
         description="When changing feature release, first stage the lowest release of the target's feature release that the software source offers below the target (its base image). Without one, the target is installed directly.",
     )
-    software_source: Literal["panorama", "update_server"] = Field(
+    software_source: Literal["panorama", "executor", "update_server"] = Field(
         default="panorama",
-        description="panorama pushes images from Panorama's software repository, so firewalls need no internet access; update_server makes each firewall download its own.",
+        description="panorama pushes images from Panorama's software repository; executor uploads them from this remote straight to each firewall's management API (close to remote sites); update_server makes each firewall download its own.",
+    )
+    images: list[PanosImage] = Field(
+        default_factory=list, max_length=20, description="Images for software_source executor, any families"
+    )
+    management_addresses: dict[str, str] = Field(
+        default_factory=dict,
+        description="Firewall management address per serial for executor uploads; default Panorama's ip-address",
+    )
+    firewall_credential_profiles: list[Name] | None = Field(
+        default=None, min_length=1, max_length=10, description="HTTP API key profiles for executor uploads"
     )
     panorama_download: bool = Field(
         default=True,
@@ -138,7 +173,8 @@ class PanosUpgradeRequest(ScheduledRequest):
     allowed_source_versions: list[PanosVersion] = Field(min_length=1, max_length=200)
     approved_models: list[str] = Field(default_factory=list, max_length=100)
     stage_only: bool = Field(
-        default=False, description="Run prechecks and downloads; never install or reboot."
+        default=False,
+        description="Preload: stage images ahead of the maintenance window; no backups, install or reboot, and no traffic or HA-health gates.",
     )
     config_backup: bool = True
     tech_support: bool = Field(
@@ -167,15 +203,26 @@ class PanosUpgradeRequest(ScheduledRequest):
         self.download_versions = [
             v for v in dict.fromkeys(self.download_versions) if v != self.target_version
         ]
+        if len({i.name for i in self.images}) != len(self.images):
+            raise ValueError("image names must be unique")
+        if self.software_source == "executor" and not any(
+            i.version == self.target_version for i in self.images
+        ):
+            raise ValueError("software_source executor requires an image of target_version")
+        for address in self.management_addresses.values():
+            if not re.fullmatch(r"[A-Za-z0-9:._-]{1,253}", address):
+                raise ValueError("management_addresses values must be hostnames or IP addresses")
         return self
 
     def plan(self):
         """Steps per member; an HA pair runs them for each member that is not on the target."""
         steps = ["discover_ha", "prevalidate"]
-        if self.config_backup or self.tech_support:
+        if (self.config_backup or self.tech_support) and not self.stage_only:
             steps += ["backup"]
         if self.software_source == "panorama":
             steps += ["panorama_repository", "upload_to_firewall"]
+        elif self.software_source == "executor":
+            steps += ["executor_image_cache", "upload_to_firewall_direct"]
         else:
             steps += ["software_check", "download"]
         if self.stage_only:

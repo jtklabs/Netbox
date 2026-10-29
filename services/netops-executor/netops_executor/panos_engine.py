@@ -7,9 +7,11 @@ import math
 import os
 import time
 from datetime import datetime, timezone
+from functools import partial
 
-from .config import under
+from .config import HTTPTarget, under
 from .device import BigIP
+from .image_cache import cached_image
 from .panos import (
     FUNCTIONAL,
     HA_ELECTION,
@@ -113,7 +115,9 @@ class PanosRunner:
         self.request = self.decision = None
         self.panorama = panorama
         self.firewalls = {}
+        self.direct_clients = {}
         self.f5_device = f5
+        self.last_report = float("-inf")
 
     def setup(self):
         # Inside run(): a removed Panorama target or credential fails this job, never the worker.
@@ -179,10 +183,40 @@ class PanosRunner:
     def step(self, key, action):
         """Run each named step once; a review continuation resumes after the completed ones."""
         done = self.result.setdefault("completed_steps", [])
-        if key not in done:
-            action()
-            done.append(key)
-            self.event("step_completed", name=key)
+        if key in done:
+            return
+        progress = self.result.setdefault("progress", {})
+        progress.update(step=key, operation=None)
+        action()
+        done.append(key)
+        total = progress.get("steps_total")
+        progress.update(
+            steps_completed=len(done),
+            percent=round(100 * len(done) / total) if total else None,
+            operation=None,
+        )
+        self.event("step_completed", name=key)
+
+    def report(self, kind, serial=None, percent=None, **detail):
+        """Expose the current operation in result.progress for pollers.
+
+        Saved at most every five seconds, or when the operation or its whole percent changes.
+        """
+        progress = self.result.setdefault("progress", {})
+        previous = progress.get("operation") or {}
+        operation = {
+            "kind": kind,
+            "serial": serial,
+            "percent": None if percent is None else round(percent, 1),
+        }
+        progress["operation"] = {**operation, **detail}
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+        changed = (previous.get("kind"), previous.get("serial")) != (kind, serial) or (
+            percent is not None and int(percent) != int(previous.get("percent") or -1)
+        )
+        if changed or self.clock() - self.last_report >= 5:
+            self.last_report = self.clock()
+            self.store.record(self.job["id"], self.worker, "progress", progress["operation"], self.result)
 
     def take(self, phase):
         """Consume the operator decision for the gate this phase opened, if any."""
@@ -301,9 +335,12 @@ class PanosRunner:
             "av_version": info["av_version"],
             "family": r.software_family or entry["family"],
         }
+        self.member(serial)["address"] = r.management_addresses.get(serial) or entry.get("address", "")
         if r.approved_models and info["model"] not in r.approved_models:
             raise PanosError(serial + " hardware model is not approved: " + info["model"])
         if info["sw_version"] != r.target_version:
+            if r.software_source == "executor" and not self.member(serial)["address"]:
+                raise PanosError("no management address for " + serial + "; set management_addresses")
             if info["sw_version"] not in r.allowed_source_versions:
                 raise PanosError(
                     serial + " running version " + info["sw_version"] + " is outside allowed_source_versions"
@@ -315,28 +352,35 @@ class PanosRunner:
         if not firewall.chassis_ready():
             raise PanosError(serial + " chassis is not ready")
         self.wait_for_jobs(firewall)
-        if firewall.pending_changes():
+        # A preload only stages files; uncommitted changes matter for the upgrade itself.
+        if not r.stage_only and firewall.pending_changes():
             raise PanosError(serial + " has uncommitted local changes")
 
-    def ha_preflight(self):
+    def ha_preflight(self, strict=True):
         states = {s: self.fw(s).ha_state() for s in self.members}
         mode = states[self.request.serial]["mode"]
+        problems = []
         if mode not in ("active-passive", "active-active"):
-            raise PanosError("unsupported HA mode: " + (mode or "unknown"))
+            problems.append("unsupported HA mode: " + (mode or "unknown"))
         for serial, ha in states.items():
             if not ha["enabled"]:
-                raise PanosError(serial + " does not report HA enabled")
+                problems.append(serial + " does not report HA enabled")
             if ha["peer_conn"] != "up":
-                raise PanosError(serial + " HA peer connection is not up")
+                problems.append(serial + " HA peer connection is not up")
             self.member(serial).update(role=ha["local"], preemptive=ha["preemptive"])
         roles = sorted(ha["local"] for ha in states.values())
         if mode == "active-passive" and roles != ["active", "passive"]:
-            raise PanosError("active/passive HA requires one active and one passive member")
+            problems.append("active/passive HA requires one active and one passive member")
         if mode == "active-active" and not all(r.startswith("active-") for r in roles):
-            raise PanosError("active/active HA requires both members active")
+            problems.append("active/active HA requires both members active")
         same = len({self.version(s) for s in self.members}) == 1
         if same and self.request.ha_policy.require_running_sync and unsynchronized(states.values()):
-            raise PanosError("HA running configuration is not synchronized")
+            problems.append("HA running configuration is not synchronized")
+        if problems and strict:
+            raise PanosError(problems[0])
+        if problems:
+            # Staging never touches HA state; the upgrade job enforces these again.
+            self.event("ha_preflight_warnings", problems=problems)
         self.ha["config_sync"] = (
             "disabled" if any(h["sync_enabled"] == "no" for h in states.values()) else "enabled"
         )
@@ -454,6 +498,11 @@ class PanosRunner:
             self.checkpoint()
             connections = f5.connections()
             state["final_connections"] = connections
+            span = baseline - threshold
+            drained = (
+                100 if connections <= threshold else 100 * (baseline - connections) / span if span > 0 else 0
+            )
+            self.report("f5_drain", percent=max(0, drained), connections=connections, threshold=threshold)
             self.event("f5_drain_sample", connections=connections, threshold=threshold)
             if connections <= threshold:
                 return
@@ -483,12 +532,14 @@ class PanosRunner:
         self.event("f5_restored", device=state["device"], addresses=len(state["changed_addresses"]))
 
     def prevalidate(self):
+        preload = self.request.stage_only
         for serial in self.members:
             self.precheck(serial)
         if self.ha["enabled"]:
-            self.ha_preflight()
-        self.f5_precheck()
-        self.result["pre_validation"] = {"traffic": self.baseline()}
+            self.ha_preflight(strict=not preload)
+        if not preload:
+            self.f5_precheck()
+        self.result["pre_validation"] = {"traffic": {} if preload else self.baseline()}
         self.result["upgrade_plan"] = self.upgrade_plan()
         self.event("pre_validation_completed", plan=self.result["upgrade_plan"])
 
@@ -527,16 +578,19 @@ class PanosRunner:
             self.event("tech_support_backup_started", serial=serial)
             path = directory / (prefix + "-techsupport.tgz")
 
+            started = self.clock()
+
             def wait(seconds):
+                self.report("tech_support", serial, elapsed_seconds=round(self.clock() - started))
                 self.checkpoint()
                 self.wait(seconds)
 
             firewall.tech_support(path, r.tech_support_timeout, wait, self.clock)
             self.artifact(serial, "tech_support", path)
 
-    def wait_job(self, job_id, timeout, label, cancellable, node):
+    def wait_job(self, job_id, timeout, label, cancellable, node, serial=None):
         deadline = self.clock() + timeout
-        last = None
+        serial = serial or getattr(node, "serial", None)
         while True:
             if cancellable:
                 self.checkpoint()
@@ -544,9 +598,10 @@ class PanosRunner:
                 job = node.job(job_id)
                 if job["status"] == "FIN":
                     return job
-                if job["progress"] != last:
-                    last = job["progress"]
-                    self.event(label + "_progress", job=job_id, progress=last)
+                # PAN-OS reports a running job's progress as a whole percent.
+                value = job["progress"]
+                percent = float(value) if value.replace(".", "", 1).isdigit() else None
+                self.report(label, serial, percent, job=job_id, status=job["status"])
             except PanosError:
                 # Panorama may briefly lose the firewall; the job keeps running on the device.
                 pass
@@ -598,6 +653,8 @@ class PanosRunner:
         self.checkpoint()
         if self.request.software_source == "panorama":
             needed = self.push_from_panorama(serial)
+        elif self.request.software_source == "executor":
+            needed = self.push_from_executor(serial)
         else:
             needed = self.download_on_firewall(serial)
         versions = self.fw(serial).software()
@@ -606,7 +663,7 @@ class PanosRunner:
         if missing and not versions and set(missing) <= set(uploaded):
             # Without update information the firewall lists nothing, even after an upload. The
             # Panorama upload job is the evidence; the install job fails if an image is absent.
-            self.member(serial)["software"]["verified_by"] = "panorama_upload_job"
+            self.member(serial)["software"]["verified_by"] = self.request.software_source + "_upload"
             self.event("software_listing_unavailable", serial=serial, versions=missing)
         elif missing:
             raise PanosError(serial + " does not report software as downloaded: " + ", ".join(missing))
@@ -662,7 +719,7 @@ class PanosRunner:
             self.checkpoint()
             self.event("software_upload_started", serial=serial, version=version, file=files[version])
             job_id = self.panorama.enqueue(repository_upload(files[version], serial))
-            job = self.wait_job(job_id, r.download_timeout, "software_upload", True, self.panorama)
+            job = self.wait_job(job_id, r.download_timeout, "software_upload", True, self.panorama, serial)
             if job["result"] != "OK":
                 raise PanosError(
                     "upload of " + files[version] + " to " + serial + " failed: " + job["details"]
@@ -670,6 +727,107 @@ class PanosRunner:
             self.member(serial)["software"]["uploaded"].append(version)
             self.event("software_upload_completed", serial=serial, version=version, job=job_id)
         return needed
+
+    def direct(self, serial):
+        """Client for one firewall's own management API, used to upload images from this remote."""
+        if serial not in self.direct_clients:
+            address = self.member(serial)["address"]
+            host = "[" + address + "]" if ":" in address else address
+            target = HTTPTarget(
+                id="panos-" + serial,
+                base_url="https://" + host,
+                auth_probe_path="/api/",
+                auth_probe_params={"type": "version"},
+                ca_file=str(self.settings.firewall_ca_file) if self.settings.firewall_ca_file else None,
+            )
+            self.direct_clients[serial] = Panorama(
+                self.settings,
+                self.store,
+                target,
+                self.request.firewall_credential_profiles,
+                self.guard,
+                lambda data: self.audit({**data, "connection": "firewall_direct"}),
+                aliases=(serial, address),
+            )
+        return self.direct_clients[serial]
+
+    def push_from_executor(self, serial):
+        r = self.request
+        self.phase = "executor_upload"
+        member = self.member(serial)
+        family = member["source"]["family"]
+        images = {i.version: i for i in r.images if i.family == family}
+        needed = self.required_versions(serial, {v: {} for v in images})
+        missing = [v for v in needed if v not in images]
+        if missing:
+            raise PanosError(f"no executor image for {serial} (family {family}): " + ", ".join(missing))
+        versions = self.fw(serial).software()
+        member["software"] = {
+            "source": "executor",
+            "required": needed,
+            "files": {v: images[v].name for v in needed},
+            "already_downloaded": [],
+            "uploaded": [],
+        }
+        self.event("software_check_completed", serial=serial)
+        for version in needed:
+            image, entry = images[version], versions.get(version, {})
+            if entry.get("downloaded") and entry.get("sha256") in ("", "(null)", image.sha256):
+                member["software"]["already_downloaded"].append(version)
+                continue
+            self.checkpoint()
+            self.report("image_cache", serial, file=image.name)
+            local = cached_image(self.settings, image, self.job["id"], self.checkpoint)
+            if not local.is_file() or digest(local) != image.sha256:
+                raise PanosError("executor image missing or SHA-256 mismatch: " + image.name)
+            size = local.stat().st_size
+
+            def sent(done, total=size, file=image.name, serial=serial):
+                self.report(
+                    "upload",
+                    serial,
+                    100 * done / total if total else 0,
+                    file=file,
+                    bytes=done,
+                    total_bytes=total,
+                )
+                self.checkpoint()
+
+            self.event(
+                "software_upload_started", serial=serial, version=version, file=image.name, source="executor"
+            )
+            outcome = self.direct(serial).import_software(local, timeout=r.download_timeout, progress=sent)
+            if not outcome["ok"]:
+                # The firewall's web front end can answer 504 on a large import that still completes.
+                self.event("software_import_unconfirmed", serial=serial, message=outcome["message"])
+            self.wait_imported(serial, version, image.sha256, confirmed=outcome["ok"])
+            member["software"]["uploaded"].append(version)
+            self.event("software_upload_completed", serial=serial, version=version)
+        return needed
+
+    def wait_imported(self, serial, version, sha256, confirmed):
+        """Wait for the firewall to list an imported image, and reject a different checksum."""
+        deadline = self.clock() + (
+            min(600, self.request.download_timeout) if confirmed else self.request.download_timeout
+        )
+        while True:
+            self.checkpoint()
+            try:
+                listing = self.fw(serial).software()
+            except PanosError:
+                listing = None
+            entry = (listing or {}).get(version, {})
+            if entry.get("sha256") not in (None, "", "(null)", sha256):
+                raise PanosError(serial + " reports a different SHA-256 for " + version)
+            if entry.get("downloaded"):
+                return
+            if confirmed and listing == {}:
+                # No update information yet; stage() accepts the confirmed import as evidence.
+                return
+            if self.clock() >= deadline:
+                raise PanosError(serial + " did not list " + version + " after the upload")
+            self.report("upload_confirmation", serial, status="waiting for the firewall to list " + version)
+            self.wait(20)
 
     def repository_file(self, filename):
         """Make sure Panorama's shared software repository holds filename."""
@@ -851,6 +1009,13 @@ class PanosRunner:
         deadline = start + r.reboot_timeout
         while self.clock() < deadline:
             self.wait(15)
+            self.report(
+                "reboot",
+                serial,
+                elapsed_seconds=round(self.clock() - start),
+                timeout_seconds=r.reboot_timeout,
+                status="waiting for a new boot on " + r.target_version,
+            )
             try:
                 info = firewall.system_info()
             except PanosError:
@@ -885,13 +1050,22 @@ class PanosRunner:
             ]
             self.result["validation_issues"] = critical
             passes = passes + 1 if not critical and not review else 0
+            required = policy.consecutive_passes if timeout else 1
+            self.report(
+                "validation",
+                phase=phase,
+                consecutive_passes=passes,
+                required_passes=required,
+                critical=len(critical),
+                differences=len(findings),
+            )
             self.event(
                 phase + "_sample",
                 critical=critical,
                 difference_count=len(findings),
                 consecutive_passes=passes,
             )
-            if passes >= (policy.consecutive_passes if timeout else 1):
+            if passes >= required:
                 return
             if self.clock() >= deadline:
                 if failback:
@@ -995,26 +1169,64 @@ class PanosRunner:
     def settle(self):
         remaining = self.request.validation_policy.settling_seconds
         while remaining > 0:
+            self.report("settle", remaining_seconds=remaining)
             self.checkpoint()
             self.wait(min(15, remaining))
             remaining -= min(15, remaining)
 
-    def upgrade_member(self, serial, handoff):
-        ha = self.ha["enabled"]
+    def member_steps(self, serial, handoff):
+        steps = []
         if handoff:
-            self.step("handoff:" + serial, lambda: self.handoff(serial))
-        elif ha:
-            self.step("suspend:" + serial, lambda: self.suspend(serial))
-        self.step("install:" + serial, lambda: self.install(serial))
-        self.step("reboot:" + serial, lambda: self.reboot(serial))
-        self.step("settle:" + serial, self.settle)
-        phase = "validate_system:" + serial
-        self.step(phase, lambda: self.validate(phase, lambda: self.system_sample(serial)))
-        if ha:
-            self.step("functional:" + serial, lambda: self.make_functional(serial))
-        phase = "validate_traffic:" + serial
-        self.step(phase, lambda: self.validate(phase, self.pair_sample))
-        self.member(serial)["validated"] = True
+            steps.append(("handoff:" + serial, partial(self.handoff, serial)))
+        elif self.ha["enabled"]:
+            steps.append(("suspend:" + serial, partial(self.suspend, serial)))
+        steps += [
+            ("install:" + serial, partial(self.install, serial)),
+            ("reboot:" + serial, partial(self.reboot, serial)),
+            ("settle:" + serial, self.settle),
+        ]
+        system = "validate_system:" + serial
+        steps.append((system, lambda: self.validate(system, partial(self.system_sample, serial))))
+        if self.ha["enabled"]:
+            steps.append(("functional:" + serial, partial(self.make_functional, serial)))
+        traffic = "validate_traffic:" + serial
+
+        def validate_traffic():
+            self.validate(traffic, self.pair_sample)
+            self.member(serial)["validated"] = True
+
+        steps.append((traffic, validate_traffic))
+        return steps
+
+    def planned_steps(self):
+        """Every remaining step, in order, so pollers see a real total."""
+        r = self.request
+        plan = self.result["upgrade_plan"]
+        if not plan:
+            if r.stage_only:
+                return []
+            self.result["already_on_target"] = True
+            return [("validate_current", lambda: self.validate("validate_current", self.pair_sample))]
+        serials = [item["serial"] for item in plan]
+        steps = [] if r.stage_only else [("backup:" + s, partial(self.backup, s)) for s in serials]
+        steps += [("stage:" + s, partial(self.stage, s)) for s in serials]
+        if r.stage_only:
+            return steps
+        preemption = self.ha["enabled"] and r.ha_policy.disable_preemption
+        if preemption:
+            steps.append(("preemption_disable", partial(self.preemption, "no")))
+        if r.f5_drain:
+            steps.append(("f5_drain", self.f5_drain))
+        for item in plan:
+            steps += self.member_steps(item["serial"], item["handoff"])
+        if preemption:
+            steps.append(("preemption_restore", partial(self.preemption, None)))
+        if r.f5_drain:
+            steps.append(("f5_restore", self.f5_restore))
+            steps.append(("validate_restored", lambda: self.validate("validate_restored", self.pair_sample)))
+        if self.ha["enabled"]:
+            steps.append(("validate_final", lambda: self.validate("validate_final", self.pair_sample)))
+        return steps
 
     def upgrade(self):
         self.setup()
@@ -1024,31 +1236,16 @@ class PanosRunner:
         self.decision = self.store.apply_decision(self.job["id"], self.worker)
         self.result["plan"] = r.plan()
         self.step("prevalidate", self.prevalidate)
-        plan = self.result["upgrade_plan"]
-        if not plan:
-            self.result["already_on_target"] = True
-            self.step("validate_current", lambda: self.validate("validate_current", self.pair_sample))
-        else:
-            for item in plan:
-                self.step("backup:" + item["serial"], lambda s=item["serial"]: self.backup(s))
-            for item in plan:
-                self.step("stage:" + item["serial"], lambda s=item["serial"]: self.stage(s))
-            if r.stage_only:
-                return
-            preemption = self.ha["enabled"] and r.ha_policy.disable_preemption
-            if preemption:
-                self.step("preemption_disable", lambda: self.preemption("no"))
-            if r.f5_drain:
-                self.step("f5_drain", self.f5_drain)
-            for item in plan:
-                self.upgrade_member(item["serial"], item["handoff"])
-            if preemption:
-                self.step("preemption_restore", lambda: self.preemption(None))
-            if r.f5_drain:
-                self.step("f5_restore", self.f5_restore)
-                self.step("validate_restored", lambda: self.validate("validate_restored", self.pair_sample))
-            if self.ha["enabled"]:
-                self.step("validate_final", lambda: self.validate("validate_final", self.pair_sample))
+        steps = self.planned_steps()
+        progress = self.result.setdefault("progress", {})
+        done = len(self.result["completed_steps"])
+        progress.update(steps_total=done + sum(key not in self.result["completed_steps"] for key, _ in steps))
+        progress.update(steps_completed=done, percent=round(100 * done / progress["steps_total"]))
+        for key, action in steps:
+            self.step(key, action)
+        if r.stage_only:
+            self.result["preloaded"] = True
+            return
         self.result["validated_version"] = r.target_version
         self.result["validation_accepted"] = True
 
@@ -1073,11 +1270,16 @@ class PanosRunner:
             self.upgrade()
             self.result["completed"] = True
             self.event("completed")
-            audit = self.store.get(self.job["id"])["credential_summary"]
+            # Panorama, firewall and F5 connections use different profiles; a warning means one
+            # target fell back from one profile to another.
+            profiles = {}
+            for usage in self.store.get(self.job["id"])["credential_usage"]:
+                if usage["outcome"] == "authenticated":
+                    profiles.setdefault(usage["target"], set()).add(usage["profile"])
             warnings = bool(
                 self.result.get("validation_differences")
                 or self.result.get("manual_validations")
-                or audit.get("multiple_profiles_used")
+                or any(len(used) > 1 for used in profiles.values())
             )
             self.store.finish(
                 self.job["id"], self.worker, "completed_with_warnings" if warnings else "succeeded"
@@ -1119,3 +1321,5 @@ class PanosRunner:
         finally:
             if self.panorama is not None:
                 self.panorama.close()
+            for client in self.direct_clients.values():
+                client.close()

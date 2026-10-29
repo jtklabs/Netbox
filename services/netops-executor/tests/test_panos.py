@@ -1,3 +1,5 @@
+import hashlib
+import re
 from urllib.parse import parse_qs
 
 import httpx
@@ -9,7 +11,7 @@ from test_controls_credentials import vault_for
 from netops_executor import panos
 from netops_executor.api import create_app
 from netops_executor.config import HTTPTarget
-from netops_executor.credentials import Credential
+from netops_executor.credentials import Credential, Vault
 from netops_executor.execution_models import ValidationDecision
 from netops_executor.panos_engine import PanosRunner, compare
 from netops_executor.panos_models import PanosBatch, PanosUpgradeRequest, PanosValidationPolicy
@@ -31,7 +33,10 @@ class FakeFirewall:
         self.software = {v: v == version for v in ("10.2.9-h1", "11.1.0", TARGET)}
         self.internet = False
         self.update_info = True
-        self.mgmt_ip = "192.0.2." + serial[-2:]
+        self.mgmt_ip = "198.51.100." + str(10 + int(serial[-2:]))
+        self.sha = {}
+        self.import_status = 200
+        self.corrupt = False
         self.sync_enabled, self.sync_override = "yes", None
         self.installed = None
         self.jobs = {}
@@ -144,7 +149,8 @@ class FakeFirewall:
             return (
                 "<sw-updates><versions>"
                 + "".join(
-                    f"<entry><version>{v}</version><downloaded>{'yes' if d else 'no'}</downloaded></entry>"
+                    f"<entry><version>{v}</version><downloaded>{'yes' if d else 'no'}</downloaded>"
+                    f"<sha256>{self.sha.get(v, '(null)')}</sha256></entry>"
                     for v, d in self.software.items()
                 )
                 + "</versions></sw-updates>"
@@ -274,7 +280,8 @@ class FakePanorama:
             entries.append(
                 f'<entry name="{fw.serial}"><serial>{fw.serial}</serial>'
                 f"<connected>{'no' if fw.rebooting else 'yes'}</connected><model>{fw.model}</model>"
-                f"<sw-version>{fw.version}</sw-version><family>{fw.family}</family>{ha}</entry>"
+                f"<sw-version>{fw.version}</sw-version><family>{fw.family}</family>"
+                f"<ip-address>{fw.mgmt_ip}</ip-address>{ha}</entry>"
             )
         return "<devices>" + "".join(entries) + "</devices>"
 
@@ -329,7 +336,29 @@ class FakePanorama:
             return self.job_xml(int(field(cmd, "id")))
         raise AssertionError("unexpected Panorama command " + cmd)
 
+    def direct(self, request):
+        """A firewall's own management API, reached by its management address."""
+        fw = next(f for f in self.firewalls.values() if f.mgmt_ip == request.url.host)
+        if request.headers.get("x-pan-key") != "firewall-secret":
+            return httpx.Response(
+                200, text='<response status="error" code="403"><msg>Invalid credential</msg></response>'
+            )
+        if request.method == "GET":
+            return httpx.Response(200, text='<response status="success"><result/></response>')
+        assert request.url.params["type"] == "import" and request.url.params["category"] == "software"
+        filename = re.search(rb'filename="([^"]+)"', request.content).group(1).decode()
+        payload = request.content.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
+        version = filename.split("-", 1)[1]
+        fw.write("import " + filename)
+        fw.software[version] = True
+        fw.sha[version] = "0" * 64 if fw.corrupt else hashlib.sha256(payload).hexdigest()
+        if fw.import_status != 200:
+            return httpx.Response(fw.import_status, text="<html>Gateway Time-out</html>")
+        return httpx.Response(200, text='<response status="success"><msg>uploaded</msg></response>')
+
     def __call__(self, request):
+        if request.url.host != "panorama.example":
+            return self.direct(request)
         if request.method == "GET":
             assert request.headers["x-pan-key"] == "panorama-secret"
             if self.reject_probe:
@@ -442,7 +471,7 @@ def test_firewall_without_update_information_relies_on_upload_jobs(settings, sto
     job = run(settings, store, fw.serial, tech_support=False)
     assert job["status"] == "succeeded", job["result"]
     software = job["result"]["members"][fw.serial]["software"]
-    assert software["verified_by"] == "panorama_upload_job" and software["uploaded"] == ["11.1.0", TARGET]
+    assert software["verified_by"] == "panorama_upload" and software["uploaded"] == ["11.1.0", TARGET]
     assert fw.writes == ["install " + TARGET, "restart"]
 
 
@@ -900,4 +929,99 @@ def test_batch_overrides_merge_into_shared_drain_defaults():
     with pytest.raises(ValueError):
         PanosBatch.model_validate(
             {**batch.model_dump(), "overrides": {"0079510001": {"f5_drain": {"device": "192.0.2.51"}}}}
+        )
+
+
+def executor_image(settings, store, content=b"panos image bytes", name="PanOS_3200-" + TARGET):
+    Vault(store, settings.credential_key_file).put(
+        "firewall-key",
+        Credential(
+            kind="http",
+            scheme="header",
+            header="X-PAN-KEY",
+            token="firewall-secret",
+            targets=["0079510001", "0079510002"],
+        ),
+    )
+    (settings.image_root / name).write_bytes(content)
+    return {"name": name, "sha256": hashlib.sha256(b"panos image bytes").hexdigest()}
+
+
+def test_executor_pushes_from_its_image_cache_with_progress(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    image = executor_image(settings, store)
+    job = run(settings, store, fw.serial, software_source="executor", images=[image], tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert panorama.writes == []
+    assert fw.writes == ["import PanOS_3200-" + TARGET, "install " + TARGET, "restart"]
+    software = job["result"]["members"][fw.serial]["software"]
+    assert software["source"] == "executor" and software["uploaded"] == [TARGET]
+    uploads = [
+        e["data"]
+        for e in store.events(job["id"], 0, 5000)
+        if e["step"] == "progress" and e["data"]["kind"] == "upload"
+    ]
+    assert uploads[-1]["percent"] == 100 and uploads[-1]["bytes"] == uploads[-1]["total_bytes"] == 17
+    progress = job["result"]["progress"]
+    assert progress["percent"] == 100 and progress["steps_completed"] == progress["steps_total"]
+    assert {"reboot", "validation"} <= {
+        e["data"]["kind"] for e in store.events(job["id"], 0, 5000) if e["step"] == "progress"
+    }
+
+
+def test_executor_import_504_is_confirmed_by_the_firewall_listing(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    fw.import_status = 504
+    job = run(
+        settings,
+        store,
+        fw.serial,
+        software_source="executor",
+        images=[executor_image(settings, store)],
+        tech_support=False,
+    )
+    assert job["status"] == "succeeded", job["result"]
+    assert any(e["step"] == "software_import_unconfirmed" for e in store.events(job["id"], 0, 5000))
+
+
+@pytest.mark.parametrize(
+    "corrupt_local, corrupt_remote, error",
+    [
+        (True, False, "executor image missing or SHA-256 mismatch"),
+        (False, True, "reports a different SHA-256"),
+    ],
+)
+def test_executor_rejects_checksum_mismatches(
+    settings, store, panorama, corrupt_local, corrupt_remote, error
+):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    fw.corrupt = corrupt_remote
+    image = executor_image(settings, store, content=b"tampered" if corrupt_local else b"panos image bytes")
+    job = run(settings, store, fw.serial, software_source="executor", images=[image], tech_support=False)
+    assert job["status"] == "failed" and error in job["result"]["error"]
+    assert not any(w.startswith("install") for w in fw.writes) and not job["lock_held"]
+
+
+def test_preload_stages_a_pair_without_backups_or_health_gates(settings, store, panorama):
+    a, b = pair(panorama)
+    a.pending = True
+    a.sync_override = b.sync_override = "not synchronized"
+    job = run(
+        settings,
+        store,
+        a.serial,
+        software_source="executor",
+        images=[executor_image(settings, store)],
+        stage_only=True,
+    )
+    assert job["status"] == "succeeded", job["result"]
+    assert job["result"]["preloaded"] and "artifacts" not in job["result"]
+    assert a.writes == ["import PanOS_3200-" + TARGET] and b.writes == ["import PanOS_3200-" + TARGET]
+    assert any(e["step"] == "ha_preflight_warnings" for e in store.events(job["id"], 0, 5000))
+    with pytest.raises(ValueError):
+        PanosUpgradeRequest(
+            serial=a.serial,
+            target_version=TARGET,
+            allowed_source_versions=["10.2.9-h1"],
+            software_source="executor",
         )

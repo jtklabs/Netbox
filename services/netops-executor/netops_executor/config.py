@@ -79,6 +79,8 @@ class Settings:
 
     credential_key_file: Path | None = None
     http_targets: dict[str, HTTPTarget] = field(default_factory=dict)
+    # CA bundle for firewall management certificates when executors push PAN-OS images directly.
+    firewall_ca_file: Path | None = None
 
     def device(self, identifier):
         if identifier in self.devices:
@@ -115,6 +117,9 @@ class Settings:
             if len({p.id for p in profiles}) != len(profiles):
                 raise ValueError("duplicate SNMP profile IDs")
             result.snmp_profiles = {p.id: p for p in profiles}
+        result.firewall_ca_file = (
+            Path(env("NETOPS_FIREWALL_CA_FILE")) if env("NETOPS_FIREWALL_CA_FILE") else None
+        )
         result.credential_key_file = (
             Path(env("NETOPS_CREDENTIAL_KEY_FILE")) if env("NETOPS_CREDENTIAL_KEY_FILE") else None
         )

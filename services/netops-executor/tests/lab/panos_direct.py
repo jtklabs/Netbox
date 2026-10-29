@@ -6,8 +6,6 @@ comes from each firewall's system info and HA state, and the software repository
 local directory of PanOS_<family>-<version> files imported with type=import&category=software.
 This exercises every firewall command and parser the product sends; Panorama's device
 list fields, batch software commands and target relay remain unverified.
-Each firewall has its own API key profile, so a completed upgrade reports
-completed_with_warnings for multiple credential profiles.
 
 Not collected by pytest. Read-only modes need no flag. Modes that change a firewall need
 --allow-writes; take Hyper-V checkpoints of both firewalls first.
@@ -16,7 +14,9 @@ Not collected by pytest. Read-only modes need no flag. Modes that change a firew
         --firewall 10.50.10.168=~/.config/netops-lab/pan-10.50.10.168.key \\
         --firewall 10.50.10.169=~/.config/netops-lab/pan-10.50.10.169.key discover
 
-Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgrade (writes).
+Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgrade, preload (writes).
+With --source executor the product's own direct upload (type=import) runs instead of the
+emulated Panorama push, from --images.
 """
 
 import argparse
@@ -37,9 +37,10 @@ from netops_executor.credentials import Credential, Vault, initialize_key
 from netops_executor.panos import Firewall, Panorama, PanosError, text
 from netops_executor.panos_engine import PanosRunner, carries
 from netops_executor.panos_models import PanosUpgradeRequest
+from netops_executor.ssh import digest
 from netops_executor.store import NeedsReview, Store
 
-WRITES = ("ha-cycle", "reboot-suspended", "upgrade")
+WRITES = ("ha-cycle", "reboot-suspended", "upgrade", "preload")
 
 
 def field(cmd, name):
@@ -86,6 +87,7 @@ class DirectPanorama(Panorama):
                 ET.SubElement(entry, "connected").text = "yes"
                 for key in ("model", "sw-version", "family", "hostname"):
                     ET.SubElement(entry, key).text = text(system, key)
+                ET.SubElement(entry, "ip-address").text = self.address(serial)
                 # Panorama reports ha/peer/serial; here the peer is the firewall at the peer mgmt IP.
                 peer = next((s for s in self.clients if self.address(s) == ha["peer_mgmt_ip"]), None)
                 if ha["enabled"] and peer:
@@ -203,7 +205,9 @@ def build(args):
             raise SystemExit("empty API key file: " + key_file)
         vault.put(
             target,
-            Credential(kind="http", scheme="header", header="X-PAN-KEY", token=token, targets=[target]),
+            Credential(
+                kind="http", scheme="header", header="X-PAN-KEY", token=token, targets=[target, address]
+            ),
         )
     return settings, store
 
@@ -259,7 +263,13 @@ def run_job(args, settings, store, images, sleep, clock):
         "allowed_source_versions": args.allowed_source or [current],
         "tech_support": args.tech_support,
         "validation_timeout": args.validation_timeout,
+        "software_source": args.source,
+        "stage_only": args.mode == "preload",
     }
+    if args.source == "executor":
+        # The executor uploads from its own image root.
+        settings.image_root = images.resolve()
+        options["images"] = [{"name": p.name, "sha256": digest(p)} for p in sorted(images.glob("PanOS_*"))]
     if args.family:
         options["software_family"] = args.family
     request = PanosUpgradeRequest.model_validate(options)
@@ -268,7 +278,7 @@ def run_job(args, settings, store, images, sleep, clock):
     job = store.claim(worker)
     runner = PanosRunner(settings, store, job, worker, sleep=sleep, clock=clock)
     runner.panorama = direct(settings, store, images, runner.guard, runner.audit)
-    if args.mode == "upgrade":
+    if args.mode in ("upgrade", "preload"):
         runner.run()
         return store.get(job["id"])
     status = "succeeded"
@@ -363,6 +373,8 @@ def summary(job):
         "suspended_after_reboot": result.get("suspended_after_reboot"),
         "survivor_state": result.get("survivor_state"),
         "commit_check": result.get("commit_check"),
+        "progress": result.get("progress"),
+        "software": {s: m.get("software") for s, m in result.get("members", {}).items()},
         "gates": [{"phase": g["phase"], "findings": g["findings"]} for g in job["validation_gates"]],
     }
 
@@ -378,6 +390,7 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic):
     p.add_argument("--target")
     p.add_argument("--allowed-source", action="append")
     p.add_argument("--family")
+    p.add_argument("--source", choices=["panorama", "executor"], default="panorama")
     p.add_argument("--tech-support", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--validation-timeout", type=int, default=900)
     p.add_argument(

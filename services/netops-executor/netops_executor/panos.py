@@ -153,9 +153,28 @@ class Jobs:
         return " ".join(t.strip() for t in self.op(cmd, timeout=120).itertext() if t.strip())[:1000]
 
 
+class Counting:
+    """File wrapper reporting bytes read, so an upload's progress is visible while it streams."""
+
+    def __init__(self, stream, callback):
+        self.stream, self.callback, self.done = stream, callback, 0
+
+    def read(self, size=-1):
+        chunk = self.stream.read(size)
+        self.done += len(chunk)
+        self.callback(self.done)
+        return chunk
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 class Panorama(Jobs):
-    def __init__(self, settings, store, target_id, profiles, guard, audit):
-        self.target = settings.http_targets[target_id]
+    """XML API client for Panorama, or, given an HTTPTarget, for one firewall's own management API."""
+
+    def __init__(self, settings, store, target, profiles, guard, audit, aliases=()):
+        self.target = settings.http_targets[target] if isinstance(target, str) else target
+        self.aliases = aliases
         if not self.target.auth_probe_path:
             raise PanosError("Panorama target requires a configured read-only authentication probe")
         self.selector = Selector(
@@ -183,7 +202,7 @@ class Panorama(Jobs):
                 return options
 
             try:
-                self.auth = self.selector.run(authenticate)
+                self.auth = self.selector.run(authenticate, self.aliases)
             except httpx.HTTPError as exc:
                 raise PanosUnavailable("Panorama probe failed (" + type(exc).__name__ + ")") from None
             except AuthenticationRejected:
@@ -248,6 +267,33 @@ class Panorama(Jobs):
         result = root.find("result")
         return result if result is not None else ET.Element("result")
 
+    def import_software(self, path, timeout=3600, progress=None):
+        """Upload an image file into this endpoint's software repository (type=import).
+
+        progress(bytes_sent) is called as the request body is read; it may raise to cancel.
+        """
+        options = self.connect()
+        try:
+            with path.open("rb") as stream:
+                response = self.client.post(
+                    "/api/",
+                    params={"type": "import", "category": "software"},
+                    files={"file": (path.name, Counting(stream, progress) if progress else stream)},
+                    timeout=timeout,
+                    **options,
+                )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "message": "upload failed (" + type(exc).__name__ + ")"}
+        if response.status_code in (401, 403):
+            self.auth = None
+            raise PanosError("firewall rejected the API credential (HTTP " + str(response.status_code) + ")")
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError:
+            return {"ok": False, "message": "HTTP " + str(response.status_code)}
+        detail = self.selector.redact(message(root) or "")[:500]
+        return {"ok": root.tag == "response" and root.get("status") == "success", "message": detail}
+
     def device(self, serial):
         for entry in self.op(DEVICES).findall("devices/entry"):
             if (text(entry, "serial") or entry.get("name")) == serial:
@@ -258,6 +304,7 @@ class Panorama(Jobs):
                     "model": text(entry, "model"),
                     "sw_version": text(entry, "sw-version"),
                     "family": text(entry, "family"),
+                    "address": text(entry, "ip-address"),
                     "ha_state": text(entry, "ha/state").lower(),
                     "ha_peer": text(entry, "ha/peer/serial") or None,
                 }
@@ -394,6 +441,7 @@ class Firewall(Jobs):
                     # A manually imported image can report uploaded rather than downloaded.
                     "downloaded": "yes" in (text(entry, "downloaded"), text(entry, "uploaded")),
                     "current": text(entry, "current") == "yes",
+                    "sha256": text(entry, "sha256").lower(),
                     "base": text(entry, "release-type").lower() == "base",
                 }
         return versions

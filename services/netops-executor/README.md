@@ -593,6 +593,68 @@ firewalls, plus Panorama's batch software requests. Then send this to
 }
 ```
 
+### Pushing images from the executor and preloading
+
+When Panorama is far from some firewalls, the executor nearer to them can push the
+image itself: `software_source: executor` uploads each `PanOS_<family>-<version>` file
+from `NETOPS_IMAGE_ROOT` (or downloads it first from an HTTPS `source_url`, with the
+same SHA-256 checks as F5 images) straight to the firewall's management API
+(`type=import&category=software`). Listing, install and everything else still go
+through Panorama. The firewall must be reachable from the executor on HTTPS, with an
+API key in an `http` credential profile whose `targets` name the serial or address.
+Certificates are verified; set `NETOPS_FIREWALL_CA_FILE` for a private CA, and use
+`management_addresses` hostnames when certificates do not carry IP addresses. After an
+upload the firewall must list the image with the same SHA-256. A firewall's web front
+end can answer 504 on a large import that still completes (seen on PA-VM 12.1.6 at
+about seven minutes), so an unconfirmed upload is confirmed from the software list.
+
+Preload is `stage_only: true`, usually with `software_source: executor`, run as a batch
+days before the maintenance window. It checks the firewall is connected, on an allowed
+version and idle, then stages the base (when needed) and target images on every member
+of each pair. It takes no backups and skips uncommitted-change, HA-health and traffic
+gates, because staging does not touch traffic; the upgrade job enforces them later and
+skips images already present with a matching checksum:
+
+```json
+{
+  "name": "Preload-456",
+  "defaults": {
+    "stage_only": true,
+    "software_source": "executor",
+    "target_version": "12.2.2",
+    "allowed_source_versions": ["12.1.6"],
+    "images": [{"name": "PanOS_vm-12.2.2", "sha256": "15cb673b4cf66c2dd8a1c5ade5892beaf522612ec7545b976abf56376d5d956c"}]
+  },
+  "waves": [{"wave": 1, "upgrade_at_a_time": 10, "serials": ["007951000123456", "007951000123457"]}]
+}
+```
+
+### Progress
+
+Poll `GET /api/v1/jobs/{id}` and read `result.progress`:
+
+```json
+{
+  "step": "stage:007951000123456",
+  "steps_completed": 3,
+  "steps_total": 14,
+  "percent": 21,
+  "operation": {"kind": "upload", "serial": "007951000123456", "percent": 42.5,
+                "file": "PanOS_vm-12.2.2", "bytes": 725614592, "total_bytes": 1707326960},
+  "updated_at": "2026-11-01T02:14:09.512000+00:00"
+}
+```
+
+`percent` counts completed steps against the planned total for this job, including
+both members of a pair. `operation` describes what is running now, with a real
+`percent` where one exists: `upload` (bytes sent by the executor), `software_upload`,
+`software_download`, `panorama_download`, `install` and `commit` (the PAN-OS job's own
+percentage) and `f5_drain` (connections drained towards the threshold). `reboot`
+(elapsed/timeout), `validation` (consecutive passes), `tech_support`, `settle` and
+`upload_confirmation` carry status fields instead. The same operations appear as
+`progress` events in `GET /api/v1/jobs/{id}/events`, written at most every five
+seconds or when the whole percent changes, alongside every step's own events.
+
 A batch holds up to 1,000 serials. Wave barriers, start windows, `defaults`,
 `overrides` and idempotency behave exactly as for F5 batches; poll
 `/api/v1/upgrade-batches/{id}` (`kind: panos_upgrade`). Put a small canary wave
@@ -610,13 +672,16 @@ workers as the largest `upgrade_at_a_time` (`executor_workers`, or
 | --- | --- |
 | `target_version` | Version to install, such as `11.1.6-h3` |
 | `allowed_source_versions` | Required exact running-version allowlist; members already on the target only validate |
-| `software_source` | `panorama` (default) or `update_server` |
+| `software_source` | `panorama` (default), `executor` or `update_server` |
+| `images` | For `executor`: `{name, sha256, source_url?}` per `PanOS_<family>-<version>` file, any families |
+| `management_addresses` | For `executor`: firewall management address per serial; default Panorama's `ip-address` |
+| `firewall_credential_profiles` | For `executor`: HTTP API key profiles for the firewalls; default profiles whose `targets` match the serial or address |
 | `panorama_download` | Default true: Panorama downloads a missing file into its repository |
 | `software_family` | Override the family used in Panorama filenames |
 | `download_versions` | Extra versions to stage, not install, such as intermediate base images for a skip-version upgrade |
 | `auto_base_image` | Default true: when changing feature release, first stage the lowest release of the target's feature release that the source offers below the target (base releases are not always `X.Y.0`); without one, install the target directly |
 | `approved_models` | Optional model allowlist matching `show system info` |
-| `stage_only` | Prechecks, backups and staging only; a later full job reuses the staged images |
+| `stage_only` | Preload: stage images only, ahead of the window; no backups, install, reboot or traffic/HA-health gates. A later full job reuses the staged images |
 | `config_backup`, `tech_support` | Default true: save each member's running configuration XML and a tech support file under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |
 | `ha_policy.upgrade_order` | `standby_first` (default) or `active_first` |
 | `ha_policy.disable_preemption` | Default true: disable preemption and commit before the first suspend, then restore and commit after both members validate; false leaves preemption alone |

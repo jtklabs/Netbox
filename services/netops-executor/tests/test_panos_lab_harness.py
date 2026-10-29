@@ -102,7 +102,29 @@ def test_upgrade_imports_local_images_in_place_of_panorama_push(tmp_path, monkey
         "--allowed-source",
         "10.2.9-h1",
     )
-    # One API key profile per firewall reads as multiple profiles used, which is a warning.
-    assert report["status"] == "completed_with_warnings" and not report["differences"], report
+    assert report["status"] == "succeeded", report
     assert a.version == b.version == TARGET
     assert b.writes[:2] == ["import PanOS_vm-11.1.0", "import PanOS_vm-" + TARGET]
+
+
+def test_preload_through_the_executor_upload_path(tmp_path, monkeypatch):
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / ("PanOS_vm-" + TARGET)).write_bytes(b"image")
+    report, a, b = harness(
+        tmp_path,
+        monkeypatch,
+        "preload",
+        "--allow-writes",
+        "--source",
+        "executor",
+        "--images",
+        str(images),
+        "--target",
+        TARGET,
+        "--allowed-source",
+        "10.2.9-h1",
+    )
+    assert report["status"] == "succeeded", report
+    assert a.writes == b.writes == ["import PanOS_vm-" + TARGET]
+    assert {s["source"] for s in report["software"].values()} == {"executor"}
