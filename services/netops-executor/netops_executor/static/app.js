@@ -372,6 +372,7 @@ const examples = {
     panorama: "panorama",
     target_version: "11.1.6-h3",
     allowed_source_versions: ["10.2.9-h1"],
+    f5_drain: { device: "192.0.2.51", remaining_connections: 50 },
   },
   "ssh/jobs": {
     device: "192.0.2.10",

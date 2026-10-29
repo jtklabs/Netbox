@@ -65,6 +65,49 @@ class PanosHAPolicy(Model):
     )
 
 
+class F5Drain(Model):
+    """Stop traffic reaching a firewall by disabling virtual addresses on its related F5.
+
+    Disabled addresses fail the upstream load balancer's health checks (for example a GCP
+    internal load balancer), so it stops sending traffic through this firewall.
+    """
+
+    device: str = Field(
+        min_length=1, max_length=253, description="Related F5 BIG-IP inventory ID or management IP (SSH)"
+    )
+    credential_profiles: list[Name] | None = Field(default=None, min_length=1, max_length=10)
+    addresses: list[str] = Field(
+        default_factory=list,
+        max_length=1000,
+        description="Virtual addresses to drain, such as /Common/10.1.1.10; default every enabled address",
+    )
+    remaining_connections: int | None = Field(default=None, ge=0)
+    reduction_percent: float | None = Field(default=None, ge=0, le=100)
+    timeout_seconds: int = Field(default=600, ge=0, le=86400)
+    proceed_on_timeout: bool = Field(
+        default=False, description="Upgrade even when connections stay above the threshold at timeout"
+    )
+
+    @model_validator(mode="after")
+    def one_threshold(self):
+        if self.remaining_connections is not None and self.reduction_percent is not None:
+            raise ValueError("choose remaining_connections or reduction_percent, not both")
+        self.addresses = ["/" + a.lstrip("/") for a in self.addresses]
+        return self
+
+
+def merged(base, override):
+    """Batch overrides merge into nested defaults, so a per-serial F5 address keeps shared thresholds."""
+    result = dict(base)
+    for key, value in override.items():
+        result[key] = (
+            merged(result[key], value)
+            if isinstance(value, dict) and isinstance(result.get(key), dict)
+            else value
+        )
+    return result
+
+
 class PanosUpgradeRequest(ScheduledRequest):
     serial: Serial
     panorama: Name = Field(default="panorama", description="HTTP target ID of the managing Panorama")
@@ -104,6 +147,9 @@ class PanosUpgradeRequest(ScheduledRequest):
     backup_directory: str | None = Field(default=None, max_length=240)
     validation_policy: PanosValidationPolicy = Field(default_factory=PanosValidationPolicy)
     ha_policy: PanosHAPolicy = Field(default_factory=PanosHAPolicy)
+    f5_drain: F5Drain | None = Field(
+        default=None, description="Drain the related F5 before installing; standalone firewalls only"
+    )
     job_wait_timeout: int = Field(default=600, ge=0, le=7200)
     tech_support_timeout: int = Field(default=1800, ge=60, le=7200)
     commit_timeout: int = Field(default=900, ge=60, le=7200)
@@ -135,9 +181,11 @@ class PanosUpgradeRequest(ScheduledRequest):
         if self.stage_only:
             return steps
         preemption = self.ha_policy.disable_preemption
+        drain = self.f5_drain is not None
         return (
             steps
             + (["ha_disable_preemption_and_commit"] if preemption else [])
+            + (["f5_disable_virtual_addresses_and_drain"] if drain else [])
             + [
                 "ha_suspend_or_handoff_with_survivor_validation",
                 "install",
@@ -147,6 +195,7 @@ class PanosUpgradeRequest(ScheduledRequest):
                 "validate_pair_or_traffic",
             ]
             + (["ha_restore_preemption_and_commit"] if preemption else [])
+            + (["f5_restore_virtual_addresses", "validate_restored"] if drain else [])
             + ["validate_final"]
         )
 
@@ -183,6 +232,6 @@ class PanosBatch(ScheduledRequest):
 
     def request_for(self, serial):
         request = PanosUpgradeRequest.model_validate(
-            {**self.defaults, **self.overrides.get(serial, {}), "serial": serial}
+            {**merged(self.defaults, self.overrides.get(serial, {})), "serial": serial}
         )
         return within_window(self, request)

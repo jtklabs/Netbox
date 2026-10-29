@@ -709,6 +709,54 @@ contain per-member `members` (role, source, software, install, boot, validation)
 `upgrade_plan`, `completed_steps`, `preemption`, `artifacts`, `pre_validation`,
 `post_validation`, `validation_findings` and `validated_version`.
 
+### Draining a related F5
+
+Where a standalone firewall has a 1:1 related F5 whose virtual addresses keep an
+upstream load balancer (such as a GCP internal load balancer) sending traffic through
+the firewall, add `f5_drain`. Disabling those addresses fails the load balancer's
+health checks, so traffic moves off this firewall before it is upgraded:
+
+```json
+{
+  "defaults": {
+    "target_version": "11.1.6-h3",
+    "allowed_source_versions": ["10.2.9-h1"],
+    "f5_drain": {"remaining_connections": 50, "timeout_seconds": 900}
+  },
+  "overrides": {
+    "007951000123456": {"f5_drain": {"device": "192.0.2.51"}},
+    "007951000123457": {"f5_drain": {"device": "192.0.2.52", "addresses": ["/Common/10.1.1.10"]}}
+  }
+}
+```
+
+PAN-OS batch overrides merge into nested defaults, so a per-serial F5 address keeps the
+shared thresholds. `device` is an F5 inventory ID or management IP reached over SSH
+with the usual encrypted SSH profiles (`credential_profiles` optional). The drain
+reuses the F5 upgrade job's logic and reserves the same F5 keys as F5 upgrade, SSH and
+HTTP jobs, so none can overlap it.
+
+| `f5_drain` option | Behavior/default |
+| --- | --- |
+| `device` | Required: the related F5 |
+| `addresses` | Virtual addresses to drain, such as `/Common/10.1.1.10`; default every enabled address |
+| `remaining_connections` or `reduction_percent` | Drain target from F5 clientside virtual-server connections; neither means zero |
+| `timeout_seconds` | Default 600 |
+| `proceed_on_timeout` | Default false: restore the addresses and stop; true upgrades anyway |
+
+Prechecks also require the F5 to be standalone and active, with no automatic config
+sync, and every listed address to exist. After backups and staging, the job disables
+the enabled addresses (recording each before the command) and waits for connections
+to reach the threshold. It then installs, reboots and validates the firewall; session
+and ARP thresholds are skipped while drained. Next it re-enables only the addresses it
+disabled, saves the F5 configuration, reads the states back, and runs
+`validate_restored` with all thresholds. A failure before the install restores the F5.
+An upgraded firewall that has not passed validation leaves the F5 drained, so no
+traffic reaches it, and ends `recovery_required` or at a review gate; accepting or
+retrying the gate continues to the restore. `result.f5_drain` records the original
+address states, changed addresses, connection counts, threshold, timeout and restore.
+HA pairs move traffic with failover instead, so `f5_drain` is refused for them.
+
 Preemption is restored by setting the original value locally. If HA election
 settings come from a Panorama template, this leaves a local override equal to the
 template value. Mixed-version pairs may not synchronize sessions across a

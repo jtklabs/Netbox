@@ -2,7 +2,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
-from conftest import Clock
+from conftest import Clock, FakeDevice
 from fastapi.testclient import TestClient
 from test_controls_credentials import vault_for
 
@@ -379,10 +379,10 @@ def submit(store, serial, **options):
     return store.submit(request.model_dump(mode="json"), "panos:" + serial, kind="panos_upgrade")
 
 
-def work(settings, store, worker="w"):
+def work(settings, store, worker="w", f5=None):
     job = store.claim(worker)
     clock = Clock()
-    PanosRunner(settings, store, job, worker, sleep=clock.sleep, clock=clock.clock).run()
+    PanosRunner(settings, store, job, worker, sleep=clock.sleep, clock=clock.clock, f5=f5).run()
     return store.get(job["id"])
 
 
@@ -772,3 +772,132 @@ def test_missing_target_or_rejected_key_fails_job_not_worker(settings, store, pa
     assert job["status"] == "failed"
     assert job["result"]["error"] == "Panorama rejected every eligible HTTP credential"
     assert fw.writes == []
+
+
+F5 = "192.0.2.50"
+
+
+def logged_f5(panorama):
+    f5 = FakeDevice()
+    original = f5.set_enabled
+
+    def set_enabled(address, enabled):
+        panorama.log.append(("f5", ("enable " if enabled else "disable ") + address))
+        original(address, enabled)
+
+    f5.set_enabled = set_enabled
+    return f5
+
+
+def drain_run(settings, store, serial, f5, drain=None, **options):
+    submit(store, serial, tech_support=False, f5_drain={"device": F5, **(drain or {})}, **options)
+    return work(settings, store, f5=f5)
+
+
+def test_f5_drain_disables_before_install_and_restores_after_validation(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    f5 = logged_f5(panorama)
+    job = drain_run(settings, store, fw.serial, f5)
+    assert job["status"] == "succeeded", job["result"]
+    log = [
+        entry for entry in panorama.log if entry[0] == "f5" or entry[1] in ("install " + TARGET, "restart")
+    ]
+    assert log == [
+        ("f5", "disable /Common/192.0.2.20"),
+        (fw.serial, "install " + TARGET),
+        (fw.serial, "restart"),
+        ("f5", "enable /Common/192.0.2.20"),
+    ]
+    # Only addresses this job disabled are restored; an already-disabled address stays disabled.
+    assert f5.addresses == {"/Common/192.0.2.20": True, "/Tenant/192.0.2.30": False}
+    assert ("save /sys config", {"timeout": 180}) in f5.ssh.commands
+    drain = job["result"]["f5_drain"]
+    assert drain["initial_connections"] == 100 and drain["threshold"] == 0 and drain["restored"]
+    steps = job["result"]["completed_steps"]
+    assert (
+        steps.index("validate_traffic:" + fw.serial)
+        < steps.index("f5_restore")
+        < steps.index("validate_restored")
+    )
+    events = store.events(job["id"], 0, 1000)
+    reserved = next(e for e in events if e["step"] == "resources_reserved")["data"]["keys"]
+    assert "device:" + F5 in reserved and "endpoint:" + F5 in reserved
+
+
+def test_f5_drain_timeout_restores_and_stops_before_install(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    f5 = logged_f5(panorama)
+    f5.counts = iter([100, 90, 90, 90, 90])
+    job = drain_run(settings, store, fw.serial, f5, {"remaining_connections": 10, "timeout_seconds": 10})
+    assert job["status"] == "failed" and "F5 drain timed out" in job["result"]["error"]
+    assert f5.address_changes == [("/Common/192.0.2.20", False), ("/Common/192.0.2.20", True)]
+    assert fw.writes == [] and not job["lock_held"]
+
+
+def test_f5_drain_proceeds_on_timeout_when_allowed(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    f5 = logged_f5(panorama)
+    f5.counts = iter([100, 90, 90, 90, 90])
+    job = drain_run(
+        settings,
+        store,
+        fw.serial,
+        f5,
+        {"reduction_percent": 50, "timeout_seconds": 10, "proceed_on_timeout": True},
+    )
+    assert job["status"] == "succeeded", job["result"]
+    assert job["result"]["f5_drain"]["threshold"] == 50 and job["result"]["f5_drain"]["timed_out"]
+
+
+def test_unvalidated_upgrade_keeps_the_f5_drained(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    fw.bgp_after_upgrade = "Idle"
+    f5 = logged_f5(panorama)
+    job = drain_run(settings, store, fw.serial, f5)
+    assert job["status"] == "needs_review" and job["lock_held"]
+    assert f5.addresses["/Common/192.0.2.20"] is False
+    fw.bgp_after_upgrade = None
+    decide(store, job, "retry")
+    job = work(settings, store, f5=f5)
+    assert job["status"] == "succeeded", job["result"]
+    assert f5.addresses["/Common/192.0.2.20"] is True
+    other = panorama.add(FakeFirewall("0079510003"))
+    other.boot_polls = 10**6
+    job = drain_run(settings, store, other.serial, logged_f5(panorama), reboot_timeout=300)
+    assert job["status"] == "recovery_required" and job["result"]["f5_drain"]["pending_restore"]
+
+
+def test_f5_drain_refuses_pairs_and_clustered_f5(settings, store, panorama):
+    a, b = pair(panorama)
+    job = drain_run(settings, store, a.serial, logged_f5(panorama))
+    assert job["status"] == "failed" and "standalone firewalls" in job["result"]["error"]
+    fw = panorama.add(FakeFirewall("0079510003"))
+    f5 = logged_f5(panorama)
+    f5.topology = lambda: {**FakeDevice.topology(f5), "cluster": "ha:f5"}
+    job = drain_run(settings, store, fw.serial, f5)
+    assert job["status"] == "failed" and "requires a standalone F5" in job["result"]["error"]
+    assert f5.address_changes == [] and fw.writes == []
+
+
+def test_batch_overrides_merge_into_shared_drain_defaults():
+    batch = PanosBatch.model_validate(
+        {
+            "name": "Change789",
+            "defaults": {
+                "target_version": TARGET,
+                "allowed_source_versions": ["10.2.9-h1"],
+                "f5_drain": {"remaining_connections": 50, "timeout_seconds": 900},
+            },
+            "overrides": {
+                "0079510001": {"f5_drain": {"device": "192.0.2.51"}},
+                "0079510002": {"f5_drain": {"device": "192.0.2.52"}},
+            },
+            "waves": [{"wave": 1, "serials": ["0079510001", "0079510002"]}],
+        }
+    )
+    drain = batch.request_for("0079510002").f5_drain
+    assert (drain.device, drain.remaining_connections, drain.timeout_seconds) == ("192.0.2.52", 50, 900)
+    with pytest.raises(ValueError):
+        PanosBatch.model_validate(
+            {**batch.model_dump(), "overrides": {"0079510001": {"f5_drain": {"device": "192.0.2.51"}}}}
+        )

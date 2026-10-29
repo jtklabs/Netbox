@@ -194,6 +194,11 @@ def create_app(settings=None):
                 under(settings.backup_root, request.backup_directory)
             except ValueError:
                 raise HTTPException(422, "backup directory escapes BACKUP_ROOT") from None
+        if request.f5_drain:
+            try:
+                settings.device(request.f5_drain.device)
+            except ValueError:
+                raise HTTPException(422, "f5_drain.device must be an inventory ID or IP address") from None
         return PanosPlanResponse(request=request, steps=request.plan(), lock_key="panos:" + request.serial)
 
     @app.get("/healthz")

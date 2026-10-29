@@ -3,11 +3,13 @@
 An HA pair is one unit of work: a job for either member upgrades both, one at a time.
 """
 
+import math
 import os
 import time
 from datetime import datetime, timezone
 
 from .config import under
+from .device import BigIP
 from .panos import (
     FUNCTIONAL,
     HA_ELECTION,
@@ -23,7 +25,7 @@ from .panos import (
     repository_upload,
 )
 from .panos_models import PanosUpgradeRequest, feature_release, version_key
-from .ssh import digest
+from .ssh import SSH, DeviceError, digest
 from .store import CancelRequested, Deferred, LostOwnership, NeedsReview
 
 TRAFFIC_CATEGORIES = ("interfaces", "routes", "bgp_peers", "ipsec_tunnels", "sessions", "arp")
@@ -101,7 +103,9 @@ def carries(state):
 
 
 class PanosRunner:
-    def __init__(self, settings, store, job, worker, panorama=None, sleep=time.sleep, clock=time.monotonic):
+    def __init__(
+        self, settings, store, job, worker, panorama=None, sleep=time.sleep, clock=time.monotonic, f5=None
+    ):
         self.settings, self.store, self.job, self.worker = settings, store, job, worker
         self.sleep, self.clock = sleep, clock
         self.result = job["result"]
@@ -109,6 +113,7 @@ class PanosRunner:
         self.request = self.decision = None
         self.panorama = panorama
         self.firewalls = {}
+        self.f5_device = f5
 
     def setup(self):
         # Inside run(): a removed Panorama target or credential fails this job, never the worker.
@@ -193,8 +198,10 @@ class PanosRunner:
     def unsafe(self):
         # A staged image boots on the next restart; a suspended unit carries no traffic.
         members = self.result.get("members", {}).values()
-        return any(m.get("suspended") or staged(m) for m in members) or any(
-            p["current"] != p["original"] for p in self.result.get("preemption", {}).values()
+        return (
+            any(m.get("suspended") or staged(m) for m in members)
+            or any(p["current"] != p["original"] for p in self.result.get("preemption", {}).values())
+            or self.f5_drained()
         )
 
     def reserve(self):
@@ -223,6 +230,12 @@ class PanosRunner:
         keys = [self.job["lock_key"], "panos:" + serial]
         if peer:
             keys += ["panos:" + peer, "panos-ha:" + ":".join(sorted((serial, peer)))]
+        if self.request.f5_drain:
+            # The same keys F5 upgrade, SSH and HTTP jobs take, so none can overlap the drain.
+            f5 = self.settings.device(self.request.f5_drain.device)
+            keys += ["device:" + f5.id, "endpoint:" + f5.host] + (
+                ["group:" + f5.lock_group] if f5.lock_group else []
+            )
         if not self.store.reserve(self.job["id"], self.worker, keys):
             if self.result.get("mutations"):
                 raise PanosError("reservation changed during continuation")
@@ -361,11 +374,120 @@ class PanosRunner:
             plan.append({"serial": serial, "handoff": not quiet})
         return plan
 
+    def f5(self):
+        if self.f5_device is None:
+            drain = self.request.f5_drain
+            self.f5_device = BigIP(
+                SSH(
+                    self.settings,
+                    self.settings.device(drain.device),
+                    self.guard,
+                    drain.credential_profiles,
+                    lambda data: self.audit({**data, "connection": "f5_drain"}),
+                )
+            )
+        return self.f5_device
+
+    def f5_drained(self):
+        return bool(self.result.get("f5_drain", {}).get("pending_restore"))
+
+    def f5_selected(self, states):
+        wanted = self.request.f5_drain.addresses
+        # Recursive listings name addresses relative to "/"; requests use absolute paths.
+        states = {"/" + a.lstrip("/"): enabled for a, enabled in states.items()}
+        missing = [a for a in wanted if a not in states]
+        if missing:
+            raise PanosError("F5 virtual addresses not found: " + ", ".join(missing[:20]))
+        return {a: e for a, e in states.items() if not wanted or a in wanted}
+
+    def f5_precheck(self):
+        drain = self.request.f5_drain
+        if not drain:
+            return
+        if self.ha["enabled"]:
+            raise PanosError("f5_drain applies to standalone firewalls")
+        f5 = self.f5()
+        topology = f5.topology()
+        if topology["cluster"]:
+            raise PanosError("f5_drain requires a standalone F5; " + drain.device + " is clustered")
+        if topology["role"] != "active":
+            raise PanosError("F5 " + drain.device + " is not active")
+        f5.check_drain()
+        states = self.f5_selected(f5.address_states())
+        self.result["f5_drain"] = {
+            "device": drain.device,
+            "address_states": states,
+            "to_disable": sorted(a for a, enabled in states.items() if enabled),
+            "changed_addresses": [],
+            "pending_restore": [],
+            "restored": False,
+        }
+        self.event(
+            "f5_precheck_completed", device=drain.device, enabled=len(self.result["f5_drain"]["to_disable"])
+        )
+
+    def f5_drain(self):
+        drain, state = self.request.f5_drain, self.result["f5_drain"]
+        f5 = self.f5()
+        self.checkpoint()
+        f5.check_drain()
+        current = self.f5_selected(f5.address_states())
+        baseline = f5.connections()
+        threshold = (
+            math.floor(baseline * (100 - drain.reduction_percent) / 100)
+            if drain.reduction_percent is not None
+            else (drain.remaining_connections or 0)
+        )
+        state.update(initial_connections=baseline, threshold=threshold, timed_out=False)
+        self.event("f5_drain_snapshot", connections=baseline, threshold=threshold)
+        for address, enabled in current.items():
+            if not enabled:
+                continue
+            self.checkpoint()
+            # Record before the command so a lost response still restores this address.
+            state["changed_addresses"].append(address)
+            state["pending_restore"].append(address)
+            self.intent("f5_disable_virtual_address", address=address)
+            f5.set_enabled(address, False)
+        deadline = self.clock() + drain.timeout_seconds
+        while True:
+            self.checkpoint()
+            connections = f5.connections()
+            state["final_connections"] = connections
+            self.event("f5_drain_sample", connections=connections, threshold=threshold)
+            if connections <= threshold:
+                return
+            if self.clock() >= deadline:
+                state["timed_out"] = True
+                self.event("f5_drain_timeout", proceed=drain.proceed_on_timeout)
+                if drain.proceed_on_timeout:
+                    return
+                raise PanosError(f"F5 drain timed out with {connections} connections above {threshold}")
+            self.wait(min(5, max(0, deadline - self.clock())))
+
+    def f5_restore(self):
+        state = self.result.get("f5_drain")
+        if not state or state["restored"]:
+            return
+        f5 = self.f5()
+        for address in state["pending_restore"][:]:
+            self.intent("f5_restore_virtual_address", address=address)
+            f5.set_enabled(address, True)
+            state["pending_restore"].remove(address)
+        f5.ssh.tmsh("save /sys config", timeout=180)
+        current = self.f5_selected(f5.address_states())
+        still = [a for a in state["changed_addresses"] if not current.get(a)]
+        if still:
+            raise PanosError("F5 virtual addresses are not enabled after restore: " + ", ".join(still[:20]))
+        state["restored"] = True
+        self.event("f5_restored", device=state["device"], addresses=len(state["changed_addresses"]))
+
     def prevalidate(self):
         for serial in self.members:
             self.precheck(serial)
         if self.ha["enabled"]:
             self.ha_preflight()
+        self.f5_precheck()
         self.result["pre_validation"] = {"traffic": self.baseline()}
         self.result["upgrade_plan"] = self.upgrade_plan()
         self.event("pre_validation_completed", plan=self.result["upgrade_plan"])
@@ -858,11 +980,13 @@ class PanosRunner:
                 return critical, []
         baselines = self.result["pre_validation"]["traffic"]
         post = self.result.setdefault("post_validation", {})
+        policy = r.validation_policy
+        if self.f5_drained():
+            # Drained on purpose: session and ARP counts are only meaningful after the F5 restore.
+            policy = policy.model_copy(update={"min_session_percent": None, "min_arp_percent": None})
         for serial in carriers:
             current = self.traffic(self.fw(serial))
-            failures, items, metrics = compare(
-                baselines.get(serial, baselines.get("pair")), current, r.validation_policy
-            )
+            failures, items, metrics = compare(baselines.get(serial, baselines.get("pair")), current, policy)
             critical += [serial + ": " + f for f in failures]
             findings += [{**f, "serial": serial} for f in items]
             post[serial] = {"traffic": current, "metrics": metrics}
@@ -914,10 +1038,15 @@ class PanosRunner:
             preemption = self.ha["enabled"] and r.ha_policy.disable_preemption
             if preemption:
                 self.step("preemption_disable", lambda: self.preemption("no"))
+            if r.f5_drain:
+                self.step("f5_drain", self.f5_drain)
             for item in plan:
                 self.upgrade_member(item["serial"], item["handoff"])
             if preemption:
                 self.step("preemption_restore", lambda: self.preemption(None))
+            if r.f5_drain:
+                self.step("f5_restore", self.f5_restore)
+                self.step("validate_restored", lambda: self.validate("validate_restored", self.pair_sample))
             if self.ha["enabled"]:
                 self.step("validate_final", lambda: self.validate("validate_final", self.pair_sample))
         self.result["validated_version"] = r.target_version
@@ -930,10 +1059,14 @@ class PanosRunner:
         for serial, member in members.items():
             if member.get("suspended") and not staged(member):
                 self.make_functional(serial)
-        if not any(staged(m) for m in members.values()) and any(
+        unchanged = not any(staged(m) for m in members.values())
+        if unchanged and any(
             p["current"] != p["original"] for p in self.result.get("preemption", {}).values()
         ):
             self.preemption(None)
+        # An unchanged firewall can take traffic again; an upgraded but unvalidated one stays drained.
+        if unchanged and self.f5_drained():
+            self.f5_restore()
 
     def run(self):
         try:
@@ -965,7 +1098,9 @@ class PanosRunner:
                 self.store.finish(self.job["id"], self.worker, "recovery_required")
         except Exception as exc:
             message = (
-                str(exc) if isinstance(exc, PanosError) else "operation failed (" + type(exc).__name__ + ")"
+                str(exc)
+                if isinstance(exc, (PanosError, DeviceError))
+                else "operation failed (" + type(exc).__name__ + ")"
             )
             self.result["error"] = message
             try:
