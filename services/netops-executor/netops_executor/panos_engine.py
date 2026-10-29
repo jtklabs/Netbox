@@ -943,8 +943,37 @@ class PanosRunner(StepRunner):
             ):
                 member["boot_verified"] = {"version": info["sw_version"], "uptime_seconds": uptime}
                 self.event("reboot_completed", serial=serial)
+                if self.ha["enabled"] and member.get("suspended"):
+                    self.resuspend(serial)
                 return
         raise PanosError(serial + ": a new boot on the target version was not verified before timeout")
+
+    def resuspend(self, serial):
+        """Keep an unvalidated image out of service across its reboot.
+
+        PAN-OS 12.1.6 returns a suspended member to service (passive, or active in
+        active/active) when it reboots, so suspend it again before system validation.
+        """
+        ha = self.wait_ha(
+            serial,
+            lambda h: h["local"] == "suspended" or functional(h["local"]),
+            600,
+            serial + " did not reach a stable HA state after the reboot",
+        )
+        if ha["local"] == "suspended":
+            return
+        other = self.fw(self.peer_of(serial)).ha_state()
+        if not functional(other["local"]) or other["peer_conn"] != "up":
+            raise PanosError(serial + " returned to service after its reboot and its peer cannot take over")
+        self.intent("ha_resuspend", serial=serial, state=ha["local"])
+        self.fw(serial).command(SUSPEND)
+        self.wait_ha(
+            serial,
+            lambda h: h["local"] == "suspended" and carries(h["peer_state"]),
+            300,
+            serial + " could not be suspended again after its reboot",
+        )
+        self.event("ha_resuspended", serial=serial, returned_as=ha["local"])
 
     def system_sample(self, serial):
         r = self.request

@@ -727,8 +727,12 @@ Steps, in order:
       peer must then pass traffic validation against the baseline while carrying
       everything. A member is never suspended unless its peer is functional.
    2. Install, then reboot. A new boot is verified by the target version and an
-      uptime shorter than the time since the restart request.
-   3. **System validation** while still suspended: target version, chassis ready,
+      uptime shorter than the time since the restart request. PAN-OS 12.1.6 brings a
+      suspended member back into service when it reboots (seen in the lab: it returned
+      passive), so the job suspends it again as soon as its HA state settles, provided
+      the peer is functional. Between the boot and that suspend, an active/active
+      member can briefly carry traffic.
+   3. **System validation** while suspended: target version, chassis ready,
       latest auto-commit finished `OK`, connected to Panorama on the target. Content
       version changes are reported.
    4. Make it functional (`request high-availability state functional`), then
@@ -770,7 +774,9 @@ Failures before any install, and installs the firewall reports as failed, end as
 preemption is restored first. An install with an unknown outcome, a staged image or
 a reboot that did not pass validation ends as `recovery_required`. Both HA
 reservations stay held, preemption stays disabled, and an upgraded but unvalidated
-member **stays suspended** so its peer keeps carrying traffic. Inspect the
+member is left suspended (suspended again after its reboot) so its peer keeps carrying
+traffic. A failure while waiting for the new boot leaves whatever HA state the member
+booted into. Inspect the
 firewalls, make them functional and restore preemption manually if appropriate,
 then resolve the job. Cancellation during prechecks, backups or staging is clean.
 An install is never interrupted; cancellation is honored after it finishes. Results
@@ -1296,10 +1302,12 @@ that uploaded 1.7 GB in about two minutes with live byte progress, survived the
 firewall's HTTP 504 and confirmed the image by SHA-256 about 16 minutes later while the
 other member was skipped as already staged, and an install refused by the firewall
 (unlicensed VM: "Base license is not valid") returning the suspended standby to
-service and failing cleanly. Not yet verified on real devices: Panorama's device list fields, the batch
+service and failing cleanly, and a same-version reboot of a suspended standby, which
+showed that PAN-OS 12.1.6 returns a suspended member to service (passive) after a
+reboot. Not yet verified on real devices: Panorama's device list fields, the batch
 software commands (taken from published community automation rather than the API
-reference), the `target` relay itself, install and reboot on a newer image, HA suspend
-persistence across reboot, active/active state names and the F5 drain against a real
+reference), the `target` relay itself, install and reboot on a newer image,
+re-suspending a member after its reboot, active/active state names and the F5 drain against a real
 BIG-IP. A successful install needs licensed firewalls. Lab acceptance through a
 real Panorama is required before production use. Supported scope is standalone
 firewalls and active/passive or active/active pairs managed by one Panorama. Firewall
