@@ -475,12 +475,12 @@ def test_update_server_source_downloads_on_the_firewall(settings, store, panoram
         (
             lambda fw, p: p.repository.clear(),
             {"panorama_download": False},
-            "PanOS_3200-11.1.0 is not in Panorama's software repository",
+            "PanOS_3200-11.1.6-h3 is not in Panorama's software repository",
         ),
         (
-            lambda fw, p: setattr(p, "internet", False),
+            lambda fw, p: (p.repository.clear(), setattr(p, "internet", False)),
             {},
-            "Panorama does not offer PanOS_3200-11.1.0",
+            "Panorama does not offer PanOS_3200-11.1.6-h3",
         ),
     ],
 )
@@ -491,6 +491,21 @@ def test_failures_before_install_change_nothing(settings, store, panorama, chang
     assert job["status"] == "failed"
     assert error in job["result"]["error"]
     assert fw.writes == [] and not job["lock_held"]
+
+
+def test_base_image_is_the_lowest_offered_release_and_optional(settings, store, panorama):
+    # 12.x feature releases do not always ship X.Y.0; with no lower release the target installs directly.
+    fw = panorama.add(FakeFirewall("0079510001"))
+    panorama.offered = {"PanOS_3200-11.1.2", "PanOS_3200-11.1.4", "PanOS_3200-" + TARGET}
+    job = run(settings, store, fw.serial, tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert job["result"]["members"][fw.serial]["software"]["required"] == ["11.1.2", TARGET]
+    fw2 = panorama.add(FakeFirewall("0079510003"))
+    panorama.offered = {"PanOS_3200-" + TARGET}
+    panorama.repository = {"PanOS_3200-" + TARGET: True}
+    job = run(settings, store, fw2.serial, tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert job["result"]["members"][fw2.serial]["software"]["required"] == [TARGET]
 
 
 def test_family_override_selects_panorama_file(settings, store, panorama):

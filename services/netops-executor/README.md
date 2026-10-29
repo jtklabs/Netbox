@@ -614,7 +614,7 @@ workers as the largest `upgrade_at_a_time` (`executor_workers`, or
 | `panorama_download` | Default true: Panorama downloads a missing file into its repository |
 | `software_family` | Override the family used in Panorama filenames |
 | `download_versions` | Extra versions to stage, not install, such as intermediate base images for a skip-version upgrade |
-| `auto_base_image` | Default true: stage `X.Y.0` first when the target is a maintenance release of another feature release |
+| `auto_base_image` | Default true: when changing feature release, first stage the lowest release of the target's feature release that the source offers below the target (base releases are not always `X.Y.0`); without one, install the target directly |
 | `approved_models` | Optional model allowlist matching `show system info` |
 | `stage_only` | Prechecks, backups and staging only; a later full job reuses the staged images |
 | `config_backup`, `tech_support` | Default true: save each member's running configuration XML and a tech support file under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |

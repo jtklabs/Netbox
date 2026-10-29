@@ -1,5 +1,6 @@
 """PAN-OS firewall upgrades through Panorama: requests, policies and batches."""
 
+import re
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
@@ -13,6 +14,11 @@ PanosVersion = Annotated[str, Field(pattern=r"^\d{1,2}\.\d{1,2}\.\d{1,3}(?:-[a-z
 
 def feature_release(version):
     return ".".join(version.split(".")[:2])
+
+
+def version_key(version):
+    """Numeric ordering for PAN-OS versions such as 12.2.2-h1."""
+    return tuple(int(n) for n in re.findall(r"\d+", version))
 
 
 def within_window(batch, request):
@@ -71,7 +77,7 @@ class PanosUpgradeRequest(ScheduledRequest):
     )
     auto_base_image: bool = Field(
         default=True,
-        description="Download the X.Y.0 base image first when the target is a maintenance release of another feature release.",
+        description="When changing feature release, first stage the lowest release of the target's feature release that the software source offers below the target (its base image). Without one, the target is installed directly.",
     )
     software_source: Literal["panorama", "update_server"] = Field(
         default="panorama",

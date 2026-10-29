@@ -22,7 +22,7 @@ from .panos import (
     repository_download,
     repository_upload,
 )
-from .panos_models import PanosUpgradeRequest, feature_release
+from .panos_models import PanosUpgradeRequest, feature_release, version_key
 from .ssh import digest
 from .store import CancelRequested, Deferred, LostOwnership, NeedsReview
 
@@ -432,22 +432,48 @@ class PanosRunner:
                 raise PanosError(label + " job " + str(job_id) + " did not finish before timeout")
             self.wait(10)
 
-    def required_versions(self, serial):
+    def required_versions(self, serial, available):
+        """Extra versions, then the feature release's base image when the source offers one, then the target.
+
+        Base releases are not always X.Y.0 (12.x first ships later maintenance numbers), so the base
+        is the lowest offered release of the target's feature release below the target.
+        """
         r = self.request
         needed = list(r.download_versions)
-        base = feature_release(r.target_version) + ".0"
-        if r.auto_base_image and feature_release(self.version(serial)) != feature_release(r.target_version):
-            if r.target_version != base and base not in needed:
-                needed.insert(0, base)
+        feature = feature_release(r.target_version)
+        if r.auto_base_image and feature_release(self.version(serial)) != feature:
+            lower = sorted(
+                (
+                    v
+                    for v in available
+                    if feature_release(v) == feature and version_key(v) < version_key(r.target_version)
+                ),
+                key=version_key,
+            )
+            if lower and lower[0] not in needed:
+                needed.insert(0, lower[0])
         return needed + [r.target_version]
 
+    def repository_versions(self, family):
+        """Versions Panorama holds or offers for this platform family, mapped to filenames."""
+        files = self.panorama.repository()
+        if self.request.panorama_download:
+            try:
+                files = {**files, **self.panorama.repository(refresh=True)}
+            except PanosUnavailable:
+                raise
+            except PanosError as exc:
+                # An offline Panorama can still hold manually uploaded files.
+                self.event("panorama_software_check_failed", error=str(exc)[:300])
+        prefix = "PanOS_" + family + "-"
+        return {f[len(prefix) :]: f for f in files if f.startswith(prefix)}
+
     def stage(self, serial):
-        needed = self.required_versions(serial)
         self.checkpoint()
         if self.request.software_source == "panorama":
-            self.push_from_panorama(serial, needed)
+            needed = self.push_from_panorama(serial)
         else:
-            self.download_on_firewall(serial, needed)
+            needed = self.download_on_firewall(serial)
         versions = self.fw(serial).software()
         missing = [v for v in needed if not versions.get(v, {}).get("downloaded")]
         uploaded = self.member(serial)["software"].get("uploaded", [])
@@ -460,11 +486,12 @@ class PanosRunner:
             raise PanosError(serial + " does not report software as downloaded: " + ", ".join(missing))
         self.event("software_staged", serial=serial, versions=needed)
 
-    def download_on_firewall(self, serial, needed):
+    def download_on_firewall(self, serial):
         r = self.request
         firewall = self.fw(serial)
         self.phase = "software_check"
         versions = firewall.software(refresh=True)
+        needed = self.required_versions(serial, versions)
         missing = [v for v in needed if v not in versions]
         if missing:
             raise PanosError("software not offered to " + serial + ": " + ", ".join(missing))
@@ -484,13 +511,15 @@ class PanosRunner:
             if job["result"] != "OK":
                 raise PanosError("download of " + version + " to " + serial + " failed: " + job["details"])
             self.event("software_download_completed", serial=serial, version=version, job=job_id)
+        return needed
 
-    def push_from_panorama(self, serial, needed):
+    def push_from_panorama(self, serial):
         r = self.request
         self.phase = "panorama_repository"
         # No update-server check on the firewall: it may have no internet access.
         versions = self.fw(serial).software()
         family = self.member(serial)["source"]["family"]
+        needed = self.required_versions(serial, self.repository_versions(family))
         files = {v: "PanOS_" + family + "-" + v for v in needed}
         self.member(serial)["software"] = {
             "source": "panorama",
@@ -514,6 +543,7 @@ class PanosRunner:
                 )
             self.member(serial)["software"]["uploaded"].append(version)
             self.event("software_upload_completed", serial=serial, version=version, job=job_id)
+        return needed
 
     def repository_file(self, filename):
         """Make sure Panorama's shared software repository holds filename."""
