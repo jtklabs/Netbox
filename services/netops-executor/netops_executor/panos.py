@@ -267,6 +267,7 @@ class Panorama(Jobs):
             if filename.startswith("PanOS_"):
                 files[filename] = {
                     "version": text(entry, "version"),
+                    "base": text(entry, "release-type").lower() == "base",
                     # Manually uploaded files can report uploaded rather than downloaded.
                     "available": "yes" in (text(entry, "downloaded"), text(entry, "uploaded")),
                 }
@@ -386,8 +387,10 @@ class Firewall(Jobs):
             if version:
                 versions[version] = {
                     "filename": text(entry, "filename"),
-                    "downloaded": text(entry, "downloaded") == "yes",
+                    # A manually imported image can report uploaded rather than downloaded.
+                    "downloaded": "yes" in (text(entry, "downloaded"), text(entry, "uploaded")),
                     "current": text(entry, "current") == "yes",
+                    "base": text(entry, "release-type").lower() == "base",
                 }
         return versions
 

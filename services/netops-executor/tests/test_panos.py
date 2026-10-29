@@ -243,6 +243,7 @@ class FakePanorama:
         self.writes = []
         self.log = []
         self.busy = False
+        self.base_files = set()
         self.download_wait = None
         self.upload_result = "OK"
 
@@ -288,7 +289,8 @@ class FakePanorama:
             "<sw-updates><versions>"
             + "".join(
                 f"<entry><version>{f.split('-', 1)[1]}</version><filename>{f}</filename>"
-                f"<downloaded>{'yes' if a else 'no'}</downloaded></entry>"
+                f"<downloaded>{'yes' if a else 'no'}</downloaded>"
+                f"<release-type>{'Base' if f in self.base_files else ''}</release-type></entry>"
                 for f, a in self.repository.items()
             )
             + "</versions></sw-updates>"
@@ -506,6 +508,13 @@ def test_base_image_is_the_lowest_offered_release_and_optional(settings, store, 
     job = run(settings, store, fw2.serial, tech_support=False)
     assert job["status"] == "succeeded", job["result"]
     assert job["result"]["members"][fw2.serial]["software"]["required"] == [TARGET]
+    # A release the source flags as Base wins over the lowest number.
+    fw3 = panorama.add(FakeFirewall("0079510004"))
+    panorama.offered = {"PanOS_3200-11.1.2", "PanOS_3200-11.1.4", "PanOS_3200-" + TARGET}
+    panorama.base_files = {"PanOS_3200-11.1.4"}
+    panorama.repository = {"PanOS_3200-" + TARGET: True}
+    job = run(settings, store, fw3.serial, tech_support=False)
+    assert job["result"]["members"][fw3.serial]["software"]["required"] == ["11.1.4", TARGET]
 
 
 def test_family_override_selects_panorama_file(settings, store, panorama):

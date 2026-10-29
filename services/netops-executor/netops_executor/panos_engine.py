@@ -435,8 +435,8 @@ class PanosRunner:
     def required_versions(self, serial, available):
         """Extra versions, then the feature release's base image when the source offers one, then the target.
 
-        Base releases are not always X.Y.0 (12.x first ships later maintenance numbers), so the base
-        is the lowest offered release of the target's feature release below the target.
+        Base releases are not always X.Y.0 (12.1's base is 12.1.2). A release flagged Base wins;
+        otherwise the base is the lowest offered release of the target's feature release below it.
         """
         r = self.request
         needed = list(r.download_versions)
@@ -450,8 +450,10 @@ class PanosRunner:
                 ),
                 key=version_key,
             )
-            if lower and lower[0] not in needed:
-                needed.insert(0, lower[0])
+            flagged = [v for v in lower if available[v].get("base")]
+            base = flagged[0] if flagged else lower[0] if lower else None
+            if base and base not in needed:
+                needed.insert(0, base)
         return needed + [r.target_version]
 
     def repository_versions(self, family):
@@ -466,7 +468,9 @@ class PanosRunner:
                 # An offline Panorama can still hold manually uploaded files.
                 self.event("panorama_software_check_failed", error=str(exc)[:300])
         prefix = "PanOS_" + family + "-"
-        return {f[len(prefix) :]: f for f in files if f.startswith(prefix)}
+        return {
+            f[len(prefix) :]: {"filename": f, **info} for f, info in files.items() if f.startswith(prefix)
+        }
 
     def stage(self, serial):
         self.checkpoint()

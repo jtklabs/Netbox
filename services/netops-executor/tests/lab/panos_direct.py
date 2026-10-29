@@ -53,6 +53,7 @@ class DirectPanorama(Panorama):
         self.clients, self.images = clients, images
         self.selector = next(iter(clients.values())).selector
         self.jobs = {}
+        self.import_wait = 1200
 
     def request(self, form, **kwargs):
         if form.get("target"):
@@ -119,20 +120,34 @@ class DirectPanorama(Panorama):
             raise PanosError(filename + " is not in " + str(self.images))
         client = self.clients[serial]
         auth = client.connect()
-        with path.open("rb") as stream:
-            response = client.client.post(
-                "/api/",
-                params={"type": "import", "category": "software"},
-                files={"file": (filename, stream)},
-                timeout=3600,
-                **auth,
-            )
         try:
-            root = ET.fromstring(response.content)
-            ok = root.get("status") == "success"
-            details = panos.message(root)
-        except ET.ParseError:
-            ok, details = False, "HTTP " + str(response.status_code)
+            with path.open("rb") as stream:
+                response = client.client.post(
+                    "/api/",
+                    params={"type": "import", "category": "software"},
+                    files={"file": (filename, stream)},
+                    timeout=3600,
+                    **auth,
+                )
+            try:
+                root = ET.fromstring(response.content)
+                ok, details = root.get("status") == "success", panos.message(root)
+            except ET.ParseError:
+                ok, details = False, "HTTP " + str(response.status_code)
+        except httpx.HTTPError as exc:
+            ok, details = False, type(exc).__name__
+        if not ok:
+            # The web front end can answer 504 on a large import while the firewall keeps working.
+            version = filename.split("-", 1)[1]
+            deadline = time.monotonic() + self.import_wait
+            while time.monotonic() < deadline:
+                time.sleep(20)
+                try:
+                    if Firewall(self, serial).software().get(version, {}).get("downloaded"):
+                        ok, details = True, details + "; image listed after the error"
+                        break
+                except PanosError:
+                    pass
         self.jobs[len(self.jobs) + 1] = {
             "type": "SWUpload",
             "result": "OK" if ok else "FAIL",
