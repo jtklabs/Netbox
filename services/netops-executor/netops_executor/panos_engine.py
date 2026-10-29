@@ -739,6 +739,8 @@ class PanosRunner:
                 auth_probe_path="/api/",
                 auth_probe_params={"type": "version"},
                 ca_file=str(self.settings.firewall_ca_file) if self.settings.firewall_ca_file else None,
+                # Firewalls present self-signed certificates: pin the first one unless a CA is configured.
+                tls="verify" if self.settings.firewall_ca_file else "pin",
             )
             self.direct_clients[serial] = Panorama(
                 self.settings,

@@ -10,6 +10,7 @@ import httpx
 
 from .credentials import AuthenticationRejected, Selector, Vault
 from .execution import credential_options, probe
+from .pins import PinnedContext, tls_key
 from .store import Conflict
 
 DEVICES = "<show><devices><all></all></devices></show>"
@@ -174,7 +175,7 @@ class Panorama(Jobs):
 
     def __init__(self, settings, store, target, profiles, guard, audit, aliases=()):
         self.target = settings.http_targets[target] if isinstance(target, str) else target
-        self.aliases = aliases
+        self.aliases, self.store = aliases, store
         if not self.target.auth_probe_path:
             raise PanosError("Panorama target requires a configured read-only authentication probe")
         self.selector = Selector(
@@ -190,14 +191,20 @@ class Panorama(Jobs):
 
     def connect(self):
         if self.client is None:
-            verify = ssl.create_default_context(cafile=self.target.ca_file) if self.target.ca_file else True
+            verify = (
+                PinnedContext(self.store, tls_key(self.target.base_url))
+                if self.target.tls == "pin"
+                else ssl.create_default_context(cafile=self.target.ca_file)
+                if self.target.ca_file
+                else True
+            )
             self.client = httpx.Client(
                 base_url=self.target.base_url, verify=verify, follow_redirects=False, trust_env=False
             )
         if self.auth is None:
 
             def authenticate(c):
-                options = credential_options(self.selector, c)
+                options = credential_options(self.selector, c, self.client)
                 probe(self.client, self.target, options, 30, self.guard)
                 return options
 
@@ -248,7 +255,16 @@ class Panorama(Jobs):
                         os.fsync(stream.fileno())
                         stream.close()
         except httpx.HTTPError as exc:
-            raise PanosUnavailable("Panorama request failed (" + type(exc).__name__ + ")") from None
+            # Connection errors carry the TLS pin message; nothing in them comes from the device body.
+            raise PanosUnavailable(
+                "request to "
+                + self.target.id
+                + " failed ("
+                + type(exc).__name__
+                + ": "
+                + str(exc)[:200]
+                + ")"
+            ) from None
         if status in (401, 403):
             # The key may have rotated; select again before the next request.
             self.auth = None

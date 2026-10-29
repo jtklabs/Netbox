@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from urllib.parse import parse_qs
 
@@ -339,6 +340,17 @@ class FakePanorama:
     def direct(self, request):
         """A firewall's own management API, reached by its management address."""
         fw = next(f for f in self.firewalls.values() if f.mgmt_ip == request.url.host)
+        form = parse_qs(request.content.decode(errors="replace")) if request.method == "POST" else {}
+        if form.get("type") == ["keygen"]:
+            if form.get("user") == ["admin"] and form.get("password") == ["lab-password"]:
+                return httpx.Response(
+                    200,
+                    text='<response status="success"><result><key>firewall-secret</key></result></response>',
+                )
+            return httpx.Response(
+                403,
+                text='<response status="error" code="403"><result><msg>Invalid Credential</msg></result></response>',
+            )
         if request.headers.get("x-pan-key") != "firewall-secret":
             return httpx.Response(
                 200, text='<response status="error" code="403"><msg>Invalid credential</msg></response>'
@@ -1025,3 +1037,27 @@ def test_preload_stages_a_pair_without_backups_or_health_gates(settings, store, 
             allowed_source_versions=["10.2.9-h1"],
             software_source="executor",
         )
+
+
+def test_executor_generates_the_firewall_api_key_from_saved_credentials(settings, store, panorama):
+    fw = panorama.add(FakeFirewall("0079510001"))
+    image = executor_image(settings, store)
+    vault = Vault(store, settings.credential_key_file)
+    vault.put("firewall-key", Credential(kind="http", token="unused", enabled=False))
+    vault.put(
+        "firewall-login",
+        Credential(
+            kind="http", scheme="keygen", username="admin", password="lab-password", targets=[fw.serial]
+        ),
+    )
+    job = run(settings, store, fw.serial, software_source="executor", images=[image], tech_support=False)
+    assert job["status"] == "succeeded", job["result"]
+    assert "firewall-login" in job["credential_summary"]["profiles_used"]
+    assert "lab-password" not in json.dumps(job) and "firewall-secret" not in json.dumps(job)
+    vault.put(
+        "firewall-login",
+        Credential(kind="http", scheme="keygen", username="admin", password="wrong", targets=[fw.serial]),
+    )
+    fw.software[TARGET], fw.version, fw.installed = False, "10.2.9-h1", None
+    job = run(settings, store, fw.serial, software_source="executor", images=[image], tech_support=False)
+    assert job["status"] == "failed" and "rejected every eligible" in job["result"]["error"]

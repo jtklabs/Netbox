@@ -10,7 +10,7 @@ list fields, batch software commands and target relay remain unverified.
 Not collected by pytest. Read-only modes need no flag. Modes that change a firewall need
 --allow-writes; take Hyper-V checkpoints of both firewalls first.
 
-    python tests/lab/panos_direct.py --insecure \\
+    python tests/lab/panos_direct.py \\
         --firewall 10.50.10.168=~/.config/netops-lab/pan-10.50.10.168.key \\
         --firewall 10.50.10.169=~/.config/netops-lab/pan-10.50.10.169.key discover
 
@@ -199,6 +199,8 @@ def build(args):
             base_url="https://" + address,
             auth_probe_path="/api/",
             auth_probe_params={"type": "version"},
+            # Lab firewalls are self-signed: exercise the product's pin-on-first-use path.
+            tls="pin",
         )
         token = Path(key_file).expanduser().read_text().strip()
         if not token:
@@ -394,7 +396,9 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic):
     p.add_argument("--tech-support", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--validation-timeout", type=int, default=900)
     p.add_argument(
-        "--insecure", action="store_true", help="Skip TLS verification for self-signed lab certificates"
+        "--insecure",
+        action="store_true",
+        help="Skip TLS checks entirely instead of pinning first-use certificates",
     )
     p.add_argument("--allow-writes", action="store_true")
     p.add_argument(

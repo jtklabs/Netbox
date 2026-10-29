@@ -387,10 +387,25 @@ def create_app(settings=None):
     def rotate():
         return vault.rotate()
 
+    @app.get("/api/v1/pins", dependencies=authenticated, tags=["Trust"])
+    def pins():
+        """Pinned device TLS certificates (tls:host:port) and SSH host keys (ssh:host:port)."""
+        return store.pins()
+
+    @app.delete("/api/v1/pins/{key}", dependencies=authenticated, status_code=204, tags=["Trust"])
+    def unpin(key: str):
+        """Forget a pin after inspecting a legitimately replaced certificate or host key."""
+        store.unpin(key)
+
     @app.get("/api/v1/http/targets", dependencies=authenticated)
     def http_targets():
         return [
-            {"id": t.id, "base_url": t.base_url, "auth_probe_configured": bool(t.auth_probe_path)}
+            {
+                "id": t.id,
+                "base_url": t.base_url,
+                "auth_probe_configured": bool(t.auth_probe_path),
+                "tls": t.tls,
+            }
             for t in settings.http_targets.values()
         ]
 

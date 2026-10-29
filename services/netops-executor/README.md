@@ -928,6 +928,48 @@ credentials are supported. Use `params`, `form`, `json_body` or `body` as approp
 paths must remain relative to the configured target. Authentication belongs in
 profiles rather than submitted headers. `parent_job_id` links follow-up jobs.
 
+## Device trust: self-signed certificates and host keys
+
+Devices usually present self-signed certificates. Firewall management APIs used by
+PAN-OS executor uploads, and HTTP targets configured with `"tls": "pin"`, trust the
+certificate an endpoint presents the **first** time and pin its SHA-256 fingerprint in
+the job store (shared by every worker). Afterwards only that certificate is accepted.
+The check runs during the TLS handshake, before any request, API key or password is
+sent, so a changed certificate stops the job without exposing credentials. Set
+`NETOPS_FIREWALL_CA_FILE` to verify firewall certificates against a CA instead.
+
+SSH works the same way with `NETOPS_SSH_HOST_KEYS=pin`: a host missing from
+`NETOPS_KNOWN_HOSTS` has its key pinned on first use and a different key is rejected.
+Entries in the known_hosts file always take precedence. The default remains
+`known_hosts`, which rejects unknown hosts.
+
+After a certificate or host key is legitimately replaced, inspect the device, then
+reset its pin; the next connection pins the new one:
+
+```http
+GET /api/v1/pins
+DELETE /api/v1/pins/tls:192.0.2.10:443
+DELETE /api/v1/pins/ssh:192.0.2.10:22
+```
+
+Pinning trusts the first connection. Make that first connection from the executor's
+network, ideally during a preload, or pre-seed known_hosts where SSH keys are known.
+
+### PAN-OS device API keys from saved credentials
+
+Firewall management APIs can use an `http` profile with `scheme: keygen` instead of a
+stored API key. At connection time the executor exchanges the saved username and
+password for an API key (`type=keygen`, password in the POST body, never the URL),
+uses it for that connection only and never stores it. A rejected login moves to the
+next eligible profile and cools down for 60 seconds, as for other credentials:
+
+```json
+{"kind": "http", "scheme": "keygen", "username": "automation", "password": "SECRET", "targets": ["007951000123456", "198.51.100.20"]}
+```
+
+`targets` limits the profile to firewall serials or management addresses. Panorama
+targets keep their stored `X-PAN-KEY` profile.
+
 ## Encrypted credentials and Ansible
 
 Device credentials are encrypted in SQLite with authenticated Fernet encryption.

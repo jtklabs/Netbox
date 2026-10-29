@@ -70,6 +70,9 @@ class Store:
                     id TEXT PRIMARY KEY, job TEXT NOT NULL, revision INTEGER NOT NULL,
                     phase TEXT NOT NULL, findings TEXT NOT NULL, state TEXT NOT NULL, decision TEXT, decision_key TEXT UNIQUE);
                 CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, heartbeat REAL, job TEXT, state TEXT);
+                CREATE TABLE IF NOT EXISTS pins (
+                    key TEXT PRIMARY KEY, kind TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                    first_seen REAL NOT NULL, last_seen REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS resources_job ON resources(job);
                 CREATE INDEX IF NOT EXISTS gates_job ON gates(job);
                 CREATE INDEX IF NOT EXISTS batch_members_batch ON batch_members(batch,wave);
@@ -783,6 +786,29 @@ class Store:
                         continue
                     return all(verified.get(k) == active.get(k) for k in ("volume", "version", "build"))
         return False
+
+    def pin(self, key, kind, fingerprint):
+        """Trust on first use: record a first fingerprint, then accept only a match."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT fingerprint FROM pins WHERE key=?", (key,)).fetchone()
+            now = time.time()
+            if row is None:
+                db.execute("INSERT INTO pins VALUES (?,?,?,?,?)", (key, kind, fingerprint, now, now))
+                return True
+            if row["fingerprint"] != fingerprint:
+                return False
+            db.execute("UPDATE pins SET last_seen=? WHERE key=?", (now, key))
+            return True
+
+    def pins(self):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM pins ORDER BY key")]
+
+    def unpin(self, key):
+        with self.connect() as db:
+            if not db.execute("DELETE FROM pins WHERE key=?", (key,)).rowcount:
+                raise KeyError(key)
 
     def worker_seen(self, worker, job=None, state="available"):
         with self.connect() as db:
