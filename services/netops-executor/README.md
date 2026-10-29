@@ -1098,11 +1098,14 @@ against a PA-VM 12.1.6 active/passive lab pair without a Panorama using
 proxied request straight to the firewall's XML API; only Panorama's own commands are
 emulated. Lab-verified on 12.1.6: prechecks, HA state parsing (including disabled
 config sync), traffic baselines, running config and tech support export, HA election
-set and commit, and the standby-first suspend, functional, failover and validation
-sequence. Not yet verified on real devices: Panorama's device list fields, the batch
+set and commit, the standby-first suspend, functional, failover and validation
+sequence, image import and staging of 12.2.2, and an install refused by the firewall
+(unlicensed VM: "Base license is not valid") returning the suspended standby to
+service and failing cleanly. Not yet verified on real devices: Panorama's device list fields, the batch
 software commands (taken from published community automation rather than the API
 reference), the `target` relay itself, install and reboot on a newer image, HA suspend
-persistence across reboot and active/active state names. Lab acceptance through a
+persistence across reboot, active/active state names and the F5 drain against a real
+BIG-IP. A successful install needs licensed firewalls. Lab acceptance through a
 real Panorama is required before production use. Supported scope is standalone
 firewalls and active/passive or active/active pairs managed by one Panorama. Firewall
 clusters, Advanced Routing Engine route comparison and automatic downgrade are not

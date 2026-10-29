@@ -141,9 +141,13 @@ class Jobs:
             raise PanosError("job " + str(job_id) + " was not reported")
         return self.parse_job(job)
 
-    def enqueue(self, cmd):
-        """Send a job-producing write once and return the job ID."""
-        return job_id(self.op(cmd, timeout=120))
+    def enqueue(self, cmd, timeout=600):
+        """Send a job-producing write once and return the job ID.
+
+        PA-VM 12.1.6 took 104 seconds to answer an install request (license check), so the
+        default leaves room; a lost answer leaves an uncertain outcome that is never replayed.
+        """
+        return job_id(self.op(cmd, timeout=timeout))
 
     def command(self, cmd):
         return " ".join(t.strip() for t in self.op(cmd, timeout=120).itertext() if t.strip())[:1000]
