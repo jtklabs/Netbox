@@ -14,7 +14,10 @@ Not collected by pytest. Read-only modes need no flag. Modes that change a firew
         --firewall 10.50.10.168=~/.config/netops-lab/pan-10.50.10.168.key \\
         --firewall 10.50.10.169=~/.config/netops-lab/pan-10.50.10.169.key discover
 
-Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgrade, preload (writes).
+Modes: discover, readiness, backup (read-only); ha-cycle, reboot-suspended, upgrade, preload,
+f5-drain (writes). f5-drain runs the PAN job's F5 precheck, drain and restore against --f5 over
+SSH (host keys pinned on first use); --f5-allow-clustered lets a lab HA F5 continue past the
+production refusal so the real disable, restore, save and read-back run.
 With --source executor the product's own direct upload (type=import) runs instead of the
 emulated Panorama push, from --images.
 """
@@ -32,7 +35,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from netops_executor import panos
-from netops_executor.config import HTTPTarget, Settings
+from netops_executor.config import Device, HTTPTarget, Settings
 from netops_executor.credentials import Credential, Vault, initialize_key
 from netops_executor.panos import Firewall, Panorama, PanosError, text
 from netops_executor.panos_engine import PanosRunner, carries
@@ -40,7 +43,7 @@ from netops_executor.panos_models import PanosUpgradeRequest
 from netops_executor.ssh import digest
 from netops_executor.store import NeedsReview, Store
 
-WRITES = ("ha-cycle", "reboot-suspended", "upgrade", "preload")
+WRITES = ("ha-cycle", "reboot-suspended", "upgrade", "preload", "f5-drain")
 
 
 def field(cmd, name):
@@ -191,8 +194,13 @@ def build(args):
         initialize_key(settings.credential_key_file)
     store = Store(work / "data" / "jobs.sqlite3")
     vault = Vault(store, settings.credential_key_file)
-    for spec in args.firewall:
-        address, key_file = spec.split("=", 1)
+    if getattr(args, "f5", None):
+        # Legacy key_file inventory: the product loads the operator's existing SSH key in place.
+        key = str(Path(args.f5_key).expanduser())
+        settings.devices[args.f5] = Device(id=args.f5, host=args.f5, username="root", key_file=key)
+        settings.ssh_host_keys = "pin"
+    for spec in args.firewall or []:
+        address, _, key_file = spec.partition("=")
         target = "fw-" + address
         settings.http_targets[target] = HTTPTarget(
             id=target,
@@ -201,7 +209,11 @@ def build(args):
             auth_probe_params={"type": "version"},
             # Lab firewalls are self-signed: exercise the product's pin-on-first-use path.
             tls="pin",
+            # ADDRESS alone uses the saved login "login-ADDRESS" (scheme keygen) from credential-put.
+            credential_profiles=[target if key_file else "login-" + address],
         )
+        if not key_file:
+            continue
         token = Path(key_file).expanduser().read_text().strip()
         if not token:
             raise SystemExit("empty API key file: " + key_file)
@@ -217,7 +229,7 @@ def build(args):
 def direct(settings, store, images, guard=lambda: None, audit=lambda _: None):
     clients = {}
     for target in settings.http_targets:
-        client = Panorama(settings, store, target, [target], guard, audit)
+        client = Panorama(settings, store, target, None, guard, audit)
         serial = text(client.op(panos.SYSTEM_INFO).find("system"), "serial")
         if serial in ("", "unknown"):
             address = urlsplit(client.target.base_url).hostname
@@ -268,6 +280,8 @@ def run_job(args, settings, store, images, sleep, clock):
         "software_source": args.source,
         "stage_only": args.mode == "preload",
     }
+    if args.mode == "f5-drain":
+        options["f5_drain"] = {"device": args.f5, "addresses": args.f5_address or [], "timeout_seconds": 120}
     if args.source == "executor":
         # The executor uploads from its own image root.
         settings.image_root = images.resolve()
@@ -291,6 +305,30 @@ def run_job(args, settings, store, images, sleep, clock):
         if args.mode == "backup":
             for member in runner.members:
                 runner.backup(member)
+        if args.mode == "f5-drain":
+            # Only the F5 is exercised; the lab PAN pair just provides the job context.
+            runner.result["ha"] = {**runner.result["ha"], "enabled": False}
+            try:
+                runner.f5_precheck()
+                runner.result["f5_production_precheck"] = "passed"
+            except PanosError as exc:
+                runner.result["f5_production_precheck"] = str(exc)
+                if not args.f5_allow_clustered:
+                    raise
+                f5 = runner.f5()
+                f5.check_drain()
+                states = runner.f5_selected(f5.address_states())
+                runner.result["f5_drain"] = {
+                    "device": args.f5,
+                    "address_states": states,
+                    "to_disable": sorted(a for a, enabled in states.items() if enabled),
+                    "changed_addresses": [],
+                    "pending_restore": [],
+                    "restored": False,
+                }
+            runner.f5_drain()
+            runner.result["f5_states_while_drained"] = runner.f5_selected(runner.f5().address_states())
+            runner.f5_restore()
         if args.mode in ("ha-cycle", "reboot-suspended"):
             if not runner.ha["enabled"]:
                 raise PanosError("HA is not enabled on " + serial)
@@ -321,6 +359,8 @@ def run_job(args, settings, store, images, sleep, clock):
                 # Same-version restart: verifies a new boot and whether suspension survives it.
                 runner.reboot(standby)
                 runner.result["suspended_after_reboot"] = runner.fw(standby).ha_state()["local"]
+                runner.settle()
+                runner.validate("lab_standby_system", lambda: runner.system_sample(standby))
                 runner.validate("lab_standby_rebooted", lambda: runner.pair_sample(suspended={standby}))
             runner.make_functional(standby)
             runner.validate("lab_standby_functional", runner.pair_sample)
@@ -375,6 +415,9 @@ def summary(job):
         "suspended_after_reboot": result.get("suspended_after_reboot"),
         "survivor_state": result.get("survivor_state"),
         "commit_check": result.get("commit_check"),
+        "f5_production_precheck": result.get("f5_production_precheck"),
+        "f5_drain": result.get("f5_drain"),
+        "f5_states_while_drained": result.get("f5_states_while_drained"),
         "progress": result.get("progress"),
         "software": {s: m.get("software") for s, m in result.get("members", {}).items()},
         "gates": [{"phase": g["phase"], "findings": g["findings"]} for g in job["validation_gates"]],
@@ -383,8 +426,11 @@ def summary(job):
 
 def main(argv=None, sleep=time.sleep, clock=time.monotonic):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("mode", choices=["discover", "readiness", "backup", *WRITES])
-    p.add_argument("--firewall", action="append", required=True, help="ADDRESS=API_KEY_FILE")
+    p.add_argument("mode", choices=["discover", "readiness", "backup", "credential-put", *WRITES])
+    p.add_argument("name", nargs="?", help="credential-put: profile name; reads credential JSON from stdin")
+    p.add_argument(
+        "--firewall", action="append", help="ADDRESS=API_KEY_FILE, or ADDRESS to use the saved login-ADDRESS"
+    )
     p.add_argument(
         "--workdir", default="~/.config/netops-lab/run", help="Private job store, vault and backups"
     )
@@ -393,6 +439,16 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic):
     p.add_argument("--allowed-source", action="append")
     p.add_argument("--family")
     p.add_argument("--source", choices=["panorama", "executor"], default="panorama")
+    p.add_argument("--f5", help="F5 management IP for f5-drain")
+    p.add_argument(
+        "--f5-key", default="~/.ssh/id_rsa", help="Existing SSH private key file for root on the F5"
+    )
+    p.add_argument(
+        "--f5-address", action="append", help="Virtual address to drain, such as /Common/10.1.1.10"
+    )
+    p.add_argument(
+        "--f5-allow-clustered", action="store_true", help="Lab only: continue past the clustered-F5 refusal"
+    )
     p.add_argument("--tech-support", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--validation-timeout", type=int, default=900)
     p.add_argument(
@@ -418,6 +474,15 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic):
 
         panos.httpx = types.SimpleNamespace(Client=client, HTTPError=httpx.HTTPError)
     settings, store = build(args)
+    if args.mode == "credential-put":
+        # Secrets arrive on stdin and are stored encrypted; only metadata is printed.
+        stored = Vault(store, settings.credential_key_file).put(
+            args.name, Credential.model_validate_json(sys.stdin.read())
+        )
+        print(json.dumps({k: stored[k] for k in ("id", "kind", "revision")}))
+        return stored
+    if not args.firewall:
+        raise SystemExit("--firewall is required")
     images = Path(args.images).expanduser() if args.images else settings.image_root
     if args.mode == "discover":
         panorama = direct(settings, store, images)
