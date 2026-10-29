@@ -1206,7 +1206,10 @@ proxied request straight to the firewall's XML API; only Panorama's own commands
 emulated. Lab-verified on 12.1.6: prechecks, HA state parsing (including disabled
 config sync), traffic baselines, running config and tech support export, HA election
 set and commit, the standby-first suspend, functional, failover and validation
-sequence, image import and staging of 12.2.2, and an install refused by the firewall
+sequence, image import and staging of 12.2.2, an executor preload (`software_source: executor`)
+that uploaded 1.7 GB in about two minutes with live byte progress, survived the
+firewall's HTTP 504 and confirmed the image by SHA-256 about 16 minutes later while the
+other member was skipped as already staged, and an install refused by the firewall
 (unlicensed VM: "Base license is not valid") returning the suspended standby to
 service and failing cleanly. Not yet verified on real devices: Panorama's device list fields, the batch
 software commands (taken from published community automation rather than the API

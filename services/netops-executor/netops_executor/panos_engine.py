@@ -197,7 +197,7 @@ class PanosRunner:
         )
         self.event("step_completed", name=key)
 
-    def report(self, kind, serial=None, percent=None, **detail):
+    def report(self, kind, serial=None, percent=None, force=False, **detail):
         """Expose the current operation in result.progress for pollers.
 
         Saved at most every five seconds, or when the operation or its whole percent changes.
@@ -214,7 +214,7 @@ class PanosRunner:
         changed = (previous.get("kind"), previous.get("serial")) != (kind, serial) or (
             percent is not None and int(percent) != int(previous.get("percent") or -1)
         )
-        if changed or self.clock() - self.last_report >= 5:
+        if force or changed or self.clock() - self.last_report >= 5:
             self.last_report = self.clock()
             self.store.record(self.job["id"], self.worker, "progress", progress["operation"], self.result)
 
@@ -788,9 +788,10 @@ class PanosRunner:
                 self.report(
                     "upload",
                     serial,
-                    100 * done / total if total else 0,
+                    min(100, 100 * done / total) if total else 0,
+                    force=done >= total,
                     file=file,
-                    bytes=done,
+                    bytes=min(done, total),
                     total_bytes=total,
                 )
                 self.checkpoint()
