@@ -688,6 +688,7 @@ workers as the largest `upgrade_at_a_time` (`executor_workers`, or
 | `stage_only` | Preload: stage images only, ahead of the window; no backups, install, reboot or traffic/HA-health gates. A later full job reuses the staged images |
 | `config_backup`, `tech_support` | Default true: save each member's running configuration XML and a tech support file under `NETOPS_BACKUP_ROOT` (`backup_directory`, default `panos/<serial>`) |
 | `ha_policy.upgrade_order` | `standby_first` (default) or `active_first` |
+| `ha_policy.after_reboot` | `validate_in_service` (default): validate a member its reboot returned to service where it is, and suspend it only if validation fails; `suspend_until_validated` suspends it again first |
 | `ha_policy.disable_preemption` | Default true: disable preemption and commit before the first suspend, then restore and commit after both members validate; false leaves preemption alone |
 | `ha_policy.failback` | Default true: return traffic to the other member when the member left carrying it fails validation |
 | `ha_policy.require_running_sync` | Default true: same-version pairs must report running configuration synchronized |
@@ -729,12 +730,14 @@ Steps, in order:
    2. Install, then reboot. A new boot is verified by the target version and an
       uptime shorter than the time since the restart request. PAN-OS 12.1.6 brings a
       suspended member back into service when it reboots (seen in the lab: it returned
-      passive), so the job suspends it again as soon as its HA state settles, provided
-      the peer is functional. Between the boot and that suspend, an active/active
-      member can briefly carry traffic.
-   3. **System validation** while suspended: target version, chassis ready,
+      passive). With `ha_policy.after_reboot: validate_in_service` (default) it is
+      validated where it is: a passive member carries no traffic and stays available
+      for failover, while an active/active member carries traffic during validation.
+      `suspend_until_validated` suspends it again as soon as its HA state settles.
+   3. **System validation**: target version, chassis ready,
       latest auto-commit finished `OK`, connected to Panorama on the target. Content
-      version changes are reported.
+      version changes are reported. A member that fails it is suspended (when its peer
+      is functional) before the review gate or failure.
    4. Make it functional (`request high-availability state functional`), then
       validate the pair: every member functional with its peer connection up, one
       active member (active/passive) or every functional member active
@@ -774,9 +777,9 @@ Failures before any install, and installs the firewall reports as failed, end as
 preemption is restored first. An install with an unknown outcome, a staged image or
 a reboot that did not pass validation ends as `recovery_required`. Both HA
 reservations stay held, preemption stays disabled, and an upgraded but unvalidated
-member is left suspended (suspended again after its reboot) so its peer keeps carrying
-traffic. A failure while waiting for the new boot leaves whatever HA state the member
-booted into. Inspect the
+member that failed validation is left suspended so its peer keeps carrying traffic. A
+failure while waiting for the new boot leaves whatever HA state the member booted
+into. Inspect the
 firewalls, make them functional and restore preemption manually if appropriate,
 then resolve the job. Cancellation during prechecks, backups or staging is clean.
 An install is never interrupted; cancellation is honored after it finishes. Results
@@ -1307,7 +1310,7 @@ showed that PAN-OS 12.1.6 returns a suspended member to service (passive) after 
 reboot. Not yet verified on real devices: Panorama's device list fields, the batch
 software commands (taken from published community automation rather than the API
 reference), the `target` relay itself, install and reboot on a newer image,
-re-suspending a member after its reboot, active/active state names and the F5 drain against a real
+suspending a member after failed validation, active/active state names and the F5 drain against a real
 BIG-IP. A successful install needs licensed firewalls. Lab acceptance through a
 real Panorama is required before production use. Supported scope is standalone
 firewalls and active/passive or active/active pairs managed by one Panorama. Firewall
