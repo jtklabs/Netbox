@@ -1753,9 +1753,15 @@ payload examples.
 Vendor references: [console-server user manual](https://ftp.opengear.com/download/documentation/manual/current/ACM/Opengear%20User%20Manual.pdf),
 [CLI and scripting reference](https://ftp.opengear.com/download/documentation/manual/previous%20versions/Opengear%20CLI%20and%20Scripting%20Reference_4-5.pdf),
 and [upgrade prerequisites](https://ftp.opengear.com/download/opengear_appliances/end_of_sale_products/current/readme-prior-to-upgrade.pdf).
-Automated tests simulate firmware/reboot behavior; a physical IM7200 upgrade has
-not been validated as part of this implementation. Exercise one lab unit with your
-exact source/target release before widening a wave.
+Physical lab verification on an IM7248-2-DAC covered 4.13.6 → 5.5.2 through the
+executor API and worker using an administrator SSH account with password-authenticated
+sudo: configuration export/download, SCP staging and SHA-256 verification, native
+netflash, a new boot on 5.5.2, retained device identity and Ethernet state, and restored
+SSH/HTTPS access. The device returned after about ten minutes. Configuration checksum
+validation detected added storage-format/system-name fields and changed SD device/mount
+settings; XML comparison found no removed fields or changes to user/network settings.
+Review configuration differences before accepting the validation gate. Other hardware
+and release paths still require a lab test before widening a wave.
 
 ## FortiGate upgrades (FortiOS 7.4)
 
