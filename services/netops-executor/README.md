@@ -1676,13 +1676,20 @@ operation has completed. Credentials are selected automatically when
 ### Upgrade behavior and prerequisites
 
 Inventory may use `device_type: opengear`; raw management IPs also work. A root
-shell (UID 0), SCP, `config`, `netflash`, and `sha256sum` are required. The worker
-identifies the IM7200 model/version from `/etc/version` (and `/etc/issue` when
-needed), records the Ethernet MAC and Linux boot ID, and verifies the approved
+shell (UID 0), or an administrator account authorized to use `sudo`, is required.
+The executor uses the password of the selected SSH credential for sudo, through
+standard input only. Passwordless sudo also works. SCP elevation waits for sudo's
+password prompt and a verified root-session marker before starting the file protocol.
+SCP, `config`, `netflash`, and either `sha256sum` or OpenSSL with SHA-256 are required.
+The worker identifies the IM7200 model/version from `/etc/version` (and
+`config -g config.system.model` when the version identifies only IM72xx),
+records the Ethernet MAC and Linux boot ID, and verifies the approved
 model allowlist when `approved_models` is provided. An unidentified device or
 another Opengear family fails before flashing. Omit `credential_profiles` for the
 normal SSH profile selection/fallback, including after reboot; profile usage is
-reported with the job. A successful login without root privilege fails preflight.
+reported with the job. A successful login without root or sudo privilege fails preflight.
+Legacy BusyBox releases use `df -k` and shell ownership checks; GNU `df -P` and
+`stat` are not required.
 
 The workflow exports `config -e <file>.opg`, copies the configuration back over
 SCP, verifies its SHA-256, and records a downloadable artifact. This native backup
