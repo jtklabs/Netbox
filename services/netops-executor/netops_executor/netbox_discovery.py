@@ -3,6 +3,7 @@
 import re
 import ssl
 import unicodedata
+from hashlib import sha256
 from ipaddress import ip_interface
 
 import httpx
@@ -78,7 +79,14 @@ class NetBoxDiscovery:
             raise
 
     def named_object(self, path, name, slug=None):
-        slug = slug or slugify(name)
+        slug = (slug or slugify(name))[:100].rstrip("-")
+        if path == "dcim/sites/":
+            # Distinct names may slugify identically, including names using non-Latin scripts.
+            suffix = sha256(name.casefold().encode()).hexdigest()[:12]
+            if not slug or any(
+                site["name"].casefold() != name.casefold() for site in self.records(path, slug=slug)
+            ):
+                slug = f"{slug[:87].rstrip('-') or 'site'}-{suffix}"
         if not slug:
             raise SyncError("NetBox names need at least one letter or digit usable in a slug")
         return self.ensure(path, lambda: self.named(path, name), {"name": name, "slug": slug})
@@ -120,6 +128,10 @@ class NetBoxDiscovery:
 
         def lookup():
             if exact := match(query or model, key):
+                return exact
+            # Catalog punctuation can differ from the device's response, e.g. FortiGate-600E.
+            fragments = re.findall(r"[a-z0-9]+", query or model, re.I)
+            if len(fragments) > 1 and (exact := match(fragments[-1], key)):
                 return exact
             # Infoblox NIOS can report IB-1420 for the Trinzic TE-1420.
             # Restrict aliases to numeric hardware models, leaving VM and other series alone.

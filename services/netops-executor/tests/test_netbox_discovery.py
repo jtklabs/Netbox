@@ -54,3 +54,26 @@ def test_repeat_poll_uses_name_and_ip_and_adds_only_its_tag():
         result = NetBoxDiscovery(client, lambda: None).sync("Lab", "checkmk-au", "192.0.2.1", facts)
     assert result == ("updated", 11)
     assert calls == [("PATCH", "dcim/devices/11", {"add_tags": [7]})]
+
+
+def test_device_type_lookup_uses_exact_normalized_model_after_punctuation_search():
+    def handle(request):
+        assert request.method == "GET"
+        query = request.url.params["q"]
+        rows = (
+            [
+                {"id": 1, "model": "FortiGate 600E", "part_number": "FG-600E"},
+                {"id": 2, "model": "FortiGate 3600E", "part_number": "FG-3600E"},
+            ]
+            if query == "600E"
+            else []
+        )
+        return httpx.Response(200, json={"results": rows, "next": None})
+
+    with httpx.Client(
+        base_url="https://netbox.example/api/", transport=httpx.MockTransport(handle)
+    ) as client:
+        match = NetBoxDiscovery(client, lambda: None).device_type(
+            {"id": 3, "slug": "fortinet"}, "FortiGate-600E"
+        )
+    assert match["id"] == 1
